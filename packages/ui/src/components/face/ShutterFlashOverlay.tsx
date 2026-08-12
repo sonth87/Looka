@@ -10,24 +10,29 @@ export const ShutterFlashOverlay: React.FC<ShutterFlashOverlayProps> = ({
   onFlashComplete,
 }) => {
   const [opacity, setOpacity] = useState(0);
+  const onFlashCompleteRef = React.useRef(onFlashComplete);
+  onFlashCompleteRef.current = onFlashComplete;
 
   useEffect(() => {
-    if (!trigger) return;
+    if (!trigger) {
+      setOpacity(0);
+      return;
+    }
 
     setOpacity(0.95);
     const timer1 = setTimeout(() => {
       setOpacity(0);
-    }, 100);
+    }, 120);
 
     const timer2 = setTimeout(() => {
-      if (onFlashComplete) onFlashComplete();
-    }, 250);
+      if (onFlashCompleteRef.current) onFlashCompleteRef.current();
+    }, 280);
 
     return () => {
       clearTimeout(timer1);
       clearTimeout(timer2);
     };
-  }, [trigger, onFlashComplete]);
+  }, [trigger]);
 
   if (opacity === 0) return null;
 

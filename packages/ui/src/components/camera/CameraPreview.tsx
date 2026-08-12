@@ -4,7 +4,7 @@ import { cn } from '../../lib/utils.js';
 export interface CameraPreviewProps {
   stream: MediaStream | null;
   mirrored?: boolean;
-  aspectRatio?: '16/9' | '4/3' | '1/1' | 'auto';
+  aspectRatio?: '16/9' | '4/3' | '3/4' | '1/1' | 'auto';
   className?: string;
   videoClassName?: string;
   overlayCanvasRef?: React.RefObject<HTMLCanvasElement | null>;
@@ -39,6 +39,8 @@ export const CameraPreview: React.FC<CameraPreviewProps> = ({
       ? 'aspect-video'
       : aspectRatio === '4/3'
       ? 'aspect-[4/3]'
+      : aspectRatio === '3/4'
+      ? 'aspect-[3/4]'
       : aspectRatio === '1/1'
       ? 'aspect-square'
       : '';

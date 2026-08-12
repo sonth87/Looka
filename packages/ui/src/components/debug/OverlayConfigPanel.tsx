@@ -141,15 +141,15 @@ export const OverlayConfigPanel: React.FC<OverlayConfigPanelProps> = ({
             </div>
 
             {/* 5 Level Toggle Buttons */}
-            <div className="flex gap-0.5">
+            <div className="flex gap-1">
               {SENSITIVITY_LEVELS.map(({ key, label }) => (
                 <button
                   key={key}
                   onClick={() => onSensitivityChange(key)}
                   className={cn(
-                    "flex-1 py-0.5 rounded border text-[9px] font-bold transition-all cursor-pointer truncate px-0.5 text-center",
+                    "flex-1 py-2 px-1 rounded-lg border text-xs font-bold transition-all cursor-pointer truncate text-center min-h-[38px] active:scale-95",
                     sensitivity === key
-                      ? "bg-amber-600 border-amber-500 text-white shadow-sm"
+                      ? "bg-amber-600 border-amber-500 text-white shadow-md"
                       : liquidButtonStyle,
                   )}
                   title={label}
@@ -158,7 +158,7 @@ export const OverlayConfigPanel: React.FC<OverlayConfigPanelProps> = ({
                 </button>
               ))}
             </div>
-            <p className="text-[9.5px] text-slate-400 leading-tight">
+            <p className="text-[10px] text-slate-400 leading-tight">
               {activeSensObj.desc}
             </p>
           </div>
@@ -166,22 +166,22 @@ export const OverlayConfigPanel: React.FC<OverlayConfigPanelProps> = ({
 
         {/* ─── Chế độ chụp ─── */}
         {onCaptureModeChange && (
-          <div className={cn("p-2.5 rounded-xl border space-y-2", liquidCardStyle)}>
+          <div className={cn("p-3 rounded-xl border space-y-2.5", liquidCardStyle)}>
             <div className="flex items-center gap-1.5">
-              <Camera className="w-3.5 h-3.5 text-violet-400" />
+              <Camera className="w-4 h-4 text-violet-400" />
               <span className={labelClass}>Chế độ chụp</span>
             </div>
 
             {/* 3 Toggle Buttons */}
-            <div className="flex gap-1">
+            <div className="flex gap-1.5">
               {(["AUTO", "MANUAL", "OFF"] as CaptureTriggerMode[]).map((m) => (
                 <button
                   key={m}
                   onClick={() => onCaptureModeChange(m)}
                   className={cn(
-                    "flex-1 py-0.5 rounded border text-[10px] font-bold transition-all cursor-pointer",
+                    "flex-1 py-2 px-2 rounded-lg border text-xs font-bold transition-all cursor-pointer min-h-[40px] active:scale-95",
                     captureMode === m
-                      ? "bg-violet-600 border-violet-500 text-white shadow-sm"
+                      ? "bg-violet-600 border-violet-500 text-white shadow-md"
                       : liquidButtonStyle,
                   )}
                 >
@@ -192,9 +192,9 @@ export const OverlayConfigPanel: React.FC<OverlayConfigPanelProps> = ({
 
             {/* AUTO: Hold duration slider */}
             {captureMode === "AUTO" && onAutoHoldMsChange && (
-              <div className="flex items-center gap-2">
-                <Timer className="w-3 h-3 text-violet-400 shrink-0" />
-                <span className="text-[10px] text-slate-400 whitespace-nowrap">
+              <div className="flex items-center gap-2 pt-1">
+                <Timer className="w-3.5 h-3.5 text-violet-400 shrink-0" />
+                <span className="text-xs text-slate-300 whitespace-nowrap">
                   Giữ:{" "}
                   <b className="text-violet-400">{(autoHoldMs / 1000).toFixed(1)}s</b>
                 </span>
@@ -205,17 +205,17 @@ export const OverlayConfigPanel: React.FC<OverlayConfigPanelProps> = ({
                   step="250"
                   value={autoHoldMs}
                   onChange={(e) => onAutoHoldMsChange(Number(e.target.value))}
-                  className="w-full h-1 accent-violet-500 cursor-pointer"
+                  className="w-full h-2 accent-violet-500 cursor-pointer min-h-[30px]"
                 />
               </div>
             )}
 
             {/* MANUAL: Gesture checklist */}
             {captureMode === "MANUAL" && onAllowedGesturesChange && (
-              <div className="space-y-1">
-                <div className="flex items-center gap-1.5 mb-0.5">
-                  <Hand className="w-3 h-3 text-violet-400" />
-                  <span className="text-[10px] text-slate-400">Cử chỉ kích hoạt:</span>
+              <div className="space-y-1.5 pt-1">
+                <div className="flex items-center gap-1.5 mb-1">
+                  <Hand className="w-3.5 h-3.5 text-violet-400" />
+                  <span className="text-xs text-slate-300">Cử chỉ kích hoạt:</span>
                 </div>
                 {ALL_GESTURES.map(({ key, label }) => {
                   const active = allowedGestures.includes(key);
@@ -224,9 +224,9 @@ export const OverlayConfigPanel: React.FC<OverlayConfigPanelProps> = ({
                       key={key}
                       onClick={() => toggleGesture(key)}
                       className={cn(
-                        "w-full flex items-center justify-between px-2 py-0.5 rounded border text-[10px] transition-all cursor-pointer",
+                        "w-full flex items-center justify-between px-3 py-2 rounded-lg border text-xs font-medium transition-all cursor-pointer min-h-[38px] active:scale-95",
                         active
-                          ? "bg-violet-600/70 border-violet-500 text-white"
+                          ? "bg-violet-600/70 border-violet-500 text-white shadow-sm"
                           : liquidButtonStyle,
                       )}
                     >

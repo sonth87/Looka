@@ -323,8 +323,8 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
         </header>
       )}
 
-      {/* ── Steps Line (Hidden in Fullscreen mode) ── */}
-      {!isFullscreen && (
+      {/* ── Steps Line (Desktop only, hidden on mobile & fullscreen) ── */}
+      {!isFullscreen && !isMobile && (
         <div className="w-full max-w-lg my-1 px-2 sm:px-0">
           <StepProgress
             steps={steps}
@@ -341,18 +341,18 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
           isFullscreen
             ? "fixed inset-0 p-0 m-0 z-40 bg-black"
             : isMobile
-            ? "my-0 px-0 h-[48vh] max-h-[50vh] flex-1"
+            ? "my-1 px-1 h-[68vh] max-h-[72vh] flex-1"
             : "my-1 sm:my-2 px-1 sm:px-0",
         )}
       >
         <div
           ref={viewportRef}
           className={cn(
-            "relative transition-all duration-300",
+            "relative transition-all duration-300 flex items-center justify-center",
             isFullscreen
               ? "w-full h-full rounded-none"
               : isMobile
-              ? "w-full h-full flex-1"
+              ? "w-full h-full max-w-sm mx-auto"
               : cn("w-full", cameraWidthClass),
           )}
         >
@@ -429,13 +429,13 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
           {/* Camera Preview */}
           <CameraPreview
             stream={stream}
-            aspectRatio={isFullscreen || isMobile ? 'auto' : '16/9'}
+            aspectRatio={isFullscreen ? 'auto' : isMobile ? '3/4' : '16/9'}
             className={cn(
               'w-full overflow-hidden transition-all border-0 shadow-none bg-transparent',
               isFullscreen
                 ? 'w-screen h-screen rounded-none bg-black'
                 : isMobile
-                ? 'w-full h-full rounded-2xl'
+                ? 'w-full h-full rounded-3xl border border-slate-800/50 shadow-2xl'
                 : 'rounded-2xl sm:rounded-3xl'
             )}
           >
@@ -494,10 +494,10 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
                 {onStartLive && (
                   <button
                     onClick={onStartLive}
-                    className="mt-1 px-5 py-2.5 rounded-full bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-lg shadow-blue-500/30 transition-all duration-300 active:scale-95 flex items-center gap-2 cursor-pointer"
+                    className="mt-1 px-4 py-2 rounded-full bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-lg shadow-blue-500/30 transition-all duration-300 active:scale-95 flex items-center gap-1.5 cursor-pointer"
                   >
                     <Play className="w-3.5 h-3.5 fill-white" />
-                    Bắt đầu chụp
+                    Bắt đầu
                   </button>
                 )}
               </div>
@@ -522,7 +522,7 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
 
             {/* Stability progress bar (AUTO mode) */}
             {stabilityProgress > 0 && captureMode === "AUTO" && (
-              <div className="absolute bottom-3 sm:bottom-4 left-1/2 -translate-x-1/2 w-48 sm:w-56 z-20">
+              <div className="absolute bottom-16 sm:bottom-4 left-1/2 -translate-x-1/2 w-48 sm:w-56 z-20">
                 <StabilityProgress
                   progress={stabilityProgress}
                   text="Giữ nguyên tư thế..."
@@ -530,9 +530,9 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
               </div>
             )}
 
-            {/* In Fullscreen mode: StepProgress renders overlayed on top of camera at top center */}
-            {isFullscreen && (
-              <div className="absolute top-3 sm:top-4 left-1/2 -translate-x-1/2 z-40 w-full max-w-md px-3 sm:px-4 pointer-events-auto">
+            {/* StepProgress (Overlayed at Top inside Camera View on Mobile & Fullscreen) */}
+            {(isFullscreen || isMobile) && (
+              <div className="absolute top-3 inset-x-0 z-40 w-full max-w-md mx-auto px-3 pointer-events-auto">
                 <StepProgress
                   steps={steps}
                   currentStepIndex={guidance.currentStepIndex}
@@ -541,8 +541,41 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
               </div>
             )}
 
-            {/* In Fullscreen mode: GuidanceMessage renders overlayed on top of camera at bottom center */}
-            {isFullscreen && (
+            {/* Mobile Overlayed Pre-Start & Guidance (Inside Camera View at Bottom) */}
+            {isMobile && stream && (
+              <div className="absolute bottom-4 inset-x-0 z-40 flex flex-col items-center gap-2 px-3 pointer-events-auto text-center">
+                {!isWorkflowStarted && onStartWorkflow ? (
+                  <>
+                    <div className="px-3.5 py-1.5 rounded-full bg-slate-950/80 backdrop-blur-md border border-slate-700/70 shadow-lg text-slate-200 text-xs font-medium flex items-center gap-2">
+                      <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                      Camera đã bật. Nhấn Bắt đầu để chụp.
+                    </div>
+                    <button
+                      onClick={onStartWorkflow}
+                      className="px-5 py-2 rounded-full bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-lg shadow-blue-500/30 transition-all duration-300 active:scale-95 flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Play className="w-3.5 h-3.5 fill-white" />
+                      Bắt đầu
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <GuidanceMessage guidance={guidance} theme="dark" />
+                    {onCancel && (
+                      <button
+                        onClick={onCancel}
+                        className="text-[11px] text-slate-400 hover:text-slate-200 underline transition-colors cursor-pointer"
+                      >
+                        Hủy bỏ quy trình
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+
+            {/* Fullscreen Desktop Guidance Overlay */}
+            {isFullscreen && !isMobile && (
               <div className="absolute bottom-4 sm:bottom-6 left-1/2 -translate-x-1/2 z-40 w-full max-w-lg px-3 sm:px-4 pointer-events-auto">
                 <GuidanceMessage guidance={guidance} theme="dark" />
                 {onCancel && (
@@ -561,9 +594,9 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
         </div>
       </main>
 
-      {/* ── Guidance Message & Start Button Panel (Hidden in Fullscreen mode) ── */}
-      {!isFullscreen && (
-        <footer className="w-full max-w-md z-10 mt-2 sm:mt-4 mb-2 pb-16 sm:pb-2 px-2 sm:px-0">
+      {/* ── Guidance Message & Start Button Panel (Desktop only, hidden on mobile & fullscreen) ── */}
+      {!isFullscreen && !isMobile && (
+        <footer className="w-full max-w-md z-10 mt-2 sm:mt-4 mb-2 pb-2 px-2 sm:px-0">
           {!isWorkflowStarted && stream && onStartWorkflow ? (
             <div className="flex flex-col items-center gap-3 w-full">
               <GuidanceMessage
@@ -584,10 +617,10 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
               />
               <button
                 onClick={onStartWorkflow}
-                className="px-6 py-3 rounded-full bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-extrabold text-xs tracking-wider uppercase shadow-xl shadow-blue-500/30 transition-all duration-300 active:scale-95 flex items-center gap-2 cursor-pointer"
+                className="px-6 py-2.5 rounded-full bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs tracking-wider uppercase shadow-xl shadow-blue-500/30 transition-all duration-300 active:scale-95 flex items-center gap-2 cursor-pointer"
               >
                 <Play className="w-4 h-4 fill-white" />
-                Bắt đầu quy trình chụp (5 bước)
+                Bắt đầu chụp (5 bước)
               </button>
             </div>
           ) : (

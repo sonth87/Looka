@@ -181,6 +181,32 @@ export const DraggablePanel: React.FC<DraggablePanelProps> = ({
         : '0 20px 45px rgba(0,0,0,0.08), inset 0 1px 0.5px rgba(255,255,255,0.9)',
   };
 
+  const [sheetHeightVh, setSheetHeightVh] = useState<number>(60);
+  const touchStartYRef = useRef<number | null>(null);
+  const initialHeightRef = useRef<number>(60);
+
+  const handleSheetTouchStart = (e: React.TouchEvent) => {
+    if (e.touches.length !== 1) return;
+    touchStartYRef.current = e.touches[0].clientY;
+    initialHeightRef.current = sheetHeightVh;
+  };
+
+  const handleSheetTouchMove = (e: React.TouchEvent) => {
+    if (touchStartYRef.current === null || e.touches.length !== 1) return;
+    const deltaY = e.touches[0].clientY - touchStartYRef.current;
+    const deltaVh = (deltaY / window.innerHeight) * 100;
+    const newHeight = Math.min(85, Math.max(25, initialHeightRef.current - deltaVh));
+    setSheetHeightVh(newHeight);
+  };
+
+  const handleSheetTouchEnd = () => {
+    touchStartYRef.current = null;
+    if (sheetHeightVh < 35) {
+      setCollapsed(true);
+      setSheetHeightVh(60);
+    }
+  };
+
   // ── Mobile View: Render Bottom Sheet ──
   if (isMobile) {
     const pillLeftClass = storageKey.includes('overlay') ? 'left-3' : 'left-15';
@@ -205,45 +231,52 @@ export const DraggablePanel: React.FC<DraggablePanelProps> = ({
             {icon}
           </button>
         ) : (
-          /* Mobile Expanded: Native Bottom Sheet Drawer */
+          /* Mobile Expanded: Native Bottom Sheet Drawer with Drag-to-Resize */
           <>
             {/* Backdrop Dim */}
             <div
               onClick={toggleCollapsed}
-              className="fixed inset-0 bg-black/60 backdrop-blur-xs z-[65] animate-in fade-in duration-200"
+              className="fixed inset-0 bg-black/60 backdrop-blur-xs z-[65] animate-in fade-in duration-200 overscroll-none touch-none"
             />
 
             {/* Bottom Sheet Modal Container */}
             <div
-              style={liquidGlassStyle}
+              style={{
+                ...liquidGlassStyle,
+                height: `${sheetHeightVh}vh`,
+              }}
               className={cn(
-                'fixed inset-x-0 bottom-0 z-[70] flex flex-col rounded-t-3xl border-t shadow-2xl transition-all duration-300 max-h-[80vh] overflow-hidden select-none animate-in slide-in-from-bottom duration-300',
+                'fixed inset-x-0 bottom-0 z-[70] flex flex-col rounded-t-3xl border-t shadow-2xl transition-all duration-150 overflow-hidden select-none animate-in slide-in-from-bottom duration-300 overscroll-contain',
                 theme === 'dark'
-                  ? 'bg-slate-950/90 border-white/25 text-slate-100'
-                  : 'bg-white/90 border-white/60 text-slate-900'
+                  ? 'bg-slate-950/95 border-white/25 text-slate-100'
+                  : 'bg-white/95 border-white/60 text-slate-900'
               )}
             >
-              {/* Drag Handle Bar at top of Bottom Sheet */}
+              {/* Drag Handle Bar at top of Bottom Sheet (Drag up/down to resize) */}
               <div
+                onTouchStart={handleSheetTouchStart}
+                onTouchMove={handleSheetTouchMove}
+                onTouchEnd={handleSheetTouchEnd}
                 onClick={toggleCollapsed}
-                className="w-full py-2.5 flex justify-center items-center cursor-pointer border-b border-white/10 active:opacity-70"
+                className="w-full py-3 flex flex-col justify-center items-center cursor-grab active:cursor-grabbing border-b border-white/10 touch-none select-none shrink-0"
               >
-                <div className="w-12 h-1.5 rounded-full bg-white/40 shadow-inner" />
+                <div className="w-12 h-1.5 rounded-full bg-white/50 shadow-inner" />
+                <span className="text-[10px] text-slate-400 mt-1 font-sans">Kéo để chỉnh độ cao / Vuốt xuống để đóng</span>
               </div>
 
               {/* Header */}
-              <div className="px-4 py-2.5 flex items-center justify-between font-medium border-b border-white/15">
-                <div className="flex items-center gap-2">{title}</div>
+              <div className="px-4 py-2.5 flex items-center justify-between font-medium border-b border-white/15 shrink-0">
+                <div className="flex items-center gap-2 font-sans font-bold">{title}</div>
                 <button
                   onClick={toggleCollapsed}
-                  className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
+                  className="p-1.5 rounded-xl text-slate-400 hover:text-white hover:bg-white/10 transition-colors min-h-[36px] min-w-[36px] flex items-center justify-center"
                 >
                   <ChevronDown className="w-5 h-5" />
                 </button>
               </div>
 
-              {/* Body */}
-              <div className="p-4 overflow-y-auto max-h-[calc(80vh-70px)] font-mono text-xs">
+              {/* Body (Scrollable inside fixed sheet height) */}
+              <div className="p-4 overflow-y-auto overscroll-contain flex-1 font-mono text-xs touch-pan-y">
                 {children}
               </div>
             </div>
