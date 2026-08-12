@@ -11,6 +11,8 @@ export interface PoseTarget {
   roll?: TargetTolerance;
 }
 
+export type CaptureSensitivity = 'VERY_LOW' | 'LOW' | 'MEDIUM' | 'HIGH' | 'VERY_HIGH';
+
 export interface QualityRequirement {
   minFaceSizeRatio?: number;
   maxFaceSizeRatio?: number;
@@ -21,6 +23,7 @@ export interface QualityRequirement {
   minSharpness?: number;
   requireEyesVisible?: boolean;
   rejectOccluded?: boolean;
+  sensitivity?: CaptureSensitivity;
 }
 
 export type StepType = 'FRONT' | 'LEFT' | 'RIGHT' | 'UP' | 'DOWN' | 'CUSTOM';
@@ -31,6 +34,7 @@ export interface CaptureStep {
   instruction: string;
   pose?: PoseTarget;
   quality?: QualityRequirement;
+  sensitivity?: CaptureSensitivity;
   stability?: {
     durationMs: number;
   };
@@ -49,6 +53,7 @@ export interface CaptureWorkflow {
   name: string;
   version: number;
   description?: string;
+  sensitivity?: CaptureSensitivity;
   steps: CaptureStep[];
   globalQuality?: QualityRequirement;
 }

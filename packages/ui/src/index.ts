@@ -16,6 +16,14 @@ export { CameraError } from './components/camera/CameraError.js';
 
 // Face
 export { FaceOverlay } from './components/face/FaceOverlay.js';
+export { GestureOverlay } from './components/face/GestureOverlay.js';
+export type { GestureOverlayProps } from './components/face/GestureOverlay.js';
+export { ShutterButton } from './components/face/ShutterButton.js';
+export type { ShutterButtonProps } from './components/face/ShutterButton.js';
+export { ShutterFlashOverlay } from './components/face/ShutterFlashOverlay.js';
+export type { ShutterFlashOverlayProps } from './components/face/ShutterFlashOverlay.js';
+export { FlyingThumbnail } from './components/face/FlyingThumbnail.js';
+export type { FlyingThumbnailProps, RectBounds } from './components/face/FlyingThumbnail.js';
 
 // Workflow
 export { StepProgress } from './components/workflow/StepProgress.js';

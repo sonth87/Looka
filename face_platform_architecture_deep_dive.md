@@ -1635,3 +1635,50 @@ E2E / Manual Tests:
 | **3.7** | OverlayConfigPanel extension — mode selector + auto duration slider |
 | **3.8** | Simulation Mode support — MockGestureEngine với devtool panel |
 
+
+---
+
+# 12. ARCHITECTURE DEEP DIVE — CAPTURE SENSITIVITY & ADAPTIVE QUALITY GATES
+
+## 12.1. System Overview
+
+Looka introduces an **Adaptive Sensitivity Architecture** allowing administrators and edge applications to configure capture strictness dynamically across 5 preset levels (`VERY_LOW`, `LOW`, `MEDIUM`, `HIGH`, `VERY_HIGH`).
+
+```
+                              ┌─────────────────────────────┐
+                              │    OverlayConfigPanel       │
+                              │  [Sensitivity Selector]     │
+                              └──────────────┬──────────────┘
+                                             │ setSensitivity()
+                                             ▼
+                              ┌─────────────────────────────┐
+                              │      WorkflowEngine         │
+                              └──────────────┬──────────────┘
+                                             │
+                      ┌──────────────────────┴──────────────────────┐
+                      ▼                                             ▼
+          ┌───────────────────────┐                     ┌───────────────────────┐
+          │     StepEvaluator     │                     │   QualityEvaluator    │
+          │ (Pose Tolerance Mult) │                     │ (Sharpness/Brightness)│
+          └───────────────────────┘                     └───────────────────────┘
+```
+
+## 12.2. Preset Matrix Definition
+
+```typescript
+export const SENSITIVITY_PRESETS: Record<CaptureSensitivity, Required<QualityRequirement>> = {
+  VERY_LOW:  { poseMult: 1.50, minSharpness: 0.15, minBrightness: 0.15, minFaceSizeRatio: 0.15, durationMs: 200 },
+  LOW:       { poseMult: 1.25, minSharpness: 0.25, minBrightness: 0.20, minFaceSizeRatio: 0.18, durationMs: 300 },
+  MEDIUM:    { poseMult: 1.00, minSharpness: 0.35, minBrightness: 0.30, minFaceSizeRatio: 0.20, durationMs: 400 },
+  HIGH:      { poseMult: 0.80, minSharpness: 0.45, minBrightness: 0.35, minFaceSizeRatio: 0.25, durationMs: 600 },
+  VERY_HIGH: { poseMult: 0.50, minSharpness: 0.55, minBrightness: 0.40, minFaceSizeRatio: 0.30, durationMs: 800 },
+};
+```
+
+## 12.3. Dynamic Threshold Calculation
+1. **Pose Tolerance:** Effective tolerance $\text{Tolerance}_{\text{eff}} = \text{Tolerance}_{\text{base}} \times \text{Multiplier}$.
+   - Example: Base Yaw tolerance $10^\circ$ at `VERY_LOW` ($\times 1.50$) $\rightarrow 15^\circ$.
+   - Example: Base Yaw tolerance $10^\circ$ at `VERY_HIGH` ($\times 0.50$) $\rightarrow 5^\circ$.
+2. **Sharpness Gate:** Frame Laplacian variance variance threshold adaptively scaled from `0.15` (`VERY_LOW`) up to `0.55` (`VERY_HIGH`).
+
+

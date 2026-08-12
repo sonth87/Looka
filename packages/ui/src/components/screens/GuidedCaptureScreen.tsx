@@ -1,9 +1,13 @@
 import React, { useState } from 'react';
 import { Video, Minus, Plus, Maximize, Minimize } from 'lucide-react';
-import { CameraDevice, FaceState, GuidanceState } from '@face/core';
+import { CameraDevice, CaptureSensitivity, CaptureTriggerMode, FaceState, GestureState, GestureType, GuidanceState } from '@face/core';
 import { CameraPreview } from '../camera/CameraPreview.js';
 import { CameraSelector } from '../camera/CameraSelector.js';
 import { FaceOverlay } from '../face/FaceOverlay.js';
+import { GestureOverlay } from '../face/GestureOverlay.js';
+import { ShutterButton } from '../face/ShutterButton.js';
+import { ShutterFlashOverlay } from '../face/ShutterFlashOverlay.js';
+import { FlyingThumbnail, RectBounds } from '../face/FlyingThumbnail.js';
 import { StepProgress, StepItem } from '../workflow/StepProgress.js';
 import { GuidanceMessage } from '../workflow/GuidanceMessage.js';
 import { StabilityProgress } from '../workflow/StabilityProgress.js';
@@ -38,6 +42,15 @@ export interface GuidedCaptureScreenProps {
   modeButton?: React.ReactNode;
   onCancel?: () => void;
   className?: string;
+  // Capture trigger & sensitivity
+  gestureState?: GestureState | null;
+  gestureProgress?: number;
+  onShutterCapture?: () => void;
+  sensitivity?: CaptureSensitivity;
+  onSensitivityChange?: (sensitivity: CaptureSensitivity) => void;
+  onCaptureModeChange?: (mode: CaptureTriggerMode) => void;
+  onAutoHoldMsChange?: (ms: number) => void;
+  latestCapturedImage?: { stepId: string; imagePath: string } | null;
 }
 
 export type CameraScale = 'compact' | 'standard' | 'large';
@@ -61,7 +74,62 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
   modeButton,
   onCancel,
   className,
+  gestureState = null,
+  gestureProgress = 0,
+  onShutterCapture,
+  sensitivity: externalSensitivity,
+  onSensitivityChange,
+  onCaptureModeChange: externalOnCaptureModeChange,
+  onAutoHoldMsChange: externalOnAutoHoldMsChange,
+  latestCapturedImage,
 }) => {
+  const viewportRef = React.useRef<HTMLDivElement>(null);
+  const [flashTrigger, setFlashTrigger] = useState(false);
+  const [freezeSnapshot, setFreezeSnapshot] = useState<string | null>(null);
+  const [flyingState, setFlyingState] = useState<{
+    imageSrc: string | null;
+    startRect: RectBounds | null;
+    targetRect: RectBounds | null;
+  }>({ imageSrc: null, startRect: null, targetRect: null });
+
+  React.useEffect(() => {
+    if (!latestCapturedImage || !latestCapturedImage.imagePath) return;
+
+    setFlashTrigger(true);
+    setFreezeSnapshot(latestCapturedImage.imagePath);
+
+    const freezeTimer = setTimeout(() => {
+      setFreezeSnapshot(null);
+    }, 450);
+
+    if (viewportRef.current) {
+      const vpRect = viewportRef.current.getBoundingClientRect();
+      const startRect: RectBounds = {
+        x: vpRect.left + vpRect.width * 0.25,
+        y: vpRect.top + vpRect.height * 0.2,
+        width: vpRect.width * 0.5,
+        height: vpRect.height * 0.6,
+      };
+
+      const targetEl = document.querySelector(`[data-step-id="${latestCapturedImage.stepId}"]`);
+      const targetRect = targetEl ? targetEl.getBoundingClientRect() : null;
+
+      if (targetRect) {
+        setFlyingState({
+          imageSrc: latestCapturedImage.imagePath,
+          startRect,
+          targetRect: {
+            x: targetRect.left,
+            y: targetRect.top,
+            width: targetRect.width,
+            height: targetRect.height,
+          },
+        });
+      }
+    }
+
+    return () => clearTimeout(freezeTimer);
+  }, [latestCapturedImage]);
   const [cameraScale, setCameraScale] = useState<CameraScale>(() => {
     if (typeof window === 'undefined') return 'standard';
     try {
@@ -114,6 +182,42 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
     }
   });
 
+  const [captureMode, setCaptureMode] = useState<CaptureTriggerMode>(() => {
+    if (typeof window === 'undefined') return 'AUTO';
+    try {
+      const saved = localStorage.getItem('face_ui_capture_trigger_mode');
+      if (saved === 'AUTO' || saved === 'MANUAL' || saved === 'OFF') return saved;
+    } catch {}
+    return 'AUTO';
+  });
+
+  const [autoHoldMs, setAutoHoldMs] = useState<number>(() => {
+    if (typeof window === 'undefined') return 2000;
+    try {
+      const saved = localStorage.getItem('face_ui_auto_hold_ms');
+      return saved !== null ? parseInt(saved, 10) : 2000;
+    } catch { return 2000; }
+  });
+
+  const [allowedGestures, setAllowedGestures] = useState<GestureType[]>(() => {
+    if (typeof window === 'undefined') return ['VICTORY', 'THUMBS_UP', 'OPEN_PALM'];
+    try {
+      const saved = localStorage.getItem('face_ui_allowed_gestures');
+      return saved !== null ? JSON.parse(saved) : ['VICTORY', 'THUMBS_UP', 'OPEN_PALM'];
+    } catch { return ['VICTORY', 'THUMBS_UP', 'OPEN_PALM']; }
+  });
+
+  const [sensitivityState, setSensitivityState] = useState<CaptureSensitivity>(() => {
+    if (typeof window === 'undefined') return 'MEDIUM';
+    try {
+      const saved = localStorage.getItem('face_ui_capture_sensitivity');
+      if (saved === 'VERY_LOW' || saved === 'LOW' || saved === 'MEDIUM' || saved === 'HIGH' || saved === 'VERY_HIGH') return saved;
+    } catch {}
+    return 'MEDIUM';
+  });
+
+  const activeSensitivity = externalSensitivity || sensitivityState;
+
   const [landmarkSize, setLandmarkSize] = useState<number>(() => {
     if (typeof window === 'undefined') return 1.5;
     try {
@@ -150,6 +254,29 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
     try {
       localStorage.setItem('face_ui_landmark_size', String(val));
     } catch {}
+  };
+
+  const handleCaptureModeChange = (val: CaptureTriggerMode) => {
+    setCaptureMode(val);
+    try { localStorage.setItem('face_ui_capture_trigger_mode', val); } catch {}
+    if (externalOnCaptureModeChange) externalOnCaptureModeChange(val);
+  };
+
+  const handleAutoHoldMsChange = (val: number) => {
+    setAutoHoldMs(val);
+    try { localStorage.setItem('face_ui_auto_hold_ms', String(val)); } catch {}
+    if (externalOnAutoHoldMsChange) externalOnAutoHoldMsChange(val);
+  };
+
+  const handleAllowedGesturesChange = (val: GestureType[]) => {
+    setAllowedGestures(val);
+    try { localStorage.setItem('face_ui_allowed_gestures', JSON.stringify(val)); } catch {}
+  };
+
+  const handleSensitivityChange = (val: CaptureSensitivity) => {
+    setSensitivityState(val);
+    try { localStorage.setItem('face_ui_capture_sensitivity', val); } catch {}
+    if (onSensitivityChange) onSensitivityChange(val);
   };
 
   const decreaseScale = () => {
@@ -244,6 +371,7 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
         )}
       >
         <div
+          ref={viewportRef}
           className={cn(
             'relative transition-all duration-300',
             isFullscreen ? 'w-full h-full rounded-none' : cn('w-full', cameraWidthClass)
@@ -339,12 +467,45 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
                 opacity={overlayOpacity}
                 mirrored={true}
                 variant="capture"
+                stabilityProgress={stabilityProgress}
+                autoHoldMs={autoHoldMs}
               />
             )}
             <CountdownTimer value={countdownValue} />
+            {freezeSnapshot && (
+              <img
+                src={freezeSnapshot}
+                alt="Captured Snapshot Freeze"
+                className="absolute inset-0 w-full h-full object-cover z-25 pointer-events-none transition-opacity duration-150 animate-in fade-in"
+              />
+            )}
+            <ShutterFlashOverlay trigger={flashTrigger} onFlashComplete={() => setFlashTrigger(false)} />
+            <FlyingThumbnail
+              imageSrc={flyingState.imageSrc}
+              startRect={flyingState.startRect}
+              targetRect={flyingState.targetRect}
+              onAnimationEnd={() => setFlyingState({ imageSrc: null, startRect: null, targetRect: null })}
+            />
 
-            {/* Stability progress bar */}
-            {stabilityProgress > 0 && (
+            {/* Gesture Overlay (MANUAL mode) */}
+            {mode === 'live' && captureMode === 'MANUAL' && (
+              <GestureOverlay
+                gestureState={gestureState}
+                gestureProgress={gestureProgress}
+                faceReady={faceState?.detected ?? false}
+              />
+            )}
+
+            {/* Shutter Button (OFF mode) */}
+            {mode === 'live' && captureMode === 'OFF' && onShutterCapture && (
+              <ShutterButton
+                enabled={faceState?.detected ?? false}
+                onCapture={onShutterCapture}
+              />
+            )}
+
+            {/* Stability progress bar (AUTO mode) */}
+            {stabilityProgress > 0 && captureMode === 'AUTO' && (
               <div className="absolute bottom-4 left-1/2 -translate-x-1/2 w-56 z-20">
                 <StabilityProgress progress={stabilityProgress} text="Giữ nguyên tư thế..." />
               </div>
@@ -452,6 +613,14 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
               onToggleLandmarks={handleToggleLandmarks}
               landmarkSize={landmarkSize}
               onLandmarkSizeChange={handleLandmarkSizeChange}
+              captureMode={captureMode}
+              onCaptureModeChange={handleCaptureModeChange}
+              autoHoldMs={autoHoldMs}
+              onAutoHoldMsChange={handleAutoHoldMsChange}
+              allowedGestures={allowedGestures}
+              onAllowedGesturesChange={handleAllowedGesturesChange}
+              sensitivity={activeSensitivity}
+              onSensitivityChange={handleSensitivityChange}
               theme={theme}
               isFullscreen={isFullscreen}
               defaultPosition={{ x: 30, y: 440 }}

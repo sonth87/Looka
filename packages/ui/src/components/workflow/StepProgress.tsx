@@ -6,6 +6,7 @@ export interface StepItem {
   id: string;
   label: string;
   status: 'PENDING' | 'CURRENT' | 'COMPLETED' | 'FAILED';
+  imagePath?: string;
 }
 
 export interface StepProgressProps {
@@ -58,12 +59,23 @@ export const StepProgress: React.FC<StepProgressProps> = ({
           <React.Fragment key={step.id}>
             <div className="flex flex-col items-center gap-1 relative">
               <div
+                data-step-id={step.id}
                 className={cn(
                   'w-7 h-7 rounded-full border-2 flex items-center justify-center font-bold text-xs transition-all duration-300 shadow-sm',
                   dotColor
                 )}
               >
-                {isCompleted ? <Check className="w-3.5 h-3.5 stroke-[3]" /> : idx + 1}
+                {isCompleted && step.imagePath && step.imagePath.startsWith('data:') ? (
+                  <img
+                    src={step.imagePath}
+                    alt={step.label}
+                    className="w-full h-full rounded-full object-cover border border-emerald-400 shadow-md animate-in zoom-in duration-300"
+                  />
+                ) : isCompleted ? (
+                  <Check className="w-3.5 h-3.5 stroke-[3]" />
+                ) : (
+                  idx + 1
+                )}
               </div>
               <span className={cn('text-[10px] font-medium tracking-wide transition-colors', labelColor)}>
                 {step.label}

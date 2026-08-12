@@ -16,6 +16,8 @@ export interface FaceOverlayProps {
    */
   variant?: 'capture' | 'recognition';
   personLabel?: string;
+  stabilityProgress?: number;
+  autoHoldMs?: number;
   className?: string;
 }
 
@@ -34,6 +36,8 @@ export const FaceOverlay: React.FC<FaceOverlayProps> = ({
   opacity = 1.0,
   variant = 'capture',
   personLabel,
+  stabilityProgress = 0,
+  autoHoldMs = 2000,
   className,
 }) => {
   if (!visible || !faceState || !faceState.detected) {
@@ -64,11 +68,29 @@ export const FaceOverlay: React.FC<FaceOverlayProps> = ({
 
   if (faces.length === 0) return null;
 
+  // Calculate countdown number when stabilizing
+  let countdownNumber: number | string | null = null;
+  if (stabilityProgress > 0 && stabilityProgress < 1.0) {
+    const totalSecs = (autoHoldMs || 2000) / 1000;
+    const remainingSecs = Math.max(1, Math.ceil((1 - stabilityProgress) * totalSecs));
+    countdownNumber = totalSecs < 1.2 ? '⚡' : remainingSecs;
+  }
+
   return (
     <div
       style={{ opacity }}
       className={cn('absolute inset-0 pointer-events-none overflow-hidden z-20 transition-opacity duration-150', className)}
     >
+      {/* Countdown Overlay Badge centered in Viewport */}
+      {countdownNumber !== null && (
+        <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-30 animate-in fade-in zoom-in duration-200">
+          <div className="w-16 h-16 rounded-full bg-slate-950/80 backdrop-blur-md border-2 border-emerald-400 flex items-center justify-center shadow-[0_0_30px_rgba(34,197,94,0.5)]">
+            <span className="text-3xl font-extrabold text-emerald-400 drop-shadow-md tracking-tighter animate-pulse">
+              {countdownNumber}
+            </span>
+          </div>
+        </div>
+      )}
       {/* Loop over ALL detected faces in the frame */}
       {faces.map((faceItem) => {
         const { index, boundingBox, landmarks } = faceItem;

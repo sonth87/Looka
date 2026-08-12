@@ -57,7 +57,7 @@ export const DraggablePanel: React.FC<DraggablePanelProps> = ({
   const clampPositionToViewport = (pos: { x: number; y: number }) => {
     if (typeof window === 'undefined') return pos;
 
-    const width = panelRef.current?.offsetWidth || (collapsed ? 44 : 320);
+    const width = panelRef.current?.offsetWidth || (collapsed ? 44 : 288);
     const height = panelRef.current?.offsetHeight || (collapsed ? 44 : 350);
 
     const maxX = Math.max(10, window.innerWidth - width - 12);

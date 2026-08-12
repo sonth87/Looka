@@ -15,6 +15,7 @@
     "@face/cv-mediapipe": "workspace:*",
     "@face/database": "workspace:*",
     "@face/face-quality": "workspace:*",
+    "@face/hand-gesture": "workspace:*",
     "@face/ui": "workspace:*",
     "@face/workflow-engine": "workspace:*",
     "lucide-react": "^1.31.0",

@@ -46,5 +46,6 @@ export interface CVEngine {
   initialize(): Promise<void>;
   processFrame(frame: FrameInput): Promise<FaceState>;
   align(frame: FrameInput, faceState: FaceState): Promise<AlignedFace>;
+  setSensitivity?(sensitivity: string): void;
   dispose(): Promise<void>;
 }

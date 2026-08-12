@@ -1,15 +1,30 @@
 import {
   CaptureStep,
+  CaptureSensitivity,
   FaceState,
   StepEvaluationResult,
   StepEvaluator as IStepEvaluator,
 } from '@face/core';
 import { QualityEvaluator } from '@face/face-quality';
 
+const POSE_TOLERANCE_MULTIPLIERS: Record<CaptureSensitivity, number> = {
+  VERY_LOW: 1.5,
+  LOW: 1.25,
+  MEDIUM: 1.0,
+  HIGH: 0.8,
+  VERY_HIGH: 0.5,
+};
+
 export class StepEvaluator implements IStepEvaluator {
   private qualityEvaluator = new QualityEvaluator();
 
-  public evaluate(faceState: FaceState, step: CaptureStep): StepEvaluationResult {
+  public evaluate(
+    faceState: FaceState,
+    step: CaptureStep,
+    workflowSensitivity: CaptureSensitivity = 'MEDIUM'
+  ): StepEvaluationResult {
+    const sensitivity = step.sensitivity || workflowSensitivity || 'MEDIUM';
+    const toleranceMultiplier = POSE_TOLERANCE_MULTIPLIERS[sensitivity] || 1.0;
     const reasons: string[] = [];
 
     // 1. Presence check
@@ -32,45 +47,53 @@ export class StepEvaluator implements IStepEvaluator {
       };
     }
 
-    // 2. Pose check
+    // 2. Pose check (scaled by sensitivity tolerance multiplier)
     let poseValid = true;
     if (step.pose && faceState.pose) {
       const { yaw, pitch, roll } = faceState.pose;
 
       if (step.pose.yaw) {
+        const effectiveTolerance = step.pose.yaw.tolerance * toleranceMultiplier;
         const diff = Math.abs(yaw - step.pose.yaw.target);
-        if (diff > step.pose.yaw.tolerance) {
+        if (diff > effectiveTolerance) {
           poseValid = false;
           reasons.push(yaw < step.pose.yaw.target ? 'TURN_RIGHT' : 'TURN_LEFT');
         }
       }
 
       if (step.pose.pitch) {
+        const effectiveTolerance = step.pose.pitch.tolerance * toleranceMultiplier;
         const diff = Math.abs(pitch - step.pose.pitch.target);
-        if (diff > step.pose.pitch.tolerance) {
+        if (diff > effectiveTolerance) {
           poseValid = false;
           reasons.push(pitch < step.pose.pitch.target ? 'LOOK_UP' : 'LOOK_DOWN');
         }
       }
 
       if (step.pose.roll) {
+        const effectiveTolerance = step.pose.roll.tolerance * toleranceMultiplier;
         const diff = Math.abs(roll - step.pose.roll.target);
-        if (diff > step.pose.roll.tolerance) {
+        if (diff > effectiveTolerance) {
           poseValid = false;
           reasons.push('TILT_CORRECT');
         }
       }
     }
 
-    // 3. Quality check
-    const frameWidth = 640; // Default reference frame width
-    const frameHeight = 480;
+    // 3. Quality check (dynamic frame dimensions from camera stream)
+    const frameWidth = faceState.frameWidth || 640;
+    const frameHeight = faceState.frameHeight || 480;
+    const qualityReq = {
+      sensitivity,
+      ...step.quality,
+    };
+
     const qualityResult = this.qualityEvaluator.evaluateQuality(
       faceState.detection.boundingBox,
       frameWidth,
       frameHeight,
       undefined,
-      step.quality
+      qualityReq
     );
 
     const qualityValid = qualityResult.accepted;
@@ -92,7 +115,7 @@ export class StepEvaluator implements IStepEvaluator {
       qualityValid,
       positionValid,
       sizeValid,
-      reasons: Array.from(new Set(reasons)), // Deduplicate reasons
+      reasons: Array.from(new Set(reasons)),
     };
   }
 }

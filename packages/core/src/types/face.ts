@@ -62,6 +62,9 @@ export interface FaceState {
   quality?: FaceQualityResult;
   landmarks?: FaceLandmark[];
   confidence?: number;
+  /** Input frame dimensions */
+  frameWidth?: number;
+  frameHeight?: number;
   /** List of all face detections when faceCount > 1 */
   allDetections?: FaceDetection[];
   /** List of landmark arrays for all detected faces */

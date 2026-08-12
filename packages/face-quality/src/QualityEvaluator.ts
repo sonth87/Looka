@@ -1,17 +1,69 @@
-import { BoundingBox, FaceQualityResult, QualityRequirement } from '@face/core';
+import { BoundingBox, CaptureSensitivity, FaceQualityResult, QualityRequirement } from '@face/core';
 
-export class QualityEvaluator {
-  private defaultRequirement: Required<QualityRequirement> = {
-    minFaceSizeRatio: 0.2,
-    maxFaceSizeRatio: 0.75,
-    maxCenterOffsetX: 0.25,
-    maxCenterOffsetY: 0.25,
-    minBrightness: 0.3,
-    maxBrightness: 0.85,
+export const SENSITIVITY_PRESETS: Record<CaptureSensitivity, Required<QualityRequirement>> = {
+  VERY_LOW: {
+    minSharpness: 0.15,
+    minBrightness: 0.15,
+    maxBrightness: 0.95,
+    minFaceSizeRatio: 0.15,
+    maxFaceSizeRatio: 0.55,
+    maxCenterOffsetX: 0.20,
+    maxCenterOffsetY: 0.20,
+    requireEyesVisible: false,
+    rejectOccluded: false,
+    sensitivity: 'VERY_LOW',
+  },
+  LOW: {
+    minSharpness: 0.25,
+    minBrightness: 0.20,
+    maxBrightness: 0.92,
+    minFaceSizeRatio: 0.18,
+    maxFaceSizeRatio: 0.50,
+    maxCenterOffsetX: 0.18,
+    maxCenterOffsetY: 0.18,
+    requireEyesVisible: false,
+    rejectOccluded: false,
+    sensitivity: 'LOW',
+  },
+  MEDIUM: {
     minSharpness: 0.35,
+    minBrightness: 0.30,
+    maxBrightness: 0.90,
+    minFaceSizeRatio: 0.20,
+    maxFaceSizeRatio: 0.55,
+    maxCenterOffsetX: 0.15,
+    maxCenterOffsetY: 0.15,
     requireEyesVisible: true,
     rejectOccluded: true,
-  };
+    sensitivity: 'MEDIUM',
+  },
+  HIGH: {
+    minSharpness: 0.45,
+    minBrightness: 0.35,
+    maxBrightness: 0.88,
+    minFaceSizeRatio: 0.25,
+    maxFaceSizeRatio: 0.40,
+    maxCenterOffsetX: 0.12,
+    maxCenterOffsetY: 0.12,
+    requireEyesVisible: true,
+    rejectOccluded: true,
+    sensitivity: 'HIGH',
+  },
+  VERY_HIGH: {
+    minSharpness: 0.55,
+    minBrightness: 0.40,
+    maxBrightness: 0.85,
+    minFaceSizeRatio: 0.30,
+    maxFaceSizeRatio: 0.38,
+    maxCenterOffsetX: 0.10,
+    maxCenterOffsetY: 0.10,
+    requireEyesVisible: true,
+    rejectOccluded: true,
+    sensitivity: 'VERY_HIGH',
+  },
+};
+
+export class QualityEvaluator {
 
   /**
    * Evaluates image brightness from an RGBA pixel array (Uint8ClampedArray).
@@ -84,7 +136,7 @@ export class QualityEvaluator {
   }
 
   /**
-   * Evaluates overall face quality gates against requirements.
+   * Evaluates overall face quality gates against requirements and sensitivity level.
    */
   public evaluateQuality(
     boundingBox: BoundingBox,
@@ -93,7 +145,9 @@ export class QualityEvaluator {
     pixelData?: Uint8ClampedArray,
     requirement?: QualityRequirement
   ): FaceQualityResult {
-    const req = { ...this.defaultRequirement, ...requirement };
+    const sensitivity = requirement?.sensitivity || 'MEDIUM';
+    const basePreset = SENSITIVITY_PRESETS[sensitivity] || SENSITIVITY_PRESETS.MEDIUM;
+    const req = { ...basePreset, ...requirement };
     const reasons: string[] = [];
 
     // Face Size Ratio

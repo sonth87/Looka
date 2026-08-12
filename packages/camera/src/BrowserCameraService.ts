@@ -231,6 +231,28 @@ export class BrowserCameraService implements CameraService {
     return null;
   }
 
+  public captureBase64Snapshot(): string | null {
+    let video: HTMLVideoElement | null = this.videoElement;
+    if (!video || video.readyState < 2) {
+      if (typeof document !== 'undefined') {
+        video = document.querySelector('video');
+      }
+    }
+    if (!video || video.readyState < 2) return null;
+    const width = video.videoWidth;
+    const height = video.videoHeight;
+    if (!width || !height) return null;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+
+    ctx.drawImage(video, 0, 0, width, height);
+    return canvas.toDataURL('image/jpeg', 0.85);
+  }
+
   public getSelectedDevice(): CameraDevice | null {
     return this.selectedDevice;
   }
@@ -268,6 +290,7 @@ export class BrowserCameraService implements CameraService {
     this.videoElement.playsInline = true;
     this.videoElement.muted = true;
     this.videoElement.srcObject = this.activeStream;
+    this.videoElement.play().catch(() => {});
 
     this.canvasElement = document.createElement('canvas');
     this.canvasContext = this.canvasElement.getContext('2d');

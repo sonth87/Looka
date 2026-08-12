@@ -1,6 +1,7 @@
 import {
   AlignedFace,
   CVEngine,
+  CaptureSensitivity,
   FaceDetection,
   FaceLandmark,
   FacePlatformError,
@@ -29,6 +30,7 @@ export class MediaPipeCVEngine implements CVEngine {
   private poseEstimator: PoseEstimator;
   private qualityEvaluator: QualityEvaluator;
   private options: MediaPipeCVEngineOptions;
+  private sensitivity: CaptureSensitivity = 'MEDIUM';
 
   constructor(options: MediaPipeCVEngineOptions = {}) {
     this.options = {
@@ -41,6 +43,10 @@ export class MediaPipeCVEngine implements CVEngine {
     };
     this.poseEstimator = new PoseEstimator(this.options.emaAlpha);
     this.qualityEvaluator = new QualityEvaluator();
+  }
+
+  public setSensitivity(sensitivity: CaptureSensitivity): void {
+    this.sensitivity = sensitivity;
   }
 
   public get isInitialized(): boolean {
@@ -170,7 +176,8 @@ export class MediaPipeCVEngine implements CVEngine {
         boundingBox,
         frame.width,
         frame.height,
-        pixelData
+        pixelData,
+        { sensitivity: this.sensitivity }
       );
 
       return {
@@ -186,6 +193,8 @@ export class MediaPipeCVEngine implements CVEngine {
         pose,
         quality,
         landmarks,
+        frameWidth: frame.width,
+        frameHeight: frame.height,
         allDetections,
         allLandmarks,
         confidence: 0.95,

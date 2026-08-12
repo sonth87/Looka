@@ -43,8 +43,18 @@ export class MockCVEngine implements CVEngine {
     this._initialized = true;
   }
 
+  private sensitivity: string = 'MEDIUM';
+
   public updateSettings(newSettings: Partial<MockCVSettings>): void {
     this.settings = { ...this.settings, ...newSettings };
+  }
+
+  public setSensitivity(sensitivity: string): void {
+    this.sensitivity = sensitivity;
+  }
+
+  public getSensitivity(): string {
+    return this.sensitivity;
   }
 
   public async processFrame(frame: FrameInput): Promise<FaceState> {
@@ -117,6 +127,8 @@ export class MockCVEngine implements CVEngine {
       timestamp: frame.timestamp,
       detected: true,
       faceCount,
+      frameWidth: frame.width,
+      frameHeight: frame.height,
       presence,
       detection: allDetections[0],
       center: {

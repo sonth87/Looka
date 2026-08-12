@@ -1,6 +1,8 @@
 import {
   CaptureSession,
+  CaptureSensitivity,
   CaptureStepResult,
+  CaptureTriggerMode,
   CaptureWorkflow,
   FaceState,
   GuidanceState,
@@ -17,6 +19,9 @@ export class WorkflowEngine implements IWorkflowEngine {
   private activeWorkflow: CaptureWorkflow | null = null;
   private currentStepIdx = 0;
   private stepStartTime = 0;
+  private sensitivity: CaptureSensitivity = 'MEDIUM';
+  private captureMode: CaptureTriggerMode = 'AUTO';
+  private autoHoldMs: number | null = null;
 
   private stepEvaluator = new StepEvaluator();
   private stabilityTracker = new StabilityTracker();
@@ -58,6 +63,7 @@ export class WorkflowEngine implements IWorkflowEngine {
     this.activeWorkflow = workflow;
     this.currentStepIdx = 0;
     this.stepStartTime = Date.now();
+    this.sensitivity = workflow.sensitivity || this.sensitivity || 'MEDIUM';
     this.stabilityTracker.reset();
 
     const sessionId = `session_${Date.now()}`;
@@ -114,11 +120,15 @@ export class WorkflowEngine implements IWorkflowEngine {
       }
     }
 
-    // 1. Evaluate Step gates
-    const evalResult = this.stepEvaluator.evaluate(faceState, currentStep);
+    // 1. Evaluate Step gates (with sensitivity level)
+    const evalResult = this.stepEvaluator.evaluate(
+      faceState,
+      currentStep,
+      this.sensitivity
+    );
 
-    // 2. Track Stability
-    const stabilityDuration = currentStep.stability?.durationMs ?? 500;
+    // 2. Track Stability (prioritize step duration, then configured autoHoldMs, then default 500ms)
+    const stabilityDuration = currentStep.stability?.durationMs || this.autoHoldMs || 500;
     const stability = this.stabilityTracker.update(evalResult.passed, stabilityDuration);
 
     // 3. Evaluate Guidance
@@ -140,28 +150,9 @@ export class WorkflowEngine implements IWorkflowEngine {
     guidance.totalSteps = this.activeWorkflow.steps.length;
     this._currentState = guidance;
 
-    // 4. Trigger Auto-Capture if Stable
-    if (stability.isStable && currentStep.capture.enabled) {
-      this.stabilityTracker.reset();
-      const captureResult = await this.captureController.captureCurrentFrame();
-
-      const valid = await this.captureController.validateCapturedImage(
-        captureResult.imagePath,
-        currentStep.quality || {}
-      );
-
-      if (valid) {
-        this.updateStepStatus(currentStep.id, 'COMPLETED', captureResult.imagePath, faceState);
-        this.emit('capture-trigger', {
-          stepId: currentStep.id,
-          imagePath: captureResult.imagePath,
-        });
-
-        await this.advanceToNextStep();
-      } else {
-        const stepResult = this._currentSession.steps.find((s) => s.stepId === currentStep.id);
-        if (stepResult) stepResult.attempts++;
-      }
+    // 4. Trigger Auto-Capture if in AUTO mode and Stable
+    if (this.captureMode === 'AUTO' && stability.isStable && currentStep.capture.enabled) {
+      await this.triggerManualCapture(faceState);
     }
 
     this.emit('state-change', this._currentState);
@@ -269,6 +260,54 @@ export class WorkflowEngine implements IWorkflowEngine {
       stepResult.pose = faceState?.pose;
       stepResult.quality = faceState?.quality;
       stepResult.timestamp = Date.now();
+    }
+  }
+
+  public setSensitivity(sensitivity: CaptureSensitivity): void {
+    this.sensitivity = sensitivity;
+  }
+
+  public getSensitivity(): CaptureSensitivity {
+    return this.sensitivity;
+  }
+
+  public setCaptureTriggerConfig(config: { mode?: CaptureTriggerMode; autoHoldMs?: number }): void {
+    if (config.mode !== undefined) this.captureMode = config.mode;
+    if (config.autoHoldMs !== undefined) this.autoHoldMs = config.autoHoldMs;
+  }
+
+  public setSnapshotProvider(provider: () => string | null): void {
+    this.captureController.setSnapshotProvider(provider);
+  }
+
+  public async triggerManualCapture(faceState?: FaceState | null): Promise<boolean> {
+    if (!this.activeWorkflow || !this._currentSession) return false;
+    const currentStep = this.activeWorkflow.steps[this.currentStepIdx];
+    if (!currentStep || !currentStep.capture?.enabled) return false;
+
+    this.stabilityTracker.reset();
+    const captureResult = await this.captureController.captureCurrentFrame();
+
+    const valid = await this.captureController.validateCapturedImage(
+      captureResult.imagePath,
+      (currentStep.quality as any) || {}
+    );
+
+    if (valid) {
+      this.updateStepStatus(currentStep.id, 'COMPLETED', captureResult.imagePath, faceState || undefined);
+      this.emit('capture-trigger', {
+        stepId: currentStep.id,
+        imagePath: captureResult.imagePath,
+      });
+
+      // Brief delay for UI capture feedback & flying thumbnail animation before advancing step
+      await new Promise((resolve) => setTimeout(resolve, 450));
+      await this.advanceToNextStep();
+      return true;
+    } else {
+      const stepResult = this._currentSession.steps.find((s) => s.stepId === currentStep.id);
+      if (stepResult) stepResult.attempts++;
+      return false;
     }
   }
 }

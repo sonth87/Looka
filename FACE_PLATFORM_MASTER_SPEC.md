@@ -30898,3 +30898,38 @@ effects; - measurable thresholds over guessed thresholds.
 
 -   Define explicitly before implementation.
 -   Keep the decision typed and testable.
+
+---
+
+## 34. SECTION 34 — CAPTURE SENSITIVITY & ADAPTIVE QUALITY GATES SPECIFICATION
+
+### 34.1 Overview & Rationale
+Looka supports configurable **Capture Sensitivity** (`VERY_LOW`, `LOW`, `MEDIUM`, `HIGH`, `VERY_HIGH`). This allows edge deployments to adaptively scale quality and pose strictness depending on device hardware capabilities (e.g. low-cost laptop webcams vs high-end eKYC kiosks).
+
+### 34.2 Sensitivity Matrix & Threshold Mappings
+
+```typescript
+export type CaptureSensitivity = 'VERY_LOW' | 'LOW' | 'MEDIUM' | 'HIGH' | 'VERY_HIGH';
+
+export interface SensitivityPreset {
+  poseToleranceMultiplier: number;
+  minSharpness: number;
+  minBrightness: number;
+  minFaceSizeRatio: number;
+  maxCenterOffset: number;
+}
+```
+
+| Sensitivity Level | Pose Tolerance Multiplier | Min Sharpness | Min Brightness | Min Face Size Ratio | Stability Hold |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `VERY_LOW` | 1.50 ($\pm 18^\circ$) | 0.15 | 0.15 | 0.15 | 200ms |
+| `LOW` | 1.25 ($\pm 15^\circ$) | 0.25 | 0.20 | 0.18 | 300ms |
+| `MEDIUM` *(Default)* | 1.00 ($\pm 10^\circ$) | 0.35 | 0.30 | 0.20 | 400ms |
+| `HIGH` | 0.80 ($\pm 8^\circ$) | 0.45 | 0.35 | 0.25 | 600ms |
+| `VERY_HIGH` | 0.50 ($\pm 5^\circ$) | 0.55 | 0.40 | 0.30 | 800ms |
+
+### 34.3 Persistence & Dynamic State Management
+- Stored under `localStorage` key `face_ui_capture_sensitivity`.
+- Dynamically passed into `WorkflowEngine.setSensitivity(level)`.
+- Applied per-frame during `StepEvaluator.evaluate()` and `QualityEvaluator.evaluateQuality()`.
+

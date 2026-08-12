@@ -28,15 +28,18 @@ describe('QualityEvaluator', () => {
     assert.equal(result.faceSizeRatio, 0.5);
   });
 
-  test('should reject face that is too small', () => {
-    const result = evaluator.evaluateQuality(
-      { x: 280, y: 200, width: 80, height: 80 }, // size ratio 80/640 = 0.125 < min 0.20
-      640,
-      480
-    );
+  test('should reject face that is too small under MEDIUM but accept under VERY_LOW', () => {
+    // size ratio 100/640 = 0.156
+    // MEDIUM minFaceSizeRatio is 0.20 -> rejects
+    // VERY_LOW minFaceSizeRatio is 0.15 -> accepts
+    const smallBox = { x: 270, y: 190, width: 100, height: 100 };
 
-    assert.equal(result.accepted, false);
-    assert.ok(result.reasons.includes('FACE_TOO_SMALL'));
+    const mediumResult = evaluator.evaluateQuality(smallBox, 640, 480, undefined, { sensitivity: 'MEDIUM' });
+    assert.equal(mediumResult.accepted, false);
+    assert.ok(mediumResult.reasons.includes('FACE_TOO_SMALL'));
+
+    const veryLowResult = evaluator.evaluateQuality(smallBox, 640, 480, undefined, { sensitivity: 'VERY_LOW' });
+    assert.equal(veryLowResult.accepted, true);
   });
 
   test('should reject face that is off center', () => {

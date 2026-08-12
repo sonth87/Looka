@@ -1,16 +1,20 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { SlidersHorizontal, Camera } from 'lucide-react';
 import {
   CameraDevice,
   CaptureSession,
+  CaptureSensitivity,
+  CaptureTriggerMode,
   CaptureWorkflow,
   FaceState,
+  GestureState,
   GuidanceState,
 } from '@face/core';
 import { BrowserCameraService } from '@face/camera';
 import { MockCVEngine, FramePipeline } from '@face/cv-engine';
 import { MediaPipeCVEngine } from '@face/cv-mediapipe';
-import { WorkflowEngine } from '@face/workflow-engine';
+import { MediaPipeGestureEngine } from '@face/hand-gesture';
+import { WorkflowEngine, CaptureTriggerEvaluator } from '@face/workflow-engine';
 import { SQLiteStorageAdapter, SessionRepository } from '@face/database';
 import {
   GuidedCaptureScreen,
@@ -97,9 +101,12 @@ export default function App() {
   const [devices, setDevices] = useState<CameraDevice[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
   const [faceState, setFaceState] = useState<FaceState | null>(null);
-  const [guidance, setGuidance] = useState<GuidanceState>({
+  const [gestureState, setGestureState] = useState<GestureState | null>(null);
+  const [gestureProgress, setGestureProgress] = useState<number>(0);
+
+  const initialGuidance: GuidanceState = {
     status: 'INITIALIZING',
-    primaryInstruction: 'Đang khởi tạo...',
+    primaryInstruction: 'Hãy điều chỉnh slider để mô phỏng tư thế...',
     primaryReason: 'NO_FACE',
     progress: 0,
     hints: [],
@@ -107,17 +114,38 @@ export default function App() {
     totalSteps: 5,
     stepId: 'step-front',
     stepType: 'FRONT',
-  });
+  };
+
+  const [simGuidance, setSimGuidance] = useState<GuidanceState>(initialGuidance);
+  const [liveGuidance, setLiveGuidance] = useState<GuidanceState>(initialGuidance);
+
+  // Active guidance derived from current mode — use activeGuidance below
+
   const [session, setSession] = useState<CaptureSession | null>(null);
   const [showReviewModal, setShowReviewModal] = useState(false);
   const [cameraFps] = useState(30);
   const [cvFps, setCvFps] = useState(0);
+  const [latestCapturedImage, setLatestCapturedImage] = useState<{ stepId: string; imagePath: string } | null>(null);
+  const [sensitivity, setSensitivity] = useState<CaptureSensitivity>(() => {
+    if (typeof window === 'undefined') return 'MEDIUM';
+    try {
+      const saved = localStorage.getItem('face_ui_capture_sensitivity');
+      if (saved === 'VERY_LOW' || saved === 'LOW' || saved === 'MEDIUM' || saved === 'HIGH' || saved === 'VERY_HIGH') return saved;
+    } catch {}
+    return 'MEDIUM';
+  });
 
   const cameraServiceRef = useRef<BrowserCameraService | null>(null);
   const mockEngineRef = useRef<MockCVEngine | null>(null);
-  const workflowEngineRef = useRef<WorkflowEngine | null>(null);
-  const pipelineRef = useRef<FramePipeline | null>(null);
+  // Two independent workflow engines — sim and live never share step progress
+  const simWorkflowEngineRef = useRef<WorkflowEngine | null>(null);
+  const liveWorkflowEngineRef = useRef<WorkflowEngine | null>(null);
+  const simPipelineRef = useRef<FramePipeline | null>(null);
+  const livePipelineRef = useRef<FramePipeline | null>(null);
   const repoRef = useRef<SessionRepository | null>(null);
+  const gestureEngineRef = useRef<MediaPipeGestureEngine | null>(null);
+  const captureTriggerRef = useRef<CaptureTriggerEvaluator>(new CaptureTriggerEvaluator());
+  const gestureAnimRef = useRef<number | null>(null);
 
   useEffect(() => {
     async function init() {
@@ -125,35 +153,86 @@ export default function App() {
       await adapter.initialize();
       repoRef.current = new SessionRepository(adapter);
 
-      const wfEngine = new WorkflowEngine();
-      workflowEngineRef.current = wfEngine;
+      // ── Simulation Workflow Engine ──────────────────────────────
+      const simEngine = new WorkflowEngine();
+      simEngine.setSensitivity(sensitivity);
+      simEngine.setSnapshotProvider(() => {
+        const canvas = document.createElement('canvas');
+        canvas.width = 640;
+        canvas.height = 480;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return null;
+        ctx.fillStyle = '#0f172a';
+        ctx.fillRect(0, 0, 640, 480);
+        ctx.fillStyle = '#10b981';
+        ctx.beginPath();
+        ctx.arc(320, 240, 120, 0, Math.PI * 2);
+        ctx.fill();
+        return canvas.toDataURL('image/jpeg', 0.85);
+      });
+      simWorkflowEngineRef.current = simEngine;
 
-      wfEngine.on('state-change', (state: GuidanceState) => {
-        setGuidance({ ...state });
+      simEngine.on('state-change', (state: GuidanceState) => {
+        setSimGuidance({ ...state });
       });
 
-      wfEngine.on('completed', (completedSession: CaptureSession) => {
+      simEngine.on('capture-trigger', (data: { stepId: string; imagePath: string }) => {
+        setLatestCapturedImage({ ...data });
+      });
+
+      simEngine.on('completed', (completedSession: CaptureSession) => {
         setSession(completedSession);
         setShowReviewModal(true);
-        if (repoRef.current) {
-          repoRef.current.saveSession(completedSession);
-        }
+        if (repoRef.current) repoRef.current.saveSession(completedSession);
       });
 
+      // MockCVEngine starts with NO_FACE — user must move sliders to simulate
       const mockCv = new MockCVEngine({ simulatedDelayMs: 10 });
+      mockCv.updateSettings({ detected: false, faceCount: 0 });
       await mockCv.initialize();
       mockEngineRef.current = mockCv;
 
-      const pipeline = new FramePipeline(mockCv);
-      pipelineRef.current = pipeline;
+      const simPipeline = new FramePipeline(mockCv);
+      simPipelineRef.current = simPipeline;
 
-      pipeline.onResult(async (state, fps) => {
-        setFaceState(state);
-        setCvFps(fps);
-        await wfEngine.processFrame(state);
+      simPipeline.onResult(async (state, fps) => {
+        // Only update state when in simulation mode (pipeline still runs in background)
+        if (mode === 'simulation') {
+          setFaceState(state);
+          setCvFps(fps);
+        }
+        await simEngine.processFrame(state);
       });
 
-      await wfEngine.startSession(defaultWorkflow);
+      // Start session but DON'T push any frame → stays at NO_FACE / INITIALIZING
+      await simEngine.startSession(defaultWorkflow);
+
+      // ── Live Workflow Engine ────────────────────────────────────
+      const liveEngine = new WorkflowEngine();
+      liveEngine.setSensitivity(sensitivity);
+      liveEngine.setSnapshotProvider(() => {
+        if (cameraServiceRef.current) {
+          return cameraServiceRef.current.captureBase64Snapshot();
+        }
+        return null;
+      });
+      liveWorkflowEngineRef.current = liveEngine;
+
+      liveEngine.on('state-change', (state: GuidanceState) => {
+        setLiveGuidance({ ...state });
+      });
+
+      liveEngine.on('capture-trigger', (data: { stepId: string; imagePath: string }) => {
+        setLatestCapturedImage({ ...data });
+      });
+
+      liveEngine.on('completed', (completedSession: CaptureSession) => {
+        setSession(completedSession);
+        setShowReviewModal(true);
+        if (repoRef.current) repoRef.current.saveSession(completedSession);
+      });
+
+      await liveEngine.startSession(defaultWorkflow);
     }
 
     init();
@@ -161,6 +240,7 @@ export default function App() {
     return () => {
       cameraServiceRef.current?.stop();
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const mediaPipeCvRef = useRef<MediaPipeCVEngine | null>(null);
@@ -170,15 +250,10 @@ export default function App() {
     let lastSimTime = 0;
 
     const processFrameLoop = () => {
-      if (mode === 'live' && cameraServiceRef.current && pipelineRef.current) {
-        const frame = cameraServiceRef.current.getFrame();
-        if (frame) {
-          pipelineRef.current.pushFrame(frame);
-        }
-      } else if (mode === 'simulation' && mockEngineRef.current && pipelineRef.current) {
+      // Simulation loop: push frames to sim pipeline only when in simulation mode
+      if (mode === 'simulation' && simPipelineRef.current) {
         const now = Date.now();
         if (now - lastSimTime >= 80) {
-          // Stream ~12fps simulated frames continuously so StabilityTracker can stabilize
           lastSimTime = now;
           const dummyFrame = {
             data: new Uint8ClampedArray(640 * 480 * 4),
@@ -186,7 +261,12 @@ export default function App() {
             height: 480,
             timestamp: now,
           };
-          pipelineRef.current.pushFrame(dummyFrame);
+          simPipelineRef.current.pushFrame(dummyFrame);
+        }
+      } else if (mode === 'live' && cameraServiceRef.current && livePipelineRef.current) {
+        const frame = cameraServiceRef.current.getFrame();
+        if (frame) {
+          livePipelineRef.current.pushFrame(frame);
         }
       }
       animId = requestAnimationFrame(processFrameLoop);
@@ -199,8 +279,89 @@ export default function App() {
     };
   }, [mode]);
 
+
+  // Gesture loop: runs only in live mode
+  useEffect(() => {
+    if (mode !== 'live') {
+      if (gestureAnimRef.current) cancelAnimationFrame(gestureAnimRef.current);
+      setGestureState(null);
+      setGestureProgress(0);
+      captureTriggerRef.current.reset();
+      return;
+    }
+
+    let lastGestureTime = 0;
+    const gestureLoop = async () => {
+      if (cameraServiceRef.current && gestureEngineRef.current?.isInitialized) {
+        const now = Date.now();
+        if (now - lastGestureTime >= 80) { // ~12 FPS
+          lastGestureTime = now;
+          const frame = cameraServiceRef.current.getFrame();
+          if (frame) {
+            try {
+              const gs = await gestureEngineRef.current.processFrame(frame);
+              setGestureState(gs);
+
+              // Evaluate capture trigger
+              const currentFaceState = faceState;
+              const decision = captureTriggerRef.current.evaluate({
+                faceReady: currentFaceState?.detected ?? false,
+                faceStabilityProgress: 0,
+                gestureState: gs,
+                currentTime: now,
+              });
+              setGestureProgress(decision.gestureProgress ?? 0);
+
+              if (decision.capture && liveWorkflowEngineRef.current) {
+                captureTriggerRef.current.reset();
+                const wf = liveWorkflowEngineRef.current as any;
+                if (wf.triggerManualCapture) wf.triggerManualCapture();
+              }
+            } catch (e) {
+              // ignore gesture errors
+            }
+          }
+        }
+      }
+      gestureAnimRef.current = requestAnimationFrame(gestureLoop);
+    };
+
+    gestureAnimRef.current = requestAnimationFrame(gestureLoop);
+    return () => {
+      if (gestureAnimRef.current) cancelAnimationFrame(gestureAnimRef.current);
+    };
+  }, [mode, faceState]);
+
+  const handleShutterCapture = useCallback(() => {
+    if (liveWorkflowEngineRef.current && faceState?.detected) {
+      const wf = liveWorkflowEngineRef.current as any;
+      if (wf.triggerManualCapture) wf.triggerManualCapture();
+    }
+  }, [faceState]);
+
+  const handleSensitivityChange = useCallback((newSensitivity: CaptureSensitivity) => {
+    setSensitivity(newSensitivity);
+    simWorkflowEngineRef.current?.setSensitivity(newSensitivity);
+    liveWorkflowEngineRef.current?.setSensitivity(newSensitivity);
+    mediaPipeCvRef.current?.setSensitivity?.(newSensitivity);
+    mockEngineRef.current?.setSensitivity?.(newSensitivity);
+  }, []);
+
+  const handleCaptureModeChange = useCallback((newMode: CaptureTriggerMode) => {
+    captureTriggerRef.current.updateConfig({ mode: newMode });
+    simWorkflowEngineRef.current?.setCaptureTriggerConfig({ mode: newMode });
+    liveWorkflowEngineRef.current?.setCaptureTriggerConfig({ mode: newMode });
+  }, []);
+
+  const handleAutoHoldMsChange = useCallback((newMs: number) => {
+    captureTriggerRef.current.updateConfig({ autoHoldMs: newMs });
+    simWorkflowEngineRef.current?.setCaptureTriggerConfig({ autoHoldMs: newMs });
+    liveWorkflowEngineRef.current?.setCaptureTriggerConfig({ autoHoldMs: newMs });
+  }, []);
+
+
   const handleSimulationChange = async (settings: SimulationSettings) => {
-    if (!mockEngineRef.current || !pipelineRef.current) return;
+    if (!mockEngineRef.current || !simPipelineRef.current) return;
 
     mockEngineRef.current.updateSettings({
       detected: settings.presence !== 'NO_FACE',
@@ -220,10 +381,64 @@ export default function App() {
       timestamp: Date.now(),
     };
 
-    pipelineRef.current.pushFrame(dummyFrame);
+    const detected = settings.presence !== 'NO_FACE';
+    const faceCount = settings.presence === 'MULTIPLE_FACES' ? 2 : settings.presence === 'SINGLE_FACE' ? 1 : 0;
+
+    const primaryBox = {
+      x: 160,
+      y: 72,
+      width: 320,
+      height: 336,
+    };
+
+    const allDetections = Array.from({ length: faceCount }, (_, idx) => {
+      if (idx === 0) return { boundingBox: primaryBox, confidence: 0.98 };
+      return {
+        boundingBox: { x: 40 + idx * 115, y: 120, width: 180, height: 216 },
+        confidence: 0.92,
+      };
+    });
+
+    simPipelineRef.current.pushFrame(dummyFrame);
+    // Also update faceState immediately for responsive UI
+    if (!detected) {
+      setFaceState({
+        timestamp: Date.now(),
+        detected: false,
+        faceCount: 0,
+        presence: 'NO_FACE',
+      });
+    } else {
+      setFaceState({
+        detected: true,
+        faceCount,
+        presence: settings.presence,
+        detection: allDetections[0],
+        allDetections,
+        pose: { yaw: settings.yaw, pitch: settings.pitch, roll: settings.roll },
+        quality: {
+          faceSizeRatio: settings.faceSizeRatio,
+          overallScore: settings.qualityScore,
+          accepted: settings.qualityScore >= 0.7,
+          sharpness: 1,
+          brightness: 0.5,
+          centerXOffset: 0,
+          centerYOffset: 0,
+          eyesVisible: true,
+          mouthVisible: true,
+          occluded: false,
+          reasons: [],
+        },
+        timestamp: Date.now(),
+      });
+    }
   };
 
   const startLiveMode = async () => {
+    // ALWAYS allow switching to Live Camera mode UI
+    setMode('live');
+    setFaceState(null);
+
     if (typeof window !== 'undefined' && window.isSecureContext === false) {
       alert(
         'Trình duyệt đã chặn Camera do bạn đang truy cập qua địa chỉ IP HTTP từ máy khác.\n\n' +
@@ -232,7 +447,6 @@ export default function App() {
         '2. Thêm URL: ' + window.location.origin + '\n' +
         '3. Chuyển sang "Enabled" và bấm Relaunch.'
       );
-      return;
     }
 
     try {
@@ -242,24 +456,36 @@ export default function App() {
           console.warn('MediaPipe initialization fallback to MockCVEngine:', e);
         });
         if (mpCv.isInitialized) {
+          mpCv.setSensitivity(sensitivity);
           mediaPipeCvRef.current = mpCv;
         }
+      } else {
+        mediaPipeCvRef.current.setSensitivity(sensitivity);
       }
 
-      // Always reconnect pipeline to MediaPipe engine (or fallback to Mock)
+      // Init gesture engine on first live mode start
+      if (!gestureEngineRef.current) {
+        const ge = new MediaPipeGestureEngine();
+        ge.initialize().catch((e) =>
+          console.warn('GestureEngine failed to init, MANUAL mode will be unavailable:', e)
+        );
+        gestureEngineRef.current = ge;
+      }
+
+      // Always reconnect live pipeline to MediaPipe engine (or fallback to Mock)
       const engineToUse =
         mediaPipeCvRef.current && mediaPipeCvRef.current.isInitialized
           ? mediaPipeCvRef.current
           : mockEngineRef.current;
 
       if (engineToUse) {
-        const newPipeline = new FramePipeline(engineToUse);
-        pipelineRef.current = newPipeline;
-        newPipeline.onResult(async (state, fps) => {
+        const newLivePipeline = new FramePipeline(engineToUse);
+        livePipelineRef.current = newLivePipeline;
+        newLivePipeline.onResult(async (state, fps) => {
           setFaceState(state);
           setCvFps(fps);
-          if (workflowEngineRef.current) {
-            await workflowEngineRef.current.processFrame(state);
+          if (liveWorkflowEngineRef.current) {
+            await liveWorkflowEngineRef.current.processFrame(state);
           }
         });
       }
@@ -267,25 +493,15 @@ export default function App() {
       const camera = cameraServiceRef.current || new BrowserCameraService();
       cameraServiceRef.current = camera;
 
-      const devs = await camera.enumerateDevices();
+      const devs = await camera.enumerateDevices().catch(() => []);
       setDevices(devs);
       if (devs.length > 0) setSelectedDeviceId(devs[0].id);
 
-      // Reset stale state before starting live video
-      setFaceState(null);
-
       const st = await camera.start();
       setStream(st);
-      setMode('live');
     } catch (err: any) {
-      const msg = err?.message || String(err || '');
-      if (msg.toLowerCase().includes('permission') || err?.name === 'NotAllowedError') {
-        alert('Truy cập Camera bị từ chối. Vui lòng cho phép quyền Camera trong cài đặt trình duyệt hoặc hệ điều hành.');
-      } else if (msg.toLowerCase().includes('not found') || err?.name === 'NotFoundError') {
-        alert('Không tìm thấy thiết bị Camera nào kết nối với máy tính này.');
-      } else {
-        alert(`Không thể mở camera thực tế (${msg || 'Lỗi không xác định'}). Vui lòng kiểm tra lại thiết bị.`);
-      }
+      console.warn('Live camera unavailable:', err);
+      setStream(null);
     }
   };
 
@@ -294,29 +510,8 @@ export default function App() {
       await cameraServiceRef.current.stop();
       setStream(null);
     }
-    // Clear stale live camera face detection state
+    // Clear live face state — sim state will be set when user adjusts sliders
     setFaceState(null);
-
-    if (mockEngineRef.current) {
-      const newPipeline = new FramePipeline(mockEngineRef.current);
-      pipelineRef.current = newPipeline;
-      newPipeline.onResult(async (state, fps) => {
-        setFaceState(state);
-        setCvFps(fps);
-        if (workflowEngineRef.current) {
-          await workflowEngineRef.current.processFrame(state);
-        }
-      });
-      // Immediately push clean initial simulation frame
-      handleSimulationChange({
-        presence: 'SINGLE_FACE',
-        yaw: 0,
-        pitch: 0,
-        roll: 0,
-        qualityScore: 0.9,
-        faceSizeRatio: 0.45,
-      });
-    }
     setMode('simulation');
   };
 
@@ -330,21 +525,36 @@ export default function App() {
 
   const handleRestart = async () => {
     setShowReviewModal(false);
-    if (workflowEngineRef.current) {
-      await workflowEngineRef.current.startSession(defaultWorkflow);
+    // Restart the active workflow engine
+    const activeEngine = mode === 'live' ? liveWorkflowEngineRef.current : simWorkflowEngineRef.current;
+    if (activeEngine) {
+      await activeEngine.startSession(defaultWorkflow);
+    }
+    // Reset sim face state to NO_FACE on restart
+    if (mode === 'simulation') {
+      setFaceState(null);
+      if (mockEngineRef.current) mockEngineRef.current.updateSettings({ detected: false, faceCount: 0 });
     }
   };
 
-  const stepsList: StepItem[] = defaultWorkflow.steps.map((s, idx) => ({
-    id: s.id,
-    label: s.type,
-    status:
-      idx < guidance.currentStepIndex
+  const activeGuidance = mode === 'live' ? liveGuidance : simGuidance;
+  const activeEngine = mode === 'live' ? liveWorkflowEngineRef.current : simWorkflowEngineRef.current;
+  const activeSession = activeEngine?.currentSession;
+
+  const stepsList: StepItem[] = defaultWorkflow.steps.map((s, idx) => {
+    const sessionStep = activeSession?.steps.find((st) => st.stepId === s.id);
+    const isCompleted = sessionStep?.status === 'COMPLETED' || idx < activeGuidance.currentStepIndex;
+    return {
+      id: s.id,
+      label: s.type,
+      status: isCompleted
         ? 'COMPLETED'
-        : idx === guidance.currentStepIndex
+        : idx === activeGuidance.currentStepIndex
         ? 'CURRENT'
         : 'PENDING',
-  }));
+      imagePath: sessionStep?.capturedImagePath,
+    };
+  });
 
   const modeButton = (
     <TooltipProvider>
@@ -397,21 +607,29 @@ export default function App() {
       <GuidedCaptureScreen
         stream={stream}
         faceState={faceState}
-        guidance={guidance}
+        guidance={activeGuidance}
         steps={stepsList}
         devices={devices}
         selectedDeviceId={selectedDeviceId}
         onSelectDevice={handleSelectCamera}
         cameraFps={cameraFps}
         cvFps={cvFps}
-        stabilityProgress={guidance.status === 'STABILIZING' ? guidance.progress : 0}
-        countdownValue={guidance.status === 'COUNTDOWN' ? guidance.countdownValue || 3 : 0}
+        stabilityProgress={activeGuidance.status === 'STABILIZING' ? activeGuidance.progress : 0}
+        countdownValue={activeGuidance.status === 'COUNTDOWN' ? activeGuidance.countdownValue || 3 : 0}
         showDebugPanel={true}
         mode={mode}
         theme={theme}
         onToggleTheme={toggleTheme}
         modeButton={modeButton}
         onCancel={handleRestart}
+        gestureState={gestureState}
+        gestureProgress={gestureProgress}
+        onShutterCapture={handleShutterCapture}
+        sensitivity={sensitivity}
+        onSensitivityChange={handleSensitivityChange}
+        onCaptureModeChange={handleCaptureModeChange}
+        onAutoHoldMsChange={handleAutoHoldMsChange}
+        latestCapturedImage={latestCapturedImage}
       />
 
       {mode === 'simulation' && (
