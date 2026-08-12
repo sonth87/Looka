@@ -1,5 +1,5 @@
 import React from "react";
-import { Eye, EyeOff, Sliders, Layers, CircleDot, Camera, Timer, Hand, Gauge } from "lucide-react";
+import { Eye, EyeOff, Sliders, Layers, CircleDot, Camera, Timer, Hand, Gauge, Activity } from "lucide-react";
 import { DraggablePanel } from "./DraggablePanel.js";
 import { cn } from "../../lib/utils.js";
 import { CaptureSensitivity, CaptureTriggerMode, GestureType } from "@face/core";
@@ -13,6 +13,8 @@ export interface OverlayConfigPanelProps {
   onToggleLandmarks?: (show: boolean) => void;
   landmarkSize?: number; // in px (0.3 .. 3.0)
   onLandmarkSizeChange?: (size: number) => void;
+  showScreenDebugStats?: boolean;
+  onToggleShowScreenDebugStats?: (show: boolean) => void;
   // Capture trigger
   captureMode?: CaptureTriggerMode;
   onCaptureModeChange?: (mode: CaptureTriggerMode) => void;
@@ -54,6 +56,8 @@ export const OverlayConfigPanel: React.FC<OverlayConfigPanelProps> = ({
   onToggleLandmarks,
   landmarkSize = 1.5,
   onLandmarkSizeChange,
+  showScreenDebugStats = true,
+  onToggleShowScreenDebugStats,
   captureMode = "AUTO",
   onCaptureModeChange,
   autoHoldMs = 2000,
@@ -126,6 +130,27 @@ export const OverlayConfigPanel: React.FC<OverlayConfigPanelProps> = ({
       className={cn("w-72", className)}
     >
       <div className="font-mono text-[11px] space-y-2">
+
+        {/* ─── Thông số Debug trên màn hình (On-Screen Debug Stats) ─── */}
+        {onToggleShowScreenDebugStats && (
+          <div className={cn("p-2.5 rounded-xl border flex items-center justify-between", liquidCardStyle)}>
+            <div className="flex items-center gap-1.5">
+              <Activity className="w-3.5 h-3.5 text-emerald-400" />
+              <span className={labelClass}>Thông số Debug màn hình</span>
+            </div>
+            <button
+              onClick={() => onToggleShowScreenDebugStats(!showScreenDebugStats)}
+              className={cn(
+                "px-2.5 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer min-h-[36px] flex items-center gap-1 border active:scale-95",
+                showScreenDebugStats
+                  ? "bg-emerald-600 border-emerald-500 text-white shadow-md"
+                  : liquidButtonStyle,
+              )}
+            >
+              {showScreenDebugStats ? "Bật" : "Tắt"}
+            </button>
+          </div>
+        )}
 
         {/* ─── Độ nhạy (Sensitivity) ─── */}
         {onSensitivityChange && (

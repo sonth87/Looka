@@ -14,6 +14,7 @@ export interface AppSettings {
   overlayOpacity?: number;
   showLandmarks?: boolean;
   landmarkSize?: number;
+  showScreenDebugStats?: boolean;
   captureMode?: CaptureTriggerMode;
   autoHoldMs?: number;
   allowedGestures?: GestureType[];
@@ -31,6 +32,7 @@ export const defaultSettings: AppSettings = {
   overlayOpacity: 1.0,
   showLandmarks: false,
   landmarkSize: 1.5,
+  showScreenDebugStats: true,
   captureMode: 'AUTO',
   autoHoldMs: 2000,
   allowedGestures: ['VICTORY', 'THUMBS_UP', 'OPEN_PALM'],

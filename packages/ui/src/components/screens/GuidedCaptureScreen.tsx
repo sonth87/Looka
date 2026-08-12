@@ -55,6 +55,8 @@ export interface GuidedCaptureScreenProps {
   onStartWorkflow?: () => void;
   onOpenReview?: () => void;
   hasCompletedSession?: boolean;
+  showScreenDebugStats?: boolean;
+  onToggleShowScreenDebugStats?: (show: boolean) => void;
   className?: string;
   // Capture trigger & sensitivity
   gestureState?: GestureState | null;
@@ -92,6 +94,8 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
   onStartWorkflow,
   onOpenReview,
   hasCompletedSession,
+  showScreenDebugStats = true,
+  onToggleShowScreenDebugStats,
   className,
   gestureState = null,
   gestureProgress = 0,
@@ -318,7 +322,7 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
     };
 
     return (
-      <div className="absolute top-12 sm:top-4 inset-x-0 z-35 flex flex-wrap items-center justify-center gap-1 px-3 pointer-events-none">
+      <div className="absolute top-20 sm:top-4 inset-x-0 z-35 flex flex-wrap items-center justify-center gap-1 px-3 pointer-events-none">
         {/* Presence Badge */}
         <div className={cn(
           'px-2.5 py-0.5 rounded-full text-[10px] sm:text-xs font-semibold border backdrop-blur-md shadow-sm flex items-center gap-1.5 pointer-events-auto',
@@ -339,6 +343,38 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
             ⚠️ {reasonLabels[r] || r}
           </div>
         ))}
+      </div>
+    );
+  };
+
+  const renderTopLeftDebugOverlay = () => {
+    const yaw = faceState?.pose?.yaw != null ? Math.round(faceState.pose.yaw) : null;
+    const pitch = faceState?.pose?.pitch != null ? Math.round(faceState.pose.pitch) : null;
+    const score = faceState?.quality?.overallScore != null ? Math.round(faceState.quality.overallScore * 100) : null;
+
+    return (
+      <div className="absolute top-28 sm:top-5 left-3 sm:left-4 z-45 flex flex-col gap-0.5 text-[10px] sm:text-xs font-mono font-extrabold tracking-tight pointer-events-none drop-shadow-[0_1.5px_2px_rgba(0,0,0,0.85)]">
+        {/* FPS */}
+        <div className="flex items-center gap-1">
+          <span className="text-emerald-400">FPS:</span>
+          <span className="text-emerald-300">{cameraFps}/{cvFps}</span>
+        </div>
+
+        {/* Pose Yaw / Pitch */}
+        {yaw != null && pitch != null && (
+          <div className="flex items-center gap-1">
+            <span className="text-cyan-400">POSE:</span>
+            <span className="text-cyan-300">Y:{yaw > 0 ? `+${yaw}` : yaw}° P:{pitch > 0 ? `+${pitch}` : pitch}°</span>
+          </div>
+        )}
+
+        {/* Quality Score */}
+        {score != null && (
+          <div className="flex items-center gap-1">
+            <span className="text-amber-400">QUAL:</span>
+            <span className="text-amber-300">{score}%</span>
+          </div>
+        )}
       </div>
     );
   };
@@ -518,12 +554,14 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
             className={cn(
               'w-full overflow-hidden transition-all border-0 shadow-none bg-transparent',
               isFullscreen
-                ? 'w-screen h-screen rounded-none bg-black'
+                ? 'w-screen h-screen rounded-none bg-black border-0'
                 : isMobile
-                ? 'w-full h-full rounded-3xl border border-slate-800/50 shadow-2xl'
-                : 'rounded-2xl sm:rounded-3xl'
+                ? 'w-full h-full rounded-3xl border-0 shadow-2xl'
+                : 'rounded-2xl sm:rounded-3xl border-0'
             )}
           >
+            {/* Top-Left Colored Text Debug Stats */}
+            {showScreenDebugStats && renderTopLeftDebugOverlay()}
             {/* Live Diagnostic Reason & Presence Badge (Overlayed inside camera viewport) */}
             {renderFaceDiagnostics()}
             {((mode === "live" && stream) || mode === "simulation") && (
@@ -633,15 +671,11 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
               <div className="absolute bottom-4 inset-x-0 z-40 flex flex-col items-center gap-2 px-3 pointer-events-auto text-center">
                 {!isWorkflowStarted && onStartWorkflow ? (
                   <div
-                    style={{
-                      backdropFilter: 'url(#liquid-glass-refraction) blur(18px) saturate(180%)',
-                      WebkitBackdropFilter: 'url(#liquid-glass-refraction) blur(18px) saturate(180%)',
-                    }}
                     className={cn(
-                      'px-4 py-2.5 rounded-2xl border shadow-2xl flex flex-col items-center gap-2 max-w-[280px]',
+                      'px-5 py-3 rounded-3xl backdrop-blur-2xl transition-all duration-300 flex flex-col items-center gap-2 max-w-[290px]',
                       theme === 'dark'
-                        ? 'bg-slate-950/65 border-white/30 text-white shadow-black/80'
-                        : 'bg-white/80 border-white/90 text-slate-900 shadow-slate-300/60'
+                        ? 'bg-slate-950/50 border border-white/20 text-white shadow-[inset_0_1px_1.5px_rgba(255,255,255,0.4),0_12px_32px_rgba(0,0,0,0.5)]'
+                        : 'bg-white/65 border border-white/70 text-slate-900 shadow-[inset_0_1px_1.5px_rgba(255,255,255,0.9),0_12px_32px_rgba(0,0,0,0.08)]'
                     )}
                   >
                     <div className="flex items-center gap-1.5 text-xs font-semibold">
@@ -750,14 +784,16 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
       {/* ── Draggable CV Debug Panel & Overlay Config Panel ── */}
       {showDebugPanel && (
         <>
-          <DebugPanel
-            faceState={faceState}
-            fps={cameraFps}
-            cvFps={cvFps}
-            theme={theme}
-            isFullscreen={isFullscreen}
-            defaultPosition={{ x: 30, y: 160 }}
-          />
+          {!isMobile && (
+            <DebugPanel
+              faceState={faceState}
+              fps={cameraFps}
+              cvFps={cvFps}
+              theme={theme}
+              isFullscreen={isFullscreen}
+              defaultPosition={{ x: 30, y: 160 }}
+            />
+          )}
 
           {mode === "live" && (
             <OverlayConfigPanel
@@ -769,6 +805,8 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
               onToggleLandmarks={handleToggleLandmarks}
               landmarkSize={landmarkSize}
               onLandmarkSizeChange={handleLandmarkSizeChange}
+              showScreenDebugStats={showScreenDebugStats}
+              onToggleShowScreenDebugStats={onToggleShowScreenDebugStats}
               captureMode={captureMode}
               onCaptureModeChange={handleCaptureModeChange}
               autoHoldMs={autoHoldMs}

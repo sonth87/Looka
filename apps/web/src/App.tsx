@@ -128,6 +128,12 @@ export default function App() {
   const [cvFps, setCvFps] = useState(0);
   const [latestCapturedImage, setLatestCapturedImage] = useState<{ stepId: string; imagePath: string } | null>(null);
   const [sensitivity, setSensitivity] = useState<CaptureSensitivity>(() => getSettings().sensitivity || 'MEDIUM');
+  const [showScreenDebugStats, setShowScreenDebugStats] = useState<boolean>(() => getSettings().showScreenDebugStats ?? true);
+
+  const handleToggleShowScreenDebugStats = useCallback((show: boolean) => {
+    setShowScreenDebugStats(show);
+    updateSettings({ showScreenDebugStats: show });
+  }, []);
 
   const [isWorkflowStarted, setIsWorkflowStarted] = useState<boolean>(false);
   const isWorkflowStartedRef = useRef(false);
@@ -658,6 +664,8 @@ export default function App() {
         onStartWorkflow={handleStartWorkflow}
         onOpenReview={() => setShowReviewModal(true)}
         hasCompletedSession={session?.status === 'COMPLETED'}
+        showScreenDebugStats={showScreenDebugStats}
+        onToggleShowScreenDebugStats={handleToggleShowScreenDebugStats}
         gestureState={gestureState}
         gestureProgress={gestureProgress}
         onShutterCapture={handleShutterCapture}
