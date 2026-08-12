@@ -160,12 +160,17 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
     return () => clearTimeout(freezeTimer);
   }, [latestCapturedImage]);
 
-  const [isMobile, setIsMobile] = useState<boolean>(() =>
-    typeof window !== 'undefined' ? window.innerWidth < 640 : false
-  );
+  const checkIsMobileOrTablet = (): boolean => {
+    if (typeof window === 'undefined') return false;
+    const isTouch = 'ontouchstart' in window || (navigator.maxTouchPoints > 0);
+    const isMobileWidth = window.innerWidth < 1024; // Includes tablets (iPads, Galaxy Tabs < 1024px)
+    return isMobileWidth || isTouch;
+  };
+
+  const [isMobile, setIsMobile] = useState<boolean>(checkIsMobileOrTablet);
 
   React.useEffect(() => {
-    const handleResize = () => setIsMobile(window.innerWidth < 640);
+    const handleResize = () => setIsMobile(checkIsMobileOrTablet());
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
   }, []);

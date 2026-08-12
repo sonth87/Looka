@@ -74,7 +74,7 @@ const defaultWorkflow: CaptureWorkflow = {
 
 export default function App() {
   const [mode, setMode] = useState<'simulation' | 'live'>(() => {
-    if (typeof window !== 'undefined' && window.innerWidth < 640) {
+    if (typeof window !== 'undefined' && (window.innerWidth < 1024 || 'ontouchstart' in window || navigator.maxTouchPoints > 0)) {
       return 'live';
     }
     return 'simulation';
@@ -250,7 +250,7 @@ export default function App() {
 
       await liveEngine.startSession(defaultWorkflow);
 
-      if (typeof window !== 'undefined' && window.innerWidth < 640) {
+      if (typeof window !== 'undefined' && (window.innerWidth < 1024 || 'ontouchstart' in window || navigator.maxTouchPoints > 0)) {
         startLiveMode();
       }
     }
