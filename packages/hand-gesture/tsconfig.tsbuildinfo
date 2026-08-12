@@ -1,1 +1,0 @@
-{"root":["./src/index.ts","./src/__tests__/gestureengine.test.ts","./src/classifiers/rulebasedclassifier.ts","./src/engines/mediapipegestureengine.ts","./src/engines/mockgestureengine.ts","./src/smoothing/gesturesmoothing.ts"],"version":"5.9.3"}

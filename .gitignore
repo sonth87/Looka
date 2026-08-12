@@ -11,3 +11,5 @@ coverage
 captures/
 model-store/
 database/*.db
+*.tsbuildinfo
+
