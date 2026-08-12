@@ -331,8 +331,10 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
   return (
     <div
       className={cn(
-        "relative min-h-screen flex flex-col items-center overflow-x-hidden select-none transition-colors duration-300",
-        isMobile ? "justify-start pt-0 gap-1 p-1" : "justify-between p-2 sm:p-5",
+        "fixed inset-0 h-[100dvh] w-screen flex flex-col items-center overflow-hidden select-none touch-none overscroll-none transition-colors duration-300",
+        isMobile
+          ? "justify-start pt-[max(env(safe-area-inset-top),6px)] pb-[max(env(safe-area-inset-bottom),6px)] px-1 gap-1"
+          : "justify-between p-2 sm:p-5",
         theme === "dark"
           ? "bg-slate-950 text-slate-100"
           : "bg-slate-100 text-slate-900",
@@ -355,7 +357,7 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
 
       {/* ── Top Header (Hidden in Fullscreen) ── */}
       {!isFullscreen && (
-        <header className="w-full px-2 sm:px-6 flex items-center justify-between gap-2 sm:gap-3 pt-0.5 pb-0.5">
+        <header className="w-full px-2 sm:px-6 flex items-center justify-between gap-2 sm:gap-3 pt-0.5 pb-0.5 shrink-0">
           <div className="flex items-center gap-2 sm:gap-3">
             <div className="w-7 h-7 sm:w-9 sm:h-9 rounded-xl bg-blue-600/20 border border-blue-500/30 flex items-center justify-center text-blue-500 font-black text-xs sm:text-sm shrink-0 shadow-md">
               FP
@@ -383,7 +385,7 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
 
       {/* ── Steps Line (Desktop only, hidden on mobile & fullscreen) ── */}
       {!isFullscreen && !isMobile && (
-        <div className="w-full max-w-lg my-1 px-2 sm:px-0">
+        <div className="w-full max-w-lg my-1 px-2 sm:px-0 shrink-0">
           <StepProgress
             steps={steps}
             currentStepIndex={guidance.currentStepIndex}
@@ -395,11 +397,11 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
       {/* ── Main Content: Camera Display ── */}
       <main
         className={cn(
-          "w-full flex-1 flex flex-col items-center justify-start z-10",
+          "w-full flex-1 flex flex-col items-center justify-center z-10 overflow-hidden",
           isFullscreen
             ? "fixed inset-0 p-0 m-0 z-40 bg-black"
             : isMobile
-            ? "my-0 px-0 h-[68vh] max-h-[72vh] flex-1"
+            ? "my-0 px-0 flex-1 w-full max-w-sm"
             : "my-1 sm:my-2 px-1 sm:px-0",
         )}
       >
