@@ -45,8 +45,10 @@ export class PoseEstimator {
 
     let yaw = 0;
     if (totalDist > 0) {
-      const ratio = (distLeft - distRight) / totalDist; // -1 (fully left) to +1 (fully right)
-      yaw = ratio * 75; // Scale to degrees (~ +/-75 deg)
+      // Invert ratio sign: Turning physical LEFT -> nose moves towards right cheek in frame (distRight < distLeft)
+      // Standard pose convention: Turn Left = Negative Yaw (-), Turn Right = Positive Yaw (+)
+      const ratio = (distLeft - distRight) / totalDist;
+      yaw = -ratio * 90; // Scale to degrees (-90 to +90 deg)
     }
 
     // --- Pitch calculation ---
