@@ -79,7 +79,12 @@ const defaultWorkflow: CaptureWorkflow = {
 };
 
 export default function App() {
-  const [mode, setMode] = useState<'simulation' | 'live'>('simulation');
+  const [mode, setMode] = useState<'simulation' | 'live'>(() => {
+    if (typeof window !== 'undefined' && window.innerWidth < 640) {
+      return 'live';
+    }
+    return 'simulation';
+  });
   const [theme, setTheme] = useState<'dark' | 'light'>(() => getSettings().theme || 'dark');
 
   const toggleTheme = () => {
@@ -218,6 +223,10 @@ export default function App() {
       });
 
       await liveEngine.startSession(defaultWorkflow);
+
+      if (typeof window !== 'undefined' && window.innerWidth < 640) {
+        startLiveMode();
+      }
     }
 
     init();
@@ -543,7 +552,7 @@ export default function App() {
 
   const modeButton = (
     <TooltipProvider>
-      <div className="flex items-center gap-1 p-1">
+      <div className="hidden sm:flex items-center gap-1 p-1">
         <Tooltip>
           <TooltipTrigger asChild>
             <button
@@ -607,6 +616,7 @@ export default function App() {
         onToggleTheme={toggleTheme}
         modeButton={modeButton}
         onCancel={handleRestart}
+        onStartLive={startLiveMode}
         gestureState={gestureState}
         gestureProgress={gestureProgress}
         onShutterCapture={handleShutterCapture}

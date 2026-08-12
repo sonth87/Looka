@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
-import { Minus } from 'lucide-react';
+import { Minus, ChevronDown } from 'lucide-react';
 import { cn } from '../../lib/utils.js';
 import { LiquidGlassSvgFilter } from '../theme/LiquidGlassSvgFilter.js';
 import { getPanelState, updatePanelState } from '../../lib/settingsStore.js';
@@ -24,9 +24,22 @@ export const DraggablePanel: React.FC<DraggablePanelProps> = ({
   theme = 'dark',
   isFullscreen = false,
   defaultPosition = { x: 20, y: 75 },
-  defaultCollapsed = false,
+  defaultCollapsed = typeof window !== 'undefined' ? window.innerWidth < 640 : false,
   className,
 }) => {
+  const [isMobile, setIsMobile] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    return window.innerWidth < 640;
+  });
+
+  useEffect(() => {
+    const handleResize = () => {
+      setIsMobile(window.innerWidth < 640);
+    };
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
   const [position, setPosition] = useState<{ x: number; y: number }>(() => {
     if (typeof window === 'undefined') return defaultPosition;
     const panelState = getPanelState(storageKey);
@@ -66,7 +79,7 @@ export const DraggablePanel: React.FC<DraggablePanelProps> = ({
    * Automatically re-clamp position immediately after expanding so panel never overflows screen
    */
   useLayoutEffect(() => {
-    if (!collapsed && panelRef.current) {
+    if (!collapsed && panelRef.current && !isMobile) {
       const rect = panelRef.current.getBoundingClientRect();
       const maxX = Math.max(10, window.innerWidth - rect.width - 12);
       const maxY = Math.max(10, window.innerHeight - rect.height - 12);
@@ -81,9 +94,9 @@ export const DraggablePanel: React.FC<DraggablePanelProps> = ({
         updatePanelState(storageKey, { position: safePos });
       }
     }
-  }, [collapsed, storageKey, position.x, position.y]);
+  }, [collapsed, storageKey, position.x, position.y, isMobile]);
 
-  const toggleCollapsed = (e: React.MouseEvent) => {
+  const toggleCollapsed = (e: React.MouseEvent | React.TouchEvent) => {
     e.stopPropagation();
     const nextState = !collapsed;
     setCollapsed(nextState);
@@ -91,7 +104,7 @@ export const DraggablePanel: React.FC<DraggablePanelProps> = ({
   };
 
   const handleMouseDown = (e: React.MouseEvent) => {
-    if (!panelRef.current) return;
+    if (!panelRef.current || isMobile) return;
     isDraggingRef.current = true;
     dragOffsetRef.current = {
       x: e.clientX - lastPosRef.current.x,
@@ -120,11 +133,44 @@ export const DraggablePanel: React.FC<DraggablePanelProps> = ({
     window.addEventListener('mouseup', handleMouseUp);
   };
 
+  const handleTouchStart = (e: React.TouchEvent) => {
+    if (!panelRef.current || e.touches.length !== 1 || isMobile) return;
+    const touch = e.touches[0];
+    isDraggingRef.current = true;
+    dragOffsetRef.current = {
+      x: touch.clientX - lastPosRef.current.x,
+      y: touch.clientY - lastPosRef.current.y,
+    };
+
+    const handleTouchMove = (ev: TouchEvent) => {
+      if (!isDraggingRef.current || ev.touches.length !== 1) return;
+      const t = ev.touches[0];
+      const rawX = t.clientX - dragOffsetRef.current.x;
+      const rawY = t.clientY - dragOffsetRef.current.y;
+      const newPos = clampPositionToViewport({ x: rawX, y: rawY });
+      lastPosRef.current = newPos;
+      setPosition(newPos);
+    };
+
+    const handleTouchEnd = () => {
+      if (isDraggingRef.current) {
+        isDraggingRef.current = false;
+        updatePanelState(storageKey, { position: lastPosRef.current });
+      }
+      window.removeEventListener('touchmove', handleTouchMove);
+      window.removeEventListener('touchend', handleTouchEnd);
+      window.removeEventListener('touchcancel', handleTouchEnd);
+    };
+
+    window.addEventListener('touchmove', handleTouchMove, { passive: true });
+    window.addEventListener('touchend', handleTouchEnd);
+    window.addEventListener('touchcancel', handleTouchEnd);
+  };
+
   useEffect(() => {
     lastPosRef.current = position;
     updatePanelState(storageKey, { position });
   }, [position, storageKey]);
-
 
   const liquidGlassStyle: React.CSSProperties = {
     backdropFilter: 'url(#liquid-glass-refraction) blur(18px) saturate(180%)',
@@ -135,6 +181,79 @@ export const DraggablePanel: React.FC<DraggablePanelProps> = ({
         : '0 20px 45px rgba(0,0,0,0.08), inset 0 1px 0.5px rgba(255,255,255,0.9)',
   };
 
+  // ── Mobile View: Render Bottom Sheet ──
+  if (isMobile) {
+    const pillLeftClass = storageKey.includes('overlay') ? 'left-3' : 'left-15';
+
+    return (
+      <>
+        <LiquidGlassSvgFilter />
+        {collapsed ? (
+          /* Mobile Collapsed: Bottom Trigger Pill FAB */
+          <button
+            onClick={toggleCollapsed}
+            style={liquidGlassStyle}
+            className={cn(
+              'fixed bottom-3.5 z-50 w-10 h-10 rounded-full flex items-center justify-center shadow-2xl transition-all duration-300 active:scale-90 border backdrop-blur-xl',
+              pillLeftClass,
+              theme === 'dark'
+                ? 'bg-slate-950/70 border-white/30 text-blue-400'
+                : 'bg-white/70 border-white/70 text-blue-600'
+            )}
+            title="Mở Bottom Sheet"
+          >
+            {icon}
+          </button>
+        ) : (
+          /* Mobile Expanded: Native Bottom Sheet Drawer */
+          <>
+            {/* Backdrop Dim */}
+            <div
+              onClick={toggleCollapsed}
+              className="fixed inset-0 bg-black/60 backdrop-blur-xs z-[65] animate-in fade-in duration-200"
+            />
+
+            {/* Bottom Sheet Modal Container */}
+            <div
+              style={liquidGlassStyle}
+              className={cn(
+                'fixed inset-x-0 bottom-0 z-[70] flex flex-col rounded-t-3xl border-t shadow-2xl transition-all duration-300 max-h-[80vh] overflow-hidden select-none animate-in slide-in-from-bottom duration-300',
+                theme === 'dark'
+                  ? 'bg-slate-950/90 border-white/25 text-slate-100'
+                  : 'bg-white/90 border-white/60 text-slate-900'
+              )}
+            >
+              {/* Drag Handle Bar at top of Bottom Sheet */}
+              <div
+                onClick={toggleCollapsed}
+                className="w-full py-2.5 flex justify-center items-center cursor-pointer border-b border-white/10 active:opacity-70"
+              >
+                <div className="w-12 h-1.5 rounded-full bg-white/40 shadow-inner" />
+              </div>
+
+              {/* Header */}
+              <div className="px-4 py-2.5 flex items-center justify-between font-medium border-b border-white/15">
+                <div className="flex items-center gap-2">{title}</div>
+                <button
+                  onClick={toggleCollapsed}
+                  className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
+                >
+                  <ChevronDown className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Body */}
+              <div className="p-4 overflow-y-auto max-h-[calc(80vh-70px)] font-mono text-xs">
+                {children}
+              </div>
+            </div>
+          </>
+        )}
+      </>
+    );
+  }
+
+  // ── Desktop View: Floating Draggable Panel ──
   return (
     <>
       <LiquidGlassSvgFilter />
@@ -146,17 +265,18 @@ export const DraggablePanel: React.FC<DraggablePanelProps> = ({
           top: `${position.y}px`,
           zIndex: 50,
         }}
-        className="select-none"
+        className="select-none max-w-[calc(100vw-24px)]"
       >
         {collapsed ? (
           /* Collapsed — Circular Refractive SVG Liquid Glass FAB */
           <button
             onMouseDown={handleMouseDown}
+            onTouchStart={handleTouchStart}
             onClick={toggleCollapsed}
             title="Mở rộng panel"
             style={liquidGlassStyle}
             className={cn(
-              'w-11 h-11 rounded-full flex items-center justify-center transition-all duration-300 hover:scale-110 active:scale-95 cursor-grab active:cursor-grabbing relative overflow-hidden',
+              'w-11 h-11 rounded-full flex items-center justify-center transition-all duration-300 hover:scale-110 active:scale-95 cursor-grab active:cursor-grabbing relative overflow-hidden touch-none',
               theme === 'dark'
                 ? 'bg-slate-950/40 border border-white/30 text-blue-400 hover:bg-slate-900/50 hover:border-white/50'
                 : 'bg-white/45 border border-white/70 text-blue-600 hover:bg-white/65 hover:border-white'
@@ -171,7 +291,7 @@ export const DraggablePanel: React.FC<DraggablePanelProps> = ({
           <div
             style={liquidGlassStyle}
             className={cn(
-              'font-mono text-xs rounded-2xl relative overflow-hidden transition-all duration-300 backdrop-contrast-125',
+              'font-mono text-xs rounded-2xl relative overflow-hidden transition-all duration-300 backdrop-contrast-125 max-w-[calc(100vw-24px)]',
               theme === 'dark'
                 ? isFullscreen
                   ? 'bg-slate-950/15 text-slate-100 border border-white/35 shadow-black/80'
@@ -191,8 +311,9 @@ export const DraggablePanel: React.FC<DraggablePanelProps> = ({
             {/* Drag Handle Header with Refractive Bezel */}
             <div
               onMouseDown={handleMouseDown}
+              onTouchStart={handleTouchStart}
               className={cn(
-                'px-4 py-3 flex items-center justify-between cursor-grab active:cursor-grabbing font-medium transition-colors border-b relative z-10',
+                'px-4 py-3 flex items-center justify-between cursor-grab active:cursor-grabbing font-medium transition-colors border-b relative z-10 touch-none',
                 theme === 'dark'
                   ? isFullscreen
                     ? 'bg-slate-900/10 border-white/20 text-slate-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.35)]'
@@ -221,7 +342,7 @@ export const DraggablePanel: React.FC<DraggablePanelProps> = ({
             </div>
 
             {/* Panel Body */}
-            <div className="p-4 relative z-10">{children}</div>
+            <div className="p-4 relative z-10 overflow-x-auto max-w-[calc(100vw-24px)]">{children}</div>
           </div>
         )}
       </div>

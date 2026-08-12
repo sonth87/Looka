@@ -34,7 +34,7 @@ export const GuidanceMessage: React.FC<GuidanceMessageProps> = ({ guidance, them
       <div
         style={liquidStyle}
         className={cn(
-          'flex flex-col items-center text-center p-5 rounded-2xl relative overflow-hidden transition-all duration-300 backdrop-contrast-125 max-w-md mx-auto',
+          'flex flex-col items-center text-center p-3 sm:p-5 rounded-2xl relative overflow-hidden transition-all duration-300 backdrop-contrast-125 max-w-md w-full mx-auto',
           theme === 'dark'
             ? 'bg-slate-950/35 border border-white/25 text-slate-100'
             : 'bg-white/40 border border-white/60 text-slate-900',
@@ -50,7 +50,7 @@ export const GuidanceMessage: React.FC<GuidanceMessageProps> = ({ guidance, them
         {/* Status Badge with Liquid Glass blur */}
         <div
           className={cn(
-            'px-4 py-1.5 rounded-full text-xs font-extrabold tracking-wide border mb-3 backdrop-blur-2xl backdrop-saturate-180 relative z-10 transition-all',
+            'px-3 sm:px-4 py-1 rounded-full text-[10px] sm:text-xs font-extrabold tracking-wide border mb-2 sm:mb-3 backdrop-blur-2xl backdrop-saturate-180 relative z-10 transition-all',
             badgeBg
           )}
         >
@@ -59,7 +59,7 @@ export const GuidanceMessage: React.FC<GuidanceMessageProps> = ({ guidance, them
 
         <h2
           className={cn(
-            'text-xl font-bold tracking-tight relative z-10 transition-all drop-shadow-sm',
+            'text-base sm:text-xl font-bold tracking-tight relative z-10 transition-all drop-shadow-sm leading-snug',
             theme === 'dark' ? 'text-slate-100' : 'text-slate-900'
           )}
         >
@@ -67,12 +67,12 @@ export const GuidanceMessage: React.FC<GuidanceMessageProps> = ({ guidance, them
         </h2>
 
         {guidance.hints && guidance.hints.length > 0 && (
-          <div className="mt-3 flex flex-wrap justify-center gap-1.5 relative z-10">
+          <div className="mt-2 sm:mt-3 flex flex-wrap justify-center gap-1 sm:gap-1.5 relative z-10">
             {guidance.hints.map((hint, idx) => (
               <span
                 key={idx}
                 className={cn(
-                  'text-xs px-2.5 py-0.5 rounded-lg border backdrop-blur-xl font-medium shadow-sm',
+                  'text-[10px] sm:text-xs px-2 sm:px-2.5 py-0.5 rounded-lg border backdrop-blur-xl font-medium shadow-sm',
                   theme === 'dark'
                     ? 'bg-slate-900/40 text-slate-200 border-white/20'
                     : 'bg-white/50 text-slate-800 border-white/60'

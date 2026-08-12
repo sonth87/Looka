@@ -46,7 +46,7 @@ export const CameraPreview: React.FC<CameraPreviewProps> = ({
   return (
     <div
       className={cn(
-        'relative overflow-hidden rounded-2xl bg-black shadow-lg border border-slate-800',
+        'relative overflow-hidden rounded-2xl',
         aspectRatioClass,
         className
       )}
