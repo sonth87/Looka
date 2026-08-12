@@ -271,10 +271,68 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
         ? "max-w-4xl"
         : "max-w-2xl";
 
+  const renderFaceDiagnostics = () => {
+    if (!faceState) return null;
+
+    const presence = faceState.presence || (faceState.detected ? 'SINGLE_FACE' : 'NO_FACE');
+    const reasons = faceState.quality?.reasons || [];
+    const faceCount = faceState.faceCount ?? (faceState.detected ? 1 : 0);
+
+    let presenceBadge = {
+      label: 'Chưa phát hiện mặt (No Face)',
+      color: 'bg-red-500/20 text-red-400 border-red-500/40',
+      dot: 'bg-red-400 animate-pulse',
+    };
+
+    if (presence === 'MULTIPLE_FACES' || faceCount > 1) {
+      presenceBadge = {
+        label: `Có ${faceCount} khuôn mặt (Multiple Faces)`,
+        color: 'bg-amber-500/20 text-amber-400 border-amber-500/40',
+        dot: 'bg-amber-400 animate-ping',
+      };
+    } else if (faceState.detected) {
+      presenceBadge = {
+        label: '1 Mặt (Single Face)',
+        color: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40',
+        dot: 'bg-emerald-400',
+      };
+    }
+
+    const reasonLabels: Record<string, string> = {
+      NO_FACE: 'Không tìm thấy mặt',
+      MULTIPLE_FACES: 'Nhiều khuôn mặt',
+      FACE_TOO_SMALL: 'Mặt quá nhỏ (Quá xa)',
+      FACE_TOO_LARGE: 'Mặt quá to (Quá gần)',
+      OFF_CENTER: 'Lệch vị trí trung tâm',
+      TOO_DARK: 'Ánh sáng quá tối',
+      TOO_BRIGHT: 'Môi trường quá chói',
+      BLURRY: 'Hình ảnh bị mờ',
+      OCCLUDED: 'Khuôn mặt bị che phủ',
+    };
+
+    return (
+      <div className="w-full max-w-sm flex flex-wrap items-center justify-center gap-1.5 px-2 my-0.5 z-20">
+        {/* Presence Badge */}
+        <div className={cn('px-2.5 py-0.5 rounded-full text-[10px] font-bold border backdrop-blur-md shadow-sm flex items-center gap-1.5', presenceBadge.color)}>
+          <span className={cn('w-1.5 h-1.5 rounded-full', presenceBadge.dot)} />
+          {presenceBadge.label}
+        </div>
+
+        {/* Quality Reason Tags */}
+        {reasons.map((r, i) => (
+          <div key={i} className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-950/80 text-amber-300 border border-amber-500/40 shadow-sm backdrop-blur-md">
+            ⚠️ {reasonLabels[r] || r}
+          </div>
+        ))}
+      </div>
+    );
+  };
+
   return (
     <div
       className={cn(
-        "relative min-h-screen flex flex-col items-center justify-between p-2 sm:p-5 overflow-x-hidden select-none transition-colors duration-300",
+        "relative min-h-screen flex flex-col items-center overflow-x-hidden select-none transition-colors duration-300",
+        isMobile ? "justify-start pt-0 gap-1 p-1" : "justify-between p-2 sm:p-5",
         theme === "dark"
           ? "bg-slate-950 text-slate-100"
           : "bg-slate-100 text-slate-900",
@@ -297,9 +355,9 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
 
       {/* ── Top Header (Hidden in Fullscreen) ── */}
       {!isFullscreen && (
-        <header className="w-full px-3 sm:px-6 flex items-center justify-between gap-2 sm:gap-3 pt-1 pb-1">
+        <header className="w-full px-2 sm:px-6 flex items-center justify-between gap-2 sm:gap-3 pt-0.5 pb-0.5">
           <div className="flex items-center gap-2 sm:gap-3">
-            <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-blue-600/20 border border-blue-500/30 flex items-center justify-center text-blue-500 font-black text-xs sm:text-sm shrink-0 shadow-md">
+            <div className="w-7 h-7 sm:w-9 sm:h-9 rounded-xl bg-blue-600/20 border border-blue-500/30 flex items-center justify-center text-blue-500 font-black text-xs sm:text-sm shrink-0 shadow-md">
               FP
             </div>
             <div>
@@ -323,6 +381,9 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
         </header>
       )}
 
+      {/* ── Live Face Diagnostics Badge Bar (Visible on mobile & desktop) ── */}
+      {!isFullscreen && renderFaceDiagnostics()}
+
       {/* ── Steps Line (Desktop only, hidden on mobile & fullscreen) ── */}
       {!isFullscreen && !isMobile && (
         <div className="w-full max-w-lg my-1 px-2 sm:px-0">
@@ -337,11 +398,11 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
       {/* ── Main Content: Camera Display ── */}
       <main
         className={cn(
-          "w-full flex-1 flex flex-col items-center justify-center z-10",
+          "w-full flex-1 flex flex-col items-center justify-start z-10",
           isFullscreen
             ? "fixed inset-0 p-0 m-0 z-40 bg-black"
             : isMobile
-            ? "my-1 px-1 h-[68vh] max-h-[72vh] flex-1"
+            ? "my-0 px-0 h-[68vh] max-h-[72vh] flex-1"
             : "my-1 sm:my-2 px-1 sm:px-0",
         )}
       >

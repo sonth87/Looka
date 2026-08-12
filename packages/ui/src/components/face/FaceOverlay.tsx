@@ -40,6 +40,23 @@ export const FaceOverlay: React.FC<FaceOverlayProps> = ({
   autoHoldMs = 2000,
   className,
 }) => {
+  const containerRef = React.useRef<HTMLDivElement>(null);
+  const [containerSize, setContainerSize] = React.useState<{ w: number; h: number }>({ w: 0, h: 0 });
+
+  React.useEffect(() => {
+    if (!containerRef.current) return;
+    const el = containerRef.current;
+    const updateSize = () => {
+      if (el.clientWidth && el.clientHeight) {
+        setContainerSize({ w: el.clientWidth, h: el.clientHeight });
+      }
+    };
+    updateSize();
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
   if (!visible || !faceState || !faceState.detected) {
     return null;
   }
@@ -76,8 +93,39 @@ export const FaceOverlay: React.FC<FaceOverlayProps> = ({
     countdownNumber = totalSecs < 1.2 ? '⚡' : remainingSecs;
   }
 
+  // ── Calculate object-cover coordinate mapping ──
+  // Camera video stream resolution is 640x480 (4/3 = 1.3333)
+  const streamAspect = 4 / 3;
+  const containerAspect = containerSize.w && containerSize.h ? containerSize.w / containerSize.h : streamAspect;
+
+  let scaleX = 1;
+  let scaleY = 1;
+  let shiftX = 0;
+  let shiftY = 0;
+
+  if (containerAspect < streamAspect) {
+    // Container is taller than video (e.g. Mobile Portrait container)
+    // Video is scaled to match container height, left & right sides are cropped
+    scaleX = streamAspect / containerAspect;
+    shiftX = (scaleX - 1) / 2;
+  } else if (containerAspect > streamAspect) {
+    // Container is wider than video (e.g. Ultra-wide container)
+    // Video is scaled to match container width, top & bottom sides are cropped
+    scaleY = containerAspect / streamAspect;
+    shiftY = (scaleY - 1) / 2;
+  }
+
+  // Helper function to map normalized 0..1 frame coordinates to container percentages
+  const getMappedCoords = (xNorm: number, yNorm: number) => {
+    const rawX = mirrored ? 1 - xNorm : xNorm;
+    const px = (rawX * scaleX - shiftX) * 100;
+    const py = (yNorm * scaleY - shiftY) * 100;
+    return { cx: px, cy: py };
+  };
+
   return (
     <div
+      ref={containerRef}
       style={{ opacity }}
       className={cn('absolute inset-0 pointer-events-none overflow-hidden z-20 transition-opacity duration-150', className)}
     >
@@ -91,6 +139,7 @@ export const FaceOverlay: React.FC<FaceOverlayProps> = ({
           </div>
         </div>
       )}
+
       {/* Loop over ALL detected faces in the frame */}
       {faces.map((faceItem) => {
         const { index, boundingBox, landmarks } = faceItem;
@@ -119,12 +168,14 @@ export const FaceOverlay: React.FC<FaceOverlayProps> = ({
           maxY = (boundingBox.y + boundingBox.height) / 480;
         }
 
-        // Account for horizontal camera preview mirroring
-        const finalLeft = mirrored ? 1 - maxX : minX;
-        const leftPct = Math.max(0, Math.min(100, finalLeft * 100));
-        const topPct = Math.max(0, Math.min(100, minY * 100));
-        const widthPct = Math.max(4, Math.min(100, (maxX - minX) * 100));
-        const heightPct = Math.max(4, Math.min(100, (maxY - minY) * 100));
+        // Map normalized bounds to container percentages
+        const topLeft = getMappedCoords(mirrored ? maxX : minX, minY);
+        const bottomRight = getMappedCoords(mirrored ? minX : maxX, maxY);
+
+        const leftPct = Math.max(-10, Math.min(110, Math.min(topLeft.cx, bottomRight.cx)));
+        const topPct = Math.max(-10, Math.min(110, topLeft.cy));
+        const widthPct = Math.max(4, Math.min(120, Math.abs(bottomRight.cx - topLeft.cx)));
+        const heightPct = Math.max(4, Math.min(120, Math.abs(bottomRight.cy - topLeft.cy)));
 
         // Color theme: Primary face uses status theme; Secondary faces use Amber multi-face warning theme
         const colorTheme =
@@ -203,8 +254,7 @@ export const FaceOverlay: React.FC<FaceOverlayProps> = ({
             {showLandmarks && landmarks && landmarks.length > 0 && (
               <svg className="absolute inset-0 w-full h-full pointer-events-none">
                 {landmarks.map((lm, lmIdx) => {
-                  const cx = (mirrored ? 1 - lm.x : lm.x) * 100;
-                  const cy = lm.y * 100;
+                  const { cx, cy } = getMappedCoords(lm.x, lm.y);
                   return (
                     <circle
                       key={lmIdx}
