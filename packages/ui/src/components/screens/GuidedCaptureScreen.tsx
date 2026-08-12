@@ -22,6 +22,8 @@ import {
   TooltipContent,
 } from '../ui/tooltip.js';
 import { cn } from '../../lib/utils.js';
+import { getSettings, updateSettings } from '../../lib/settingsStore.js';
+
 
 export interface GuidedCaptureScreenProps {
   stream: MediaStream | null;
@@ -130,161 +132,68 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
 
     return () => clearTimeout(freezeTimer);
   }, [latestCapturedImage]);
-  const [cameraScale, setCameraScale] = useState<CameraScale>(() => {
-    if (typeof window === 'undefined') return 'standard';
-    try {
-      const saved = localStorage.getItem('face_ui_camera_scale');
-      if (saved === 'compact' || saved === 'standard' || saved === 'large') {
-        return saved;
-      }
-    } catch {}
-    return 'standard';
-  });
+  const initialSettings = getSettings();
 
-  const [isFullscreen, setIsFullscreen] = useState<boolean>(() => {
-    if (typeof window === 'undefined') return false;
-    try {
-      const saved = localStorage.getItem('face_ui_camera_fullscreen');
-      if (saved !== null) {
-        return JSON.parse(saved);
-      }
-    } catch {}
-    return false;
-  });
-
-  const [overlayVisible, setOverlayVisible] = useState<boolean>(() => {
-    if (typeof window === 'undefined') return true;
-    try {
-      const saved = localStorage.getItem('face_ui_overlay_visible');
-      return saved !== null ? JSON.parse(saved) : true;
-    } catch {
-      return true;
-    }
-  });
-
-  const [overlayOpacity, setOverlayOpacity] = useState<number>(() => {
-    if (typeof window === 'undefined') return 1.0;
-    try {
-      const saved = localStorage.getItem('face_ui_overlay_opacity');
-      return saved !== null ? parseFloat(saved) : 1.0;
-    } catch {
-      return 1.0;
-    }
-  });
-
-  const [showLandmarks, setShowLandmarks] = useState<boolean>(() => {
-    if (typeof window === 'undefined') return false;
-    try {
-      const saved = localStorage.getItem('face_ui_show_landmarks');
-      return saved !== null ? JSON.parse(saved) : false;
-    } catch {
-      return false;
-    }
-  });
-
-  const [captureMode, setCaptureMode] = useState<CaptureTriggerMode>(() => {
-    if (typeof window === 'undefined') return 'AUTO';
-    try {
-      const saved = localStorage.getItem('face_ui_capture_trigger_mode');
-      if (saved === 'AUTO' || saved === 'MANUAL' || saved === 'OFF') return saved;
-    } catch {}
-    return 'AUTO';
-  });
-
-  const [autoHoldMs, setAutoHoldMs] = useState<number>(() => {
-    if (typeof window === 'undefined') return 2000;
-    try {
-      const saved = localStorage.getItem('face_ui_auto_hold_ms');
-      return saved !== null ? parseInt(saved, 10) : 2000;
-    } catch { return 2000; }
-  });
-
-  const [allowedGestures, setAllowedGestures] = useState<GestureType[]>(() => {
-    if (typeof window === 'undefined') return ['VICTORY', 'THUMBS_UP', 'OPEN_PALM'];
-    try {
-      const saved = localStorage.getItem('face_ui_allowed_gestures');
-      return saved !== null ? JSON.parse(saved) : ['VICTORY', 'THUMBS_UP', 'OPEN_PALM'];
-    } catch { return ['VICTORY', 'THUMBS_UP', 'OPEN_PALM']; }
-  });
-
-  const [sensitivityState, setSensitivityState] = useState<CaptureSensitivity>(() => {
-    if (typeof window === 'undefined') return 'MEDIUM';
-    try {
-      const saved = localStorage.getItem('face_ui_capture_sensitivity');
-      if (saved === 'VERY_LOW' || saved === 'LOW' || saved === 'MEDIUM' || saved === 'HIGH' || saved === 'VERY_HIGH') return saved;
-    } catch {}
-    return 'MEDIUM';
-  });
+  const [cameraScale, setCameraScale] = useState<CameraScale>(initialSettings.cameraScale || 'standard');
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(initialSettings.isFullscreen ?? false);
+  const [overlayVisible, setOverlayVisible] = useState<boolean>(initialSettings.overlayVisible ?? true);
+  const [overlayOpacity, setOverlayOpacity] = useState<number>(initialSettings.overlayOpacity ?? 1.0);
+  const [showLandmarks, setShowLandmarks] = useState<boolean>(initialSettings.showLandmarks ?? false);
+  const [captureMode, setCaptureMode] = useState<CaptureTriggerMode>(initialSettings.captureMode || 'AUTO');
+  const [autoHoldMs, setAutoHoldMs] = useState<number>(initialSettings.autoHoldMs || 2000);
+  const [allowedGestures, setAllowedGestures] = useState<GestureType[]>(initialSettings.allowedGestures || ['VICTORY', 'THUMBS_UP', 'OPEN_PALM']);
+  const [sensitivityState, setSensitivityState] = useState<CaptureSensitivity>(initialSettings.sensitivity || 'MEDIUM');
+  const [landmarkSize, setLandmarkSize] = useState<number>(initialSettings.landmarkSize || 1.5);
 
   const activeSensitivity = externalSensitivity || sensitivityState;
 
-  const [landmarkSize, setLandmarkSize] = useState<number>(() => {
-    if (typeof window === 'undefined') return 1.5;
-    try {
-      const saved = localStorage.getItem('face_ui_landmark_size');
-      return saved !== null ? parseFloat(saved) : 1.5;
-    } catch {
-      return 1.5;
-    }
-  });
-
   const handleToggleOverlayVisible = (val: boolean) => {
     setOverlayVisible(val);
-    try {
-      localStorage.setItem('face_ui_overlay_visible', JSON.stringify(val));
-    } catch {}
+    updateSettings({ overlayVisible: val });
   };
 
   const handleOpacityChange = (val: number) => {
     setOverlayOpacity(val);
-    try {
-      localStorage.setItem('face_ui_overlay_opacity', String(val));
-    } catch {}
+    updateSettings({ overlayOpacity: val });
   };
 
   const handleToggleLandmarks = (val: boolean) => {
     setShowLandmarks(val);
-    try {
-      localStorage.setItem('face_ui_show_landmarks', JSON.stringify(val));
-    } catch {}
+    updateSettings({ showLandmarks: val });
   };
 
   const handleLandmarkSizeChange = (val: number) => {
     setLandmarkSize(val);
-    try {
-      localStorage.setItem('face_ui_landmark_size', String(val));
-    } catch {}
+    updateSettings({ landmarkSize: val });
   };
 
   const handleCaptureModeChange = (val: CaptureTriggerMode) => {
     setCaptureMode(val);
-    try { localStorage.setItem('face_ui_capture_trigger_mode', val); } catch {}
+    updateSettings({ captureMode: val });
     if (externalOnCaptureModeChange) externalOnCaptureModeChange(val);
   };
 
   const handleAutoHoldMsChange = (val: number) => {
     setAutoHoldMs(val);
-    try { localStorage.setItem('face_ui_auto_hold_ms', String(val)); } catch {}
+    updateSettings({ autoHoldMs: val });
     if (externalOnAutoHoldMsChange) externalOnAutoHoldMsChange(val);
   };
 
   const handleAllowedGesturesChange = (val: GestureType[]) => {
     setAllowedGestures(val);
-    try { localStorage.setItem('face_ui_allowed_gestures', JSON.stringify(val)); } catch {}
+    updateSettings({ allowedGestures: val });
   };
 
   const handleSensitivityChange = (val: CaptureSensitivity) => {
     setSensitivityState(val);
-    try { localStorage.setItem('face_ui_capture_sensitivity', val); } catch {}
+    updateSettings({ sensitivity: val });
     if (onSensitivityChange) onSensitivityChange(val);
   };
 
   const decreaseScale = () => {
     setCameraScale((prev) => {
       const next = prev === 'large' ? 'standard' : 'compact';
-      try {
-        localStorage.setItem('face_ui_camera_scale', next);
-      } catch {}
+      updateSettings({ cameraScale: next });
       return next;
     });
   };
@@ -292,9 +201,7 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
   const increaseScale = () => {
     setCameraScale((prev) => {
       const next = prev === 'compact' ? 'standard' : 'large';
-      try {
-        localStorage.setItem('face_ui_camera_scale', next);
-      } catch {}
+      updateSettings({ cameraScale: next });
       return next;
     });
   };
@@ -302,9 +209,7 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
   const toggleFullscreen = () => {
     setIsFullscreen((prev) => {
       const next = !prev;
-      try {
-        localStorage.setItem('face_ui_camera_fullscreen', JSON.stringify(next));
-      } catch {}
+      updateSettings({ isFullscreen: next });
       return next;
     });
   };

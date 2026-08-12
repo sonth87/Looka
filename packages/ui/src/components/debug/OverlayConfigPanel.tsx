@@ -64,7 +64,7 @@ export const OverlayConfigPanel: React.FC<OverlayConfigPanelProps> = ({
   onSensitivityChange,
   theme = "dark",
   isFullscreen = false,
-  defaultPosition = { x: 30, y: 380 },
+  defaultPosition = { x: 20, y: 360 },
   className,
 }) => {
   const title = (

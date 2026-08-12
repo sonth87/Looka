@@ -1,4 +1,12 @@
 export { cn } from './lib/utils.js';
+export {
+  getSettings,
+  updateSettings,
+  getPanelState,
+  updatePanelState,
+} from './lib/settingsStore.js';
+export type { AppSettings, PanelState } from './lib/settingsStore.js';
+
 
 // UI Primitives (shadcn)
 export {

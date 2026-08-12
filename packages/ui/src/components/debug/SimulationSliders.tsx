@@ -28,7 +28,9 @@ export const SimulationSliders: React.FC<SimulationSlidersProps> = ({
   theme = 'dark',
   isFullscreen = false,
   className,
-  defaultPosition = { x: 950, y: 120 },
+  defaultPosition = typeof window !== 'undefined'
+    ? { x: Math.max(20, window.innerWidth - 310), y: 75 }
+    : { x: 1200, y: 75 },
 }) => {
   const [settings, setSettings] = useState<SimulationSettings>({
     presence: 'SINGLE_FACE',

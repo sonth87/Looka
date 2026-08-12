@@ -26,6 +26,8 @@ import {
   Tooltip,
   TooltipTrigger,
   TooltipContent,
+  getSettings,
+  updateSettings,
 } from '@face/ui';
 
 const defaultWorkflow: CaptureWorkflow = {
@@ -78,22 +80,12 @@ const defaultWorkflow: CaptureWorkflow = {
 
 export default function App() {
   const [mode, setMode] = useState<'simulation' | 'live'>('simulation');
-  const [theme, setTheme] = useState<'dark' | 'light'>(() => {
-    if (typeof window === 'undefined') return 'dark';
-    try {
-      const saved = localStorage.getItem('face_ui_theme');
-      return saved === 'light' || saved === 'dark' ? saved : 'dark';
-    } catch {
-      return 'dark';
-    }
-  });
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => getSettings().theme || 'dark');
 
   const toggleTheme = () => {
     setTheme((prev) => {
       const nextTheme = prev === 'dark' ? 'light' : 'dark';
-      try {
-        localStorage.setItem('face_ui_theme', nextTheme);
-      } catch {}
+      updateSettings({ theme: nextTheme });
       return nextTheme;
     });
   };
@@ -126,14 +118,7 @@ export default function App() {
   const [cameraFps] = useState(30);
   const [cvFps, setCvFps] = useState(0);
   const [latestCapturedImage, setLatestCapturedImage] = useState<{ stepId: string; imagePath: string } | null>(null);
-  const [sensitivity, setSensitivity] = useState<CaptureSensitivity>(() => {
-    if (typeof window === 'undefined') return 'MEDIUM';
-    try {
-      const saved = localStorage.getItem('face_ui_capture_sensitivity');
-      if (saved === 'VERY_LOW' || saved === 'LOW' || saved === 'MEDIUM' || saved === 'HIGH' || saved === 'VERY_HIGH') return saved;
-    } catch {}
-    return 'MEDIUM';
-  });
+  const [sensitivity, setSensitivity] = useState<CaptureSensitivity>(() => getSettings().sensitivity || 'MEDIUM');
 
   const cameraServiceRef = useRef<BrowserCameraService | null>(null);
   const mockEngineRef = useRef<MockCVEngine | null>(null);

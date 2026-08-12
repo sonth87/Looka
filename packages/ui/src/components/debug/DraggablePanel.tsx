@@ -2,6 +2,7 @@ import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { Minus } from 'lucide-react';
 import { cn } from '../../lib/utils.js';
 import { LiquidGlassSvgFilter } from '../theme/LiquidGlassSvgFilter.js';
+import { getPanelState, updatePanelState } from '../../lib/settingsStore.js';
 
 export interface DraggablePanelProps {
   storageKey: string;
@@ -22,28 +23,20 @@ export const DraggablePanel: React.FC<DraggablePanelProps> = ({
   children,
   theme = 'dark',
   isFullscreen = false,
-  defaultPosition = { x: 20, y: 20 },
+  defaultPosition = { x: 20, y: 75 },
   defaultCollapsed = false,
   className,
 }) => {
   const [position, setPosition] = useState<{ x: number; y: number }>(() => {
     if (typeof window === 'undefined') return defaultPosition;
-    try {
-      const saved = localStorage.getItem(`${storageKey}_pos`);
-      return saved ? JSON.parse(saved) : defaultPosition;
-    } catch {
-      return defaultPosition;
-    }
+    const panelState = getPanelState(storageKey);
+    return panelState.position || defaultPosition;
   });
 
   const [collapsed, setCollapsed] = useState<boolean>(() => {
     if (typeof window === 'undefined') return defaultCollapsed;
-    try {
-      const saved = localStorage.getItem(`${storageKey}_collapsed`);
-      return saved ? JSON.parse(saved) : defaultCollapsed;
-    } catch {
-      return defaultCollapsed;
-    }
+    const panelState = getPanelState(storageKey);
+    return panelState.collapsed ?? defaultCollapsed;
   });
 
   const isDraggingRef = useRef(false);
@@ -85,20 +78,16 @@ export const DraggablePanel: React.FC<DraggablePanelProps> = ({
         const safePos = { x: clampedX, y: clampedY };
         setPosition(safePos);
         lastPosRef.current = safePos;
-        try {
-          localStorage.setItem(`${storageKey}_pos`, JSON.stringify(safePos));
-        } catch {}
+        updatePanelState(storageKey, { position: safePos });
       }
     }
-  }, [collapsed, storageKey]);
+  }, [collapsed, storageKey, position.x, position.y]);
 
   const toggleCollapsed = (e: React.MouseEvent) => {
     e.stopPropagation();
     const nextState = !collapsed;
     setCollapsed(nextState);
-    try {
-      localStorage.setItem(`${storageKey}_collapsed`, JSON.stringify(nextState));
-    } catch {}
+    updatePanelState(storageKey, { collapsed: nextState });
   };
 
   const handleMouseDown = (e: React.MouseEvent) => {
@@ -121,9 +110,7 @@ export const DraggablePanel: React.FC<DraggablePanelProps> = ({
     const handleMouseUp = () => {
       if (isDraggingRef.current) {
         isDraggingRef.current = false;
-        try {
-          localStorage.setItem(`${storageKey}_pos`, JSON.stringify(lastPosRef.current));
-        } catch {}
+        updatePanelState(storageKey, { position: lastPosRef.current });
       }
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
@@ -135,10 +122,9 @@ export const DraggablePanel: React.FC<DraggablePanelProps> = ({
 
   useEffect(() => {
     lastPosRef.current = position;
-    try {
-      localStorage.setItem(`${storageKey}_pos`, JSON.stringify(position));
-    } catch {}
+    updatePanelState(storageKey, { position });
   }, [position, storageKey]);
+
 
   const liquidGlassStyle: React.CSSProperties = {
     backdropFilter: 'url(#liquid-glass-refraction) blur(18px) saturate(180%)',

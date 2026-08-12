@@ -14,6 +14,8 @@ import {
   TooltipContent,
 } from '../ui/tooltip.js';
 import { cn } from '../../lib/utils.js';
+import { getSettings, updateSettings } from '../../lib/settingsStore.js';
+
 
 export interface KioskAttendanceScreenProps {
   stream: MediaStream | null;
@@ -52,94 +54,33 @@ export const KioskAttendanceScreen: React.FC<KioskAttendanceScreenProps> = ({
   onSwitchMode,
   className,
 }) => {
-  const [cameraScale, setCameraScale] = useState<CameraScale>(() => {
-    if (typeof window === 'undefined') return 'standard';
-    try {
-      const saved = localStorage.getItem('face_ui_camera_scale');
-      if (saved === 'compact' || saved === 'standard' || saved === 'large') {
-        return saved;
-      }
-    } catch {}
-    return 'standard';
-  });
+  const initialSettings = getSettings();
 
-  const [isFullscreen, setIsFullscreen] = useState<boolean>(() => {
-    if (typeof window === 'undefined') return false;
-    try {
-      const saved = localStorage.getItem('face_ui_camera_fullscreen');
-      if (saved !== null) {
-        return JSON.parse(saved);
-      }
-    } catch {}
-    return false;
-  });
-
-  const [overlayVisible, setOverlayVisible] = useState<boolean>(() => {
-    if (typeof window === 'undefined') return true;
-    try {
-      const saved = localStorage.getItem('face_ui_overlay_visible');
-      return saved !== null ? JSON.parse(saved) : true;
-    } catch {
-      return true;
-    }
-  });
-
-  const [overlayOpacity, setOverlayOpacity] = useState<number>(() => {
-    if (typeof window === 'undefined') return 1.0;
-    try {
-      const saved = localStorage.getItem('face_ui_overlay_opacity');
-      return saved !== null ? parseFloat(saved) : 1.0;
-    } catch {
-      return 1.0;
-    }
-  });
-
-  const [showLandmarks, setShowLandmarks] = useState<boolean>(() => {
-    if (typeof window === 'undefined') return false;
-    try {
-      const saved = localStorage.getItem('face_ui_show_landmarks');
-      return saved !== null ? JSON.parse(saved) : false;
-    } catch {
-      return false;
-    }
-  });
-
-  const [landmarkSize, setLandmarkSize] = useState<number>(() => {
-    if (typeof window === 'undefined') return 1.5;
-    try {
-      const saved = localStorage.getItem('face_ui_landmark_size');
-      return saved !== null ? parseFloat(saved) : 1.5;
-    } catch {
-      return 1.5;
-    }
-  });
+  const [cameraScale, setCameraScale] = useState<CameraScale>(initialSettings.cameraScale || 'standard');
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(initialSettings.isFullscreen ?? false);
+  const [overlayVisible, setOverlayVisible] = useState<boolean>(initialSettings.overlayVisible ?? true);
+  const [overlayOpacity, setOverlayOpacity] = useState<number>(initialSettings.overlayOpacity ?? 1.0);
+  const [showLandmarks, setShowLandmarks] = useState<boolean>(initialSettings.showLandmarks ?? false);
+  const [landmarkSize, setLandmarkSize] = useState<number>(initialSettings.landmarkSize ?? 1.5);
 
   const handleToggleOverlayVisible = (val: boolean) => {
     setOverlayVisible(val);
-    try {
-      localStorage.setItem('face_ui_overlay_visible', JSON.stringify(val));
-    } catch {}
+    updateSettings({ overlayVisible: val });
   };
 
   const handleOpacityChange = (val: number) => {
     setOverlayOpacity(val);
-    try {
-      localStorage.setItem('face_ui_overlay_opacity', String(val));
-    } catch {}
+    updateSettings({ overlayOpacity: val });
   };
 
   const handleToggleLandmarks = (val: boolean) => {
     setShowLandmarks(val);
-    try {
-      localStorage.setItem('face_ui_show_landmarks', JSON.stringify(val));
-    } catch {}
+    updateSettings({ showLandmarks: val });
   };
 
   const handleLandmarkSizeChange = (val: number) => {
     setLandmarkSize(val);
-    try {
-      localStorage.setItem('face_ui_landmark_size', String(val));
-    } catch {}
+    updateSettings({ landmarkSize: val });
   };
 
   const hasRecognized = !!personLabel;
@@ -147,9 +88,7 @@ export const KioskAttendanceScreen: React.FC<KioskAttendanceScreenProps> = ({
   const decreaseScale = () => {
     setCameraScale((prev) => {
       const next = prev === 'large' ? 'standard' : 'compact';
-      try {
-        localStorage.setItem('face_ui_camera_scale', next);
-      } catch {}
+      updateSettings({ cameraScale: next });
       return next;
     });
   };
@@ -157,9 +96,7 @@ export const KioskAttendanceScreen: React.FC<KioskAttendanceScreenProps> = ({
   const increaseScale = () => {
     setCameraScale((prev) => {
       const next = prev === 'compact' ? 'standard' : 'large';
-      try {
-        localStorage.setItem('face_ui_camera_scale', next);
-      } catch {}
+      updateSettings({ cameraScale: next });
       return next;
     });
   };
@@ -167,9 +104,7 @@ export const KioskAttendanceScreen: React.FC<KioskAttendanceScreenProps> = ({
   const toggleFullscreen = () => {
     setIsFullscreen((prev) => {
       const next = !prev;
-      try {
-        localStorage.setItem('face_ui_camera_fullscreen', JSON.stringify(next));
-      } catch {}
+      updateSettings({ isFullscreen: next });
       return next;
     });
   };

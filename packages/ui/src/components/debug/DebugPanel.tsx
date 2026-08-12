@@ -21,7 +21,7 @@ export const DebugPanel: React.FC<DebugPanelProps> = ({
   theme = 'dark',
   isFullscreen = false,
   className,
-  defaultPosition = { x: 30, y: 120 },
+  defaultPosition = { x: 20, y: 75 },
 }) => {
   const pose = faceState?.pose || { yaw: 0, pitch: 0, roll: 0 };
   const quality = faceState?.quality;

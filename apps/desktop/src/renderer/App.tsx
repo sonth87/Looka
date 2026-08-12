@@ -24,6 +24,8 @@ import {
   KioskAttendanceScreen,
   SimulationSliders,
   SimulationSettings,
+  getSettings,
+  updateSettings,
 } from '@face/ui';
 
 const sampleWorkflow: CaptureWorkflow = {
@@ -52,22 +54,12 @@ const sampleWorkflow: CaptureWorkflow = {
 
 export const App: React.FC = () => {
   const [appMode, setAppMode] = useState<'REGISTRATION' | 'KIOSK'>('KIOSK');
-  const [theme, setTheme] = useState<'dark' | 'light'>(() => {
-    if (typeof window === 'undefined') return 'dark';
-    try {
-      const saved = localStorage.getItem('face_ui_theme');
-      return saved === 'light' || saved === 'dark' ? saved : 'dark';
-    } catch {
-      return 'dark';
-    }
-  });
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => getSettings().theme || 'dark');
 
   const toggleTheme = () => {
     setTheme((prev) => {
       const nextTheme = prev === 'dark' ? 'light' : 'dark';
-      try {
-        localStorage.setItem('face_ui_theme', nextTheme);
-      } catch {}
+      updateSettings({ theme: nextTheme });
       return nextTheme;
     });
   };
