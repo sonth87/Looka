@@ -56,6 +56,9 @@ importers:
       '@face/workflow-engine':
         specifier: workspace:*
         version: link:../../packages/workflow-engine
+      lucide-react:
+        specifier: ^1.31.0
+        version: 1.31.0(react@19.2.8)
       react:
         specifier: ^19.0.0
         version: 19.2.8
@@ -66,6 +69,9 @@ importers:
         specifier: ^1.12.0
         version: 1.14.1
     devDependencies:
+      '@tailwindcss/vite':
+        specifier: ^4.0.0
+        version: 4.3.3(vite@6.4.3(@types/node@22.20.1)(jiti@2.7.0)(lightningcss@1.32.0))
       '@types/node':
         specifier: ^22.13.4
         version: 22.20.1
@@ -84,6 +90,9 @@ importers:
       electron-builder:
         specifier: ^25.1.8
         version: 25.1.8(electron-builder-squirrel-windows@25.1.8)
+      tailwindcss:
+        specifier: ^4.0.0
+        version: 4.3.3
       typescript:
         specifier: ^5.7.3
         version: 5.9.3

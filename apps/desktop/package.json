@@ -1,12 +1,16 @@
 {
   "name": "@face/desktop",
   "version": "0.1.0",
-  "private": true,
+  "description": "Offline-first Face Capture Desktop Kiosk App",
+  "author": "Skyline <sonth87@gmail.com>",
   "main": "./dist/main/index.js",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
-    "package": "pnpm build && electron-builder"
+    "dev": "node ./scripts/dev.mjs",
+    "build": "vite build --emptyOutDir false && tsc -p tsconfig.electron.json",
+    "package": "pnpm build && electron-builder",
+    "package:mac": "pnpm build && electron-builder --mac",
+    "package:win": "pnpm build && electron-builder --win",
+    "package:all": "pnpm build && electron-builder --mac --win"
   },
   "dependencies": {
     "@face/attendance-engine": "workspace:*",
@@ -17,20 +21,24 @@
     "@face/cv-mediapipe": "workspace:*",
     "@face/database": "workspace:*",
     "@face/face-quality": "workspace:*",
+    "@face/hand-gesture": "workspace:*",
     "@face/recognition-engine": "workspace:*",
     "@face/ui": "workspace:*",
     "@face/workflow-engine": "workspace:*",
+    "lucide-react": "^1.31.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "sql.js": "^1.12.0"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.0.0",
     "@types/node": "^22.13.4",
     "@types/react": "^19.0.10",
     "@types/react-dom": "^19.0.4",
     "@vitejs/plugin-react": "^4.3.4",
     "electron": "^34.2.0",
     "electron-builder": "^25.1.8",
+    "tailwindcss": "^4.0.0",
     "typescript": "^5.7.3",
     "vite": "^6.1.0"
   }

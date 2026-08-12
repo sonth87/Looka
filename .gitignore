@@ -1,8 +1,10 @@
 node_modules
 dist
+release
 .turbo
 .next
 build
+out
 coverage
 *.log
 .DS_Store
@@ -12,4 +14,13 @@ captures/
 model-store/
 database/*.db
 *.tsbuildinfo
+
+# Electron Build & Packaging Artifacts
+release/
+*.dmg
+*.exe
+*.zip
+*.blockmap
+builder-debug.yml
+builder-effective-config.yaml
 

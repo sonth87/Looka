@@ -1,5 +1,5 @@
-import React from 'react';
-import { RotateCcw, Send, X, CheckCircle2 } from 'lucide-react';
+import React, { useState } from 'react';
+import { RotateCcw, Send, X, CheckCircle2, Download, FolderOpen } from 'lucide-react';
 import { CaptureSession } from '@face/core';
 import { cn } from '../../lib/utils.js';
 
@@ -20,6 +20,8 @@ export const SessionReviewModal: React.FC<SessionReviewModalProps> = ({
 }) => {
   if (!session || session.status !== 'COMPLETED') return null;
 
+  const [exportNotice, setExportNotice] = useState<{ path: string; count: number } | null>(null);
+
   const handleRetakeConfirm = () => {
     if (typeof window !== 'undefined') {
       const confirmed = window.confirm('Bạn có chắc chắn muốn hủy kết quả hiện tại để chụp lại từ đầu không?');
@@ -28,6 +30,33 @@ export const SessionReviewModal: React.FC<SessionReviewModalProps> = ({
       }
     } else {
       onRetake();
+    }
+  };
+
+  const handleExportNative = async () => {
+    if (typeof window === 'undefined') return;
+    const faceAPI = (window as any).faceAPI;
+    const validImages = session.steps
+      .filter((s) => s.capturedImagePath)
+      .map((s) => ({ stepId: s.stepId, imagePath: s.capturedImagePath! }));
+
+    if (faceAPI?.exportSessionImages) {
+      const res = await faceAPI.exportSessionImages({ sessionId: session.id, images: validImages });
+      if (res.success && res.exportPath) {
+        setExportNotice({ path: res.exportPath, count: res.fileCount || validImages.length });
+      } else {
+        alert(res.error || 'Xuất ảnh thất bại.');
+      }
+    } else {
+      alert(`Đã lưu ${validImages.length} ảnh trong bộ nhớ phiên làm việc.`);
+    }
+  };
+
+  const handleOpenFolder = () => {
+    if (typeof window === 'undefined') return;
+    const faceAPI = (window as any).faceAPI;
+    if (exportNotice && faceAPI?.openExportDir) {
+      faceAPI.openExportDir(exportNotice.path);
     }
   };
 
@@ -58,6 +87,23 @@ export const SessionReviewModal: React.FC<SessionReviewModalProps> = ({
             <X className="w-4 h-4" />
           </button>
         </div>
+
+        {/* Export Notification Toast */}
+        {exportNotice && (
+          <div className="px-3.5 py-2.5 rounded-2xl bg-emerald-950/80 border border-emerald-500/40 text-emerald-200 text-xs flex items-center justify-between gap-2 shadow-lg animate-in fade-in shrink-0">
+            <div className="truncate">
+              <span className="font-bold">✓ Đã xuất {exportNotice.count} tệp ảnh ra máy tính:</span>
+              <p className="text-[10px] text-emerald-400 font-mono truncate">{exportNotice.path}</p>
+            </div>
+            <button
+              onClick={handleOpenFolder}
+              className="px-3 py-1 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1 shrink-0 shadow-md cursor-pointer"
+            >
+              <FolderOpen className="w-3.5 h-3.5" />
+              Mở thư mục
+            </button>
+          </div>
+        )}
 
         {/* Step Images Grid */}
         <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 sm:gap-4 overflow-y-auto flex-1 p-1">
@@ -92,24 +138,36 @@ export const SessionReviewModal: React.FC<SessionReviewModalProps> = ({
         </div>
 
         {/* Action Buttons */}
-        <div className="flex items-center justify-end gap-2 sm:gap-3 pt-3 border-t border-slate-800 shrink-0">
+        <div className="flex items-center justify-between gap-2 sm:gap-3 pt-3 border-t border-slate-800 shrink-0">
           <button
-            onClick={handleRetakeConfirm}
-            className="px-3.5 sm:px-5 py-2.5 bg-slate-800 hover:bg-slate-700 active:scale-95 text-slate-200 font-semibold text-xs sm:text-sm rounded-xl border border-slate-700 shadow-md transition-all flex items-center gap-1.5 cursor-pointer"
+            onClick={handleExportNative}
+            className="px-3 sm:px-4 py-2.5 bg-slate-800 hover:bg-slate-700 active:scale-95 text-slate-200 font-semibold text-xs sm:text-sm rounded-xl border border-slate-700 shadow-md transition-all flex items-center gap-1.5 cursor-pointer"
+            title="Lưu tất cả ảnh chụp thành tệp PNG ra máy tính"
           >
-            <RotateCcw className="w-4 h-4 text-amber-400" />
-            <span className="hidden sm:inline">Chụp lại toàn bộ</span>
-            <span className="sm:hidden">Chụp lại</span>
+            <Download className="w-4 h-4 text-sky-400" />
+            <span className="hidden sm:inline">Xuất ảnh ra máy tính</span>
+            <span className="sm:hidden">Xuất ảnh</span>
           </button>
 
-          <button
-            onClick={onAccept}
-            className="px-4 sm:px-6 py-2.5 bg-blue-600 hover:bg-blue-500 active:scale-95 text-white font-bold text-xs sm:text-sm rounded-xl shadow-lg shadow-blue-500/25 transition-all flex items-center gap-1.5 cursor-pointer"
-          >
-            <Send className="w-4 h-4 fill-white" />
-            <span className="hidden sm:inline">Xác nhận & Lưu hồ sơ</span>
-            <span className="sm:hidden">Gửi hồ sơ</span>
-          </button>
+          <div className="flex items-center gap-2 sm:gap-3">
+            <button
+              onClick={handleRetakeConfirm}
+              className="px-3.5 sm:px-4 py-2.5 bg-slate-800 hover:bg-slate-700 active:scale-95 text-slate-200 font-semibold text-xs sm:text-sm rounded-xl border border-slate-700 shadow-md transition-all flex items-center gap-1.5 cursor-pointer"
+            >
+              <RotateCcw className="w-4 h-4 text-amber-400" />
+              <span className="hidden sm:inline">Chụp lại toàn bộ</span>
+              <span className="sm:hidden">Chụp lại</span>
+            </button>
+
+            <button
+              onClick={onAccept}
+              className="px-4 sm:px-6 py-2.5 bg-blue-600 hover:bg-blue-500 active:scale-95 text-white font-bold text-xs sm:text-sm rounded-xl shadow-lg shadow-blue-500/25 transition-all flex items-center gap-1.5 cursor-pointer"
+            >
+              <Send className="w-4 h-4 fill-white" />
+              <span className="hidden sm:inline">Xác nhận & Lưu hồ sơ</span>
+              <span className="sm:hidden">Gửi hồ sơ</span>
+            </button>
+          </div>
         </div>
       </div>
     </div>

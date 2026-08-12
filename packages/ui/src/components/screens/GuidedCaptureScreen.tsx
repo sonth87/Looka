@@ -557,12 +557,12 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
             stream={stream}
             aspectRatio={isFullscreen ? 'auto' : isMobile ? '3/4' : '16/9'}
             className={cn(
-              'w-full overflow-hidden transition-all border-0 shadow-none bg-transparent',
+              'w-full overflow-hidden transition-all bg-transparent shadow-none',
               isFullscreen
                 ? 'w-screen h-screen rounded-none bg-black border-0'
                 : isMobile
-                ? 'w-full h-full rounded-3xl border-0 shadow-2xl'
-                : 'rounded-2xl sm:rounded-3xl border-0'
+                ? 'w-full h-full rounded-3xl border-0'
+                : 'rounded-2xl sm:rounded-3xl sm:border sm:border-slate-200 dark:sm:border-slate-800'
             )}
           >
             {/* Top-Left Colored Text Debug Stats */}

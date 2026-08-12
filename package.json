@@ -11,6 +11,13 @@
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev",
+    "dev:web": "pnpm --filter @face/web dev",
+    "dev:app": "pnpm --filter @face/desktop dev",
+    "build:app": "pnpm --filter @face/desktop build",
+    "package:app": "pnpm --filter @face/desktop package",
+    "package:app:mac": "pnpm --filter @face/desktop package:mac",
+    "package:app:win": "pnpm --filter @face/desktop package:win",
+    "package:app:all": "pnpm --filter @face/desktop package:all",
     "test": "turbo run test",
     "lint": "turbo run lint",
     "clean": "turbo run clean && rimraf node_modules"

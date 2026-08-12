@@ -1,6 +1,8 @@
 {
+  "$schema": "https://raw.githubusercontent.com/electron-userland/electron-builder/master/packages/app-builder-lib/scheme.json",
   "appId": "com.faceplatform.desktop",
   "productName": "Face Platform Kiosk",
+  "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
   "directories": {
     "output": "release"
   },
@@ -9,9 +11,21 @@
   ],
   "mac": {
     "category": "public.app-category.business",
-    "target": ["dmg", "zip"]
+    "target": [
+      { "target": "dmg", "arch": ["arm64", "x64"] },
+      { "target": "zip", "arch": ["arm64", "x64"] }
+    ]
   },
   "win": {
-    "target": ["nsis", "zip"]
+    "target": [
+      { "target": "nsis", "arch": ["x64"] },
+      { "target": "zip", "arch": ["x64"] }
+    ]
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true
   }
 }
