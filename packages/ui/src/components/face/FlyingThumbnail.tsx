@@ -22,6 +22,8 @@ export const FlyingThumbnail: React.FC<FlyingThumbnailProps> = ({
 }) => {
   const [style, setStyle] = useState<React.CSSProperties>({});
   const [visible, setVisible] = useState(false);
+  const onAnimationEndRef = React.useRef(onAnimationEnd);
+  onAnimationEndRef.current = onAnimationEnd;
 
   useEffect(() => {
     if (!imageSrc || !startRect || !targetRect) {
@@ -69,14 +71,14 @@ export const FlyingThumbnail: React.FC<FlyingThumbnailProps> = ({
 
     const timer = setTimeout(() => {
       setVisible(false);
-      if (onAnimationEnd) onAnimationEnd();
+      if (onAnimationEndRef.current) onAnimationEndRef.current();
     }, 580);
 
     return () => {
       cancelAnimationFrame(animFrame);
       clearTimeout(timer);
     };
-  }, [imageSrc, startRect, targetRect, onAnimationEnd]);
+  }, [imageSrc, startRect?.x, startRect?.y, targetRect?.x, targetRect?.y]);
 
   if (!visible || !imageSrc) return null;
 

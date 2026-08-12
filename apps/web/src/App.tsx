@@ -26,53 +26,47 @@ import {
   Tooltip,
   TooltipTrigger,
   TooltipContent,
-  getSettings,
-  updateSettings,
 } from '@face/ui';
+import { getSettings, updateSettings } from '@face/ui';
 
 const defaultWorkflow: CaptureWorkflow = {
-  id: 'standard-enrollment',
-  name: 'Standard Face Capture',
+  id: 'workflow_standard_5step',
+  name: 'Quy trình 5 hướng chuẩn',
   version: 1,
   steps: [
     {
       id: 'step-front',
       type: 'FRONT',
       instruction: 'Nhìn thẳng vào camera',
-      pose: { yaw: { target: 0, tolerance: 10 } },
-      stability: { durationMs: 400 },
+      pose: { yaw: { target: 0, tolerance: 10 }, pitch: { target: 0, tolerance: 10 } },
       capture: { enabled: true },
     },
     {
       id: 'step-left',
       type: 'LEFT',
       instruction: 'Quay mặt sang trái',
-      pose: { yaw: { target: -30, tolerance: 12 } },
-      stability: { durationMs: 400 },
+      pose: { yaw: { target: -20, tolerance: 10 } },
       capture: { enabled: true },
     },
     {
       id: 'step-right',
       type: 'RIGHT',
       instruction: 'Quay mặt sang phải',
-      pose: { yaw: { target: 30, tolerance: 12 } },
-      stability: { durationMs: 400 },
+      pose: { yaw: { target: 20, tolerance: 10 } },
       capture: { enabled: true },
     },
     {
       id: 'step-up',
       type: 'UP',
-      instruction: 'Ngẩng mặt lên một chút',
-      pose: { pitch: { target: 15, tolerance: 10 } },
-      stability: { durationMs: 400 },
+      instruction: 'Ngẩng đầu lên',
+      pose: { pitch: { target: -15, tolerance: 10 } },
       capture: { enabled: true },
     },
     {
       id: 'step-down',
       type: 'DOWN',
-      instruction: 'Cúi mặt xuống một chút',
-      pose: { pitch: { target: -15, tolerance: 10 } },
-      stability: { durationMs: 400 },
+      instruction: 'Cúi đầu xuống',
+      pose: { pitch: { target: 15, tolerance: 10 } },
       capture: { enabled: true },
     },
   ],
@@ -124,6 +118,22 @@ export default function App() {
   const [cvFps, setCvFps] = useState(0);
   const [latestCapturedImage, setLatestCapturedImage] = useState<{ stepId: string; imagePath: string } | null>(null);
   const [sensitivity, setSensitivity] = useState<CaptureSensitivity>(() => getSettings().sensitivity || 'MEDIUM');
+
+  const [isWorkflowStarted, setIsWorkflowStarted] = useState<boolean>(false);
+  const isWorkflowStartedRef = useRef(false);
+
+  useEffect(() => {
+    isWorkflowStartedRef.current = isWorkflowStarted;
+  }, [isWorkflowStarted]);
+
+  const handleStartWorkflow = async () => {
+    setIsWorkflowStarted(true);
+    isWorkflowStartedRef.current = true;
+    const activeEngine = mode === 'live' ? liveWorkflowEngineRef.current : simWorkflowEngineRef.current;
+    if (activeEngine) {
+      await activeEngine.startSession(defaultWorkflow);
+    }
+  };
 
   const cameraServiceRef = useRef<BrowserCameraService | null>(null);
   const mockEngineRef = useRef<MockCVEngine | null>(null);
@@ -478,7 +488,7 @@ export default function App() {
         newLivePipeline.onResult(async (state, fps) => {
           setFaceState(state);
           setCvFps(fps);
-          if (liveWorkflowEngineRef.current) {
+          if (liveWorkflowEngineRef.current && isWorkflowStartedRef.current) {
             await liveWorkflowEngineRef.current.processFrame(state);
           }
         });
@@ -506,6 +516,8 @@ export default function App() {
     }
     // Clear live face state — sim state will be set when user adjusts sliders
     setFaceState(null);
+    setIsWorkflowStarted(false);
+    isWorkflowStartedRef.current = false;
     setMode('simulation');
   };
 
@@ -519,6 +531,9 @@ export default function App() {
 
   const handleRestart = async () => {
     setShowReviewModal(false);
+    setLatestCapturedImage(null);
+    setIsWorkflowStarted(false);
+    isWorkflowStartedRef.current = false;
     // Restart the active workflow engine
     const activeEngine = mode === 'live' ? liveWorkflowEngineRef.current : simWorkflowEngineRef.current;
     if (activeEngine) {
@@ -538,38 +553,41 @@ export default function App() {
   const stepsList: StepItem[] = defaultWorkflow.steps.map((s, idx) => {
     const sessionStep = activeSession?.steps.find((st) => st.stepId === s.id);
     const isCompleted = sessionStep?.status === 'COMPLETED' || idx < activeGuidance.currentStepIndex;
+    const isCurrent = isWorkflowStarted && idx === activeGuidance.currentStepIndex && !isCompleted;
+
     return {
       id: s.id,
       label: s.type,
       status: isCompleted
         ? 'COMPLETED'
-        : idx === activeGuidance.currentStepIndex
+        : isCurrent
         ? 'CURRENT'
+        : sessionStep?.status === 'FAILED'
+        ? 'FAILED'
         : 'PENDING',
-      imagePath: sessionStep?.capturedImagePath,
+      thumbnailUrl: sessionStep?.capturedImagePath,
     };
   });
 
   const modeButton = (
     <TooltipProvider>
-      <div className="hidden sm:flex items-center gap-1 p-1">
+      <div className="hidden sm:flex items-center bg-slate-900/90 p-1 rounded-xl border border-slate-800 shadow-inner">
         <Tooltip>
           <TooltipTrigger asChild>
             <button
               onClick={switchToSimulationMode}
-              className={`p-2 rounded-xl transition-all cursor-pointer flex items-center justify-center ${
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
                 mode === 'simulation'
-                  ? 'bg-blue-600 text-white shadow-md ring-2 ring-blue-500/30'
-                  : theme === 'dark'
-                  ? 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
-                  : 'text-slate-500 hover:text-slate-800 hover:bg-slate-200/60'
+                  ? 'bg-blue-600 text-white shadow-md'
+                  : 'text-slate-400 hover:text-slate-200'
               }`}
             >
-              <SlidersHorizontal className="w-4.5 h-4.5" />
+              <SlidersHorizontal className="w-3.5 h-3.5" />
+              Mô phỏng (Simulation)
             </button>
           </TooltipTrigger>
           <TooltipContent side="bottom" theme={theme}>
-            Chế độ Giả lập (Pose Simulation)
+            Chế độ Mô phỏng dữ liệu camera bằng thanh trượt
           </TooltipContent>
         </Tooltip>
 
@@ -577,15 +595,14 @@ export default function App() {
           <TooltipTrigger asChild>
             <button
               onClick={startLiveMode}
-              className={`p-2 rounded-xl transition-all cursor-pointer flex items-center justify-center ${
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
                 mode === 'live'
-                  ? 'bg-blue-600 text-white shadow-md ring-2 ring-blue-500/30'
-                  : theme === 'dark'
-                  ? 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
-                  : 'text-slate-500 hover:text-slate-800 hover:bg-slate-200/60'
+                  ? 'bg-blue-600 text-white shadow-md'
+                  : 'text-slate-400 hover:text-slate-200'
               }`}
             >
-              <Camera className="w-4.5 h-4.5" />
+              <Camera className="w-3.5 h-3.5" />
+              Live Camera
             </button>
           </TooltipTrigger>
           <TooltipContent side="bottom" theme={theme}>
@@ -617,6 +634,8 @@ export default function App() {
         modeButton={modeButton}
         onCancel={handleRestart}
         onStartLive={startLiveMode}
+        isWorkflowStarted={isWorkflowStarted}
+        onStartWorkflow={handleStartWorkflow}
         gestureState={gestureState}
         gestureProgress={gestureProgress}
         onShutterCapture={handleShutterCapture}

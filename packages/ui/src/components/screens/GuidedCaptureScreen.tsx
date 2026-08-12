@@ -51,6 +51,8 @@ export interface GuidedCaptureScreenProps {
   modeButton?: React.ReactNode;
   onCancel?: () => void;
   onStartLive?: () => void;
+  isWorkflowStarted?: boolean;
+  onStartWorkflow?: () => void;
   className?: string;
   // Capture trigger & sensitivity
   gestureState?: GestureState | null;
@@ -84,6 +86,8 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
   modeButton,
   onCancel,
   onStartLive,
+  isWorkflowStarted = false,
+  onStartWorkflow,
   className,
   gestureState = null,
   gestureProgress = 0,
@@ -103,8 +107,14 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
     targetRect: RectBounds | null;
   }>({ imageSrc: null, startRect: null, targetRect: null });
 
+  const lastHandledKeyRef = React.useRef<string | null>(null);
+
   React.useEffect(() => {
     if (!latestCapturedImage || !latestCapturedImage.imagePath) return;
+
+    const key = `${latestCapturedImage.stepId}_${latestCapturedImage.imagePath.length}_${latestCapturedImage.imagePath.slice(-20)}`;
+    if (lastHandledKeyRef.current === key) return;
+    lastHandledKeyRef.current = key;
 
     setFlashTrigger(true);
     setFreezeSnapshot(latestCapturedImage.imagePath);
@@ -551,24 +561,54 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
         </div>
       </main>
 
-      {/* ── Guidance Message Panel (Hidden in Fullscreen mode) ── */}
+      {/* ── Guidance Message & Start Button Panel (Hidden in Fullscreen mode) ── */}
       {!isFullscreen && (
         <footer className="w-full max-w-md z-10 mt-2 sm:mt-4 mb-2 pb-16 sm:pb-2 px-2 sm:px-0">
-          <GuidanceMessage guidance={guidance} theme={theme} />
-          {onCancel && (
-            <div className="flex justify-center pt-2">
+          {!isWorkflowStarted && stream && onStartWorkflow ? (
+            <div className="flex flex-col items-center gap-3 w-full">
+              <GuidanceMessage
+                guidance={{
+                  status: 'READY',
+                  primaryInstruction: 'Camera đã bật. Nhấn nút Bắt đầu để tiến hành chụp 5 bước.',
+                  primaryReason: 'READY',
+                  progress: 0,
+                  hints: faceState?.detected
+                    ? [{ code: 'READY', message: 'Khuôn mặt đã nằm trong vị trí camera' }]
+                    : [{ code: 'NO_FACE', message: 'Vui lòng đứng trước camera' }],
+                  currentStepIndex: 0,
+                  totalSteps: steps.length,
+                  stepId: steps[0]?.id || '',
+                  stepType: 'FRONT',
+                }}
+                theme={theme}
+              />
               <button
-                onClick={onCancel}
-                className={cn(
-                  "text-xs underline transition-colors cursor-pointer",
-                  theme === "dark"
-                    ? "text-slate-500 hover:text-slate-300"
-                    : "text-slate-400 hover:text-slate-700",
-                )}
+                onClick={onStartWorkflow}
+                className="px-6 py-3 rounded-full bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-extrabold text-xs tracking-wider uppercase shadow-xl shadow-blue-500/30 transition-all duration-300 active:scale-95 flex items-center gap-2 cursor-pointer"
               >
-                Hủy bỏ quy trình
+                <Play className="w-4 h-4 fill-white" />
+                Bắt đầu quy trình chụp (5 bước)
               </button>
             </div>
+          ) : (
+            <>
+              <GuidanceMessage guidance={guidance} theme={theme} />
+              {onCancel && (
+                <div className="flex justify-center pt-2">
+                  <button
+                    onClick={onCancel}
+                    className={cn(
+                      "text-xs underline transition-colors cursor-pointer",
+                      theme === "dark"
+                        ? "text-slate-500 hover:text-slate-300"
+                        : "text-slate-400 hover:text-slate-700",
+                    )}
+                  >
+                    Hủy bỏ quy trình
+                  </button>
+                </div>
+              )}
+            </>
           )}
         </footer>
       )}
