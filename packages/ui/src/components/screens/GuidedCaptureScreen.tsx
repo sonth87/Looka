@@ -280,20 +280,20 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
 
     let presenceBadge = {
       label: 'Chưa phát hiện mặt (No Face)',
-      color: 'bg-red-500/20 text-red-400 border-red-500/40',
+      color: 'bg-red-500/30 text-red-300 border-red-500/50',
       dot: 'bg-red-400 animate-pulse',
     };
 
     if (presence === 'MULTIPLE_FACES' || faceCount > 1) {
       presenceBadge = {
         label: `Có ${faceCount} khuôn mặt (Multiple Faces)`,
-        color: 'bg-amber-500/20 text-amber-400 border-amber-500/40',
+        color: 'bg-amber-500/30 text-amber-300 border-amber-500/50',
         dot: 'bg-amber-400 animate-ping',
       };
     } else if (faceState.detected) {
       presenceBadge = {
         label: '1 Mặt (Single Face)',
-        color: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40',
+        color: 'bg-emerald-500/30 text-emerald-300 border-emerald-500/50',
         dot: 'bg-emerald-400',
       };
     }
@@ -311,16 +311,16 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
     };
 
     return (
-      <div className="w-full max-w-sm flex flex-wrap items-center justify-center gap-1.5 px-2 my-0.5 z-20">
+      <div className="absolute top-12 sm:top-4 inset-x-0 z-35 flex flex-wrap items-center justify-center gap-1.5 px-3 pointer-events-none">
         {/* Presence Badge */}
-        <div className={cn('px-2.5 py-0.5 rounded-full text-[10px] font-bold border backdrop-blur-md shadow-sm flex items-center gap-1.5', presenceBadge.color)}>
+        <div className={cn('px-2.5 py-0.5 rounded-full text-[10px] sm:text-xs font-bold border backdrop-blur-md shadow-md flex items-center gap-1.5 pointer-events-auto', presenceBadge.color)}>
           <span className={cn('w-1.5 h-1.5 rounded-full', presenceBadge.dot)} />
           {presenceBadge.label}
         </div>
 
         {/* Quality Reason Tags */}
         {reasons.map((r, i) => (
-          <div key={i} className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-950/80 text-amber-300 border border-amber-500/40 shadow-sm backdrop-blur-md">
+          <div key={i} className="px-2 py-0.5 rounded-full text-[10px] sm:text-xs font-bold bg-amber-950/90 text-amber-300 border border-amber-500/50 shadow-md backdrop-blur-md pointer-events-auto">
             ⚠️ {reasonLabels[r] || r}
           </div>
         ))}
@@ -381,9 +381,6 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
         </header>
       )}
 
-      {/* ── Live Face Diagnostics Badge Bar (Visible on mobile & desktop) ── */}
-      {!isFullscreen && renderFaceDiagnostics()}
-
       {/* ── Steps Line (Desktop only, hidden on mobile & fullscreen) ── */}
       {!isFullscreen && !isMobile && (
         <div className="w-full max-w-lg my-1 px-2 sm:px-0">
@@ -417,7 +414,7 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
               : cn("w-full", cameraWidthClass),
           )}
         >
-          {/* ── 3 Control Buttons: "-" (Decrease), "+" (Increase), Fullscreen (Hidden on Mobile) ── */}
+          {/* ── 3 Control Buttons: "-" (Decrease), "+" (Increase), Fullscreen (Desktop only) ── */}
           <TooltipProvider>
             <div className="hidden sm:flex absolute top-2.5 sm:top-3 right-2.5 sm:right-3 z-50 items-center gap-0.5 sm:gap-1 bg-slate-950/75 backdrop-blur-md p-0.5 sm:p-1 rounded-xl border border-slate-800/80 shadow-2xl">
               <Tooltip>
@@ -500,6 +497,8 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
                 : 'rounded-2xl sm:rounded-3xl'
             )}
           >
+            {/* Live Diagnostic Reason & Presence Badge (Overlayed inside camera viewport) */}
+            {renderFaceDiagnostics()}
             {((mode === "live" && stream) || mode === "simulation") && (
               <FaceOverlay
                 faceState={faceState}

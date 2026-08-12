@@ -161,6 +161,13 @@ export const FaceOverlay: React.FC<FaceOverlayProps> = ({
             if (lm.y < minY) minY = lm.y;
             if (lm.y > maxY) maxY = lm.y;
           }
+          // Add padding so tracking box comfortably covers chin/jawline lower down
+          const hDiff = maxY - minY;
+          const wDiff = maxX - minX;
+          minY = Math.max(0, minY - hDiff * 0.08);
+          maxY = Math.min(1, maxY + hDiff * 0.16); // Extends lower down chin
+          minX = Math.max(0, minX - wDiff * 0.08);
+          maxX = Math.min(1, maxX + wDiff * 0.08);
         } else if (boundingBox) {
           minX = boundingBox.x / 640;
           minY = boundingBox.y / 480;
