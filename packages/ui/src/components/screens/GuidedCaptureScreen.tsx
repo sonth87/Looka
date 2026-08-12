@@ -1,0 +1,464 @@
+import React, { useState } from 'react';
+import { Video, Minus, Plus, Maximize, Minimize } from 'lucide-react';
+import { CameraDevice, FaceState, GuidanceState } from '@face/core';
+import { CameraPreview } from '../camera/CameraPreview.js';
+import { CameraSelector } from '../camera/CameraSelector.js';
+import { FaceOverlay } from '../face/FaceOverlay.js';
+import { StepProgress, StepItem } from '../workflow/StepProgress.js';
+import { GuidanceMessage } from '../workflow/GuidanceMessage.js';
+import { StabilityProgress } from '../workflow/StabilityProgress.js';
+import { CountdownTimer } from '../workflow/CountdownTimer.js';
+import { DebugPanel } from '../debug/DebugPanel.js';
+import { OverlayConfigPanel } from '../debug/OverlayConfigPanel.js';
+import { ThemeToggle } from '../theme/ThemeToggle.js';
+import {
+  TooltipProvider,
+  Tooltip,
+  TooltipTrigger,
+  TooltipContent,
+} from '../ui/tooltip.js';
+import { cn } from '../../lib/utils.js';
+
+export interface GuidedCaptureScreenProps {
+  stream: MediaStream | null;
+  faceState?: FaceState | null;
+  guidance: GuidanceState;
+  steps: StepItem[];
+  devices: CameraDevice[];
+  selectedDeviceId?: string;
+  onSelectDevice: (deviceId: string) => void;
+  cameraFps?: number;
+  cvFps?: number;
+  stabilityProgress?: number;
+  countdownValue?: number;
+  showDebugPanel?: boolean;
+  mode?: 'simulation' | 'live';
+  theme?: 'dark' | 'light';
+  onToggleTheme?: () => void;
+  modeButton?: React.ReactNode;
+  onCancel?: () => void;
+  className?: string;
+}
+
+export type CameraScale = 'compact' | 'standard' | 'large';
+
+export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
+  stream,
+  faceState,
+  guidance,
+  steps,
+  devices,
+  selectedDeviceId,
+  onSelectDevice,
+  cameraFps = 0,
+  cvFps = 0,
+  stabilityProgress = 0,
+  countdownValue = 0,
+  showDebugPanel = true,
+  mode = 'live',
+  theme = 'dark',
+  onToggleTheme,
+  modeButton,
+  onCancel,
+  className,
+}) => {
+  const [cameraScale, setCameraScale] = useState<CameraScale>(() => {
+    if (typeof window === 'undefined') return 'standard';
+    try {
+      const saved = localStorage.getItem('face_ui_camera_scale');
+      if (saved === 'compact' || saved === 'standard' || saved === 'large') {
+        return saved;
+      }
+    } catch {}
+    return 'standard';
+  });
+
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    try {
+      const saved = localStorage.getItem('face_ui_camera_fullscreen');
+      if (saved !== null) {
+        return JSON.parse(saved);
+      }
+    } catch {}
+    return false;
+  });
+
+  const [overlayVisible, setOverlayVisible] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return true;
+    try {
+      const saved = localStorage.getItem('face_ui_overlay_visible');
+      return saved !== null ? JSON.parse(saved) : true;
+    } catch {
+      return true;
+    }
+  });
+
+  const [overlayOpacity, setOverlayOpacity] = useState<number>(() => {
+    if (typeof window === 'undefined') return 1.0;
+    try {
+      const saved = localStorage.getItem('face_ui_overlay_opacity');
+      return saved !== null ? parseFloat(saved) : 1.0;
+    } catch {
+      return 1.0;
+    }
+  });
+
+  const [showLandmarks, setShowLandmarks] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    try {
+      const saved = localStorage.getItem('face_ui_show_landmarks');
+      return saved !== null ? JSON.parse(saved) : false;
+    } catch {
+      return false;
+    }
+  });
+
+  const [landmarkSize, setLandmarkSize] = useState<number>(() => {
+    if (typeof window === 'undefined') return 1.5;
+    try {
+      const saved = localStorage.getItem('face_ui_landmark_size');
+      return saved !== null ? parseFloat(saved) : 1.5;
+    } catch {
+      return 1.5;
+    }
+  });
+
+  const handleToggleOverlayVisible = (val: boolean) => {
+    setOverlayVisible(val);
+    try {
+      localStorage.setItem('face_ui_overlay_visible', JSON.stringify(val));
+    } catch {}
+  };
+
+  const handleOpacityChange = (val: number) => {
+    setOverlayOpacity(val);
+    try {
+      localStorage.setItem('face_ui_overlay_opacity', String(val));
+    } catch {}
+  };
+
+  const handleToggleLandmarks = (val: boolean) => {
+    setShowLandmarks(val);
+    try {
+      localStorage.setItem('face_ui_show_landmarks', JSON.stringify(val));
+    } catch {}
+  };
+
+  const handleLandmarkSizeChange = (val: number) => {
+    setLandmarkSize(val);
+    try {
+      localStorage.setItem('face_ui_landmark_size', String(val));
+    } catch {}
+  };
+
+  const decreaseScale = () => {
+    setCameraScale((prev) => {
+      const next = prev === 'large' ? 'standard' : 'compact';
+      try {
+        localStorage.setItem('face_ui_camera_scale', next);
+      } catch {}
+      return next;
+    });
+  };
+
+  const increaseScale = () => {
+    setCameraScale((prev) => {
+      const next = prev === 'compact' ? 'standard' : 'large';
+      try {
+        localStorage.setItem('face_ui_camera_scale', next);
+      } catch {}
+      return next;
+    });
+  };
+
+  const toggleFullscreen = () => {
+    setIsFullscreen((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('face_ui_camera_fullscreen', JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+  };
+
+  const cameraWidthClass =
+    cameraScale === 'compact'
+      ? 'max-w-md'
+      : cameraScale === 'large'
+      ? 'max-w-4xl'
+      : 'max-w-2xl';
+
+  return (
+    <div
+      className={cn(
+        'relative min-h-screen flex flex-col items-center justify-between p-3 md:p-5 overflow-x-hidden select-none transition-colors duration-300',
+        theme === 'dark' ? 'bg-slate-950 text-slate-100' : 'bg-slate-100 text-slate-900',
+        className
+      )}
+    >
+      {/* ── Top Theme Toggle (Hidden in Fullscreen mode) ── */}
+      {!isFullscreen && onToggleTheme && (
+        <div className="fixed top-3.5 right-4 z-[60]">
+          <ThemeToggle theme={theme} onToggleTheme={onToggleTheme} />
+        </div>
+      )}
+
+      {/* ── Top Header Bar (Hidden in Fullscreen mode) ── */}
+      {!isFullscreen && (
+        <header className="w-full px-6 flex items-center justify-between gap-3 pt-1 pb-1">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-blue-600/20 border border-blue-500/30 flex items-center justify-center text-blue-500 font-black text-sm shrink-0 shadow-md">
+              FP
+            </div>
+            <div>
+              <h1 className="text-sm font-bold tracking-tight leading-tight">Guided Face Capture</h1>
+              <p className={cn('text-[11px] leading-tight', theme === 'dark' ? 'text-slate-400' : 'text-slate-500')}>
+                Hệ thống hướng dẫn chụp ảnh tự động
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 pr-12">
+            {modeButton}
+          </div>
+        </header>
+      )}
+
+      {/* ── Steps Line (Hidden in Fullscreen mode) ── */}
+      {!isFullscreen && (
+        <div className="w-full max-w-lg my-1">
+          <StepProgress
+            steps={steps}
+            currentStepIndex={guidance.currentStepIndex}
+            theme={theme}
+          />
+        </div>
+      )}
+
+      {/* ── Main Content: Camera Display ── */}
+      <main
+        className={cn(
+          'w-full flex-1 flex flex-col items-center justify-center z-10',
+          isFullscreen ? 'fixed inset-0 p-0 m-0 z-40 bg-black' : 'my-2'
+        )}
+      >
+        <div
+          className={cn(
+            'relative transition-all duration-300',
+            isFullscreen ? 'w-full h-full rounded-none' : cn('w-full', cameraWidthClass)
+          )}
+        >
+          {/* ── 3 Control Buttons: "-" (Decrease), "+" (Increase), Fullscreen (Maximize/Minimize) ── */}
+          <TooltipProvider>
+            <div className="absolute top-3 right-3 z-50 flex items-center gap-1 bg-slate-950/75 backdrop-blur-md p-1 rounded-xl border border-slate-800/80 shadow-2xl">
+              {/* "-" Decrease size button */}
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    onClick={decreaseScale}
+                    disabled={cameraScale === 'compact' || isFullscreen}
+                    className={cn(
+                      'p-1.5 rounded-lg text-xs transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed',
+                      theme === 'dark'
+                        ? 'text-slate-300 hover:text-white hover:bg-slate-800'
+                        : 'text-slate-300 hover:text-white hover:bg-slate-800'
+                    )}
+                  >
+                    <Minus className="w-4 h-4" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" theme="dark">
+                  Giảm kích thước camera (-)
+                </TooltipContent>
+              </Tooltip>
+
+              {/* "+" Increase size button */}
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    onClick={increaseScale}
+                    disabled={cameraScale === 'large' || isFullscreen}
+                    className={cn(
+                      'p-1.5 rounded-lg text-xs transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed',
+                      theme === 'dark'
+                        ? 'text-slate-300 hover:text-white hover:bg-slate-800'
+                        : 'text-slate-300 hover:text-white hover:bg-slate-800'
+                    )}
+                  >
+                    <Plus className="w-4 h-4" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" theme="dark">
+                  Tăng kích thước camera (+)
+                </TooltipContent>
+              </Tooltip>
+
+              {/* Fullscreen button */}
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    onClick={toggleFullscreen}
+                    className={cn(
+                      'p-1.5 rounded-lg text-xs transition-colors cursor-pointer',
+                      isFullscreen
+                        ? 'bg-blue-600 text-white shadow-md'
+                        : 'text-slate-300 hover:text-white hover:bg-slate-800'
+                    )}
+                  >
+                    {isFullscreen ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" theme="dark">
+                  {isFullscreen ? 'Thoát Toàn màn hình' : 'Toàn màn hình (Fullscreen)'}
+                </TooltipContent>
+              </Tooltip>
+            </div>
+          </TooltipProvider>
+
+          {/* Camera Preview */}
+          <CameraPreview
+            stream={stream}
+            aspectRatio={isFullscreen ? 'auto' : '16/9'}
+            className={cn(
+              'w-full shadow-2xl overflow-hidden transition-all',
+              isFullscreen
+                ? 'w-screen h-screen rounded-none border-none bg-black'
+                : cn(
+                    'rounded-3xl',
+                    theme === 'dark' ? 'border border-slate-800' : 'border border-slate-200 shadow-slate-300/50'
+                  )
+            )}
+          >
+            {((mode === 'live' && stream) || mode === 'simulation') && (
+              <FaceOverlay
+                faceState={faceState}
+                showLandmarks={showLandmarks}
+                landmarkSize={landmarkSize}
+                visible={overlayVisible}
+                opacity={overlayOpacity}
+                mirrored={true}
+                variant="capture"
+              />
+            )}
+            <CountdownTimer value={countdownValue} />
+
+            {/* Stability progress bar */}
+            {stabilityProgress > 0 && (
+              <div className="absolute bottom-4 left-1/2 -translate-x-1/2 w-56 z-20">
+                <StabilityProgress progress={stabilityProgress} text="Giữ nguyên tư thế..." />
+              </div>
+            )}
+
+            {/* In Fullscreen mode: StepProgress renders overlayed on top of camera at top center */}
+            {isFullscreen && (
+              <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40 w-full max-w-md px-4 pointer-events-auto">
+                <StepProgress
+                  steps={steps}
+                  currentStepIndex={guidance.currentStepIndex}
+                  theme="dark"
+                />
+              </div>
+            )}
+
+            {/* In Fullscreen mode: GuidanceMessage renders overlayed on top of camera at bottom center */}
+            {isFullscreen && (
+              <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-40 w-full max-w-lg px-4 pointer-events-auto">
+                <GuidanceMessage guidance={guidance} theme="dark" />
+                {onCancel && (
+                  <div className="flex justify-center pt-2">
+                    <button
+                      onClick={onCancel}
+                      className="text-xs text-slate-400 hover:text-slate-200 underline transition-colors cursor-pointer"
+                    >
+                      Hủy bỏ quy trình
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* No-stream placeholder */}
+            {!stream && (
+              <div
+                className={cn(
+                  'absolute inset-0 flex flex-col items-center justify-center gap-3',
+                  theme === 'dark' || isFullscreen ? 'bg-slate-900/90' : 'bg-slate-200/90'
+                )}
+              >
+                <Video className={cn('w-14 h-14 opacity-25', theme === 'dark' || isFullscreen ? 'text-slate-400' : 'text-slate-600')} />
+                <p className={cn('text-sm font-medium', theme === 'dark' || isFullscreen ? 'text-slate-400' : 'text-slate-600')}>
+                  Camera chưa kết nối
+                </p>
+                <p className={cn('text-xs', theme === 'dark' || isFullscreen ? 'text-slate-500' : 'text-slate-400')}>
+                  Chọn chế độ Giả lập hoặc kết nối Live Camera
+                </p>
+              </div>
+            )}
+          </CameraPreview>
+        </div>
+      </main>
+
+      {/* ── Guidance Message + Cancel (Standard mode only) ── */}
+      {!isFullscreen && (
+        <footer className="w-full max-w-xl space-y-2 z-10 my-1">
+          <GuidanceMessage guidance={guidance} theme={theme} />
+
+          {onCancel && (
+            <div className="flex justify-center pt-1">
+              <button
+                onClick={onCancel}
+                className={cn(
+                  'text-xs underline transition-colors cursor-pointer',
+                  theme === 'dark' ? 'text-slate-500 hover:text-slate-300' : 'text-slate-400 hover:text-slate-700'
+                )}
+              >
+                Hủy bỏ quy trình
+              </button>
+            </div>
+          )}
+        </footer>
+      )}
+
+      {/* ── Fixed Bottom-Right: Camera Selector ── */}
+      <div className="fixed bottom-4 right-4 z-40">
+        <CameraSelector
+          devices={devices}
+          selectedDeviceId={selectedDeviceId}
+          onSelectDevice={onSelectDevice}
+          className="w-48 shadow-xl"
+        />
+      </div>
+
+      {/* ── Draggable CV Debug Panel & Overlay Config Panel ── */}
+      {showDebugPanel && (
+        <>
+          <DebugPanel
+            faceState={faceState}
+            fps={cameraFps}
+            cvFps={cvFps}
+            theme={theme}
+            isFullscreen={isFullscreen}
+            defaultPosition={{ x: 30, y: 160 }}
+          />
+
+          {mode === 'live' && (
+            <OverlayConfigPanel
+              visible={overlayVisible}
+              onToggleVisible={handleToggleOverlayVisible}
+              opacity={overlayOpacity}
+              onOpacityChange={handleOpacityChange}
+              showLandmarks={showLandmarks}
+              onToggleLandmarks={handleToggleLandmarks}
+              landmarkSize={landmarkSize}
+              onLandmarkSizeChange={handleLandmarkSizeChange}
+              theme={theme}
+              isFullscreen={isFullscreen}
+              defaultPosition={{ x: 30, y: 440 }}
+            />
+          )}
+        </>
+      )}
+    </div>
+  );
+};

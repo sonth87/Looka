@@ -1,0 +1,17 @@
+{
+  "appId": "com.faceplatform.desktop",
+  "productName": "Face Platform Kiosk",
+  "directories": {
+    "output": "release"
+  },
+  "files": [
+    "dist/**/*"
+  ],
+  "mac": {
+    "category": "public.app-category.business",
+    "target": ["dmg", "zip"]
+  },
+  "win": {
+    "target": ["nsis", "zip"]
+  }
+}

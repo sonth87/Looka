@@ -1,0 +1,28 @@
+{
+  "name": "Looka",
+  "private": true,
+  "version": "0.1.0",
+  "author": {
+    "name": "Skyline",
+    "email": "sonth87@gmail.com",
+    "url": "https://github.com/sonth87/Looka"
+  },
+  "description": "Offline-first Face Capture, Recognition, Liveness, and Attendance Platform",
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "test": "turbo run test",
+    "lint": "turbo run lint",
+    "clean": "turbo run clean && rimraf node_modules"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "rimraf": "^6.0.1",
+    "turbo": "^2.4.4",
+    "typescript": "^5.7.3"
+  },
+  "packageManager": "pnpm@9.15.4",
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

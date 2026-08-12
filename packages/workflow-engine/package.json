@@ -1,0 +1,27 @@
+{
+  "name": "@face/workflow-engine",
+  "version": "0.1.0",
+  "description": "Guided face capture workflow engine, state machine, priority guidance, and stability tracking",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "tsc -b && node --test dist/__tests__/*.test.js",
+    "clean": "rimraf dist tsconfig.tsbuildinfo"
+  },
+  "dependencies": {
+    "@face/core": "workspace:*",
+    "@face/face-quality": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "rimraf": "^6.0.1",
+    "typescript": "^5.7.3"
+  }
+}

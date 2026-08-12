@@ -1,0 +1,244 @@
+import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
+import { Minus } from 'lucide-react';
+import { cn } from '../../lib/utils.js';
+import { LiquidGlassSvgFilter } from '../theme/LiquidGlassSvgFilter.js';
+
+export interface DraggablePanelProps {
+  storageKey: string;
+  title: React.ReactNode;
+  icon: React.ReactNode;
+  children: React.ReactNode;
+  theme?: 'dark' | 'light';
+  isFullscreen?: boolean;
+  defaultPosition?: { x: number; y: number };
+  defaultCollapsed?: boolean;
+  className?: string;
+}
+
+export const DraggablePanel: React.FC<DraggablePanelProps> = ({
+  storageKey,
+  title,
+  icon,
+  children,
+  theme = 'dark',
+  isFullscreen = false,
+  defaultPosition = { x: 20, y: 20 },
+  defaultCollapsed = false,
+  className,
+}) => {
+  const [position, setPosition] = useState<{ x: number; y: number }>(() => {
+    if (typeof window === 'undefined') return defaultPosition;
+    try {
+      const saved = localStorage.getItem(`${storageKey}_pos`);
+      return saved ? JSON.parse(saved) : defaultPosition;
+    } catch {
+      return defaultPosition;
+    }
+  });
+
+  const [collapsed, setCollapsed] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return defaultCollapsed;
+    try {
+      const saved = localStorage.getItem(`${storageKey}_collapsed`);
+      return saved ? JSON.parse(saved) : defaultCollapsed;
+    } catch {
+      return defaultCollapsed;
+    }
+  });
+
+  const isDraggingRef = useRef(false);
+  const dragOffsetRef = useRef({ x: 0, y: 0 });
+  const lastPosRef = useRef(position);
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  /**
+   * Clamp position so panel always fits strictly inside viewport screen
+   */
+  const clampPositionToViewport = (pos: { x: number; y: number }) => {
+    if (typeof window === 'undefined') return pos;
+
+    const width = panelRef.current?.offsetWidth || (collapsed ? 44 : 320);
+    const height = panelRef.current?.offsetHeight || (collapsed ? 44 : 350);
+
+    const maxX = Math.max(10, window.innerWidth - width - 12);
+    const maxY = Math.max(10, window.innerHeight - height - 12);
+
+    const clampedX = Math.min(Math.max(10, pos.x), maxX);
+    const clampedY = Math.min(Math.max(10, pos.y), maxY);
+
+    return { x: clampedX, y: clampedY };
+  };
+
+  /**
+   * Automatically re-clamp position immediately after expanding so panel never overflows screen
+   */
+  useLayoutEffect(() => {
+    if (!collapsed && panelRef.current) {
+      const rect = panelRef.current.getBoundingClientRect();
+      const maxX = Math.max(10, window.innerWidth - rect.width - 12);
+      const maxY = Math.max(10, window.innerHeight - rect.height - 12);
+
+      const clampedX = Math.min(Math.max(10, position.x), maxX);
+      const clampedY = Math.min(Math.max(10, position.y), maxY);
+
+      if (clampedX !== position.x || clampedY !== position.y) {
+        const safePos = { x: clampedX, y: clampedY };
+        setPosition(safePos);
+        lastPosRef.current = safePos;
+        try {
+          localStorage.setItem(`${storageKey}_pos`, JSON.stringify(safePos));
+        } catch {}
+      }
+    }
+  }, [collapsed, storageKey]);
+
+  const toggleCollapsed = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const nextState = !collapsed;
+    setCollapsed(nextState);
+    try {
+      localStorage.setItem(`${storageKey}_collapsed`, JSON.stringify(nextState));
+    } catch {}
+  };
+
+  const handleMouseDown = (e: React.MouseEvent) => {
+    if (!panelRef.current) return;
+    isDraggingRef.current = true;
+    dragOffsetRef.current = {
+      x: e.clientX - lastPosRef.current.x,
+      y: e.clientY - lastPosRef.current.y,
+    };
+
+    const handleMouseMove = (ev: MouseEvent) => {
+      if (!isDraggingRef.current) return;
+      const rawX = ev.clientX - dragOffsetRef.current.x;
+      const rawY = ev.clientY - dragOffsetRef.current.y;
+      const newPos = clampPositionToViewport({ x: rawX, y: rawY });
+      lastPosRef.current = newPos;
+      setPosition(newPos);
+    };
+
+    const handleMouseUp = () => {
+      if (isDraggingRef.current) {
+        isDraggingRef.current = false;
+        try {
+          localStorage.setItem(`${storageKey}_pos`, JSON.stringify(lastPosRef.current));
+        } catch {}
+      }
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+  };
+
+  useEffect(() => {
+    lastPosRef.current = position;
+    try {
+      localStorage.setItem(`${storageKey}_pos`, JSON.stringify(position));
+    } catch {}
+  }, [position, storageKey]);
+
+  const liquidGlassStyle: React.CSSProperties = {
+    backdropFilter: 'url(#liquid-glass-refraction) blur(18px) saturate(180%)',
+    WebkitBackdropFilter: 'url(#liquid-glass-refraction) blur(18px) saturate(180%)',
+    boxShadow:
+      theme === 'dark'
+        ? '0 24px 60px rgba(0,0,0,0.6), inset 0 1px 0.5px rgba(255,255,255,0.4)'
+        : '0 20px 45px rgba(0,0,0,0.08), inset 0 1px 0.5px rgba(255,255,255,0.9)',
+  };
+
+  return (
+    <>
+      <LiquidGlassSvgFilter />
+      <div
+        ref={panelRef}
+        style={{
+          position: 'fixed',
+          left: `${position.x}px`,
+          top: `${position.y}px`,
+          zIndex: 50,
+        }}
+        className="select-none"
+      >
+        {collapsed ? (
+          /* Collapsed — Circular Refractive SVG Liquid Glass FAB */
+          <button
+            onMouseDown={handleMouseDown}
+            onClick={toggleCollapsed}
+            title="Mở rộng panel"
+            style={liquidGlassStyle}
+            className={cn(
+              'w-11 h-11 rounded-full flex items-center justify-center transition-all duration-300 hover:scale-110 active:scale-95 cursor-grab active:cursor-grabbing relative overflow-hidden',
+              theme === 'dark'
+                ? 'bg-slate-950/40 border border-white/30 text-blue-400 hover:bg-slate-900/50 hover:border-white/50'
+                : 'bg-white/45 border border-white/70 text-blue-600 hover:bg-white/65 hover:border-white'
+            )}
+          >
+            {/* Specular sheen gradient overlay */}
+            <span className="absolute inset-0 bg-gradient-to-br from-white/35 via-transparent to-black/20 pointer-events-none" />
+            <span className="relative z-10">{icon}</span>
+          </button>
+        ) : (
+          /* Expanded — True Refractive SVG Liquid Glass Card Panel */
+          <div
+            style={liquidGlassStyle}
+            className={cn(
+              'font-mono text-xs rounded-2xl relative overflow-hidden transition-all duration-300 backdrop-contrast-125',
+              theme === 'dark'
+                ? isFullscreen
+                  ? 'bg-slate-950/15 text-slate-100 border border-white/35 shadow-black/80'
+                  : 'bg-slate-950/35 text-slate-100 border border-white/25'
+                : isFullscreen
+                ? 'bg-white/18 text-slate-900 border border-white/80'
+                : 'bg-white/40 text-slate-900 border border-white/60',
+              className
+            )}
+          >
+            {/* Diagonal Glass Reflection Sheen */}
+            <div className="absolute inset-0 bg-gradient-to-br from-white/30 via-transparent to-white/5 pointer-events-none rounded-2xl" />
+
+            {/* Top Specular Edge Highlight Line */}
+            <div className="absolute top-0 left-4 right-4 h-[1px] bg-gradient-to-r from-transparent via-white/60 to-transparent pointer-events-none" />
+
+            {/* Drag Handle Header with Refractive Bezel */}
+            <div
+              onMouseDown={handleMouseDown}
+              className={cn(
+                'px-4 py-3 flex items-center justify-between cursor-grab active:cursor-grabbing font-medium transition-colors border-b relative z-10',
+                theme === 'dark'
+                  ? isFullscreen
+                    ? 'bg-slate-900/10 border-white/20 text-slate-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.35)]'
+                    : 'bg-slate-900/25 border-white/15 text-slate-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.25)]'
+                  : isFullscreen
+                  ? 'bg-white/15 border-white/65 text-slate-900 shadow-[inset_0_1px_0_rgba(255,255,255,0.85)]'
+                  : 'bg-white/25 border-white/50 text-slate-900 shadow-[inset_0_1px_0_rgba(255,255,255,0.7)]'
+              )}
+            >
+              <div className="flex items-center gap-2 pointer-events-none">
+                {title}
+              </div>
+
+              <button
+                onClick={toggleCollapsed}
+                title="Thu gọn thành nút tròn"
+                className={cn(
+                  'p-1 rounded-lg transition-all cursor-pointer ml-2 backdrop-blur-sm',
+                  theme === 'dark'
+                    ? 'text-slate-300 hover:text-white hover:bg-white/15'
+                    : 'text-slate-600 hover:text-slate-900 hover:bg-black/10'
+                )}
+              >
+                <Minus className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            {/* Panel Body */}
+            <div className="p-4 relative z-10">{children}</div>
+          </div>
+        )}
+      </div>
+    </>
+  );
+};

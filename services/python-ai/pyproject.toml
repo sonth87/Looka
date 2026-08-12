@@ -1,0 +1,16 @@
+[project]
+name = "python-ai-service"
+version = "0.1.0"
+description = "Python AI Sidecar Service for Face Platform Heavy Model Inference"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+    "pydantic>=2.8.0",
+    "numpy>=1.26.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"

@@ -1,0 +1,21 @@
+{
+  "name": "@face/hand-gesture",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "test": "tsc -b && node --test dist/__tests__/*.test.js",
+    "clean": "rimraf dist"
+  },
+  "dependencies": {
+    "@face/core": "workspace:*",
+    "@mediapipe/tasks-vision": "^0.10.21"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  }
+}

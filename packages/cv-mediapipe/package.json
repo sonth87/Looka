@@ -1,0 +1,22 @@
+{
+  "name": "@face/cv-mediapipe",
+  "version": "0.1.0",
+  "description": "MediaPipe FaceLandmarker CVEngine implementation with head pose estimation & EMA smoothing",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "test": "tsc -b && node --test dist/__tests__/*.test.js",
+    "clean": "rimraf dist tsconfig.tsbuildinfo"
+  },
+  "dependencies": {
+    "@face/core": "workspace:*",
+    "@face/face-quality": "workspace:*",
+    "@mediapipe/tasks-vision": "^0.10.21"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "rimraf": "^6.0.1",
+    "typescript": "^5.7.3"
+  }
+}

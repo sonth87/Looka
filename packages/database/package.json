@@ -1,0 +1,28 @@
+{
+  "name": "@face/database",
+  "version": "0.1.0",
+  "description": "Local-first SQLite database layer, DDL schemas, and repository adapters for Face Platform",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "tsc -b && node --test dist/__tests__/*.test.js",
+    "clean": "rimraf dist tsconfig.tsbuildinfo"
+  },
+  "dependencies": {
+    "@face/core": "workspace:*",
+    "sql.js": "^1.12.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "@types/sql.js": "^1.4.9",
+    "rimraf": "^6.0.1",
+    "typescript": "^5.7.3"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "name": "@face/attendance-engine",
+  "version": "0.1.0",
+  "description": "Attendance Kiosk Service, Anti-duplicate Cooldown Window, Real-time event bus, and Sync Queue integration",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "tsc -b && node --test dist/__tests__/*.test.js",
+    "clean": "rimraf dist tsconfig.tsbuildinfo"
+  },
+  "dependencies": {
+    "@face/biometric": "workspace:*",
+    "@face/core": "workspace:*",
+    "@face/database": "workspace:*",
+    "@face/recognition-engine": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "rimraf": "^6.0.1",
+    "typescript": "^5.7.3"
+  }
+}

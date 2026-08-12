@@ -1,0 +1,37 @@
+{
+  "name": "@face/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "main": "./dist/main/index.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "package": "pnpm build && electron-builder"
+  },
+  "dependencies": {
+    "@face/attendance-engine": "workspace:*",
+    "@face/biometric": "workspace:*",
+    "@face/camera": "workspace:*",
+    "@face/core": "workspace:*",
+    "@face/cv-engine": "workspace:*",
+    "@face/cv-mediapipe": "workspace:*",
+    "@face/database": "workspace:*",
+    "@face/face-quality": "workspace:*",
+    "@face/recognition-engine": "workspace:*",
+    "@face/ui": "workspace:*",
+    "@face/workflow-engine": "workspace:*",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "sql.js": "^1.12.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "@types/react": "^19.0.10",
+    "@types/react-dom": "^19.0.4",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^34.2.0",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.7.3",
+    "vite": "^6.1.0"
+  }
+}
