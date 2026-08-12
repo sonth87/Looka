@@ -79,7 +79,17 @@ export default function App() {
     }
     return 'simulation';
   });
-  const [theme, setTheme] = useState<'dark' | 'light'>(() => getSettings().theme || 'dark');
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => getSettings().theme || 'light');
+
+  useEffect(() => {
+    if (theme === 'dark') {
+      document.documentElement.classList.add('dark');
+      document.documentElement.classList.remove('light');
+    } else {
+      document.documentElement.classList.add('light');
+      document.documentElement.classList.remove('dark');
+    }
+  }, [theme]);
 
   const toggleTheme = () => {
     setTheme((prev) => {
@@ -613,6 +623,16 @@ export default function App() {
     </TooltipProvider>
   );
 
+  const handleCancelWorkflow = useCallback(async () => {
+    setIsWorkflowStarted(false);
+    isWorkflowStartedRef.current = false;
+    setLatestCapturedImage(null);
+    const activeEngine = mode === 'live' ? liveWorkflowEngineRef.current : simWorkflowEngineRef.current;
+    if (activeEngine) {
+      await activeEngine.startSession(defaultWorkflow);
+    }
+  }, [mode]);
+
   return (
     <div className="relative min-h-screen">
       <GuidedCaptureScreen
@@ -632,10 +652,12 @@ export default function App() {
         theme={theme}
         onToggleTheme={toggleTheme}
         modeButton={modeButton}
-        onCancel={handleRestart}
+        onCancel={handleCancelWorkflow}
         onStartLive={startLiveMode}
         isWorkflowStarted={isWorkflowStarted}
         onStartWorkflow={handleStartWorkflow}
+        onOpenReview={() => setShowReviewModal(true)}
+        hasCompletedSession={session?.status === 'COMPLETED'}
         gestureState={gestureState}
         gestureProgress={gestureProgress}
         onShutterCapture={handleShutterCapture}

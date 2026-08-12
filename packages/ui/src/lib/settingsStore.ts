@@ -23,7 +23,7 @@ export interface AppSettings {
 const SETTINGS_KEY = 'face_platform_settings';
 
 export const defaultSettings: AppSettings = {
-  theme: 'dark',
+  theme: 'light',
   sensitivity: 'MEDIUM',
   cameraScale: 'standard',
   isFullscreen: false,

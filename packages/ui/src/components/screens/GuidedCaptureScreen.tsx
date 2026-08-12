@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Minus, Plus, Maximize, Minimize, Play, Camera } from "lucide-react";
+import { Minus, Plus, Maximize, Minimize, Play, Camera, Images } from "lucide-react";
 import {
   CameraDevice,
   CaptureSensitivity,
@@ -53,6 +53,8 @@ export interface GuidedCaptureScreenProps {
   onStartLive?: () => void;
   isWorkflowStarted?: boolean;
   onStartWorkflow?: () => void;
+  onOpenReview?: () => void;
+  hasCompletedSession?: boolean;
   className?: string;
   // Capture trigger & sensitivity
   gestureState?: GestureState | null;
@@ -88,6 +90,8 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
   onStartLive,
   isWorkflowStarted = false,
   onStartWorkflow,
+  onOpenReview,
+  hasCompletedSession,
   className,
   gestureState = null,
   gestureProgress = 0,
@@ -280,20 +284,23 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
 
     let presenceBadge = {
       label: 'Chưa phát hiện mặt (No Face)',
-      color: 'bg-red-500/30 text-red-300 border-red-500/50',
+      darkColor: 'bg-red-950/40 text-red-300 border-red-500/30',
+      lightColor: 'bg-red-500/15 text-red-800 border-red-500/40',
       dot: 'bg-red-400 animate-pulse',
     };
 
     if (presence === 'MULTIPLE_FACES' || faceCount > 1) {
       presenceBadge = {
         label: `Có ${faceCount} khuôn mặt (Multiple Faces)`,
-        color: 'bg-amber-500/30 text-amber-300 border-amber-500/50',
+        darkColor: 'bg-amber-950/40 text-amber-300 border-amber-500/30',
+        lightColor: 'bg-amber-500/15 text-amber-900 border-amber-500/40',
         dot: 'bg-amber-400 animate-ping',
       };
     } else if (faceState.detected) {
       presenceBadge = {
         label: '1 Mặt (Single Face)',
-        color: 'bg-emerald-500/30 text-emerald-300 border-emerald-500/50',
+        darkColor: 'bg-emerald-950/40 text-emerald-300 border-emerald-500/30',
+        lightColor: 'bg-emerald-500/15 text-emerald-800 border-emerald-500/40',
         dot: 'bg-emerald-400',
       };
     }
@@ -301,26 +308,34 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
     const reasonLabels: Record<string, string> = {
       NO_FACE: 'Không tìm thấy mặt',
       MULTIPLE_FACES: 'Nhiều khuôn mặt',
-      FACE_TOO_SMALL: 'Mặt quá nhỏ (Quá xa)',
-      FACE_TOO_LARGE: 'Mặt quá to (Quá gần)',
-      OFF_CENTER: 'Lệch vị trí trung tâm',
-      TOO_DARK: 'Ánh sáng quá tối',
-      TOO_BRIGHT: 'Môi trường quá chói',
-      BLURRY: 'Hình ảnh bị mờ',
-      OCCLUDED: 'Khuôn mặt bị che phủ',
+      FACE_TOO_SMALL: 'Mặt quá nhỏ',
+      FACE_TOO_LARGE: 'Mặt quá to',
+      OFF_CENTER: 'Lệch trung tâm',
+      TOO_DARK: 'Ánh sáng tối',
+      TOO_BRIGHT: 'Quá chói',
+      BLURRY: 'Ảnh bị mờ',
+      OCCLUDED: 'Mặt bị che',
     };
 
     return (
-      <div className="absolute top-12 sm:top-4 inset-x-0 z-35 flex flex-wrap items-center justify-center gap-1.5 px-3 pointer-events-none">
+      <div className="absolute top-12 sm:top-4 inset-x-0 z-35 flex flex-wrap items-center justify-center gap-1 px-3 pointer-events-none">
         {/* Presence Badge */}
-        <div className={cn('px-2.5 py-0.5 rounded-full text-[10px] sm:text-xs font-bold border backdrop-blur-md shadow-md flex items-center gap-1.5 pointer-events-auto', presenceBadge.color)}>
+        <div className={cn(
+          'px-2.5 py-0.5 rounded-full text-[10px] sm:text-xs font-semibold border backdrop-blur-md shadow-sm flex items-center gap-1.5 pointer-events-auto',
+          theme === 'dark' ? presenceBadge.darkColor : presenceBadge.lightColor
+        )}>
           <span className={cn('w-1.5 h-1.5 rounded-full', presenceBadge.dot)} />
           {presenceBadge.label}
         </div>
 
         {/* Quality Reason Tags */}
         {reasons.map((r, i) => (
-          <div key={i} className="px-2 py-0.5 rounded-full text-[10px] sm:text-xs font-bold bg-amber-950/90 text-amber-300 border border-amber-500/50 shadow-md backdrop-blur-md pointer-events-auto">
+          <div key={i} className={cn(
+            'px-2 py-0.5 rounded-full text-[10px] sm:text-[11px] font-medium border backdrop-blur-md shadow-sm pointer-events-auto',
+            theme === 'dark'
+              ? 'bg-amber-950/40 text-amber-300 border-amber-500/30'
+              : 'bg-amber-500/15 text-amber-900 border-amber-500/40 font-semibold'
+          )}>
             ⚠️ {reasonLabels[r] || r}
           </div>
         ))}
@@ -378,6 +393,16 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
           </div>
 
           <div className="flex items-center gap-1.5 sm:gap-2 pr-9 sm:pr-12">
+            {hasCompletedSession && onOpenReview && (
+              <button
+                onClick={onOpenReview}
+                className="px-2.5 py-1 rounded-full bg-blue-600 hover:bg-blue-500 text-white font-bold text-[11px] sm:text-xs shadow-md flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer backdrop-blur-md shrink-0"
+                title="Mở lại danh sách ảnh đã chụp"
+              >
+                <Images className="w-3.5 h-3.5 text-white" />
+                <span>Xem kết quả</span>
+              </button>
+            )}
             {modeButton}
           </div>
         </header>
@@ -598,7 +623,7 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
                 <StepProgress
                   steps={steps}
                   currentStepIndex={guidance.currentStepIndex}
-                  theme="dark"
+                  theme={theme}
                 />
               </div>
             )}
@@ -607,19 +632,33 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
             {isMobile && stream && (
               <div className="absolute bottom-4 inset-x-0 z-40 flex flex-col items-center gap-2 px-3 pointer-events-auto text-center">
                 {!isWorkflowStarted && onStartWorkflow ? (
-                  <>
-                    <div className="px-3.5 py-1.5 rounded-full bg-slate-950/80 backdrop-blur-md border border-slate-700/70 shadow-lg text-slate-200 text-xs font-medium flex items-center gap-2">
+                  <div
+                    style={{
+                      backdropFilter: 'url(#liquid-glass-refraction) blur(18px) saturate(180%)',
+                      WebkitBackdropFilter: 'url(#liquid-glass-refraction) blur(18px) saturate(180%)',
+                    }}
+                    className={cn(
+                      'px-4 py-2.5 rounded-2xl border shadow-2xl flex flex-col items-center gap-2 max-w-[280px]',
+                      theme === 'dark'
+                        ? 'bg-slate-950/65 border-white/30 text-white shadow-black/80'
+                        : 'bg-white/80 border-white/90 text-slate-900 shadow-slate-300/60'
+                    )}
+                  >
+                    <div className="flex items-center gap-1.5 text-xs font-semibold">
                       <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                      Camera đã bật. Nhấn Bắt đầu để chụp.
+                      <span>Camera đã bật</span>
                     </div>
+                    <p className={cn("text-[11px] font-medium text-center", theme === 'dark' ? "text-slate-300" : "text-slate-600")}>
+                      Nhấn Bắt đầu để thực hiện quy trình chụp
+                    </p>
                     <button
                       onClick={onStartWorkflow}
-                      className="px-5 py-2 rounded-full bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-lg shadow-blue-500/30 transition-all duration-300 active:scale-95 flex items-center gap-1.5 cursor-pointer"
+                      className="mt-0.5 px-5 py-1.5 rounded-full bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold text-xs shadow-lg shadow-blue-500/30 transition-all duration-300 active:scale-95 flex items-center gap-1.5 cursor-pointer"
                     >
                       <Play className="w-3.5 h-3.5 fill-white" />
                       Bắt đầu
                     </button>
-                  </>
+                  </div>
                 ) : (
                   <>
                     <GuidanceMessage guidance={guidance} theme="dark" />
