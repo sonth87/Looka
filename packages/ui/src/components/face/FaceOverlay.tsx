@@ -150,12 +150,7 @@ export const FaceOverlay: React.FC<FaceOverlayProps> = ({
         let minY = 0.2;
         let maxY = 0.8;
 
-        if (boundingBox) {
-          minX = boundingBox.x / 640;
-          minY = boundingBox.y / 480;
-          maxX = (boundingBox.x + boundingBox.width) / 640;
-          maxY = (boundingBox.y + boundingBox.height) / 480;
-        } else if (landmarks && landmarks.length > 0) {
+        if (landmarks && landmarks.length > 0) {
           minX = 1;
           maxX = 0;
           minY = 1;
@@ -166,12 +161,20 @@ export const FaceOverlay: React.FC<FaceOverlayProps> = ({
             if (lm.y < minY) minY = lm.y;
             if (lm.y > maxY) maxY = lm.y;
           }
+          // Add natural head padding so tracking box comfortably covers head & chin
           const hDiff = maxY - minY;
           const wDiff = maxX - minX;
           minY = Math.max(0, minY - hDiff * 0.1);
           maxY = Math.min(1, maxY + hDiff * 0.15);
           minX = Math.max(0, minX - wDiff * 0.1);
           maxX = Math.min(1, maxX + wDiff * 0.1);
+        } else if (boundingBox) {
+          const fw = faceState?.frameWidth || 640;
+          const fh = faceState?.frameHeight || 480;
+          minX = boundingBox.x / fw;
+          minY = boundingBox.y / fh;
+          maxX = (boundingBox.x + boundingBox.width) / fw;
+          maxY = (boundingBox.y + boundingBox.height) / fh;
         }
 
         // Map normalized bounds to container percentages
