@@ -100,7 +100,7 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
 
     const freezeTimer = setTimeout(() => {
       setFreezeSnapshot(null);
-    }, 450);
+    }, 1050);
 
     if (viewportRef.current) {
       const vpRect = viewportRef.current.getBoundingClientRect();

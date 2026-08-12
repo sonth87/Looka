@@ -101,8 +101,15 @@ export class WorkflowEngine implements IWorkflowEngine {
     return this._currentSession;
   }
 
+  private isCapturing = false;
+
   public async processFrame(faceState: FaceState): Promise<GuidanceState> {
-    if (!this._currentSession || !this.activeWorkflow || this._currentSession.status !== 'RUNNING') {
+    if (
+      this.isCapturing ||
+      !this._currentSession ||
+      !this.activeWorkflow ||
+      this._currentSession.status !== 'RUNNING'
+    ) {
       return this._currentState;
     }
 
@@ -157,6 +164,50 @@ export class WorkflowEngine implements IWorkflowEngine {
 
     this.emit('state-change', this._currentState);
     return this._currentState;
+  }
+
+  public async triggerManualCapture(faceState?: FaceState | null): Promise<boolean> {
+    if (this.isCapturing || !this.activeWorkflow || !this._currentSession) return false;
+    const currentStep = this.activeWorkflow.steps[this.currentStepIdx];
+    if (!currentStep || !currentStep.capture?.enabled) return false;
+
+    this.isCapturing = true;
+    this.stabilityTracker.reset();
+
+    try {
+      // 1. Chụp ảnh TRƯỚC KHI nháy flash (Real Base64 Snapshot)
+      const captureResult = await this.captureController.captureCurrentFrame();
+      const valid = await this.captureController.validateCapturedImage(
+        captureResult.imagePath,
+        (currentStep.quality as any) || {}
+      );
+
+      if (valid) {
+        this.updateStepStatus(currentStep.id, 'COMPLETED', captureResult.imagePath, faceState || undefined);
+
+        // Phát sự kiện trigger để UI hiển thị Flash & Freeze Base64 & Animation bay ảnh
+        this.emit('capture-trigger', {
+          stepId: currentStep.id,
+          imagePath: captureResult.imagePath,
+        });
+
+        // 2. Chờ thời gian thực hiện animation thu nhỏ và di chuyển về thẻ step (550ms)
+        await new Promise((resolve) => setTimeout(resolve, 550));
+
+        // 3. Delay 0.5s (500ms) sau khi xong animation trước khi chuyển sang step mới
+        await new Promise((resolve) => setTimeout(resolve, 500));
+
+        // 4. Chính thức chuyển step và reset bộ đếm cho quy trình chụp mới
+        await this.advanceToNextStep();
+        return true;
+      } else {
+        const stepResult = this._currentSession.steps.find((s) => s.stepId === currentStep.id);
+        if (stepResult) stepResult.attempts++;
+        return false;
+      }
+    } finally {
+      this.isCapturing = false;
+    }
   }
 
   public async cancelSession(): Promise<void> {
@@ -278,36 +329,5 @@ export class WorkflowEngine implements IWorkflowEngine {
 
   public setSnapshotProvider(provider: () => string | null): void {
     this.captureController.setSnapshotProvider(provider);
-  }
-
-  public async triggerManualCapture(faceState?: FaceState | null): Promise<boolean> {
-    if (!this.activeWorkflow || !this._currentSession) return false;
-    const currentStep = this.activeWorkflow.steps[this.currentStepIdx];
-    if (!currentStep || !currentStep.capture?.enabled) return false;
-
-    this.stabilityTracker.reset();
-    const captureResult = await this.captureController.captureCurrentFrame();
-
-    const valid = await this.captureController.validateCapturedImage(
-      captureResult.imagePath,
-      (currentStep.quality as any) || {}
-    );
-
-    if (valid) {
-      this.updateStepStatus(currentStep.id, 'COMPLETED', captureResult.imagePath, faceState || undefined);
-      this.emit('capture-trigger', {
-        stepId: currentStep.id,
-        imagePath: captureResult.imagePath,
-      });
-
-      // Brief delay for UI capture feedback & flying thumbnail animation before advancing step
-      await new Promise((resolve) => setTimeout(resolve, 450));
-      await this.advanceToNextStep();
-      return true;
-    } else {
-      const stepResult = this._currentSession.steps.find((s) => s.stepId === currentStep.id);
-      if (stepResult) stepResult.attempts++;
-      return false;
-    }
   }
 }
