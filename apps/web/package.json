@@ -18,9 +18,13 @@
     "@face/hand-gesture": "workspace:*",
     "@face/ui": "workspace:*",
     "@face/workflow-engine": "workspace:*",
-    "lucide-react": "^1.31.0",
+    "@iconify/react": "catalog:",
+    "@sonth87/device-layout": "catalog:",
+    "lucide-react": "catalog:",
+    "motion": "catalog:",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "zustand": "catalog:"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.0.0",

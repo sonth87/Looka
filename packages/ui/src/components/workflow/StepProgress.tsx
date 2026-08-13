@@ -27,7 +27,7 @@ export const StepProgress: React.FC<StepProgressProps> = ({
   return (
     <div
       className={cn(
-        'flex items-center justify-between w-full max-w-md mx-auto py-1 px-1 sm:px-0 overflow-x-auto no-scrollbar bg-transparent border-0 shadow-none',
+        'flex items-center justify-between w-full max-w-md mx-auto py-2 px-1 overflow-visible bg-transparent border-0 shadow-none',
         className
       )}
     >
