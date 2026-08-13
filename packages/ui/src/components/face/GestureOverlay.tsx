@@ -48,21 +48,25 @@ export const GestureOverlay: React.FC<GestureOverlayProps> = ({
   mirrored = true,
   className,
 }) => {
-  const containerRef = React.useRef<HTMLDivElement>(null);
   const [containerSize, setContainerSize] = React.useState<{ w: number; h: number }>({ w: 0, h: 0 });
+  const observerRef = React.useRef<ResizeObserver | null>(null);
 
-  React.useEffect(() => {
-    if (!containerRef.current) return;
-    const el = containerRef.current;
-    const updateSize = () => {
-      if (el.clientWidth && el.clientHeight) {
-        setContainerSize({ w: el.clientWidth, h: el.clientHeight });
-      }
-    };
-    updateSize();
-    const observer = new ResizeObserver(updateSize);
-    observer.observe(el);
-    return () => observer.disconnect();
+  const containerRef = React.useCallback((node: HTMLDivElement | null) => {
+    if (observerRef.current) {
+      observerRef.current.disconnect();
+      observerRef.current = null;
+    }
+    if (node) {
+      const updateSize = () => {
+        if (node.clientWidth && node.clientHeight) {
+          setContainerSize({ w: node.clientWidth, h: node.clientHeight });
+        }
+      };
+      updateSize();
+      const observer = new ResizeObserver(updateSize);
+      observer.observe(node);
+      observerRef.current = observer;
+    }
   }, []);
 
   const gesture = gestureState?.gesture ?? "NONE";
