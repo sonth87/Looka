@@ -48,13 +48,55 @@ export const GestureOverlay: React.FC<GestureOverlayProps> = ({
   mirrored = true,
   className,
 }) => {
+  const containerRef = React.useRef<HTMLDivElement>(null);
+  const [containerSize, setContainerSize] = React.useState<{ w: number; h: number }>({ w: 0, h: 0 });
+
+  React.useEffect(() => {
+    if (!containerRef.current) return;
+    const el = containerRef.current;
+    const updateSize = () => {
+      if (el.clientWidth && el.clientHeight) {
+        setContainerSize({ w: el.clientWidth, h: el.clientHeight });
+      }
+    };
+    updateSize();
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
   const gesture = gestureState?.gesture ?? "NONE";
   const hasGesture = gesture !== "NONE" && faceReady;
   const meta = GESTURE_META[gesture];
   const landmarks = gestureState?.landmarks || [];
 
+  // Calculate object-cover coordinate mapping
+  const streamAspect = 4 / 3;
+  const containerAspect = containerSize.w && containerSize.h ? containerSize.w / containerSize.h : streamAspect;
+
+  let scaleX = 1;
+  let scaleY = 1;
+  let shiftX = 0;
+  let shiftY = 0;
+
+  if (containerAspect < streamAspect) {
+    scaleX = streamAspect / containerAspect;
+    shiftX = (scaleX - 1) / 2;
+  } else if (containerAspect > streamAspect) {
+    scaleY = containerAspect / streamAspect;
+    shiftY = (scaleY - 1) / 2;
+  }
+
+  const getMappedCoords = (xNorm: number, yNorm: number) => {
+    const rawX = mirrored ? 1 - xNorm : xNorm;
+    const px = (rawX * scaleX - shiftX) * 100;
+    const py = (yNorm * scaleY - shiftY) * 100;
+    return { cx: px, cy: py };
+  };
+
   return (
     <div
+      ref={containerRef}
       className={cn(
         "absolute inset-0 pointer-events-none z-30 overflow-hidden",
         className,
@@ -79,10 +121,8 @@ export const GestureOverlay: React.FC<GestureOverlayProps> = ({
             const p2 = landmarks[endIdx];
             if (!p1 || !p2) return null;
 
-            const x1 = (mirrored ? 1 - p1.x : p1.x) * 100;
-            const y1 = p1.y * 100;
-            const x2 = (mirrored ? 1 - p2.x : p2.x) * 100;
-            const y2 = p2.y * 100;
+            const { cx: x1, cy: y1 } = getMappedCoords(p1.x, p1.y);
+            const { cx: x2, cy: y2 } = getMappedCoords(p2.x, p2.y);
 
             return (
               <line
@@ -102,8 +142,7 @@ export const GestureOverlay: React.FC<GestureOverlayProps> = ({
 
           {/* 21 Hand Joint Dots */}
           {landmarks.map((lm, idx) => {
-            const cx = (mirrored ? 1 - lm.x : lm.x) * 100;
-            const cy = lm.y * 100;
+            const { cx, cy } = getMappedCoords(lm.x, lm.y);
             const isTip = FINGERTIPS.has(idx);
             const isWrist = idx === 0;
 

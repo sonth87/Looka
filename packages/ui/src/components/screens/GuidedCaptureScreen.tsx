@@ -162,9 +162,9 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
 
   const checkIsMobileOrTablet = (): boolean => {
     if (typeof window === 'undefined') return false;
-    const isTouch = 'ontouchstart' in window || (navigator.maxTouchPoints > 0);
-    const isMobileWidth = window.innerWidth < 1024; // Includes tablets (iPads, Galaxy Tabs < 1024px)
-    return isMobileWidth || isTouch;
+    const isMobileUA = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    const isNarrowWidth = window.innerWidth < 768; // Under 768px (Mobile & Portrait Tablet)
+    return isNarrowWidth || isMobileUA;
   };
 
   const [isMobile, setIsMobile] = useState<boolean>(checkIsMobileOrTablet);
@@ -609,7 +609,7 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = ({
 
             {/* No-stream / Start Camera UI */}
             {!stream && (
-              <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-transparent p-4 z-20">
+              <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-transparent p-4 z-20 pointer-events-auto">
                 <div className={cn('w-12 h-12 sm:w-14 sm:h-14 rounded-full flex items-center justify-center shadow-lg border backdrop-blur-md', theme === 'dark' ? 'bg-blue-600/20 border-blue-500/40 text-blue-400' : 'bg-blue-50 border-blue-300 text-blue-600')}>
                   <Camera className="w-6 h-6 sm:w-7 sm:h-7 animate-pulse" />
                 </div>

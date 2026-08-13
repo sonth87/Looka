@@ -94,8 +94,11 @@ export const FaceOverlay: React.FC<FaceOverlayProps> = ({
   }
 
   // ── Calculate object-cover coordinate mapping ──
-  // Camera video stream resolution is 640x480 (4/3 = 1.3333)
-  const streamAspect = 4 / 3;
+  // Stream aspect ratio derived from actual frame dimensions (default 4/3)
+  const streamAspect =
+    faceState?.frameWidth && faceState?.frameHeight && faceState.frameWidth > 0 && faceState.frameHeight > 0
+      ? faceState.frameWidth / faceState.frameHeight
+      : 4 / 3;
   const containerAspect = containerSize.w && containerSize.h ? containerSize.w / containerSize.h : streamAspect;
 
   let scaleX = 1;
