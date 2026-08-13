@@ -119,9 +119,17 @@ export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
           {modeButton}
         </div>
       </header>
+      {/* ── Steps Line (Positioned below header, above camera view) ── */}
+      <div className="w-full max-w-sm px-3 pt-1 pb-1 shrink-0 z-30">
+        <StepProgress
+          steps={steps}
+          currentStepIndex={guidance.currentStepIndex}
+          theme={theme}
+        />
+      </div>
 
-      {/* ── Main Content: 3:4 Portrait Camera Display ── */}
-      <main className="w-full flex-1 flex flex-col items-center justify-center z-10 overflow-hidden my-0 px-0 max-w-sm">
+      {/* ── Main Content: 3:4 Portrait Camera Display (Pushed UP) ── */}
+      <main className="w-full flex-1 flex flex-col items-center justify-start z-10 overflow-hidden my-0 px-0 max-w-sm pt-1">
         <div
           ref={viewportRef}
           className="relative transition-all duration-300 flex items-center justify-center w-full max-h-full max-w-sm mx-auto"
@@ -244,14 +252,7 @@ export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
               </div>
             )}
 
-            {/* StepProgress (Overlayed at Top inside Camera View on Mobile) */}
-            <div className="absolute top-3 inset-x-0 z-40 w-full max-w-md mx-auto px-3 pointer-events-auto">
-              <StepProgress
-                steps={steps}
-                currentStepIndex={guidance.currentStepIndex}
-                theme={theme}
-              />
-            </div>
+
 
             {/* Mobile Overlayed Pre-Start & Guidance (Inside Camera View at Bottom) */}
             {stream && (

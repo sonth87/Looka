@@ -47,6 +47,9 @@ importers:
       '@face/face-quality':
         specifier: workspace:*
         version: link:../../packages/face-quality
+      '@face/hand-gesture':
+        specifier: workspace:*
+        version: link:../../packages/hand-gesture
       '@face/recognition-engine':
         specifier: workspace:*
         version: link:../../packages/recognition-engine

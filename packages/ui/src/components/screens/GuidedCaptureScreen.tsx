@@ -11,6 +11,7 @@ import {
 import { StepItem } from "../workflow/StepProgress.js";
 import { RectBounds } from "../face/FlyingThumbnail.js";
 import { getSettings, updateSettings } from "../../lib/settingsStore.js";
+import { cn } from "../../lib/utils.js";
 import { DesktopCaptureView } from "./views/DesktopCaptureView.js";
 import { MobileCaptureView } from "./views/MobileCaptureView.js";
 import { SharedCaptureViewProps } from "./views/types.js";
@@ -55,7 +56,9 @@ export interface GuidedCaptureScreenProps {
   latestCapturedImage?: { stepId: string; imagePath: string } | null;
 }
 
-export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (props) => {
+export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (
+  props,
+) => {
   const {
     stream,
     faceState,
@@ -148,7 +151,10 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (props) =
 
   const checkIsMobileOrTablet = (): boolean => {
     if (typeof window === "undefined") return false;
-    const isMobileUA = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    const isMobileUA =
+      /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
+        navigator.userAgent,
+      );
     const isNarrowWidth = window.innerWidth < 768; // Under 768px (Mobile & Portrait Tablet)
     return isNarrowWidth || isMobileUA;
   };
@@ -270,25 +276,40 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (props) =
   const renderTopLeftDebugOverlay = () => {
     const presenceText =
       faceState?.presence === "SINGLE_FACE"
-        ? "Mặt hợp lệ (Single Face)"
+        ? "Single Face"
         : faceState?.presence === "MULTIPLE_FACES"
           ? `Cảnh báo: ${faceState.faceCount} mặt!`
-          : "Chưa phát hiện mặt (No Face)";
+          : "Chưa phát hiện mặt";
 
     const presenceBgClass =
       faceState?.presence === "SINGLE_FACE"
-        ? "bg-emerald-500/80 text-white"
+        ? "bg-emerald-500/90 text-white border-emerald-400"
         : faceState?.presence === "MULTIPLE_FACES"
-          ? "bg-amber-500/90 text-slate-950 font-black animate-pulse"
-          : "bg-slate-900/80 text-slate-300";
+          ? "bg-amber-500/90 text-slate-950 font-black border-amber-300 animate-pulse"
+          : theme === "dark"
+            ? "bg-slate-900/80 text-slate-300 border-slate-700/80"
+            : "bg-white/90 text-slate-700 border-slate-200 shadow-sm";
+
+    const fpsBgClass =
+      theme === "dark"
+        ? "bg-slate-950/80 text-emerald-400 border-emerald-500/30"
+        : "bg-white/90 text-emerald-600 border-emerald-300/80 shadow-sm";
 
     return (
       <div className="absolute top-2.5 left-2.5 z-40 flex flex-col items-start gap-1 pointer-events-none font-mono text-[10px]">
-        <div className="px-2 py-0.5 rounded-full bg-slate-950/80 backdrop-blur-md text-emerald-400 font-bold border border-emerald-500/30 shadow-md">
+        <div
+          className={cn(
+            "px-2 py-0.5 rounded-full backdrop-blur-md font-bold border shadow-sm",
+            fpsBgClass,
+          )}
+        >
           FPS:{cameraFps}/{cvFps}
         </div>
         <div
-          className={`px-2 py-0.5 rounded-full backdrop-blur-md font-bold shadow-md border border-white/20 ${presenceBgClass}`}
+          className={cn(
+            "px-2 py-0.5 rounded-full backdrop-blur-md font-bold border shadow-sm",
+            presenceBgClass,
+          )}
         >
           {presenceText}
         </div>
@@ -316,7 +337,10 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (props) =
         NO_FACE: { icon: "👤", text: "Vui lòng di chuyển vào khung hình" },
         TOO_FAR: { icon: "🔍", text: "Lại gần camera hơn" },
         TOO_CLOSE: { icon: "↔️", text: "Lùi xa camera hơn một chút" },
-        NOT_CENTERED: { icon: "🎯", text: "Di chuyển khuôn mặt vào giữa khung" },
+        NOT_CENTERED: {
+          icon: "🎯",
+          text: "Di chuyển khuôn mặt vào giữa khung",
+        },
         TOO_DARK: { icon: "💡", text: "Môi trường quá tối" },
         TOO_BRIGHT: { icon: "☀️", text: "Môi trường quá chói sáng" },
         BLURRY: { icon: "👓", text: "Khuôn mặt bị mờ, giữ yên camera" },
