@@ -12,6 +12,7 @@ import { StepItem } from "../workflow/StepProgress.js";
 import { RectBounds } from "../face/FlyingThumbnail.js";
 import { getSettings, updateSettings } from "../../lib/settingsStore.js";
 import { cn } from "../../lib/utils.js";
+import { LiquidGlassCard } from "../theme/LiquidGlassCard.js";
 import { DesktopCaptureView } from "./views/DesktopCaptureView.js";
 import { MobileCaptureView } from "./views/MobileCaptureView.js";
 import { SharedCaptureViewProps } from "./views/types.js";
@@ -281,38 +282,33 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (
           ? `Cảnh báo: ${faceState.faceCount} mặt!`
           : "Chưa phát hiện mặt";
 
-    const presenceBgClass =
-      faceState?.presence === "SINGLE_FACE"
-        ? "bg-emerald-500/90 text-white border-emerald-400"
-        : faceState?.presence === "MULTIPLE_FACES"
-          ? "bg-amber-500/90 text-slate-950 font-black border-amber-300 animate-pulse"
-          : theme === "dark"
-            ? "bg-slate-900/80 text-slate-300 border-slate-700/80"
-            : "bg-white/90 text-slate-700 border-slate-200 shadow-sm";
-
-    const fpsBgClass =
-      theme === "dark"
-        ? "bg-slate-950/80 text-emerald-400 border-emerald-500/30"
-        : "bg-white/90 text-emerald-600 border-emerald-300/80 shadow-sm";
-
     return (
       <div className="absolute top-2.5 left-2.5 z-40 flex flex-col items-start gap-1 pointer-events-none font-mono text-[10px]">
-        <div
+        <LiquidGlassCard
+          theme={theme}
+          variant="pill"
           className={cn(
-            "px-2 py-0.5 rounded-full backdrop-blur-md font-bold border shadow-sm",
-            fpsBgClass,
+            "px-2.5 py-0.5 font-bold transition-all duration-300",
+            theme === "dark" ? "text-emerald-400" : "text-emerald-600 font-extrabold",
           )}
         >
           FPS:{cameraFps}/{cvFps}
-        </div>
-        <div
+        </LiquidGlassCard>
+
+        <LiquidGlassCard
+          theme={theme}
+          variant="pill"
           className={cn(
-            "px-2 py-0.5 rounded-full backdrop-blur-md font-bold border shadow-sm",
-            presenceBgClass,
+            "px-2.5 py-0.5 font-bold transition-all duration-300",
+            faceState?.presence === "SINGLE_FACE"
+              ? "bg-emerald-500/80 text-white border-emerald-400"
+              : faceState?.presence === "MULTIPLE_FACES"
+                ? "bg-amber-500/90 text-slate-950 font-black border-amber-300 animate-pulse"
+                : "",
           )}
         >
           {presenceText}
-        </div>
+        </LiquidGlassCard>
       </div>
     );
   };
@@ -324,7 +320,7 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (
     if (presence === "MULTIPLE_FACES") {
       return (
         <div className="absolute top-12 left-1/2 -translate-x-1/2 z-40 pointer-events-none animate-in fade-in zoom-in-95 duration-150">
-          <div className="px-3.5 py-1.5 rounded-full bg-amber-500/90 backdrop-blur-md text-slate-950 font-bold text-xs shadow-xl border border-amber-300 flex items-center gap-1.5 animate-bounce">
+          <div className="px-4 py-2 rounded-full bg-amber-500/90 backdrop-blur-2xl text-slate-950 font-bold text-xs border border-amber-300 shadow-[inset_0_1px_1.5px_rgba(255,255,255,0.6),0_12px_32px_rgba(245,158,11,0.4)] flex items-center gap-1.5 animate-bounce">
             <span>⚠️</span>
             <span>Phát hiện nhiều khuôn mặt! Chỉ đứng 1 người</span>
           </div>
@@ -355,10 +351,14 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (
 
       return (
         <div className="absolute top-12 left-1/2 -translate-x-1/2 z-40 pointer-events-none animate-in fade-in zoom-in-95 duration-150">
-          <div className="px-3.5 py-1.5 rounded-full bg-slate-950/80 backdrop-blur-md text-slate-200 font-semibold text-xs shadow-xl border border-slate-700/80 flex items-center gap-1.5">
-            <span>{info.icon}</span>
-            <span>{info.text}</span>
-          </div>
+          <LiquidGlassCard
+            theme={theme}
+            variant="pill"
+            className="px-4 py-2 flex items-center gap-2"
+          >
+            <span className="text-sm leading-none">{info.icon}</span>
+            <span className="tracking-wide font-medium text-xs">{info.text}</span>
+          </LiquidGlassCard>
         </div>
       );
     }

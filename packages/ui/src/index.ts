@@ -51,6 +51,8 @@ export { OverlayConfigPanel } from './components/debug/OverlayConfigPanel.js';
 // Theme
 export { ThemeToggle } from './components/theme/ThemeToggle.js';
 export { LiquidGlassSvgFilter } from './components/theme/LiquidGlassSvgFilter.js';
+export { LiquidGlassCard } from './components/theme/LiquidGlassCard.js';
+export type { LiquidGlassCardProps } from './components/theme/LiquidGlassCard.js';
 
 // Screens
 export { GuidedCaptureScreen } from './components/screens/GuidedCaptureScreen.js';

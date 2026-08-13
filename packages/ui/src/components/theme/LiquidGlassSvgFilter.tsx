@@ -5,52 +5,37 @@ export const LiquidGlassSvgFilter: React.FC = () => {
     <svg
       aria-hidden="true"
       style={{
-        position: 'absolute',
+        position: "absolute",
         width: 0,
         height: 0,
-        overflow: 'hidden',
-        pointerEvents: 'none',
+        overflow: "hidden",
+        pointerEvents: "none",
       }}
       colorInterpolationFilters="sRGB"
     >
       <defs>
-        {/* SVG Displacement Map Refraction Filter as described in kube.io Liquid Glass specification */}
-        <filter id="liquid-glass-refraction" x="0%" y="0%" width="100%" height="100%">
-          {/* 1. Generate subtle liquid fluid turbulence vector map */}
+        {/* SVG Displacement Map Refraction Filter matching Shu Ding's liquid-glass specification */}
+        <filter id="liquid-glass-refraction" x="-20%" y="-20%" width="140%" height="140%">
           <feTurbulence
             type="fractalNoise"
-            baseFrequency="0.012"
+            baseFrequency="0.02"
             numOctaves="2"
             seed="42"
             result="liquid_noise"
           />
-          {/* 2. Refract background graphics smoothly without edge displacement artifacts */}
           <feDisplacementMap
             in="SourceGraphic"
             in2="liquid_noise"
-            scale="6"
+            scale="7"
             xChannelSelector="R"
             yChannelSelector="G"
             result="displaced_graphic"
           />
-          {/* 3. Elevate color saturation on refracted glass edges */}
           <feColorMatrix
             in="displaced_graphic"
             type="saturate"
-            values="1.8"
+            values="1.2"
             result="saturated_graphic"
-          />
-          {/* 4. Smooth out optical dispersion blur */}
-          <feGaussianBlur
-            in="saturated_graphic"
-            stdDeviation="0.4"
-            result="blurred_graphic"
-          />
-          {/* 5. Blend specular lighting over refracted image */}
-          <feBlend
-            in="SourceGraphic"
-            in2="blurred_graphic"
-            mode="overlay"
           />
         </filter>
       </defs>

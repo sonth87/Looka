@@ -128,17 +128,17 @@ export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
         />
       </div>
 
-      {/* ── Main Content: 3:4 Portrait Camera Display (Pushed UP) ── */}
-      <main className="w-full flex-1 flex flex-col items-center justify-start z-10 overflow-hidden my-0 px-0 max-w-sm pt-1">
+      {/* ── Main Content: Extended Portrait Camera Display ── */}
+      <main className="w-full flex-1 flex flex-col items-center justify-start z-10 overflow-hidden my-0 px-0 max-w-sm pt-1 pb-2">
         <div
           ref={viewportRef}
-          className="relative transition-all duration-300 flex items-center justify-center w-full max-h-full max-w-sm mx-auto"
+          className="relative transition-all duration-300 flex items-center justify-center w-full flex-1 h-full max-w-sm mx-auto"
         >
           {/* Camera Preview */}
           <CameraPreview
             stream={stream}
-            aspectRatio="3/4"
-            className="w-full aspect-[3/4] max-h-full rounded-3xl border-0 overflow-hidden transition-all bg-transparent shadow-none"
+            aspectRatio="auto"
+            className="w-full h-full flex-1 rounded-3xl border border-slate-200/60 dark:border-slate-800/80 overflow-hidden transition-all bg-transparent shadow-none"
           >
             {/* Top-Left Colored Text Debug Stats */}
             {showScreenDebugStats && renderTopLeftDebugOverlay()}
