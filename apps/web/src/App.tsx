@@ -322,10 +322,15 @@ export default function App() {
               const gs = await gestureEngineRef.current.processFrame(frame);
               setGestureState(gs);
 
-              // Evaluate capture trigger
+              // Evaluate capture trigger (face must be detected, single face, AND quality accepted)
               const currentFaceState = faceState;
+              const isFaceReady =
+                currentFaceState?.detected === true &&
+                currentFaceState?.presence === "SINGLE_FACE" &&
+                currentFaceState?.quality?.accepted === true;
+
               const decision = captureTriggerRef.current.evaluate({
-                faceReady: currentFaceState?.detected ?? false,
+                faceReady: isFaceReady,
                 faceStabilityProgress: 0,
                 gestureState: gs,
                 currentTime: now,

@@ -314,8 +314,13 @@ export default function App() {
               setGestureState(gs);
 
               const currentFaceState = faceState;
+              const isFaceReady =
+                currentFaceState?.detected === true &&
+                currentFaceState?.presence === "SINGLE_FACE" &&
+                currentFaceState?.quality?.accepted === true;
+
               const decision = captureTriggerRef.current.evaluate({
-                faceReady: currentFaceState?.detected ?? false,
+                faceReady: isFaceReady,
                 faceStabilityProgress: 0,
                 gestureState: gs,
                 currentTime: now,

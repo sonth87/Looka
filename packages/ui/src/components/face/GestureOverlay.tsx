@@ -111,7 +111,7 @@ export const GestureOverlay: React.FC<GestureOverlayProps> = ({
         <svg className="absolute inset-0 w-full h-full pointer-events-none z-20">
           <defs>
             <filter id="hand-neon-glow" x="-20%" y="-20%" width="140%" height="140%">
-              <feGaussianBlur stdDeviation="2.5" result="blur" />
+              <feGaussianBlur stdDeviation="1.0" result="blur" />
               <feMerge>
                 <feMergeNode in="blur" />
                 <feMergeNode in="SourceGraphic" />
@@ -136,10 +136,10 @@ export const GestureOverlay: React.FC<GestureOverlayProps> = ({
                 x2={`${x2}%`}
                 y2={`${y2}%`}
                 stroke={meta.stroke}
-                strokeWidth="2.5"
+                strokeWidth="1.2"
                 strokeLinecap="round"
                 filter="url(#hand-neon-glow)"
-                className="opacity-85 transition-all duration-75"
+                className="opacity-50 transition-all duration-75"
               />
             );
           })}
@@ -155,12 +155,12 @@ export const GestureOverlay: React.FC<GestureOverlayProps> = ({
                 key={idx}
                 cx={`${cx}%`}
                 cy={`${cy}%`}
-                r={isTip ? 5 : isWrist ? 6 : 3.5}
+                r={isTip ? 3.5 : isWrist ? 4 : 2.5}
                 fill={isTip ? "#38bdf8" : isWrist ? "#ffffff" : meta.stroke}
                 stroke="#ffffff"
-                strokeWidth={isTip || isWrist ? 1.5 : 1}
+                strokeWidth={isTip || isWrist ? 1 : 0.75}
                 filter="url(#hand-neon-glow)"
-                className="transition-all duration-75"
+                className="opacity-65 transition-all duration-75"
               />
             );
           })}

@@ -230,14 +230,22 @@ export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
               <GestureOverlay
                 gestureState={gestureState}
                 gestureProgress={gestureProgress}
-                faceReady={faceState?.detected ?? false}
+                faceReady={
+                  faceState?.detected === true &&
+                  faceState?.presence === "SINGLE_FACE" &&
+                  faceState?.quality?.accepted === true
+                }
               />
             )}
 
             {/* Shutter Button (OFF mode) */}
             {mode === "live" && captureMode === "OFF" && onShutterCapture && (
               <ShutterButton
-                enabled={faceState?.detected ?? false}
+                enabled={
+                  faceState?.detected === true &&
+                  faceState?.presence === "SINGLE_FACE" &&
+                  faceState?.quality?.accepted === true
+                }
                 onCapture={onShutterCapture}
               />
             )}
