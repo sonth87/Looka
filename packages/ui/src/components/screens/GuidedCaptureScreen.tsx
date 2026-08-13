@@ -182,7 +182,7 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (
     initialSettings.overlayOpacity ?? 1.0,
   );
   const [showLandmarks, setShowLandmarks] = useState(
-    initialSettings.showLandmarks ?? false,
+    initialSettings.showLandmarks ?? true,
   );
   const [landmarkSize, setLandmarkSize] = useState(
     initialSettings.landmarkSize ?? 1.5,

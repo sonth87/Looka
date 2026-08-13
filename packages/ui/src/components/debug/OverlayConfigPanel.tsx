@@ -28,6 +28,7 @@ export interface OverlayConfigPanelProps {
   theme?: "dark" | "light";
   isFullscreen?: boolean;
   defaultPosition?: { x: number; y: number };
+  defaultCollapsed?: boolean;
   className?: string;
 }
 
@@ -48,11 +49,11 @@ const SENSITIVITY_LEVELS: { key: CaptureSensitivity; label: string; desc: string
 ];
 
 export const OverlayConfigPanel: React.FC<OverlayConfigPanelProps> = ({
-  visible,
+  visible = true,
   onToggleVisible,
   opacity,
   onOpacityChange,
-  showLandmarks = false,
+  showLandmarks = true,
   onToggleLandmarks,
   landmarkSize = 1.5,
   onLandmarkSizeChange,
@@ -68,7 +69,10 @@ export const OverlayConfigPanel: React.FC<OverlayConfigPanelProps> = ({
   onSensitivityChange,
   theme = "dark",
   isFullscreen = false,
-  defaultPosition = { x: 20, y: 360 },
+  defaultPosition = typeof window !== "undefined"
+    ? { x: 20, y: Math.max(20, window.innerHeight - 440) }
+    : { x: 20, y: 280 },
+  defaultCollapsed = false,
   className,
 }) => {
   const title = (
@@ -127,6 +131,7 @@ export const OverlayConfigPanel: React.FC<OverlayConfigPanelProps> = ({
       theme={theme}
       isFullscreen={isFullscreen}
       defaultPosition={defaultPosition}
+      defaultCollapsed={defaultCollapsed}
       className={cn("w-72", className)}
     >
       <div className="font-mono text-[11px] space-y-2">

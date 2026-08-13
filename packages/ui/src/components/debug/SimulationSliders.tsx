@@ -20,6 +20,7 @@ export interface SimulationSlidersProps {
   isFullscreen?: boolean;
   className?: string;
   defaultPosition?: { x: number; y: number };
+  defaultCollapsed?: boolean;
 }
 
 export const SimulationSliders: React.FC<SimulationSlidersProps> = ({
@@ -29,8 +30,9 @@ export const SimulationSliders: React.FC<SimulationSlidersProps> = ({
   isFullscreen = false,
   className,
   defaultPosition = typeof window !== 'undefined'
-    ? { x: Math.max(20, window.innerWidth - 310), y: 75 }
-    : { x: 1200, y: 75 },
+    ? { x: 20, y: Math.max(20, window.innerHeight - 80) }
+    : { x: 20, y: 650 },
+  defaultCollapsed = true,
 }) => {
   const [settings, setSettings] = useState<SimulationSettings>({
     presence: 'SINGLE_FACE',
@@ -101,6 +103,7 @@ export const SimulationSliders: React.FC<SimulationSlidersProps> = ({
       theme={theme}
       isFullscreen={isFullscreen}
       defaultPosition={defaultPosition}
+      defaultCollapsed={defaultCollapsed}
       className={cn('w-72', className)}
     >
       <div className="space-y-3">

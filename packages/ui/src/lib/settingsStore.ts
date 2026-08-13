@@ -30,7 +30,7 @@ export const defaultSettings: AppSettings = {
   isFullscreen: false,
   overlayVisible: true,
   overlayOpacity: 1.0,
-  showLandmarks: false,
+  showLandmarks: true,
   landmarkSize: 1.5,
   showScreenDebugStats: true,
   captureMode: 'AUTO',
