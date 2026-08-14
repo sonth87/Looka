@@ -5,12 +5,17 @@ import fs from 'node:fs';
 let mainWindow: BrowserWindow | null = null;
 
 function createWindow() {
+  const iconPath = path.join(__dirname, '../renderer/assets/icon.png');
+  const fallbackIconPath = path.join(__dirname, '../../public/icon.png');
+  const validIcon = fs.existsSync(iconPath) ? iconPath : fs.existsSync(fallbackIconPath) ? fallbackIconPath : undefined;
+
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
     minWidth: 1024,
     minHeight: 720,
-    title: 'Face Platform Kiosk',
+    title: 'Looka',
+    icon: validIcon,
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
@@ -29,6 +34,13 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  if (process.platform === 'darwin' && app.dock) {
+    const dockIconPath = path.join(__dirname, '../../public/icon.png');
+    if (fs.existsSync(dockIconPath)) {
+      app.dock.setIcon(dockIconPath);
+    }
+  }
+
   ipcMain.handle('app:getVersion', () => app.getVersion());
   ipcMain.handle('app:getStatus', () => ({ status: 'ONLINE', dbConnected: true }));
 

@@ -1,6 +1,6 @@
 import { useEffect, Component, ReactNode } from "react";
 import { DeviceLayout, AppConfig } from "@sonth87/device-layout";
-import { FaceCaptureApp } from "./components/FaceCaptureApp";
+import { FaceCaptureApp, LookaIcon } from "@face/ui";
 
 class AppErrorBoundary extends Component<
   { children: ReactNode },
@@ -44,9 +44,10 @@ const appsConfig: AppConfig[] = [
   {
     id: "looka-face-capture",
     name: "Looka",
-    icon: "lucide:Camera",
-    iconColor: ["#2563eb", "#1d4ed8"],
+    icon: LookaIcon,
+    iconColor: ["#ffffff", "#e0f2fe"],
     render: FaceCaptureApp,
+    rawIcon: true,
     defaultSize: { width: 1150, height: 780 },
     minSize: { width: 640, height: 480 },
     defaultMaximized: true,

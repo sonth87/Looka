@@ -39,6 +39,8 @@ export interface GuidedCaptureScreenProps {
   modeButton?: React.ReactNode;
   onCancel?: () => void;
   onStartLive?: () => void;
+  isCameraLoading?: boolean;
+  cameraError?: string | null;
   isWorkflowStarted?: boolean;
   onStartWorkflow?: () => void;
   onOpenReview?: () => void;
@@ -79,6 +81,8 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (
     modeButton,
     onCancel,
     onStartLive,
+    isCameraLoading = false,
+    cameraError = null,
     isWorkflowStarted = false,
     onStartWorkflow,
     onOpenReview,
@@ -385,6 +389,8 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (
     modeButton,
     onCancel,
     onStartLive,
+    isCameraLoading,
+    cameraError,
     isWorkflowStarted,
     onStartWorkflow,
     onOpenReview,

@@ -32,6 +32,8 @@ export interface SharedCaptureViewProps {
   modeButton?: React.ReactNode;
   onCancel?: () => void;
   onStartLive?: () => void;
+  isCameraLoading?: boolean;
+  cameraError?: string | null;
   isWorkflowStarted: boolean;
   onStartWorkflow?: () => void;
   onOpenReview?: () => void;

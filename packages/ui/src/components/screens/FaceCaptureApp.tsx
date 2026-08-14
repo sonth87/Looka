@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
+import { SlidersHorizontal, Camera } from 'lucide-react';
 import {
   CameraDevice,
   CaptureSession,
@@ -15,13 +16,12 @@ import { MediaPipeCVEngine } from '@face/cv-mediapipe';
 import { MediaPipeGestureEngine } from '@face/hand-gesture';
 import { WorkflowEngine, CaptureTriggerEvaluator } from '@face/workflow-engine';
 import { SQLiteStorageAdapter, SessionRepository } from '@face/database';
-import {
-  GuidedCaptureScreen,
-  SessionReviewModal,
-  StepItem,
-  getSettings,
-  updateSettings,
-} from '@face/ui';
+import { GuidedCaptureScreen } from './GuidedCaptureScreen.js';
+import { SessionReviewModal } from '../workflow/SessionReviewModal.js';
+import { SimulationSliders, SimulationSettings } from '../debug/SimulationSliders.js';
+import { StepItem } from '../workflow/StepProgress.js';
+import { TooltipProvider, Tooltip, TooltipTrigger, TooltipContent } from '../ui/tooltip.js';
+import { getSettings, updateSettings } from '../../lib/settingsStore.js';
 
 const defaultWorkflow: CaptureWorkflow = {
   id: 'workflow_standard_5step',
@@ -72,12 +72,18 @@ export interface FaceCaptureAppProps {
 }
 
 export function FaceCaptureApp(_props: FaceCaptureAppProps) {
-  const [mode] = useState<'live'>('live');
-  const [theme, setTheme] = useState<'dark' | 'light'>(() => getSettings().theme || 'light');
+  const [mode, setMode] = useState<'simulation' | 'live'>(() => {
+    if (
+      typeof window !== 'undefined' &&
+      (window.innerWidth < 768 ||
+        /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent))
+    ) {
+      return 'live';
+    }
+    return 'simulation';
+  });
 
-  useEffect(() => {
-    // Theme is scoped locally inside FaceCaptureApp component container
-  }, [theme]);
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => getSettings().theme || 'light');
 
   const toggleTheme = () => {
     setTheme((prev) => {
@@ -86,7 +92,10 @@ export function FaceCaptureApp(_props: FaceCaptureAppProps) {
       return nextTheme;
     });
   };
+
   const [stream, setStream] = useState<MediaStream | null>(null);
+  const [isCameraLoading, setIsCameraLoading] = useState<boolean>(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
   const [devices, setDevices] = useState<CameraDevice[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
   const [faceState, setFaceState] = useState<FaceState | null>(null);
@@ -105,6 +114,7 @@ export function FaceCaptureApp(_props: FaceCaptureAppProps) {
     stepType: 'FRONT',
   };
 
+  const [simGuidance, setSimGuidance] = useState<GuidanceState>(initialGuidance);
   const [liveGuidance, setLiveGuidance] = useState<GuidanceState>(initialGuidance);
 
   const [session, setSession] = useState<CaptureSession | null>(null);
@@ -146,18 +156,15 @@ export function FaceCaptureApp(_props: FaceCaptureAppProps) {
   const gestureEngineRef = useRef<MediaPipeGestureEngine | null>(null);
   const captureTriggerRef = useRef<CaptureTriggerEvaluator>(new CaptureTriggerEvaluator());
   const gestureAnimRef = useRef<number | null>(null);
+  const mediaPipeCvRef = useRef<MediaPipeCVEngine | null>(null);
 
   useEffect(() => {
-    console.log('📱 [FaceCaptureApp] Mounted inside OS window. Starting init...');
     async function init() {
       try {
-        console.log('📦 [FaceCaptureApp] Initializing SQLiteStorageAdapter...');
         const adapter = new SQLiteStorageAdapter();
         await adapter.initialize();
         repoRef.current = new SessionRepository(adapter);
-        console.log('✅ [FaceCaptureApp] SQLiteStorageAdapter initialized.');
 
-        // Simulation Workflow Engine
         const simEngine = new WorkflowEngine();
         simEngine.setSensitivity(sensitivity);
         simEngine.setSnapshotProvider(() => {
@@ -177,7 +184,7 @@ export function FaceCaptureApp(_props: FaceCaptureAppProps) {
         simWorkflowEngineRef.current = simEngine;
 
         simEngine.on('state-change', (state: GuidanceState) => {
-          setLiveGuidance({ ...state });
+          setSimGuidance({ ...state });
         });
 
         simEngine.on('capture-trigger', (data: { stepId: string; imagePath: string }) => {
@@ -198,14 +205,16 @@ export function FaceCaptureApp(_props: FaceCaptureAppProps) {
         const simPipeline = new FramePipeline(mockCv);
         simPipelineRef.current = simPipeline;
 
-        simPipeline.onResult(async (state, fps) => {
-          setCvFps(fps);
+        simPipeline.onResult(async (state: FaceState, fps: number) => {
+          if (mode === 'simulation') {
+            setFaceState(state);
+            setCvFps(fps);
+          }
           await simEngine.processFrame(state);
         });
 
         await simEngine.startSession(defaultWorkflow);
 
-        // Live Workflow Engine
         const liveEngine = new WorkflowEngine();
         liveEngine.setSensitivity(sensitivity);
         liveEngine.setSnapshotProvider(() => {
@@ -231,32 +240,37 @@ export function FaceCaptureApp(_props: FaceCaptureAppProps) {
         });
 
         await liveEngine.startSession(defaultWorkflow);
-        console.log('🎉 [FaceCaptureApp] All engines initialized successfully.');
-
-        if (typeof window !== 'undefined' && (window.innerWidth < 768 || /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent))) {
-          startCamera();
-        }
       } catch (err) {
-        console.error('❌ [FaceCaptureApp] Error during init:', err);
+        console.error('❌ [FaceCaptureApp] Initialization error:', err);
       }
     }
 
     init();
 
     return () => {
-      console.log('🧹 [FaceCaptureApp] Unmounting...');
       cameraServiceRef.current?.stop();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const mediaPipeCvRef = useRef<MediaPipeCVEngine | null>(null);
-
   useEffect(() => {
     let animId: number;
+    let lastSimTime = 0;
 
     const processFrameLoop = () => {
-      if (cameraServiceRef.current && livePipelineRef.current) {
+      if (mode === 'simulation' && simPipelineRef.current) {
+        const now = Date.now();
+        if (now - lastSimTime >= 80) {
+          lastSimTime = now;
+          const dummyFrame = {
+            data: new Uint8ClampedArray(640 * 480 * 4),
+            width: 640,
+            height: 480,
+            timestamp: now,
+          };
+          simPipelineRef.current.pushFrame(dummyFrame);
+        }
+      } else if (mode === 'live' && cameraServiceRef.current && livePipelineRef.current) {
         const frame = cameraServiceRef.current.getFrame();
         if (frame) {
           livePipelineRef.current.pushFrame(frame);
@@ -296,7 +310,7 @@ export function FaceCaptureApp(_props: FaceCaptureAppProps) {
               const currentFaceState = faceState;
               const isFaceReady =
                 currentFaceState?.detected === true &&
-                currentFaceState?.presence === "SINGLE_FACE" &&
+                currentFaceState?.presence === 'SINGLE_FACE' &&
                 currentFaceState?.quality?.accepted === true;
 
               const decision = captureTriggerRef.current.evaluate({
@@ -354,23 +368,101 @@ export function FaceCaptureApp(_props: FaceCaptureAppProps) {
     liveWorkflowEngineRef.current?.setCaptureTriggerConfig({ autoHoldMs: newMs });
   }, []);
 
-  const startCamera = useCallback(async () => {
+  const handleSimulationChange = async (settings: SimulationSettings) => {
+    if (!mockEngineRef.current || !simPipelineRef.current) return;
+
+    mockEngineRef.current.updateSettings({
+      detected: settings.presence !== 'NO_FACE',
+      faceCount: settings.presence === 'MULTIPLE_FACES' ? 2 : settings.presence === 'SINGLE_FACE' ? 1 : 0,
+      pose: { yaw: settings.yaw, pitch: settings.pitch, roll: settings.roll },
+      quality: {
+        faceSizeRatio: settings.faceSizeRatio,
+        overallScore: settings.qualityScore,
+        accepted: settings.qualityScore >= 0.7,
+      },
+    });
+
+    const dummyFrame = {
+      data: new Uint8ClampedArray(640 * 480 * 4),
+      width: 640,
+      height: 480,
+      timestamp: Date.now(),
+    };
+
+    const detected = settings.presence !== 'NO_FACE';
+    const faceCount = settings.presence === 'MULTIPLE_FACES' ? 2 : settings.presence === 'SINGLE_FACE' ? 1 : 0;
+
+    const primaryBox = {
+      x: 160,
+      y: 72,
+      width: 320,
+      height: 336,
+    };
+
+    const allDetections = Array.from({ length: faceCount }, (_, idx) => {
+      if (idx === 0) return { boundingBox: primaryBox, confidence: 0.98 };
+      return {
+        boundingBox: { x: 40 + idx * 115, y: 120, width: 180, height: 216 },
+        confidence: 0.92,
+      };
+    });
+
+    simPipelineRef.current.pushFrame(dummyFrame);
+    if (!detected) {
+      setFaceState({
+        timestamp: Date.now(),
+        detected: false,
+        faceCount: 0,
+        presence: 'NO_FACE',
+      });
+    } else {
+      setFaceState({
+        detected: true,
+        faceCount,
+        presence: settings.presence,
+        detection: allDetections[0],
+        allDetections,
+        pose: { yaw: settings.yaw, pitch: settings.pitch, roll: settings.roll },
+        quality: {
+          faceSizeRatio: settings.faceSizeRatio,
+          overallScore: settings.qualityScore,
+          accepted: settings.qualityScore >= 0.7,
+          sharpness: 1,
+          brightness: 0.5,
+          centerXOffset: 0,
+          centerYOffset: 0,
+          eyesVisible: true,
+          mouthVisible: true,
+          occluded: false,
+          reasons: [],
+        },
+        timestamp: Date.now(),
+      });
+    }
+  };
+
+  const startLiveMode = async () => {
+    setMode('live');
     setFaceState(null);
+    setCameraError(null);
+    setIsCameraLoading(true);
 
     if (typeof window !== 'undefined' && window.isSecureContext === false) {
       alert(
         'Trình duyệt đã chặn Camera do bạn đang truy cập qua địa chỉ IP HTTP từ máy khác.\n\n' +
-        'Cách bật Camera cho máy này trên Chrome:\n' +
-        '1. Mở tab mới: chrome://flags/#unsafely-treat-insecure-origin-as-secure\n' +
-        '2. Thêm URL: ' + window.location.origin + '\n' +
-        '3. Chuyển sang "Enabled" và bấm Relaunch.'
+          'Cách bật Camera cho máy này trên Chrome:\n' +
+          '1. Mở tab mới: chrome://flags/#unsafely-treat-insecure-origin-as-secure\n' +
+          '2. Thêm URL: ' +
+          window.location.origin +
+          '\n' +
+          '3. Chuyển sang "Enabled" và bấm Relaunch.'
       );
     }
 
     try {
       if (!mediaPipeCvRef.current) {
         const mpCv = new MediaPipeCVEngine();
-        await mpCv.initialize().catch((e) => {
+        await mpCv.initialize().catch((e: any) => {
           console.warn('MediaPipe initialization fallback to MockCVEngine:', e);
         });
         if (mpCv.isInitialized) {
@@ -383,7 +475,7 @@ export function FaceCaptureApp(_props: FaceCaptureAppProps) {
 
       if (!gestureEngineRef.current) {
         const ge = new MediaPipeGestureEngine();
-        ge.initialize().catch((e) =>
+        ge.initialize().catch((e: any) =>
           console.warn('GestureEngine failed to init, MANUAL mode will be unavailable:', e)
         );
         gestureEngineRef.current = ge;
@@ -397,7 +489,7 @@ export function FaceCaptureApp(_props: FaceCaptureAppProps) {
       if (engineToUse) {
         const newLivePipeline = new FramePipeline(engineToUse);
         livePipelineRef.current = newLivePipeline;
-        newLivePipeline.onResult(async (state, fps) => {
+        newLivePipeline.onResult(async (state: FaceState, fps: number) => {
           setFaceState(state);
           setCvFps(fps);
           if (liveWorkflowEngineRef.current && isWorkflowStartedRef.current) {
@@ -415,17 +507,48 @@ export function FaceCaptureApp(_props: FaceCaptureAppProps) {
 
       const st = await camera.start();
       setStream(st);
+      setIsCameraLoading(false);
     } catch (err: any) {
-      console.warn('Live camera unavailable:', err);
+      console.warn('Live camera error:', err);
+      setStream(null);
+      setIsCameraLoading(false);
+
+      const errStr = String(err?.message || err || '');
+      if (errStr.includes('Permission') || errStr.includes('NotAllowedError')) {
+        setCameraError('Trình duyệt hoặc hệ thống đã từ chối quyền truy cập Camera. Vui lòng cho phép quyền Camera trên ô địa chỉ trình duyệt.');
+      } else if (errStr.includes('NotFound') || errStr.includes('DevicesNotFoundError')) {
+        setCameraError('Không tìm thấy thiết bị Camera nào trên máy tính/thiết bị này.');
+      } else {
+        setCameraError(`Không thể khởi động Camera: ${errStr || 'Vui lòng kiểm tra lại thiết bị camera.'}`);
+      }
+    }
+  };
+
+  const switchToSimulationMode = async () => {
+    if (cameraServiceRef.current) {
+      await cameraServiceRef.current.stop();
       setStream(null);
     }
-  }, [sensitivity]);
+    setFaceState(null);
+    setIsCameraLoading(false);
+    setCameraError(null);
+    setIsWorkflowStarted(false);
+    isWorkflowStartedRef.current = false;
+    setMode('simulation');
+  };
 
   const handleSelectCamera = async (devId: string) => {
     setSelectedDeviceId(devId);
     if (cameraServiceRef.current) {
-      const st = await cameraServiceRef.current.start({ deviceId: devId });
-      setStream(st);
+      try {
+        setIsCameraLoading(true);
+        const st = await cameraServiceRef.current.start({ deviceId: devId });
+        setStream(st);
+        setIsCameraLoading(false);
+      } catch (err: any) {
+        setIsCameraLoading(false);
+        setCameraError(`Không thể chuyển sang camera đã chọn: ${err?.message || err}`);
+      }
     }
   };
 
@@ -434,17 +557,22 @@ export function FaceCaptureApp(_props: FaceCaptureAppProps) {
     setLatestCapturedImage(null);
     setIsWorkflowStarted(false);
     isWorkflowStartedRef.current = false;
-    if (liveWorkflowEngineRef.current) {
-      await liveWorkflowEngineRef.current.startSession(defaultWorkflow);
+    const activeEngine = mode === 'live' ? liveWorkflowEngineRef.current : simWorkflowEngineRef.current;
+    if (activeEngine) {
+      await activeEngine.startSession(defaultWorkflow);
+    }
+    if (mode === 'simulation') {
+      setFaceState(null);
+      if (mockEngineRef.current) mockEngineRef.current.updateSettings({ detected: false, faceCount: 0 });
     }
   };
 
-  const activeGuidance = liveGuidance;
-  const activeEngine = liveWorkflowEngineRef.current;
+  const activeGuidance = mode === 'live' ? liveGuidance : simGuidance;
+  const activeEngine = mode === 'live' ? liveWorkflowEngineRef.current : simWorkflowEngineRef.current;
   const activeSession = activeEngine?.currentSession;
 
   const stepsList: StepItem[] = defaultWorkflow.steps.map((s, idx) => {
-    const sessionStep = activeSession?.steps.find((st) => st.stepId === s.id);
+    const sessionStep = activeSession?.steps.find((st: any) => st.stepId === s.id);
     const isCompleted = sessionStep?.status === 'COMPLETED' || idx < activeGuidance.currentStepIndex;
     const isCurrent = isWorkflowStarted && idx === activeGuidance.currentStepIndex && !isCompleted;
 
@@ -462,19 +590,66 @@ export function FaceCaptureApp(_props: FaceCaptureAppProps) {
     };
   });
 
+  const modeButton = (
+    <TooltipProvider>
+      <div className="hidden sm:flex items-center bg-slate-900/90 p-1 rounded-xl border border-slate-800 shadow-inner">
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              onClick={switchToSimulationMode}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
+                mode === 'simulation'
+                  ? 'bg-blue-600 text-white shadow-md'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <SlidersHorizontal className="w-3.5 h-3.5" />
+              Mô phỏng (Simulation)
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" theme={theme}>
+            Chế độ Mô phỏng dữ liệu camera bằng thanh trượt
+          </TooltipContent>
+        </Tooltip>
+
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              onClick={startLiveMode}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
+                mode === 'live'
+                  ? 'bg-blue-600 text-white shadow-md'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Camera className="w-3.5 h-3.5" />
+              Live Camera
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" theme={theme}>
+            Chế độ Live Camera thực tế
+          </TooltipContent>
+        </Tooltip>
+      </div>
+    </TooltipProvider>
+  );
+
   const handleCancelWorkflow = useCallback(async () => {
     setIsWorkflowStarted(false);
     isWorkflowStartedRef.current = false;
     setLatestCapturedImage(null);
-    if (liveWorkflowEngineRef.current) {
-      await liveWorkflowEngineRef.current.startSession(defaultWorkflow);
+    const activeEngine = mode === 'live' ? liveWorkflowEngineRef.current : simWorkflowEngineRef.current;
+    if (activeEngine) {
+      await activeEngine.startSession(defaultWorkflow);
     }
-  }, []);
+  }, [mode]);
 
   return (
     <div className="relative h-full w-full overflow-hidden flex flex-col bg-slate-950 text-slate-100">
       <GuidedCaptureScreen
         stream={stream}
+        isCameraLoading={isCameraLoading}
+        cameraError={cameraError}
         faceState={faceState}
         guidance={activeGuidance}
         steps={stepsList}
@@ -489,8 +664,9 @@ export function FaceCaptureApp(_props: FaceCaptureAppProps) {
         mode={mode}
         theme={theme}
         onToggleTheme={toggleTheme}
+        modeButton={modeButton}
         onCancel={handleCancelWorkflow}
-        onStartLive={startCamera}
+        onStartLive={startLiveMode}
         isWorkflowStarted={isWorkflowStarted}
         onStartWorkflow={handleStartWorkflow}
         onOpenReview={() => setShowReviewModal(true)}
@@ -506,6 +682,10 @@ export function FaceCaptureApp(_props: FaceCaptureAppProps) {
         onAutoHoldMsChange={handleAutoHoldMsChange}
         latestCapturedImage={latestCapturedImage}
       />
+
+      {mode === 'simulation' && (
+        <SimulationSliders onChange={handleSimulationChange} theme={theme} />
+      )}
 
       {showReviewModal && (
         <SessionReviewModal

@@ -53,7 +53,10 @@ export { ThemeToggle } from './components/theme/ThemeToggle.js';
 export { LiquidGlassSvgFilter } from './components/theme/LiquidGlassSvgFilter.js';
 export { LiquidGlassCard } from './components/theme/LiquidGlassCard.js';
 export type { LiquidGlassCardProps } from './components/theme/LiquidGlassCard.js';
+export { LookaIcon } from './components/theme/LookaIcon.js';
 
 // Screens
 export { GuidedCaptureScreen } from './components/screens/GuidedCaptureScreen.js';
 export { KioskAttendanceScreen } from './components/screens/KioskAttendanceScreen.js';
+export { FaceCaptureApp } from './components/screens/FaceCaptureApp.js';
+

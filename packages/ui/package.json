@@ -16,7 +16,13 @@
     "clean": "rimraf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {
+    "@face/camera": "workspace:*",
     "@face/core": "workspace:*",
+    "@face/cv-engine": "workspace:*",
+    "@face/cv-mediapipe": "workspace:*",
+    "@face/database": "workspace:*",
+    "@face/hand-gesture": "workspace:*",
+    "@face/workflow-engine": "workspace:*",
     "@radix-ui/react-tooltip": "^1.2.16",
     "clsx": "^2.1.1",
     "lucide-react": "^1.31.0",
