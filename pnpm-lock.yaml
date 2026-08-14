@@ -10,8 +10,8 @@ catalogs:
       specifier: ^5.0.0
       version: 5.2.1
     '@sonth87/device-layout':
-      specifier: ^0.5.23
-      version: 0.5.23
+      specifier: ^0.5.26
+      version: 0.5.26
     lucide-react:
       specifier: ^1.31.0
       version: 1.31.0
@@ -82,7 +82,7 @@ importers:
         version: 5.2.1(react@19.2.8)
       '@sonth87/device-layout':
         specifier: 'catalog:'
-        version: 0.5.23(@babel/core@7.29.7)(@floating-ui/dom@1.8.0)(@tiptap/core@3.30.0(@tiptap/pm@3.30.0))(@tiptap/extension-list@3.30.0(@tiptap/core@3.30.0(@tiptap/pm@3.30.0))(@tiptap/pm@3.30.0))(@tiptap/extensions@3.30.0(@tiptap/core@3.30.0(@tiptap/pm@3.30.0))(@tiptap/pm@3.30.0))(@tiptap/pm@3.30.0)(@types/babel__core@7.20.5)(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(use-sync-external-store@1.6.0(react@19.2.8))(webpack@5.109.2(lightningcss@1.32.0))
+        version: 0.5.26(@babel/core@7.29.7)(@floating-ui/dom@1.8.0)(@tiptap/core@3.30.0(@tiptap/pm@3.30.0))(@tiptap/extension-list@3.30.0(@tiptap/core@3.30.0(@tiptap/pm@3.30.0))(@tiptap/pm@3.30.0))(@tiptap/extensions@3.30.0(@tiptap/core@3.30.0(@tiptap/pm@3.30.0))(@tiptap/pm@3.30.0))(@tiptap/pm@3.30.0)(@types/babel__core@7.20.5)(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(use-sync-external-store@1.6.0(react@19.2.8))(webpack@5.109.2(lightningcss@1.32.0))
       lucide-react:
         specifier: 'catalog:'
         version: 1.31.0(react@19.2.8)
@@ -167,7 +167,7 @@ importers:
         version: 5.2.1(react@19.2.8)
       '@sonth87/device-layout':
         specifier: 'catalog:'
-        version: 0.5.23(@babel/core@7.29.7)(@floating-ui/dom@1.8.0)(@tiptap/core@3.30.0(@tiptap/pm@3.30.0))(@tiptap/extension-list@3.30.0(@tiptap/core@3.30.0(@tiptap/pm@3.30.0))(@tiptap/pm@3.30.0))(@tiptap/extensions@3.30.0(@tiptap/core@3.30.0(@tiptap/pm@3.30.0))(@tiptap/pm@3.30.0))(@tiptap/pm@3.30.0)(@types/babel__core@7.20.5)(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(use-sync-external-store@1.6.0(react@19.2.8))(webpack@5.109.2(lightningcss@1.32.0))
+        version: 0.5.26(@babel/core@7.29.7)(@floating-ui/dom@1.8.0)(@tiptap/core@3.30.0(@tiptap/pm@3.30.0))(@tiptap/extension-list@3.30.0(@tiptap/core@3.30.0(@tiptap/pm@3.30.0))(@tiptap/pm@3.30.0))(@tiptap/extensions@3.30.0(@tiptap/core@3.30.0(@tiptap/pm@3.30.0))(@tiptap/pm@3.30.0))(@tiptap/pm@3.30.0)(@types/babel__core@7.20.5)(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(use-sync-external-store@1.6.0(react@19.2.8))(webpack@5.109.2(lightningcss@1.32.0))
       lucide-react:
         specifier: 'catalog:'
         version: 1.31.0(react@19.2.8)
@@ -2053,8 +2053,8 @@ packages:
     resolution: {integrity: sha512-t09vSN3MdfsyCHoFcTRCH/iUtG7OJ0CsjzB8cjAmKc/va/kIgeDI/TxsigdncE/4be734m0cvIYwNaV4i2XqAw==}
     engines: {node: '>=10'}
 
-  '@sonth87/device-layout@0.5.23':
-    resolution: {integrity: sha512-VgGYqYq1WXvz1OXRV27AYUStM6fys4X3V+wtv3mzTzzDHQsfFMYOKlt6yX9Uv3rXy3NsP8DKGhhm7K/kNGDN/g==}
+  '@sonth87/device-layout@0.5.26':
+    resolution: {integrity: sha512-r8BmKO0W+cnOsO7mSJM4q7hkMw6amSdfHx0wGFwjGNnFpD6F9CCLU0OXVVo/e/oernE2atVDIlbkp5bEpWdLdA==}
 
   '@standard-schema/spec@1.1.0':
     resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
@@ -6881,7 +6881,7 @@ snapshots:
 
   '@sindresorhus/is@4.6.0': {}
 
-  '@sonth87/device-layout@0.5.23(@babel/core@7.29.7)(@floating-ui/dom@1.8.0)(@tiptap/core@3.30.0(@tiptap/pm@3.30.0))(@tiptap/extension-list@3.30.0(@tiptap/core@3.30.0(@tiptap/pm@3.30.0))(@tiptap/pm@3.30.0))(@tiptap/extensions@3.30.0(@tiptap/core@3.30.0(@tiptap/pm@3.30.0))(@tiptap/pm@3.30.0))(@tiptap/pm@3.30.0)(@types/babel__core@7.20.5)(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(use-sync-external-store@1.6.0(react@19.2.8))(webpack@5.109.2(lightningcss@1.32.0))':
+  '@sonth87/device-layout@0.5.26(@babel/core@7.29.7)(@floating-ui/dom@1.8.0)(@tiptap/core@3.30.0(@tiptap/pm@3.30.0))(@tiptap/extension-list@3.30.0(@tiptap/core@3.30.0(@tiptap/pm@3.30.0))(@tiptap/pm@3.30.0))(@tiptap/extensions@3.30.0(@tiptap/core@3.30.0(@tiptap/pm@3.30.0))(@tiptap/pm@3.30.0))(@tiptap/pm@3.30.0)(@types/babel__core@7.20.5)(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(use-sync-external-store@1.6.0(react@19.2.8))(webpack@5.109.2(lightningcss@1.32.0))':
     dependencies:
       '@ducanh2912/next-pwa': 10.2.9(@types/babel__core@7.20.5)(next@16.2.6(@babel/core@7.29.7)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(webpack@5.109.2(lightningcss@1.32.0))
       '@radix-ui/react-context-menu': 2.3.7(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
