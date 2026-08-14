@@ -74,7 +74,11 @@ export interface LivenessResult {
 }
 
 export interface AttendanceResult {
-  status: 'RECORDED' | 'ALREADY_RECORDED' | 'REJECTED' | 'ERROR';
+  /**
+   * PENDING means the identity is still being confirmed across frames — normal
+   * progress, not a failure. Keep feeding frames; do not show it as an error.
+   */
+  status: 'RECORDED' | 'ALREADY_RECORDED' | 'PENDING' | 'REJECTED' | 'ERROR';
   attendanceId?: string;
   personId?: string;
   timestamp?: number;

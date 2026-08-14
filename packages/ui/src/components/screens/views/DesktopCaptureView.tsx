@@ -69,7 +69,7 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
     isWorkflowStarted,
     onStartWorkflow,
     onOpenReview,
-    hasCompletedSession,
+    hasCapturedImages,
     showScreenDebugStats,
     onToggleShowScreenDebugStats,
     className,
@@ -231,7 +231,7 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
               <Activity className="w-4 h-4" />
             </button>
 
-            {hasCompletedSession && onOpenReview && (
+            {hasCapturedImages && onOpenReview && (
               <button
                 onClick={onOpenReview}
                 className="px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-bold text-[11px] shadow-md flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer shrink-0"
@@ -684,6 +684,7 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
 
               {captureMode === "OFF" && onShutterCapture && (
                 <ShutterButton
+                  className="pointer-events-auto"
                   enabled={
                     faceState?.detected === true &&
                     faceState?.presence === "SINGLE_FACE" &&
@@ -921,6 +922,19 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                             </div>
                           </div>
                         </div>
+
+                        {/* Standing distance, so "step back" carries a number */}
+                        {faceState.distance && (
+                          <div className="flex items-center justify-between text-[11px] pt-2 border-t border-slate-800/40">
+                            <span className="text-slate-400 font-bold">Khoảng cách:</span>
+                            <span className="font-mono font-bold text-blue-400">
+                              ~{faceState.distance.meters.toFixed(2)} m
+                              <span className="text-slate-500 font-normal ml-1">
+                                ({faceState.distance.minMeters.toFixed(2)}–{faceState.distance.maxMeters.toFixed(2)})
+                              </span>
+                            </span>
+                          </div>
+                        )}
 
                         {/* Biometric Quality Check */}
                         {faceState.quality && (

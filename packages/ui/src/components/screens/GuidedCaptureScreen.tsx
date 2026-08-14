@@ -44,7 +44,8 @@ export interface GuidedCaptureScreenProps {
   isWorkflowStarted?: boolean;
   onStartWorkflow?: () => void;
   onOpenReview?: () => void;
-  hasCompletedSession?: boolean;
+  /** Whether the session holds at least one photo worth reviewing. */
+  hasCapturedImages?: boolean;
   showScreenDebugStats?: boolean;
   onToggleShowScreenDebugStats?: (show: boolean) => void;
   className?: string;
@@ -86,7 +87,7 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (
     isWorkflowStarted = false,
     onStartWorkflow,
     onOpenReview,
-    hasCompletedSession,
+    hasCapturedImages,
     showScreenDebugStats = true,
     onToggleShowScreenDebugStats,
     className,
@@ -333,18 +334,22 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (
     }
 
     if (presence === "NO_FACE" || !quality.accepted) {
+      // Keys must match the codes QualityEvaluator actually emits. Three of
+      // these were spelled TOO_FAR / TOO_CLOSE / NOT_CENTERED against an
+      // evaluator that reports FACE_TOO_SMALL / FACE_TOO_LARGE / OFF_CENTER, so
+      // the one instruction a person needs — step closer — never appeared and
+      // they were shown the generic fallback instead.
       const reasonMap: Record<string, { icon: string; text: string }> = {
         NO_FACE: { icon: "👤", text: "Vui lòng di chuyển vào khung hình" },
-        TOO_FAR: { icon: "🔍", text: "Lại gần camera hơn" },
-        TOO_CLOSE: { icon: "↔️", text: "Lùi xa camera hơn một chút" },
-        NOT_CENTERED: {
+        FACE_TOO_SMALL: { icon: "🔍", text: "Lại gần camera hơn" },
+        FACE_TOO_LARGE: { icon: "↔️", text: "Lùi xa camera hơn một chút" },
+        OFF_CENTER: {
           icon: "🎯",
           text: "Di chuyển khuôn mặt vào giữa khung",
         },
         TOO_DARK: { icon: "💡", text: "Môi trường quá tối" },
         TOO_BRIGHT: { icon: "☀️", text: "Môi trường quá chói sáng" },
-        BLURRY: { icon: "👓", text: "Khuôn mặt bị mờ, giữ yên camera" },
-        POOR_ANGLE: { icon: "📐", text: "Xoay mặt nhìn thẳng vào camera" },
+        BLURRY: { icon: "👓", text: "Ảnh chưa nét — giữ yên đầu, thử nơi sáng hơn" },
       };
 
       const primaryReason = quality.reasons[0] || "NO_FACE";
@@ -352,6 +357,14 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (
         icon: "⚠️",
         text: "Điều chỉnh vị trí khuôn mặt",
       };
+
+      // Distance turns "move closer" into something a person can act on without
+      // guessing how much. Only shown for the two reasons it explains.
+      const d = faceState.distance;
+      const distanceHint =
+        d && (primaryReason === "FACE_TOO_SMALL" || primaryReason === "FACE_TOO_LARGE")
+          ? ` (đang cách ~${d.meters.toFixed(1)} m)`
+          : "";
 
       return (
         <div className="absolute top-12 left-1/2 -translate-x-1/2 z-40 pointer-events-none animate-in fade-in zoom-in-95 duration-150">
@@ -361,7 +374,7 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (
             className="px-4 py-2 flex items-center gap-2"
           >
             <span className="text-sm leading-none">{info.icon}</span>
-            <span className="tracking-wide font-medium text-xs">{info.text}</span>
+            <span className="tracking-wide font-medium text-xs">{info.text}{distanceHint}</span>
           </LiquidGlassCard>
         </div>
       );
@@ -394,7 +407,7 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (
     isWorkflowStarted,
     onStartWorkflow,
     onOpenReview,
-    hasCompletedSession,
+    hasCapturedImages,
     showScreenDebugStats,
     onToggleShowScreenDebugStats,
     className,

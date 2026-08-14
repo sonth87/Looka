@@ -18,6 +18,8 @@ export class WorkflowEngine implements IWorkflowEngine {
   private _currentState: GuidanceState;
   private activeWorkflow: CaptureWorkflow | null = null;
   private currentStepIdx = 0;
+  /** Where ordered capture resumes once the running retake commits, if one is running. */
+  private retakeReturnIdx: number | null = null;
   private stepStartTime = 0;
   private sensitivity: CaptureSensitivity = 'MEDIUM';
   private captureMode: CaptureTriggerMode = 'AUTO';
@@ -52,6 +54,11 @@ export class WorkflowEngine implements IWorkflowEngine {
     return this._currentState;
   }
 
+  public get retakingStepId(): string | null {
+    if (this.retakeReturnIdx === null || !this.activeWorkflow) return null;
+    return this.activeWorkflow.steps[this.currentStepIdx]?.id ?? null;
+  }
+
   public async startSession(
     workflow: CaptureWorkflow,
     personId?: string
@@ -62,6 +69,7 @@ export class WorkflowEngine implements IWorkflowEngine {
 
     this.activeWorkflow = workflow;
     this.currentStepIdx = 0;
+    this.retakeReturnIdx = null;
     this.stepStartTime = Date.now();
     this.sensitivity = workflow.sensitivity || this.sensitivity || 'MEDIUM';
     this.stabilityTracker.reset();
@@ -183,6 +191,8 @@ export class WorkflowEngine implements IWorkflowEngine {
       );
 
       if (valid) {
+        // advanceToNextStep clears the retake, so the flag is read while it still stands.
+        const wasRetake = this.retakeReturnIdx !== null;
         this.updateStepStatus(currentStep.id, 'COMPLETED', captureResult.imagePath, faceState || undefined);
 
         // Phát sự kiện trigger để UI hiển thị Flash & Freeze Base64 & Animation bay ảnh
@@ -199,6 +209,14 @@ export class WorkflowEngine implements IWorkflowEngine {
 
         // 4. Chính thức chuyển step và reset bộ đếm cho quy trình chụp mới
         await this.advanceToNextStep();
+
+        // Emitted last so listeners see the session already back at its resting state.
+        if (wasRetake) {
+          this.emit('step-retaken', {
+            stepId: currentStep.id,
+            imagePath: captureResult.imagePath,
+          });
+        }
         return true;
       } else {
         const stepResult = this._currentSession.steps.find((s) => s.stepId === currentStep.id);
@@ -216,6 +234,7 @@ export class WorkflowEngine implements IWorkflowEngine {
       this._currentSession.completedAt = Date.now();
     }
     this.activeWorkflow = null;
+    this.retakeReturnIdx = null;
     this.stabilityTracker.reset();
     this._currentState.status = 'ERROR';
     this._currentState.primaryInstruction = 'Đã hủy quy trình';
@@ -234,6 +253,55 @@ export class WorkflowEngine implements IWorkflowEngine {
         result.attempts++;
       }
     }
+  }
+
+  /**
+   * Re-enter an already visited step so its photo can be replaced.
+   *
+   * Nothing on the session is thrown away up front: the previous image, the
+   * step statuses and the position the workflow had reached all stay put, so
+   * abandoning a retake leaves the session exactly as it was, and only a
+   * successful capture overwrites the one image being replaced. A session that
+   * had already finished is reopened for the duration of the retake and closes
+   * itself again as soon as the replacement lands.
+   */
+  public async retakeStep(stepId: string): Promise<boolean> {
+    // A cancelled session has no active workflow, so it is turned away here too.
+    if (this.isCapturing || !this.activeWorkflow || !this._currentSession) return false;
+
+    const idx = this.activeWorkflow.steps.findIndex((s) => s.id === stepId);
+    if (idx === -1) return false;
+
+    const step = this.activeWorkflow.steps[idx];
+    // Retaking during a retake must still come back to where ordered capture
+    // was interrupted, not to the step of the retake that preceded it.
+    if (this.retakeReturnIdx === null) this.retakeReturnIdx = this.currentStepIdx;
+    this.currentStepIdx = idx;
+    this.stepStartTime = Date.now();
+    this.stabilityTracker.reset();
+
+    this._currentSession.status = 'RUNNING';
+    this._currentSession.completedAt = undefined;
+
+    const stepResult = this._currentSession.steps.find((s) => s.stepId === stepId);
+    // Counted before the shot is taken, so the replacement is stored under an
+    // attempt of its own instead of colliding with the photo it replaces.
+    if (stepResult) stepResult.attempts++;
+
+    this._currentState = {
+      status: 'POSITIONING',
+      primaryInstruction: step.instruction,
+      primaryReason: 'NO_FACE',
+      progress: 0,
+      hints: [],
+      currentStepIndex: idx,
+      totalSteps: this.activeWorkflow.steps.length,
+      stepId: step.id,
+      stepType: step.type,
+    };
+
+    this.emit('state-change', this._currentState);
+    return true;
   }
 
   public async skipStep(): Promise<void> {
@@ -269,7 +337,11 @@ export class WorkflowEngine implements IWorkflowEngine {
   private async advanceToNextStep(): Promise<void> {
     if (!this.activeWorkflow || !this._currentSession) return;
 
-    this.currentStepIdx++;
+    // A retake re-entered a step the workflow had already passed, so ordered
+    // capture picks up at the step it interrupted, not after the retaken one.
+    this.currentStepIdx =
+      this.retakeReturnIdx !== null ? this.retakeReturnIdx : this.currentStepIdx + 1;
+    this.retakeReturnIdx = null;
     this.stepStartTime = Date.now();
     this.stabilityTracker.reset();
 

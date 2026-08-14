@@ -5,6 +5,16 @@ import path from 'node:path';
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+
+  // Relative asset paths.
+  //
+  // A packaged build is opened with loadFile(), so the page runs under file://.
+  // Vite's default of '/' emits <script src="/assets/...">, which under file://
+  // resolves to the root of the drive, loads nothing, and leaves a blank window
+  // with no error anywhere. The dev server is unaffected — it serves over HTTP,
+  // which is why this never shows up during development.
+  base: './',
+
   build: {
     emptyOutDir: false,
   },

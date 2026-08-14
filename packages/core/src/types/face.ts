@@ -33,14 +33,28 @@ export interface FacePose {
 export interface FaceQualityResult {
   overallScore: number;
   accepted: boolean;
-  sharpness: number;
-  brightness: number;
+  /**
+   * Null when no pixels were available to measure from.
+   *
+   * These used to fall back to flattering constants, so a caller with no frame
+   * data was told the image was sharp and well lit. A number here means it was
+   * measured; anything else has to be treated as unknown, not as good.
+   */
+  sharpness: number | null;
+  brightness: number | null;
   faceSizeRatio: number;
   centerXOffset: number;
   centerYOffset: number;
-  eyesVisible: boolean;
-  mouthVisible: boolean;
-  occluded: boolean;
+  /**
+   * Null until something actually looks.
+   *
+   * Nothing in the pipeline detects eyelids, mouths or occlusion today. These
+   * were hardcoded to "eyes visible, not occluded", which reported a masked or
+   * closed-eyed face as fully verified — a claim no code had earned.
+   */
+  eyesVisible: boolean | null;
+  mouthVisible: boolean | null;
+  occluded: boolean | null;
   reasons: string[];
 }
 
@@ -51,6 +65,20 @@ export interface FaceDetection {
 
 export type FacePresenceState = 'NO_FACE' | 'SINGLE_FACE' | 'MULTIPLE_FACES';
 
+/**
+ * How far the subject is standing, in metres.
+ *
+ * A band rather than a figure: it is derived from how much of the frame the
+ * face spans, and both inputs to that — real face width and the camera's field
+ * of view — vary by around 10% and are rarely published. Null when nothing was
+ * detected to measure.
+ */
+export interface FaceDistance {
+  minMeters: number;
+  maxMeters: number;
+  meters: number;
+}
+
 export interface FaceState {
   timestamp: number;
   detected: boolean;
@@ -60,6 +88,8 @@ export interface FaceState {
   center?: Point2D;
   pose?: FacePose;
   quality?: FaceQualityResult;
+  /** Estimated standing distance. Null when it could not be measured. */
+  distance?: FaceDistance | null;
   landmarks?: FaceLandmark[];
   confidence?: number;
   /** Input frame dimensions */
