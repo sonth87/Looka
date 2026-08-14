@@ -507,7 +507,7 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
               {!stream && (
                 <div
                   className={cn(
-                    "absolute inset-0 flex flex-col items-center justify-center gap-3 p-4 z-20 transition-colors",
+                    "absolute inset-0 flex flex-col items-center justify-center gap-3 p-4 z-20 pointer-events-auto transition-colors",
                     theme === "dark"
                       ? "bg-slate-950/95 text-slate-100"
                       : "bg-slate-50/95 text-slate-900",

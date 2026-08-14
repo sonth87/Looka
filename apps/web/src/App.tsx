@@ -106,7 +106,7 @@ export default function App() {
             dock: false,
             menuBar: { clock: true, spotlight: false, controlCenter: false },
           }}
-          colorScheme="dark"
+          colorScheme="light"
           osTheme="macos"
           fallbackMenuBarAppId="looka-face-capture"
         />

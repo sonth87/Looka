@@ -72,16 +72,7 @@ export interface FaceCaptureAppProps {
 }
 
 export function FaceCaptureApp(_props: FaceCaptureAppProps) {
-  const [mode, setMode] = useState<'simulation' | 'live'>(() => {
-    if (
-      typeof window !== 'undefined' &&
-      (window.innerWidth < 768 ||
-        /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent))
-    ) {
-      return 'live';
-    }
-    return 'simulation';
-  });
+  const [mode, setMode] = useState<'simulation' | 'live'>('live');
 
   const [theme, setTheme] = useState<'dark' | 'light'>(() => getSettings().theme || 'light');
 

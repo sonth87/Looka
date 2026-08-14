@@ -16,11 +16,9 @@ const appsConfig: AppConfig[] = [
 ];
 
 export default function App() {
-  const DeviceLayoutComponent = DeviceLayout as any;
-
   return (
     <div className="w-screen h-screen overflow-hidden bg-slate-950">
-      <DeviceLayoutComponent
+      <DeviceLayout
         assetBaseUrl="https://device-layout.vercel.app"
         apps={appsConfig}
         isSimpleMode={{
