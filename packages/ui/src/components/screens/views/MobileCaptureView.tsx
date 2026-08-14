@@ -63,19 +63,29 @@ export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
         className,
       )}
     >
-      {/* ── Top Header ── */}
+      {/* ── Top Header with Integrated Step Timeline ── */}
       <header className={cn(
-        "w-full px-3 flex items-center justify-between gap-2 pt-2.5 pb-2 shrink-0 z-30 border-b transition-colors duration-300",
+        "w-full px-3 flex items-center justify-between gap-2 py-2 shrink-0 z-30 border-b transition-colors duration-300",
         theme === "dark" ? "border-slate-800/80 bg-slate-950/90 text-slate-100" : "border-slate-200/90 bg-white/90 text-slate-900 shadow-sm"
       )}>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5 shrink-0">
           <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-blue-600 to-indigo-600 flex items-center justify-center text-white font-black text-xs shrink-0 shadow-md">
             LK
           </div>
-          <h1 className="text-xs font-bold tracking-tight">Looka</h1>
+          <h1 className="text-xs font-bold tracking-tight hidden xs:block">Looka</h1>
         </div>
 
-        <div className="flex items-center gap-2">
+        {/* Integrated Center StepProgress Timeline */}
+        <div className="flex-1 max-w-xs px-1 overflow-visible">
+          <StepProgress
+            steps={steps}
+            currentStepIndex={guidance.currentStepIndex}
+            theme={theme}
+            compact={true}
+          />
+        </div>
+
+        <div className="flex items-center gap-1.5 shrink-0">
           {devices && devices.length > 1 && (
             <CameraSelector
               devices={devices}
@@ -110,15 +120,6 @@ export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
           )}
         </div>
       </header>
-
-      {/* ── Steps Timeline Line ── */}
-      <div className="w-full max-w-sm px-3 pt-1.5 pb-1 shrink-0 z-30">
-        <StepProgress
-          steps={steps}
-          currentStepIndex={guidance.currentStepIndex}
-          theme={theme}
-        />
-      </div>
 
       {/* ── Main Content: Extended Portrait Camera Display ── */}
       <main className="w-full flex-1 flex flex-col items-center justify-start z-10 overflow-hidden my-0 px-2 max-w-sm pt-1 pb-2">

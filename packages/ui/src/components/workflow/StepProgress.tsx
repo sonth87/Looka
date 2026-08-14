@@ -13,6 +13,7 @@ export interface StepProgressProps {
   steps: StepItem[];
   currentStepIndex: number;
   theme?: 'dark' | 'light';
+  compact?: boolean;
   className?: string;
 }
 
@@ -20,6 +21,7 @@ export const StepProgress: React.FC<StepProgressProps> = ({
   steps,
   currentStepIndex,
   theme = 'light',
+  compact = false,
   className,
 }) => {
   if (!steps || steps.length === 0) return null;
@@ -27,7 +29,8 @@ export const StepProgress: React.FC<StepProgressProps> = ({
   return (
     <div
       className={cn(
-        'flex items-center justify-between w-full max-w-md mx-auto py-2 px-1 overflow-visible bg-transparent border-0 shadow-none',
+        'flex items-center justify-between w-full max-w-md mx-auto py-1 px-0.5 overflow-visible bg-transparent border-0 shadow-none',
+        compact && 'justify-center gap-0.5 sm:gap-1 py-0 max-w-[210px]',
         className
       )}
     >
@@ -39,7 +42,7 @@ export const StepProgress: React.FC<StepProgressProps> = ({
         const dotStyle = isCompleted
           ? 'backdrop-blur-xl bg-gradient-to-br from-emerald-500/90 to-teal-600/90 text-white border-white/60 shadow-[inset_0_1.5px_2px_rgba(255,255,255,0.8),inset_0_-1px_1px_rgba(0,0,0,0.2),0_4px_14px_rgba(16,185,129,0.4)]'
           : isCurrent
-          ? 'backdrop-blur-xl bg-gradient-to-br from-blue-500/95 to-indigo-600/95 text-white border-white/70 ring-4 ring-blue-500/30 shadow-[inset_0_1.5px_2.5px_rgba(255,255,255,0.9),inset_0_-1px_1px_rgba(0,0,0,0.2),0_6px_20px_rgba(37,99,235,0.5)] scale-110'
+          ? 'backdrop-blur-xl bg-gradient-to-br from-blue-500/95 to-indigo-600/95 text-white border-white/70 ring-2 sm:ring-4 ring-blue-500/30 shadow-[inset_0_1.5px_2.5px_rgba(255,255,255,0.9),inset_0_-1px_1px_rgba(0,0,0,0.2),0_6px_20px_rgba(37,99,235,0.5)] scale-105 sm:scale-110'
           : isFailed
           ? 'backdrop-blur-xl bg-gradient-to-br from-rose-500/90 to-red-600/90 text-white border-white/60 shadow-[inset_0_1.5px_2px_rgba(255,255,255,0.7),0_4px_14px_rgba(244,63,94,0.4)]'
           : theme === 'dark'
@@ -53,7 +56,7 @@ export const StepProgress: React.FC<StepProgressProps> = ({
           : 'bg-slate-300/80';
 
         const labelColor = isCurrent
-          ? 'text-blue-600 dark:text-blue-400 font-bold drop-shadow-xs scale-105'
+          ? 'text-blue-600 dark:text-blue-400 font-bold drop-shadow-xs'
           : isCompleted
           ? 'text-emerald-600 dark:text-emerald-400 font-semibold'
           : theme === 'dark'
@@ -62,11 +65,12 @@ export const StepProgress: React.FC<StepProgressProps> = ({
 
         return (
           <React.Fragment key={step.id}>
-            <div className="flex flex-col items-center gap-0.5 sm:gap-1 relative shrink-0">
+            <div className="flex flex-col items-center gap-0.5 relative shrink-0">
               <div
                 data-step-id={step.id}
                 className={cn(
-                  'w-6 h-6 sm:w-7 sm:h-7 rounded-full border flex items-center justify-center font-black text-[10px] sm:text-xs transition-all duration-300 cursor-default select-none',
+                  'rounded-full border flex items-center justify-center font-black transition-all duration-300 cursor-default select-none',
+                  compact ? 'w-5 h-5 text-[9px]' : 'w-6 h-6 sm:w-7 sm:h-7 text-[10px] sm:text-xs',
                   dotStyle
                 )}
               >
@@ -77,18 +81,25 @@ export const StepProgress: React.FC<StepProgressProps> = ({
                     className="w-full h-full rounded-full object-cover border border-emerald-400 shadow-md animate-in zoom-in duration-300"
                   />
                 ) : isCompleted ? (
-                  <Check className="w-3.5 h-3.5 stroke-[3]" />
+                  <Check className={cn(compact ? 'w-3 h-3 stroke-[3]' : 'w-3.5 h-3.5 stroke-[3]')} />
                 ) : (
                   idx + 1
                 )}
               </div>
-              <span className={cn('text-[9px] sm:text-[10px] tracking-tight transition-all duration-300 whitespace-nowrap', labelColor)}>
+              <span className={cn(
+                'tracking-tight transition-all duration-300 whitespace-nowrap',
+                compact ? 'text-[8px]' : 'text-[9px] sm:text-[10px]',
+                labelColor
+              )}>
                 {step.label}
               </span>
             </div>
 
             {idx < steps.length - 1 && (
-              <div className="flex-1 min-w-[10px] sm:min-w-[14px] h-0.5 mx-1 sm:mx-1.5 mb-3.5 sm:mb-4 rounded-full overflow-hidden shrink">
+              <div className={cn(
+                'h-0.5 rounded-full overflow-hidden shrink',
+                compact ? 'w-2.5 sm:w-3.5 mx-0.5 mb-2.5 flex-none' : 'flex-1 min-w-[10px] sm:min-w-[14px] mx-1 sm:mx-1.5 mb-3.5 sm:mb-4'
+              )}>
                 <div className={cn('h-full transition-all duration-500', lineColor)} />
               </div>
             )}

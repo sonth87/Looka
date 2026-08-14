@@ -19,6 +19,8 @@ function createWindow() {
     },
   });
 
+  mainWindow.maximize();
+
   if (process.env.VITE_DEV_SERVER_URL) {
     mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
   } else {
