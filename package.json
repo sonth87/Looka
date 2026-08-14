@@ -17,10 +17,11 @@
     "package:app": "pnpm --filter @face/desktop package",
     "package:app:mac": "pnpm --filter @face/desktop package:mac",
     "package:app:win": "pnpm --filter @face/desktop package:win",
-    "package:app:all": "pnpm --filter @face/desktop package:all",
     "test": "turbo run test",
     "lint": "turbo run lint",
-    "clean": "turbo run clean && rimraf node_modules"
+    "clean": "turbo run clean && rimraf node_modules",
+    "package:app:win:dir": "pnpm --filter @face/desktop package:win:dir",
+    "start:app": "pnpm --filter @face/desktop start"
   },
   "devDependencies": {
     "@types/node": "^22.13.4",

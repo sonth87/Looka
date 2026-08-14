@@ -7,6 +7,14 @@ export interface PanelState {
 
 export interface AppSettings {
   theme?: 'dark' | 'light';
+  /**
+   * Which engine the app starts with.
+   *
+   * Remembered rather than inferred: this used to be guessed from window width,
+   * so a desktop kiosk — the machine that actually has the camera — booted into
+   * simulation and ran mock face data until somebody noticed and switched.
+   */
+  engineMode?: 'simulation' | 'live';
   sensitivity?: CaptureSensitivity;
   cameraScale?: 'compact' | 'standard' | 'large';
   isFullscreen?: boolean;
@@ -19,12 +27,28 @@ export interface AppSettings {
   autoHoldMs?: number;
   allowedGestures?: GestureType[];
   panels?: Record<string, PanelState>;
+  /** Which round of default-changes this stored object has already seen. */
+  settingsVersion?: number;
 }
 
 const SETTINGS_KEY = 'face_platform_settings';
 
+/**
+ * Bump when changing a default that existing installs must adopt.
+ *
+ * Stored settings win over defaults — that is the point of saving them — but it
+ * means a changed default never reaches a machine that has run the app before.
+ * Landmarks hit exactly this: the default became true, yet every existing kiosk
+ * kept the false it had written, so the feature looked broken on the machines
+ * that had been used the most.
+ */
+const SETTINGS_VERSION = 1;
+
 export const defaultSettings: AppSettings = {
   theme: 'light',
+  // Live is what the product does; simulation is a deliberate detour into mock
+  // data, so it should be chosen, never landed in by default.
+  engineMode: 'live',
   sensitivity: 'MEDIUM',
   cameraScale: 'standard',
   isFullscreen: false,
@@ -37,7 +61,35 @@ export const defaultSettings: AppSettings = {
   autoHoldMs: 2000,
   allowedGestures: ['VICTORY', 'THUMBS_UP', 'OPEN_PALM'],
   panels: {},
+  // Deliberately absent: getSettings merges defaults *under* stored values, so
+  // a version here would mask an old object that has no version of its own and
+  // the migration would never run for the installs that need it.
 };
+
+/**
+ * Re-apply defaults that changed since this object was stored.
+ *
+ * Runs at most once per version bump — a machine that has already caught up is
+ * left alone, so an operator who deliberately turns something off keeps it off
+ * from then on.
+ */
+function applyDefaultMigrations(settings: AppSettings): AppSettings {
+  const storedVersion = settings.settingsVersion ?? 0;
+  if (storedVersion >= SETTINGS_VERSION) return settings;
+
+  const next: AppSettings = { ...settings };
+
+  // v1 — landmark dots became visible by default.
+  if (storedVersion < 1) next.showLandmarks = true;
+
+  next.settingsVersion = SETTINGS_VERSION;
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(next));
+  } catch {
+    /* a read-only store still gets the migrated values in memory */
+  }
+  return next;
+}
 
 /**
  * Migrate legacy individual localStorage keys into the single unified SETTINGS_KEY object
@@ -177,7 +229,7 @@ export function getSettings(): AppSettings {
       ...parsed,
       panels: { ...defaultSettings.panels, ...(parsed.panels || {}) },
     };
-    return migrateLegacyKeys(merged);
+    return applyDefaultMigrations(migrateLegacyKeys(merged));
   } catch {
     return defaultSettings;
   }

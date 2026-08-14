@@ -14,6 +14,29 @@ export interface DebugPanelProps {
   defaultPosition?: { x: number; y: number };
 }
 
+/**
+ * Vietnamese labels for the raw engine codes.
+ *
+ * The panel is read by the person operating the kiosk, not by whoever wrote the
+ * engine, so the codes are translated at the edge rather than renamed upstream —
+ * the codes stay stable for logs and comparisons.
+ */
+const PRESENCE_LABEL: Record<string, string> = {
+  NO_FACE: 'Không thấy mặt',
+  SINGLE_FACE: 'Một khuôn mặt',
+  MULTIPLE_FACES: 'Nhiều khuôn mặt',
+};
+
+const QUALITY_REASON_LABEL: Record<string, string> = {
+  FACE_TOO_SMALL: 'Mặt quá nhỏ',
+  FACE_TOO_LARGE: 'Mặt quá to',
+  OFF_CENTER: 'Lệch khỏi giữa khung',
+  TOO_DARK: 'Thiếu sáng',
+  TOO_BRIGHT: 'Quá sáng',
+  BLURRY: 'Ảnh bị mờ',
+  OCCLUDED: 'Mặt bị che',
+};
+
 export const DebugPanel: React.FC<DebugPanelProps> = ({
   faceState,
   fps = 0,
@@ -36,7 +59,7 @@ export const DebugPanel: React.FC<DebugPanelProps> = ({
   const title = (
     <span className={cn('flex items-center gap-2 font-semibold', theme === 'dark' ? 'text-slate-100' : 'text-slate-900')}>
       <Activity className="w-4 h-4 text-emerald-400 animate-pulse" />
-      CV Debug Panel
+      Thông số nhận diện
     </span>
   );
 
@@ -67,32 +90,32 @@ export const DebugPanel: React.FC<DebugPanelProps> = ({
         <div className="grid grid-cols-2 gap-2">
           <div className={cn('p-2.5 rounded-xl border relative overflow-hidden', liquidCardStyle)}>
             <div className="absolute top-0 left-0 right-0 h-[1px] bg-gradient-to-r from-transparent via-blue-400/40 to-transparent" />
-            <span className={cn('text-[10px] uppercase block font-bold tracking-wide', theme === 'dark' ? 'text-slate-300' : 'text-slate-600')}>Camera FPS</span>
+            <span className={cn('text-[10px] uppercase block font-bold tracking-wide', theme === 'dark' ? 'text-slate-300' : 'text-slate-600')}>FPS camera</span>
             <span className="text-base font-bold text-blue-400 drop-shadow-[0_0_8px_rgba(96,165,250,0.4)]">{fps}</span>
           </div>
           <div className={cn('p-2.5 rounded-xl border relative overflow-hidden', liquidCardStyle)}>
             <div className="absolute top-0 left-0 right-0 h-[1px] bg-gradient-to-r from-transparent via-purple-400/40 to-transparent" />
-            <span className={cn('text-[10px] uppercase block font-bold tracking-wide', theme === 'dark' ? 'text-slate-300' : 'text-slate-600')}>CV Engine FPS</span>
+            <span className={cn('text-[10px] uppercase block font-bold tracking-wide', theme === 'dark' ? 'text-slate-300' : 'text-slate-600')}>FPS xử lý</span>
             <span className="text-base font-bold text-purple-400 drop-shadow-[0_0_8px_rgba(192,132,252,0.4)]">{cvFps}</span>
           </div>
         </div>
 
         {/* Presence State */}
         <div className="flex items-center justify-between pt-1">
-          <span className={cn('text-[11px] font-semibold', theme === 'dark' ? 'text-slate-200' : 'text-slate-700')}>Presence</span>
+          <span className={cn('text-[11px] font-semibold', theme === 'dark' ? 'text-slate-200' : 'text-slate-700')}>Khuôn mặt</span>
           <span className={cn('px-3 py-0.5 rounded-full text-[10px] font-bold border backdrop-blur-md transition-all', presenceColor)}>
-            {faceState?.presence || 'NO_FACE'}
+            {PRESENCE_LABEL[faceState?.presence || 'NO_FACE'] ?? faceState?.presence}
           </span>
         </div>
 
         {/* Head Pose */}
         <div className={cn('space-y-1.5 pt-2.5', glassBorderTop)}>
           <span className={cn('text-[10px] uppercase font-bold tracking-wider', theme === 'dark' ? 'text-slate-300' : 'text-slate-600')}>
-            Head Pose (Deg)
+            Góc đầu (độ)
           </span>
           <div className="grid grid-cols-3 gap-1.5 text-center">
             <div className={cn('p-2 rounded-xl border relative overflow-hidden', liquidCardStyle)}>
-              <div className={cn('text-[9px] font-bold', theme === 'dark' ? 'text-slate-400' : 'text-slate-500')}>YAW</div>
+              <div className={cn('text-[9px] font-bold', theme === 'dark' ? 'text-slate-400' : 'text-slate-500')}>QUAY NGANG</div>
               <div
                 className={cn(
                   'font-bold text-xs mt-0.5',
@@ -107,7 +130,7 @@ export const DebugPanel: React.FC<DebugPanelProps> = ({
               </div>
             </div>
             <div className={cn('p-2 rounded-xl border relative overflow-hidden', liquidCardStyle)}>
-              <div className={cn('text-[9px] font-bold', theme === 'dark' ? 'text-slate-400' : 'text-slate-500')}>PITCH</div>
+              <div className={cn('text-[9px] font-bold', theme === 'dark' ? 'text-slate-400' : 'text-slate-500')}>NGẨNG / CÚI</div>
               <div
                 className={cn(
                   'font-bold text-xs mt-0.5',
@@ -118,7 +141,7 @@ export const DebugPanel: React.FC<DebugPanelProps> = ({
               </div>
             </div>
             <div className={cn('p-2 rounded-xl border relative overflow-hidden', liquidCardStyle)}>
-              <div className={cn('text-[9px] font-bold', theme === 'dark' ? 'text-slate-400' : 'text-slate-500')}>ROLL</div>
+              <div className={cn('text-[9px] font-bold', theme === 'dark' ? 'text-slate-400' : 'text-slate-500')}>NGHIÊNG</div>
               <div
                 className={cn(
                   'font-bold text-xs mt-0.5',
@@ -135,23 +158,23 @@ export const DebugPanel: React.FC<DebugPanelProps> = ({
         {quality && (
           <div className={cn('space-y-1.5 pt-2.5', glassBorderTop)}>
             <span className={cn('text-[10px] uppercase font-bold tracking-wider', theme === 'dark' ? 'text-slate-300' : 'text-slate-600')}>
-              Face Quality ({quality.overallScore * 100}%)
+              Chất lượng ảnh ({Math.round(quality.overallScore * 100)}%)
             </span>
             <div className="grid grid-cols-2 gap-1.5 text-[11px]">
               <div className={cn('flex justify-between px-2.5 py-1 rounded-lg border', liquidCardStyle)}>
-                <span className={theme === 'dark' ? 'text-slate-400' : 'text-slate-600'}>Size Ratio:</span>
+                <span className={theme === 'dark' ? 'text-slate-400' : 'text-slate-600'}>Cỡ mặt:</span>
                 <span className="font-semibold">{quality.faceSizeRatio}</span>
               </div>
               <div className={cn('flex justify-between px-2.5 py-1 rounded-lg border', liquidCardStyle)}>
-                <span className={theme === 'dark' ? 'text-slate-400' : 'text-slate-600'}>Sharpness:</span>
-                <span className="font-semibold">{quality.sharpness}</span>
+                <span className={theme === 'dark' ? 'text-slate-400' : 'text-slate-600'}>Độ nét:</span>
+                <span className="font-semibold">{quality.sharpness ?? 'chưa đo'}</span>
               </div>
               <div className={cn('flex justify-between px-2.5 py-1 rounded-lg border', liquidCardStyle)}>
-                <span className={theme === 'dark' ? 'text-slate-400' : 'text-slate-600'}>Brightness:</span>
-                <span className="font-semibold">{quality.brightness}</span>
+                <span className={theme === 'dark' ? 'text-slate-400' : 'text-slate-600'}>Độ sáng:</span>
+                <span className="font-semibold">{quality.brightness ?? 'chưa đo'}</span>
               </div>
               <div className={cn('flex justify-between px-2.5 py-1 rounded-lg border', liquidCardStyle)}>
-                <span className={theme === 'dark' ? 'text-slate-400' : 'text-slate-600'}>Center Offset:</span>
+                <span className={theme === 'dark' ? 'text-slate-400' : 'text-slate-600'}>Lệch tâm:</span>
                 <span className="font-semibold">
                   {Math.max(quality.centerXOffset, quality.centerYOffset)}
                 </span>
@@ -165,7 +188,7 @@ export const DebugPanel: React.FC<DebugPanelProps> = ({
                     key={idx}
                     className="px-2 py-0.5 text-[9px] bg-rose-500/20 text-rose-300 rounded-md border border-rose-400/30 font-semibold backdrop-blur-md shadow-sm"
                   >
-                    {r}
+                    {QUALITY_REASON_LABEL[r] ?? r}
                   </span>
                 ))}
               </div>

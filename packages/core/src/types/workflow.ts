@@ -21,8 +21,6 @@ export interface QualityRequirement {
   minBrightness?: number;
   maxBrightness?: number;
   minSharpness?: number;
-  requireEyesVisible?: boolean;
-  rejectOccluded?: boolean;
   sensitivity?: CaptureSensitivity;
 }
 

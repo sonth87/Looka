@@ -2,12 +2,26 @@ import { FrameInput, GestureEngine, GestureState, HandLandmark } from '@face/cor
 import { RuleBasedClassifier } from '../classifiers/RuleBasedClassifier.js';
 import { GestureSmoothing } from '../smoothing/GestureSmoothing.js';
 
+export interface MediaPipeGestureEngineOptions {
+  /** Folder holding the MediaPipe wasm runtime. Local by default. */
+  wasmPath?: string;
+  /** Hand landmarker model file. Local by default. */
+  modelPath?: string;
+}
+
 export class MediaPipeGestureEngine implements GestureEngine {
   public readonly name = 'MediaPipeGestureEngine';
   private _initialized = false;
   private handLandmarker: any = null;
   private classifier = new RuleBasedClassifier();
   private smoothing = new GestureSmoothing(5);
+  private readonly wasmPath: string;
+  private readonly modelPath: string;
+
+  constructor(options: MediaPipeGestureEngineOptions = {}) {
+    this.wasmPath = options.wasmPath ?? './wasm';
+    this.modelPath = options.modelPath ?? './models/hand_landmarker.task';
+  }
 
   public get isInitialized(): boolean {
     return this._initialized;
@@ -20,13 +34,12 @@ export class MediaPipeGestureEngine implements GestureEngine {
       if (typeof window !== 'undefined') {
         const tasksVision = await import('@mediapipe/tasks-vision');
         const { HandLandmarker, FilesetResolver } = tasksVision;
-        const vision = await FilesetResolver.forVisionTasks(
-          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm'
-        );
+        // Local assets — see the note in MediaPipeCVEngine. A gesture engine
+        // that needs the internet to start is useless on an offline kiosk.
+        const vision = await FilesetResolver.forVisionTasks(this.wasmPath);
         this.handLandmarker = await HandLandmarker.createFromOptions(vision, {
           baseOptions: {
-            modelAssetPath:
-              'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+            modelAssetPath: this.modelPath,
             delegate: 'GPU',
           },
           runningMode: 'IMAGE',

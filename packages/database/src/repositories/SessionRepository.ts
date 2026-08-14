@@ -1,8 +1,14 @@
 import { CaptureSession, CaptureStepResult } from '@face/core';
-import { SQLiteStorageAdapter } from '../SQLiteStorageAdapter.js';
+import { SqlExecutor } from '../sql/SqlDriver.js';
+
+/** Key/value surface a SessionRepository needs on top of raw SQL. */
+export interface SessionStore extends SqlExecutor {
+  get<T>(key: string): Promise<T | null>;
+  set<T>(key: string, value: T): Promise<void>;
+}
 
 export class SessionRepository {
-  constructor(private adapter: SQLiteStorageAdapter) {}
+  constructor(private adapter: SessionStore) {}
 
   public async saveSession(session: CaptureSession): Promise<void> {
     const key = `session:${session.id}`;

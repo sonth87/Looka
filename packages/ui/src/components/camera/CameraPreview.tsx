@@ -75,6 +75,12 @@ export const CameraPreview: React.FC<CameraPreviewProps> = ({
         />
       )}
 
+      {/*
+        Overlays sit on top of the video and must not swallow clicks, so the
+        whole layer is inert by default. Anything interactive placed in here —
+        a shutter, a start button — has to opt back in with pointer-events-auto,
+        or it will render perfectly and simply refuse to respond.
+      */}
       {children && <div className="absolute inset-0 pointer-events-none">{children}</div>}
     </div>
   );

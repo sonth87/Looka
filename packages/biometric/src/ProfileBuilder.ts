@@ -1,5 +1,5 @@
 import { CaptureSession, FaceProfile, ProfileEmbeddingMetadata } from '@face/core';
-import { MockEmbeddingExtractor } from './MockEmbeddingExtractor.js';
+import { MockEmbeddingExtractor, MOCK_MODEL_FAMILY } from './MockEmbeddingExtractor.js';
 import { l2Normalize } from './vectorMath.js';
 
 export class ProfileBuilder {
@@ -46,11 +46,16 @@ export class ProfileBuilder {
     const centroid = l2Normalize(weightedSum);
     const profileId = `prof_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
+    // A profile built from placeholder embeddings must never go ACTIVE: it would
+    // join the recognition index and match nobody, and a single demo would leave
+    // permanent junk behind. DRAFT keeps it visible but out of the way.
+    const isMock = this.extractor.modelFamily === MOCK_MODEL_FAMILY;
+
     const profile: FaceProfile = {
       id: profileId,
       personId,
       profileVersion: 1,
-      status: 'ACTIVE',
+      status: isMock ? 'DRAFT' : 'ACTIVE',
       modelFamily: this.extractor.modelFamily,
       modelVersion: this.extractor.modelVersion,
       preprocessingVersion: this.extractor.preprocessingVersion,

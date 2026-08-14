@@ -27,7 +27,10 @@ export class GuidanceEngine implements IGuidanceEngine {
     TILT_CORRECT: 'Giữ thẳng đầu',
     TOO_DARK: 'Hãy di chuyển tới nơi sáng hơn',
     TOO_BRIGHT: 'Tránh nguồn sáng quá mạnh chiếu vào mặt',
-    BLURRY: 'Hãy giữ đầu ổn định',
+    // Movement is only one cause. A dim room makes the camera hold the shutter
+    // open longer, which blurs a subject who is standing perfectly still, so
+    // telling them to keep still sends them chasing the wrong thing.
+    BLURRY: 'Ảnh chưa nét — giữ yên đầu và tìm chỗ sáng hơn',
     OCCLUDED: 'Vui lòng bỏ khẩu trang hoặc vật che mặt',
     HOLD_STILL: 'Giữ nguyên tư thế...',
     READY: 'Tư thế đúng! Giữ nguyên...',
