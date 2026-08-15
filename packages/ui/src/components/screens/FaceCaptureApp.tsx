@@ -7,10 +7,12 @@ import {
   CaptureTriggerMode,
   CaptureWorkflow,
   FaceState,
+  FrameInput,
   GestureState,
   GuidanceState,
 } from '@face/core';
 import { BrowserCameraService } from '@face/camera';
+import { zoomFactorToReach } from '@face/face-quality';
 import { MockCVEngine, FramePipeline } from '@face/cv-engine';
 import { MediaPipeCVEngine } from '@face/cv-mediapipe';
 import { MediaPipeGestureEngine } from '@face/hand-gesture';
@@ -32,7 +34,12 @@ const defaultWorkflow: CaptureWorkflow = {
       id: 'step-front',
       type: 'FRONT',
       instruction: 'Nhìn thẳng vào camera',
-      pose: { yaw: { target: 0, tolerance: 7 }, pitch: { target: 0, tolerance: 7 } },
+      // Widened for real degrees. The 7 here was set when pitch and yaw came
+      // from a 2D proxy whose numbers stayed small whatever the head did; a
+      // solved 3D pose reports the actual angle, and a webcam sitting below eye
+      // level already puts a seated person 10 degrees or so off axis before
+      // they have moved at all.
+      pose: { yaw: { target: 0, tolerance: 12 }, pitch: { target: 0, tolerance: 12 } },
       capture: { enabled: true },
     },
     {
@@ -52,15 +59,21 @@ const defaultWorkflow: CaptureWorkflow = {
     {
       id: 'step-up',
       type: 'UP',
-      instruction: 'Ngẩng đầu lên (25° - 50°)',
-      pose: { pitch: { target: -37.5, tolerance: 12.5 } },
+      instruction: 'Ngẩng đầu lên (15° - 35°)',
+      // Positive pitch is looking up — the convention documented on
+      // PoseEstimator. These two were swapped, so the step asked the subject
+      // to look down while the hint told them the opposite, and it could not
+      // be completed by following its own instruction.
+      // Real degrees now: the angle comes from MediaPipe's solved 3D pose
+      // rather than from how far the nose appears to sit below the eye line.
+      pose: { pitch: { target: 25, tolerance: 10 } },
       capture: { enabled: true },
     },
     {
       id: 'step-down',
       type: 'DOWN',
-      instruction: 'Cúi đầu xuống (25° - 50°)',
-      pose: { pitch: { target: 37.5, tolerance: 12.5 } },
+      instruction: 'Cúi đầu xuống (15° - 35°)',
+      pose: { pitch: { target: -25, tolerance: 10 } },
       capture: { enabled: true },
     },
   ],
@@ -149,6 +162,21 @@ export function FaceCaptureApp(_props: FaceCaptureAppProps) {
   const gestureAnimRef = useRef<number | null>(null);
   const mediaPipeCvRef = useRef<MediaPipeCVEngine | null>(null);
 
+  /** Most recent grabbed frame, shared so only one GPU readback happens per tick. */
+  const latestFrameRef = useRef<FrameInput | null>(null);
+
+  /**
+   * Face state readable from inside the animation loops.
+   *
+   * The gesture loop read `faceState` directly, which forced it into the
+   * effect's dependency list — so every processed frame cancelled and recreated
+   * the requestAnimationFrame loop, dozens of times a second.
+   */
+  const faceStateRef = useRef<FaceState | null>(null);
+  useEffect(() => {
+    faceStateRef.current = faceState;
+  }, [faceState]);
+
   useEffect(() => {
     async function init() {
       try {
@@ -231,6 +259,11 @@ export function FaceCaptureApp(_props: FaceCaptureAppProps) {
         });
 
         await liveEngine.startSession(defaultWorkflow);
+
+        // Opening the camera was gated behind a user-agent test, so a desktop
+        // showed a live-mode interface with no picture in it: stream stayed
+        // null and the face overlay, which needs one, drew nothing.
+        startLiveMode();
       } catch (err) {
         console.error('❌ [FaceCaptureApp] Initialization error:', err);
       }
@@ -264,6 +297,9 @@ export function FaceCaptureApp(_props: FaceCaptureAppProps) {
       } else if (mode === 'live' && cameraServiceRef.current && livePipelineRef.current) {
         const frame = cameraServiceRef.current.getFrame();
         if (frame) {
+          // Reading pixels back from the GPU is the expensive part of a frame,
+          // so the gesture loop reuses this one instead of taking its own.
+          latestFrameRef.current = frame;
           livePipelineRef.current.pushFrame(frame);
         }
       }
@@ -292,13 +328,13 @@ export function FaceCaptureApp(_props: FaceCaptureAppProps) {
         const now = Date.now();
         if (now - lastGestureTime >= 80) {
           lastGestureTime = now;
-          const frame = cameraServiceRef.current.getFrame();
+          const frame = latestFrameRef.current;
           if (frame) {
             try {
               const gs = await gestureEngineRef.current.processFrame(frame);
               setGestureState(gs);
 
-              const currentFaceState = faceState;
+              const currentFaceState = faceStateRef.current;
               const isFaceReady =
                 currentFaceState?.detected === true &&
                 currentFaceState?.presence === 'SINGLE_FACE' &&
@@ -330,7 +366,7 @@ export function FaceCaptureApp(_props: FaceCaptureAppProps) {
     return () => {
       if (gestureAnimRef.current) cancelAnimationFrame(gestureAnimRef.current);
     };
-  }, [mode, faceState]);
+  }, [mode]);
 
   const handleShutterCapture = useCallback(() => {
     if (liveWorkflowEngineRef.current && faceState?.detected) {
@@ -434,6 +470,7 @@ export function FaceCaptureApp(_props: FaceCaptureAppProps) {
 
   const startLiveMode = async () => {
     setMode('live');
+    updateSettings({ engineMode: 'live' });
     setFaceState(null);
     setCameraError(null);
     setIsCameraLoading(true);
@@ -526,6 +563,7 @@ export function FaceCaptureApp(_props: FaceCaptureAppProps) {
     setIsWorkflowStarted(false);
     isWorkflowStartedRef.current = false;
     setMode('simulation');
+    updateSettings({ engineMode: 'simulation' });
   };
 
   const handleSelectCamera = async (devId: string) => {
@@ -541,6 +579,64 @@ export function FaceCaptureApp(_props: FaceCaptureAppProps) {
         setCameraError(`Không thể chuyển sang camera đã chọn: ${err?.message || err}`);
       }
     }
+  };
+
+
+  /**
+   * Re-enter one already-captured step and replace only its photo.
+   *
+   * The engine keeps the existing image until a replacement actually lands, so
+   * abandoning a retake leaves the session exactly as it was.
+   */
+
+  /**
+   * Nudge the camera's own zoom until the face fills a workable share of frame.
+   *
+   * Only real camera zoom is used. Scaling the picture up afterwards would make
+   * the face look closer while capturing exactly the same pixels — worse than
+   * useless for a photo that gets cropped and matched later. Cameras without a
+   * zoom capability keep their fixed framing and the operator is told to step
+   * closer by the existing quality guidance instead.
+   */
+  useEffect(() => {
+    if (!stream) return;
+    const camera = cameraServiceRef.current;
+    if (!camera || !camera.getZoomCapability()) return;
+
+    const TARGET_RATIO = 0.32;
+    const DEADBAND = 0.05;
+
+    const id = setInterval(() => {
+      const ratio = faceStateRef.current?.quality?.faceSizeRatio;
+      if (!ratio || ratio <= 0) return;
+      if (Math.abs(ratio - TARGET_RATIO) < DEADBAND) return;
+
+      const caps = camera.getZoomCapability();
+      const current = camera.getZoom();
+      if (!caps || current === null) return;
+
+      // Damped, so someone leaning in and out does not send the lens racing.
+      const wanted = current * zoomFactorToReach(ratio, TARGET_RATIO, 3);
+      const next = current + (wanted - current) * 0.4;
+      if (Math.abs(next - current) < caps.step) return;
+
+      void camera.setZoom(next);
+    }, 700);
+
+    return () => clearInterval(id);
+  }, [stream]);
+
+  const handleRetakeStep = async (stepId: string) => {
+    const engine = liveWorkflowEngineRef.current;
+    if (!engine) return;
+
+    const started = await engine.retakeStep(stepId);
+    if (!started) return;
+
+    setShowReviewModal(false);
+    setLatestCapturedImage(null);
+    setIsWorkflowStarted(true);
+    isWorkflowStartedRef.current = true;
   };
 
   const handleRestart = async () => {
@@ -562,8 +658,12 @@ export function FaceCaptureApp(_props: FaceCaptureAppProps) {
   const activeEngine = mode === 'live' ? liveWorkflowEngineRef.current : simWorkflowEngineRef.current;
   const activeSession = activeEngine?.currentSession;
 
-  const stepsList: StepItem[] = defaultWorkflow.steps.map((s, idx) => {
-    const sessionStep = activeSession?.steps.find((st: any) => st.stepId === s.id);
+  // Annotated on the callback, not just on stepsList: an object literal returned
+  // from an unannotated .map() is checked for assignability only, so a misspelt
+  // field is dropped in silence — which is how the step thumbnails were passed
+  // under a name StepItem does not have and never rendered.
+  const stepsList: StepItem[] = defaultWorkflow.steps.map((s, idx): StepItem => {
+    const sessionStep = activeSession?.steps.find((st) => st.stepId === s.id);
     const isCompleted = sessionStep?.status === 'COMPLETED' || idx < activeGuidance.currentStepIndex;
     const isCurrent = isWorkflowStarted && idx === activeGuidance.currentStepIndex && !isCompleted;
 
@@ -577,7 +677,7 @@ export function FaceCaptureApp(_props: FaceCaptureAppProps) {
         : sessionStep?.status === 'FAILED'
         ? 'FAILED'
         : 'PENDING',
-      thumbnailUrl: sessionStep?.capturedImagePath,
+      imagePath: sessionStep?.capturedImagePath,
     };
   });
 
@@ -661,7 +761,7 @@ export function FaceCaptureApp(_props: FaceCaptureAppProps) {
         isWorkflowStarted={isWorkflowStarted}
         onStartWorkflow={handleStartWorkflow}
         onOpenReview={() => setShowReviewModal(true)}
-        hasCompletedSession={session?.status === 'COMPLETED'}
+        hasCapturedImages={!!activeSession?.steps.some((st) => st.capturedImagePath)}
         showScreenDebugStats={showScreenDebugStats}
         onToggleShowScreenDebugStats={handleToggleShowScreenDebugStats}
         gestureState={gestureState}
@@ -686,6 +786,7 @@ export function FaceCaptureApp(_props: FaceCaptureAppProps) {
             setShowReviewModal(false);
           }}
           onRetake={handleRestart}
+          onRetakeStep={handleRetakeStep}
           onClose={() => setShowReviewModal(false)}
         />
       )}

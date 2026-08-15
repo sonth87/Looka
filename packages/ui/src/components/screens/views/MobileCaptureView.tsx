@@ -31,7 +31,7 @@ export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
     isWorkflowStarted,
     onStartWorkflow,
     onOpenReview,
-    hasCompletedSession,
+    hasCapturedImages,
     showScreenDebugStats,
     className,
     gestureState = null,
@@ -109,7 +109,7 @@ export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
             </button>
           )}
 
-          {hasCompletedSession && onOpenReview && (
+          {hasCapturedImages && onOpenReview && (
             <button
               onClick={onOpenReview}
               className="px-2.5 py-1 rounded-lg bg-blue-600 text-white font-bold text-[11px] shadow-md flex items-center gap-1 active:scale-95 cursor-pointer shrink-0"

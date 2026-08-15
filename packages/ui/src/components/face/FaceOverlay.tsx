@@ -227,7 +227,12 @@ export const FaceOverlay: React.FC<FaceOverlayProps> = ({
             {/* Dynamic Face Tracking Bounding Box */}
             <div
               className={cn(
-                'absolute transition-all duration-150 ease-out rounded-2xl backdrop-blur-[1px]',
+                // Colours animate; geometry does not. transition-all made the box ease
+              // towards each new position over 150ms, but pose updates arrive every
+              // 100-165ms, so it was still travelling to the previous position when
+              // the next one replaced it and never caught up with the face. Jitter is
+              // already handled upstream by the pose EMA.
+              'absolute transition-colors duration-150 ease-out rounded-2xl backdrop-blur-[1px]',
                 colorTheme.bg,
                 colorTheme.glow
               )}

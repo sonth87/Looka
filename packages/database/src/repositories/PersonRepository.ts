@@ -1,8 +1,8 @@
-import { SQLiteStorageAdapter } from '../SQLiteStorageAdapter.js';
+import { SqlExecutor } from '../sql/SqlDriver.js';
 import { Person } from '@face/core';
 
 export class PersonRepository {
-  constructor(private adapter: SQLiteStorageAdapter) {}
+  constructor(private adapter: SqlExecutor) {}
 
   public async savePerson(person: Person): Promise<void> {
     const existing = await this.getPersonById(person.id);

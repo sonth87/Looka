@@ -88,12 +88,21 @@ export class StepEvaluator implements IStepEvaluator {
       ...step.quality,
     };
 
+    // No pixels reach this far — only a FaceState — but the CV engine already
+    // measured brightness and sharpness from the same frame. Passing those
+    // through lets the step apply its own thresholds to real figures; without
+    // them the gate skipped both checks entirely, so BLURRY and TOO_DARK could
+    // never block a capture no matter how bad the frame was.
     const qualityResult = this.qualityEvaluator.evaluateQuality(
       faceState.detection.boundingBox,
       frameWidth,
       frameHeight,
       undefined,
-      qualityReq
+      qualityReq,
+      {
+        brightness: faceState.quality?.brightness ?? null,
+        sharpness: faceState.quality?.sharpness ?? null,
+      }
     );
 
     const qualityValid = qualityResult.accepted;

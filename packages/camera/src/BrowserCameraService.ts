@@ -7,6 +7,14 @@ import {
   FrameInput,
 } from '@face/core';
 
+/**
+ * Width the CV pipeline works at.
+ *
+ * Wide enough for landmarks to stay accurate, narrow enough that the per-frame
+ * readback stays cheap. Stills are unaffected and keep the sensor's full size.
+ */
+const ANALYSIS_WIDTH = 960;
+
 export class BrowserCameraService implements CameraService {
   private activeStream: MediaStream | null = null;
   private selectedDevice: CameraDevice | null = null;
@@ -14,6 +22,16 @@ export class BrowserCameraService implements CameraService {
   private canvasElement: HTMLCanvasElement | OffscreenCanvas | null = null;
   private canvasContext: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null = null;
   private isPaused = false;
+  /**
+   * Whether stills are written mirrored, matching a mirrored preview.
+   *
+   * The preview is mirrored so people can position themselves as they would in
+   * a mirror, but drawImage copies the raw sensor frame — a CSS transform never
+   * reaches the pixels. Left alone, the photo therefore appears to flip the
+   * instant it is taken. This flag exists so the preview and the saved frame
+   * cannot drift apart: whatever the preview shows, the still matches.
+   */
+  private mirrorStills = true;
   private listeners: Map<string, Set<(...args: any[]) => void>> = new Map();
   private deviceChangeListener: (() => void) | null = null;
 
@@ -93,8 +111,13 @@ export class BrowserCameraService implements CameraService {
       audio: false,
       video: {
         deviceId: constraints?.deviceId ? { exact: constraints.deviceId } : undefined,
-        width: constraints?.width || { ideal: 1280 },
-        height: constraints?.height || { ideal: 720 },
+        // Ask for more than the preview needs. Distance is fixed by the lens,
+        // so the only way a face further away yields a usable photo is more
+        // sensor pixels landing on it; a camera that cannot manage this simply
+        // returns what it has. The CV loop reads a downscaled copy, so the extra
+        // resolution costs nothing per frame and is spent only on the still.
+        width: constraints?.width || { ideal: 1920 },
+        height: constraints?.height || { ideal: 1080 },
         frameRate: constraints?.frameRate || { ideal: 30 },
       },
     };
@@ -204,8 +227,13 @@ export class BrowserCameraService implements CameraService {
       return null;
     }
 
-    const width = video.videoWidth;
-    const height = video.videoHeight;
+    // Analysis runs on a downscaled copy. Landmarks come back normalised and
+    // every measure built on them is a ratio, so nothing geometric changes —
+    // but reading a 1920x1080 frame back from the GPU costs 8 MB per call,
+    // which is what held the CV loop at single-digit frames per second.
+    const scale = Math.min(1, ANALYSIS_WIDTH / video.videoWidth);
+    const width = Math.round(video.videoWidth * scale);
+    const height = Math.round(video.videoHeight * scale);
 
     if (this.canvasElement instanceof HTMLCanvasElement) {
       if (this.canvasElement.width !== width || this.canvasElement.height !== height) {
@@ -249,8 +277,75 @@ export class BrowserCameraService implements CameraService {
     const ctx = canvas.getContext('2d');
     if (!ctx) return null;
 
+    if (this.mirrorStills) {
+      ctx.translate(width, 0);
+      ctx.scale(-1, 1);
+    }
     ctx.drawImage(video, 0, 0, width, height);
     return canvas.toDataURL('image/jpeg', 0.85);
+  }
+
+  /**
+   * Match saved stills to the preview orientation.
+   *
+   * Pass false when the stored image must be the true, unmirrored view — text
+   * on a badge reads correctly and asymmetric features stay on the side they
+   * are really on, which matters if the photo is later compared against another
+   * source. Note that face embeddings are not mirror-invariant, so enrolment
+   * and matching must agree on this.
+   */
+  public setMirrorStills(mirrored: boolean): void {
+    this.mirrorStills = mirrored;
+  }
+
+  /**
+   * The camera's own zoom range, if it has one.
+   *
+   * Optical or sensor-crop zoom driven by the device produces a genuinely larger
+   * face: more sensor pixels land on it. Scaling the picture afterwards cannot
+   * do that, it only enlarges the pixels already captured. Most USB and laptop
+   * webcams expose nothing here, so callers must handle null as the normal case
+   * rather than an error.
+   */
+  public getZoomCapability(): { min: number; max: number; step: number } | null {
+    const track = this.activeStream?.getVideoTracks()[0];
+    if (!track || typeof track.getCapabilities !== 'function') return null;
+
+    const caps = track.getCapabilities() as MediaTrackCapabilities & {
+      zoom?: { min: number; max: number; step: number };
+    };
+    if (!caps.zoom || caps.zoom.max <= caps.zoom.min) return null;
+    return { min: caps.zoom.min, max: caps.zoom.max, step: caps.zoom.step || 0.1 };
+  }
+
+  /** Current zoom, or null when the camera does not report one. */
+  public getZoom(): number | null {
+    const track = this.activeStream?.getVideoTracks()[0];
+    if (!track || typeof track.getSettings !== 'function') return null;
+    const settings = track.getSettings() as MediaTrackSettings & { zoom?: number };
+    return typeof settings.zoom === 'number' ? settings.zoom : null;
+  }
+
+  /**
+   * Ask the camera to zoom, clamped to what it says it supports.
+   *
+   * Returns the value actually applied, or null if the device has no zoom —
+   * never throws, since a camera without zoom is an ordinary configuration and
+   * not a failure the caller needs to handle specially.
+   */
+  public async setZoom(value: number): Promise<number | null> {
+    const track = this.activeStream?.getVideoTracks()[0];
+    const caps = this.getZoomCapability();
+    if (!track || !caps) return null;
+
+    const clamped = Math.min(caps.max, Math.max(caps.min, value));
+    try {
+      await track.applyConstraints({ advanced: [{ zoom: clamped } as MediaTrackConstraintSet] });
+      return clamped;
+    } catch {
+      // Some drivers advertise the capability and then reject the constraint.
+      return null;
+    }
   }
 
   public getSelectedDevice(): CameraDevice | null {
@@ -293,7 +388,10 @@ export class BrowserCameraService implements CameraService {
     this.videoElement.play().catch(() => {});
 
     this.canvasElement = document.createElement('canvas');
-    this.canvasContext = this.canvasElement.getContext('2d');
+    // getFrame reads this canvas back every frame. Without the hint the browser
+    // keeps it GPU-resident and each getImageData forces a stall to copy it
+    // down; it warns about exactly this in the console.
+    this.canvasContext = this.canvasElement.getContext('2d', { willReadFrequently: true });
   }
 
   private setupDeviceChangeMonitoring(): void {

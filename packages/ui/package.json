@@ -13,7 +13,8 @@
   },
   "scripts": {
     "build": "tsc -b",
-    "clean": "rimraf dist tsconfig.tsbuildinfo"
+    "clean": "rimraf dist tsconfig.tsbuildinfo",
+    "test": "tsc -b && node --test dist/lib/__tests__/*.test.js"
   },
   "dependencies": {
     "@face/camera": "workspace:*",
@@ -21,6 +22,7 @@
     "@face/cv-engine": "workspace:*",
     "@face/cv-mediapipe": "workspace:*",
     "@face/database": "workspace:*",
+    "@face/face-quality": "workspace:*",
     "@face/hand-gesture": "workspace:*",
     "@face/workflow-engine": "workspace:*",
     "@radix-ui/react-tooltip": "^1.2.16",

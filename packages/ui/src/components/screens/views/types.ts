@@ -37,7 +37,8 @@ export interface SharedCaptureViewProps {
   isWorkflowStarted: boolean;
   onStartWorkflow?: () => void;
   onOpenReview?: () => void;
-  hasCompletedSession?: boolean;
+  /** Whether the session holds at least one photo worth reviewing. */
+  hasCapturedImages?: boolean;
   showScreenDebugStats: boolean;
   onToggleShowScreenDebugStats?: (show: boolean) => void;
   className?: string;

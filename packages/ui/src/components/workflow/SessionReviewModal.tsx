@@ -1,12 +1,14 @@
 import React, { useState } from 'react';
-import { RotateCcw, Send, X, CheckCircle2, Download, FolderOpen } from 'lucide-react';
+import { RotateCcw, Send, X, CheckCircle2, Download, FolderOpen, ImageOff } from 'lucide-react';
 import { CaptureSession } from '@face/core';
 import { cn } from '../../lib/utils.js';
 
 export interface SessionReviewModalProps {
   session: CaptureSession | null;
   onAccept: () => void;
-  onRetake: (stepId?: string) => void;
+  onRetake: () => void;
+  /** Return to live capture on one step, replacing only that step's photo. */
+  onRetakeStep: (stepId: string) => void;
   onClose: () => void;
   className?: string;
 }
@@ -15,12 +17,18 @@ export const SessionReviewModal: React.FC<SessionReviewModalProps> = ({
   session,
   onAccept,
   onRetake,
+  onRetakeStep,
   onClose,
   className,
 }) => {
-  if (!session || session.status !== 'COMPLETED') return null;
-
   const [exportNotice, setExportNotice] = useState<{ path: string; count: number } | null>(null);
+
+  if (!session) return null;
+
+  const capturedSteps = session.steps.filter((s) => s.capturedImagePath);
+  // Reviewing mid-session is allowed, so completeness is read off the photos
+  // rather than off the session status, which a running retake reopens.
+  const isComplete = capturedSteps.length === session.steps.length;
 
   const handleRetakeConfirm = () => {
     if (typeof window !== 'undefined') {
@@ -36,9 +44,10 @@ export const SessionReviewModal: React.FC<SessionReviewModalProps> = ({
   const handleExportNative = async () => {
     if (typeof window === 'undefined') return;
     const faceAPI = (window as any).faceAPI;
-    const validImages = session.steps
-      .filter((s) => s.capturedImagePath)
-      .map((s) => ({ stepId: s.stepId, imagePath: s.capturedImagePath! }));
+    const validImages = capturedSteps.map((s) => ({
+      stepId: s.stepId,
+      imagePath: s.capturedImagePath!,
+    }));
 
     if (faceAPI?.exportSessionImages) {
       const res = await faceAPI.exportSessionImages({ sessionId: session.id, images: validImages });
@@ -72,11 +81,13 @@ export const SessionReviewModal: React.FC<SessionReviewModalProps> = ({
         <div className="flex items-center justify-between border-b border-slate-800 pb-3 shrink-0">
           <div>
             <h3 className="text-base sm:text-xl font-bold tracking-tight flex items-center gap-2">
-              <CheckCircle2 className="w-5 h-5 text-emerald-400" />
+              <CheckCircle2 className={cn('w-5 h-5', isComplete ? 'text-emerald-400' : 'text-amber-400')} />
               Kết quả chụp ảnh khuôn mặt
             </h3>
             <p className="text-[11px] sm:text-xs text-slate-400 mt-0.5">
-              Vui lòng xem lại chất lượng các góc chụp trước khi hoàn tất.
+              {isComplete
+                ? 'Vui lòng xem lại chất lượng các góc chụp trước khi hoàn tất.'
+                : `Đã chụp ${capturedSteps.length}/${session.steps.length} góc. Bạn có thể chụp lại từng góc bất kỳ lúc nào.`}
             </p>
           </div>
           <button
@@ -114,13 +125,26 @@ export const SessionReviewModal: React.FC<SessionReviewModalProps> = ({
             >
               <div className="aspect-square bg-slate-900 rounded-xl overflow-hidden relative flex items-center justify-center text-slate-600 font-medium">
                 {step.capturedImagePath ? (
-                  <img
-                    src={step.capturedImagePath}
-                    alt={step.stepType}
-                    className="w-full h-full object-cover"
-                  />
+                  <>
+                    <img
+                      src={step.capturedImagePath}
+                      alt={step.stepType}
+                      className="w-full h-full object-cover"
+                    />
+                    <button
+                      onClick={() => onRetakeStep(step.stepId)}
+                      className="absolute inset-x-1.5 bottom-1.5 px-2 py-1.5 rounded-lg bg-slate-950/80 hover:bg-amber-600 text-slate-100 hover:text-white text-[10px] sm:text-[11px] font-bold border border-slate-700 hover:border-amber-400 backdrop-blur-xs shadow-md transition-all active:scale-95 flex items-center justify-center gap-1 cursor-pointer"
+                      title={`Chụp lại góc ${step.stepType}`}
+                    >
+                      <RotateCcw className="w-3 h-3" />
+                      Chụp lại
+                    </button>
+                  </>
                 ) : (
-                  <span className="text-xs">📸 {step.stepType}</span>
+                  <div className="flex flex-col items-center gap-1 text-slate-500">
+                    <ImageOff className="w-5 h-5" />
+                    <span className="text-[10px] sm:text-xs font-semibold">Chưa chụp</span>
+                  </div>
                 )}
                 <span className="absolute top-1.5 left-1.5 px-2 py-0.5 text-[9px] sm:text-[10px] font-bold bg-slate-900/85 text-blue-400 rounded-md border border-slate-700 backdrop-blur-xs">
                   {step.stepType}
@@ -128,10 +152,19 @@ export const SessionReviewModal: React.FC<SessionReviewModalProps> = ({
               </div>
 
               <div className="flex items-center justify-between text-[10px] sm:text-[11px] px-1 text-slate-400 font-mono">
-                <span>Góc: {step.pose?.yaw ?? 0}°</span>
-                <span className="text-emerald-400 font-bold">
-                  {step.quality?.overallScore ? `${Math.round(step.quality.overallScore * 100)}%` : 'OK'}
-                </span>
+                {step.capturedImagePath ? (
+                  <>
+                    <span>Góc: {step.pose?.yaw ?? 0}°</span>
+                    <span className="text-emerald-400 font-bold">
+                      {step.quality?.overallScore ? `${Math.round(step.quality.overallScore * 100)}%` : 'OK'}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span>Góc: —</span>
+                    <span className="text-slate-600 font-bold">—</span>
+                  </>
+                )}
               </div>
             </div>
           ))}
@@ -141,7 +174,8 @@ export const SessionReviewModal: React.FC<SessionReviewModalProps> = ({
         <div className="flex items-center justify-between gap-2 sm:gap-3 pt-3 border-t border-slate-800 shrink-0">
           <button
             onClick={handleExportNative}
-            className="px-3 sm:px-4 py-2.5 bg-slate-800 hover:bg-slate-700 active:scale-95 text-slate-200 font-semibold text-xs sm:text-sm rounded-xl border border-slate-700 shadow-md transition-all flex items-center gap-1.5 cursor-pointer"
+            disabled={capturedSteps.length === 0}
+            className="px-3 sm:px-4 py-2.5 bg-slate-800 hover:bg-slate-700 active:scale-95 text-slate-200 font-semibold text-xs sm:text-sm rounded-xl border border-slate-700 shadow-md transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:active:scale-100"
             title="Lưu tất cả ảnh chụp thành tệp PNG ra máy tính"
           >
             <Download className="w-4 h-4 text-sky-400" />
@@ -161,7 +195,9 @@ export const SessionReviewModal: React.FC<SessionReviewModalProps> = ({
 
             <button
               onClick={onAccept}
-              className="px-4 sm:px-6 py-2.5 bg-blue-600 hover:bg-blue-500 active:scale-95 text-white font-bold text-xs sm:text-sm rounded-xl shadow-lg shadow-blue-500/25 transition-all flex items-center gap-1.5 cursor-pointer"
+              disabled={!isComplete}
+              className="px-4 sm:px-6 py-2.5 bg-blue-600 hover:bg-blue-500 active:scale-95 text-white font-bold text-xs sm:text-sm rounded-xl shadow-lg shadow-blue-500/25 transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:active:scale-100"
+              title={isComplete ? 'Lưu hồ sơ khuôn mặt' : 'Cần chụp đủ tất cả các góc trước khi lưu hồ sơ'}
             >
               <Send className="w-4 h-4 fill-white" />
               <span className="hidden sm:inline">Xác nhận & Lưu hồ sơ</span>

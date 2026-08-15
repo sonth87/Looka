@@ -10,8 +10,9 @@ import {
   FrameInput,
   ERROR_CODES,
 } from '@face/core';
-import { QualityEvaluator } from '@face/face-quality';
+import { QualityEvaluator, estimateDistance } from '@face/face-quality';
 import { PoseEstimator } from './PoseEstimator.js';
+import { poseFromTransformationMatrix } from './HeadPoseMatrix.js';
 
 export interface MediaPipeCVEngineOptions {
   wasmPath?: string;
@@ -31,6 +32,7 @@ export class MediaPipeCVEngine implements CVEngine {
   private qualityEvaluator: QualityEvaluator;
   private options: MediaPipeCVEngineOptions;
   private sensitivity: CaptureSensitivity = 'MEDIUM';
+  private lastVideoTimestamp = 0;
 
   constructor(options: MediaPipeCVEngineOptions = {}) {
     this.options = {
@@ -61,26 +63,38 @@ export class MediaPipeCVEngine implements CVEngine {
       const vision = await import('@mediapipe/tasks-vision');
       const { FaceLandmarker, FilesetResolver } = vision;
 
+      // Local by default. Fetching the runtime from a CDN at startup would make
+      // an offline-first kiosk fail exactly when it is supposed to keep working;
+      // the assets are collected into the app by scripts/fetch-assets.mjs.
+      // Callers hosting them elsewhere can still override both paths.
       const wasmFileset = await FilesetResolver.forVisionTasks(
-        this.options.wasmPath || 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm'
+        this.options.wasmPath || './wasm'
       );
 
-      const modelAssetPath =
-        this.options.modelPath ||
-        'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
+      const modelAssetPath = this.options.modelPath || './models/face_landmarker.task';
 
       this.landmarker = await FaceLandmarker.createFromOptions(wasmFileset, {
         baseOptions: {
           modelAssetPath,
           delegate: this.options.delegate,
         },
-        runningMode: 'IMAGE',
-        numFaces: 5,
+        // VIDEO rather than IMAGE: IMAGE re-runs full face detection on every
+        // frame with no memory of the last one, while VIDEO tracks between
+        // frames and only re-detects when tracking is lost. On a live preview
+        // that is the difference between detecting a face and detecting the
+        // same face thirty times a second.
+        runningMode: 'VIDEO',
+        // Enough to notice a second person — which is all the presence check
+        // needs — without paying to landmark five faces every frame.
+        numFaces: 2,
         minFaceDetectionConfidence: this.options.minDetectionConfidence,
         minFacePresenceConfidence: this.options.minPresenceConfidence,
         minTrackingConfidence: this.options.minTrackingConfidence,
         outputFaceBlendshapes: false,
-        outputFacialTransformationMatrixes: false,
+        // The solved 3D pose. Without it, pitch has to be inferred from how far
+        // the nose sits below the eye line, a signal so small that a clearly
+        // bowed head moved it about 1.5% — inside landmark noise.
+        outputFacialTransformationMatrixes: true,
       });
 
       this._initialized = true;
@@ -114,7 +128,20 @@ export class MediaPipeCVEngine implements CVEngine {
           frame.height
         );
       }
-      const results = this.landmarker.detect(inputSource);
+
+      // detectForVideo needs strictly increasing timestamps; a repeated or
+      // out-of-order value makes MediaPipe drop the frame silently, which looks
+      // exactly like the tracker freezing.
+      const ts = frame.timestamp > this.lastVideoTimestamp
+        ? frame.timestamp
+        : this.lastVideoTimestamp + 1;
+      this.lastVideoTimestamp = ts;
+
+      // The pose maths needs the frame shape to compare x against y; the real
+      // resolution is only known once frames start arriving.
+      this.poseEstimator.setFrameSize(frame.width, frame.height);
+
+      const results = this.landmarker.detectForVideo(inputSource, ts);
       const faceCount = results?.faceLandmarks?.length || 0;
       const presence: FacePresenceState =
         faceCount === 0 ? 'NO_FACE' : faceCount === 1 ? 'SINGLE_FACE' : 'MULTIPLE_FACES';
@@ -166,8 +193,14 @@ export class MediaPipeCVEngine implements CVEngine {
       const detection = allDetections[0];
       const boundingBox = detection.boundingBox;
 
-      // Estimate Head Pose with EMA smoothing for primary face
-      const pose = this.poseEstimator.estimatePose(landmarks);
+      // Prefer the solved 3D pose; fall back to the 2D estimate when MediaPipe
+      // returns no matrix, so a runtime that lacks it still reports something
+      // rather than nothing.
+      const matrix = results?.facialTransformationMatrixes?.[0]?.data;
+      const solved = poseFromTransformationMatrix(matrix);
+      const pose = solved
+        ? this.poseEstimator.smooth(solved)
+        : this.poseEstimator.estimatePose(landmarks);
 
       // Evaluate Quality for primary face
       const pixelData =
@@ -179,6 +212,11 @@ export class MediaPipeCVEngine implements CVEngine {
         pixelData,
         { sensitivity: this.sensitivity }
       );
+
+      // Standing distance, derived from how much of the frame the face spans.
+      // Exposed so guidance can say "step back" with a number behind it rather
+      // than only reacting once a threshold has already been crossed.
+      const distanceEstimate = estimateDistance(boundingBox, frame.width);
 
       return {
         timestamp: frame.timestamp,
@@ -192,6 +230,13 @@ export class MediaPipeCVEngine implements CVEngine {
         },
         pose,
         quality,
+        distance: distanceEstimate
+          ? {
+              minMeters: distanceEstimate.minMeters,
+              maxMeters: distanceEstimate.maxMeters,
+              meters: distanceEstimate.meters,
+            }
+          : null,
         landmarks,
         frameWidth: frame.width,
         frameHeight: frame.height,
@@ -234,6 +279,7 @@ export class MediaPipeCVEngine implements CVEngine {
       this.landmarker = null;
     }
     this.poseEstimator.reset();
+    this.lastVideoTimestamp = 0;
     this._initialized = false;
   }
 }
