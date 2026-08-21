@@ -60,3 +60,4 @@ export { GuidedCaptureScreen } from './components/screens/GuidedCaptureScreen.js
 export { KioskAttendanceScreen } from './components/screens/KioskAttendanceScreen.js';
 export { FaceCaptureApp } from './components/screens/FaceCaptureApp.js';
 
+export * from './lib/CaptureSink.js';

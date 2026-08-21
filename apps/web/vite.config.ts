@@ -18,7 +18,10 @@ export default defineConfig({
     },
   },
   server: {
-    port: 3000,
+    // Falls back to 3000 for a plain `pnpm dev`, but a launcher assigning a
+    // free port (this one collides with Docker Desktop's proxy on this
+    // machine) needs the override to actually take.
+    port: Number(process.env.PORT) || 3000,
     host: true,
   },
 });

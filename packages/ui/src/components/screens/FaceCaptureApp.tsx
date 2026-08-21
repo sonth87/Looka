@@ -17,13 +17,14 @@ import { MockCVEngine, FramePipeline } from '@face/cv-engine';
 import { MediaPipeCVEngine } from '@face/cv-mediapipe';
 import { MediaPipeGestureEngine } from '@face/hand-gesture';
 import { WorkflowEngine, CaptureTriggerEvaluator } from '@face/workflow-engine';
-import { SQLiteStorageAdapter, SessionRepository } from '@face/database';
 import { GuidedCaptureScreen } from './GuidedCaptureScreen.js';
 import { SessionReviewModal } from '../workflow/SessionReviewModal.js';
 import { SimulationSliders, SimulationSettings } from '../debug/SimulationSliders.js';
 import { StepItem } from '../workflow/StepProgress.js';
 import { TooltipProvider, Tooltip, TooltipTrigger, TooltipContent } from '../ui/tooltip.js';
 import { getSettings, updateSettings } from '../../lib/settingsStore.js';
+import { CaptureSink } from '../../lib/CaptureSink.js';
+import { SQLiteStorageAdapter, SessionRepository } from '@face/database';
 
 const defaultWorkflow: CaptureWorkflow = {
   id: 'workflow_standard_5step',
@@ -82,9 +83,18 @@ const defaultWorkflow: CaptureWorkflow = {
 export interface FaceCaptureAppProps {
   appId?: string;
   windowId?: string;
+  /**
+   * Where captures are kept.
+   *
+   * Supplied by the host application: the desktop kiosk hands photos to its
+   * main process, the web app posts them to a backend. Without one the screen
+   * captures but stores nothing, and says so rather than appearing to work.
+   */
+  sink?: CaptureSink;
 }
 
-export function FaceCaptureApp(_props: FaceCaptureAppProps) {
+export function FaceCaptureApp(props: FaceCaptureAppProps) {
+  const sink = props.sink ?? null;
   const [mode, setMode] = useState<'simulation' | 'live'>('live');
 
   const [theme, setTheme] = useState<'dark' | 'light'>(() => getSettings().theme || 'light');
@@ -156,6 +166,18 @@ export function FaceCaptureApp(_props: FaceCaptureAppProps) {
   const liveWorkflowEngineRef = useRef<WorkflowEngine | null>(null);
   const simPipelineRef = useRef<FramePipeline | null>(null);
   const livePipelineRef = useRef<FramePipeline | null>(null);
+  /** Set when a capture could not be stored; surfaced, never swallowed. */
+  const [storeError, setStoreError] = useState<string | null>(null);
+  const sessionIdRef = useRef<string | null>(null);
+  /**
+   * Local record of the session, in the browser's own sql.js database.
+   *
+   * Kept alongside the API sink rather than instead of it: the sink is what
+   * makes the photo durable (sql.js is in-memory and gone on reload), while this
+   * is what lets the review screen and any offline tooling read a session back
+   * without a round trip, and it is what @face/database's tests and the desktop
+   * app's repository code already assume exists.
+   */
   const repoRef = useRef<SessionRepository | null>(null);
   const gestureEngineRef = useRef<MediaPipeGestureEngine | null>(null);
   const captureTriggerRef = useRef<CaptureTriggerEvaluator>(new CaptureTriggerEvaluator());
@@ -177,12 +199,75 @@ export function FaceCaptureApp(_props: FaceCaptureAppProps) {
     faceStateRef.current = faceState;
   }, [faceState]);
 
+  /**
+   * Open the record this run's photos attach to.
+   *
+   * Created lazily on the first capture rather than on mount, so idly opening
+   * the screen does not leave empty sessions behind.
+   */
+  const ensureSession = async (): Promise<string | null> => {
+    if (!sink) return null;
+    if (sessionIdRef.current) return sessionIdRef.current;
+    try {
+      const id = await sink.startSession({});
+      sessionIdRef.current = id;
+      return id;
+    } catch (err) {
+      setStoreError((err as Error).message);
+      return null;
+    }
+  };
+
+  /**
+   * Store one capture as its step completes.
+   *
+   * A failure is shown rather than logged: the operator is the only one who can
+   * tell whether to retake now, and a photo silently missing from a finished
+   * session is discovered far too late to do anything about.
+   */
+  const storePhoto = async (stepId: string, dataUrl: string, attempt: number) => {
+    if (!sink) {
+      setStoreError('Chưa cấu hình nơi lưu ảnh — ảnh chụp sẽ không được giữ lại.');
+      return;
+    }
+    const sessionId = await ensureSession();
+    if (!sessionId) return;
+
+    try {
+      await sink.savePhoto({ sessionId, stepId, attempt, dataUrl });
+      setStoreError(null);
+    } catch (err) {
+      setStoreError(`Không lưu được ảnh ${stepId}: ${(err as Error).message}`);
+    }
+  };
+
+  /** Close the record. The photos are already stored; this only ends the run. */
+  const finishSession = async () => {
+    const sessionId = sessionIdRef.current;
+    if (!sink || !sessionId) return;
+    try {
+      await sink.completeSession(sessionId);
+      sessionIdRef.current = null;
+    } catch (err) {
+      setStoreError(`Không đóng được phiên: ${(err as Error).message}`);
+    }
+  };
+
   useEffect(() => {
     async function init() {
+      // Guarded on its own, separate from the try below: a database that fails
+      // to open must degrade the local cache, not the whole screen. The two were
+      // once one try/catch, so a browser that could not open sql.js never got as
+      // far as starting the camera either.
       try {
         const adapter = new SQLiteStorageAdapter();
         await adapter.initialize();
         repoRef.current = new SessionRepository(adapter);
+      } catch (err) {
+        console.warn('[FaceCaptureApp] local SQLite cache unavailable:', err);
+      }
+
+      try {
 
         const simEngine = new WorkflowEngine();
         simEngine.setSensitivity(sensitivity);
@@ -213,7 +298,8 @@ export function FaceCaptureApp(_props: FaceCaptureAppProps) {
         simEngine.on('completed', (completedSession: CaptureSession) => {
           setSession(completedSession);
           setShowReviewModal(true);
-          if (repoRef.current) repoRef.current.saveSession(completedSession);
+          if (repoRef.current) void repoRef.current.saveSession(completedSession);
+          void finishSession();
         });
 
         const mockCv = new MockCVEngine({ simulatedDelayMs: 10 });
@@ -250,12 +336,19 @@ export function FaceCaptureApp(_props: FaceCaptureAppProps) {
 
         liveEngine.on('capture-trigger', (data: { stepId: string; imagePath: string }) => {
           setLatestCapturedImage({ ...data });
+
+          // attempts counts completed retakes, so the wire value is 1-based: a
+          // first capture and its first retake must not share a key, or the
+          // retake is taken for a duplicate and dropped.
+          const step = liveEngine.currentSession?.steps.find((st) => st.stepId === data.stepId);
+          void storePhoto(data.stepId, data.imagePath, (step?.attempts ?? 0) + 1);
         });
 
         liveEngine.on('completed', (completedSession: CaptureSession) => {
           setSession(completedSession);
           setShowReviewModal(true);
-          if (repoRef.current) repoRef.current.saveSession(completedSession);
+          if (repoRef.current) void repoRef.current.saveSession(completedSession);
+          void finishSession();
         });
 
         await liveEngine.startSession(defaultWorkflow);
@@ -737,6 +830,20 @@ export function FaceCaptureApp(_props: FaceCaptureAppProps) {
 
   return (
     <div className="relative h-full w-full overflow-hidden flex flex-col bg-slate-950 text-slate-100">
+      {/*
+        A capture that was not stored has to be visible while the person is
+        still standing there. Discovering it once the session is finished is too
+        late to retake anything.
+      */}
+      {storeError && (
+        <div className="absolute top-0 inset-x-0 z-[100] bg-amber-500 text-slate-950 text-xs font-semibold px-4 py-2 flex items-center justify-center gap-2 shadow-lg">
+          <span>⚠️</span>
+          <span>{storeError}</span>
+          <button onClick={() => setStoreError(null)} className="ml-2 underline cursor-pointer">
+            Ẩn
+          </button>
+        </div>
+      )}
       <GuidedCaptureScreen
         stream={stream}
         isCameraLoading={isCameraLoading}
@@ -782,7 +889,7 @@ export function FaceCaptureApp(_props: FaceCaptureAppProps) {
         <SessionReviewModal
           session={session}
           onAccept={() => {
-            alert('Hồ sơ đã được xác nhận và lưu vào SQLite thành công!');
+            alert('Đã xác nhận hồ sơ. Ảnh được lưu qua máy chủ.');
             setShowReviewModal(false);
           }}
           onRetake={handleRestart}

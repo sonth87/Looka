@@ -124,7 +124,7 @@ describe('FsClient — chunked upload', () => {
     const server = new FakeServer();
     const client = makeClient(server, 4);
 
-    const res = await client.uploadRaw(input(10));
+    const res = await client.uploadChunked(input(10));
 
     assert.equal(res.fileId, 'file_1');
     assert.equal(res.status, 'SCANNING');
@@ -139,7 +139,7 @@ describe('FsClient — chunked upload', () => {
 
   test('every chunk carries its own checksum and the upload id', async () => {
     const server = new FakeServer();
-    await makeClient(server, 4).uploadRaw(input(10));
+    await makeClient(server, 4).uploadChunked(input(10));
 
     const dataChunks = server.calls.filter(
       (c) => c.headers['content-range'] && !c.headers['content-range'].startsWith('bytes */')
@@ -152,14 +152,74 @@ describe('FsClient — chunked upload', () => {
     }
   });
 
-  test('raw uploads stay chunked even when small enough for one request', async () => {
-    // Full-resolution captures sit right at the single-request ceiling, so the
-    // path must not depend on the size of any particular image.
+  test('a photo-sized upload is sent in one request', async () => {
+    // Chunking a few hundred kilobytes costs an extra round trip and buys
+    // nothing; the service documents single-request as the normal path below
+    // its ceiling.
     const server = new FakeServer();
     await makeClient(server, 1024).uploadRaw(input(100));
 
     const usedRange = server.calls.some((c) => c.headers['content-range']);
-    assert.ok(usedRange, 'raw upload must use the chunked path');
+    assert.ok(!usedRange, 'a small upload should not be split');
+  });
+
+  test('the single-request ceiling is taken from the server, not assumed', async () => {
+    // The limit is an operator setting. Rather than hardcoding it, an oversized
+    // upload is attempted and the rejection states what the server will accept.
+    const calls: Array<Record<string, string>> = [];
+    let rejectedOnce = false;
+
+    const fetchImpl = (async (_url: string, init: RequestInit) => {
+      const headers = Object.fromEntries(
+        Object.entries((init.headers ?? {}) as Record<string, string>).map(([k, v]) => [
+          k.toLowerCase(),
+          v,
+        ])
+      );
+      calls.push(headers);
+
+      if (!headers['content-range'] && !rejectedOnce) {
+        rejectedOnce = true;
+        return new Response(
+          JSON.stringify({
+            error: {
+              code: 'BAD_REQUEST',
+              message: 'payload above the single-request limit',
+              detail: { max_single_request: 8, chunk_size: 4 },
+            },
+          }),
+          { status: 400 }
+        );
+      }
+
+      const range = headers['content-range'] ?? '';
+      const end = Number(range.replace(/^bytes \d+-/, '').split('/')[0]);
+      if (end < 19) {
+        return new Response(null, { status: 204, headers: { 'Upload-Offset': String(end + 1) } });
+      }
+      return new Response(
+        JSON.stringify({ file_id: 'file_1', status: 'SCANNING', size: 20, etag: 'e', version: 1 }),
+        { status: 201 }
+      );
+    }) as unknown as typeof fetch;
+
+    const client = new FsClient({
+      baseUrl: 'http://fs-core:8080',
+      apiKey: 'test-key',
+      fetchImpl,
+    });
+
+    await client.upload(input(20));
+
+    assert.ok(rejectedOnce, 'the single request should have been attempted first');
+    const chunked = calls.filter((c) => c['content-range']);
+    assert.ok(chunked.length > 1, 'the retry should be split into chunks');
+    assert.ok(
+      chunked.some((c) => c['content-range'] === 'bytes 0-3/20'),
+      `chunks should use the size the server asked for, saw ${chunked
+        .map((c) => c['content-range'])
+        .join(', ')}`
+    );
   });
 
   test('a small derived artefact goes in a single request', async () => {
@@ -178,13 +238,13 @@ describe('FsClient — resume after interruption', () => {
     const client = makeClient(server, 4);
 
     server.failOnChunk(1); // fails partway through
-    await assert.rejects(() => client.uploadRaw(input(12)), FsError);
+    await assert.rejects(() => client.uploadChunked(input(12)), FsError);
 
     const beforeRetry = server.calls.length;
     server.calls = [];
 
     // Same idempotency key → same upload session → server reports what it has.
-    const res = await client.uploadRaw(input(12));
+    const res = await client.uploadChunked(input(12));
     assert.equal(res.fileId, 'file_1');
 
     const probe = server.calls.find((c) => c.headers['content-range']?.startsWith('bytes */'));
@@ -213,7 +273,7 @@ describe('FsClient — error classification', () => {
     const serverFault = new FakeServer();
     serverFault.failOnChunk(0, 'server');
     await assert.rejects(
-      () => makeClient(serverFault, 4).uploadRaw(input(8)),
+      () => makeClient(serverFault, 4).uploadChunked(input(8)),
       (err: FsError) => {
         assert.equal(err.httpStatus, 503);
         assert.equal(err.retryable, true, '503 should be retried');
@@ -224,7 +284,7 @@ describe('FsClient — error classification', () => {
     const clientFault = new FakeServer();
     clientFault.failOnChunk(0, 'client');
     await assert.rejects(
-      () => makeClient(clientFault, 4).uploadRaw(input(8)),
+      () => makeClient(clientFault, 4).uploadChunked(input(8)),
       (err: FsError) => {
         assert.equal(err.httpStatus, 400);
         assert.equal(err.retryable, false, 'a 400 will be rejected identically forever');
@@ -237,7 +297,7 @@ describe('FsClient — error classification', () => {
     const server = new FakeServer();
     server.failOnChunk(0, 'network');
     await assert.rejects(
-      () => makeClient(server, 4).uploadRaw(input(8)),
+      () => makeClient(server, 4).uploadChunked(input(8)),
       (err: FsError) => {
         assert.equal(err.httpStatus, 0);
         assert.equal(err.retryable, true);
@@ -283,5 +343,127 @@ describe('FsClient — metadata encoding', () => {
     const encoded = encodeMetadata({ sessionId: 'a;b=c', step: 'FRONT' });
     assert.equal(encoded, 'sessionId=a_b_c;step=FRONT');
     assert.equal(encoded.split(';').length, 2);
+  });
+});
+
+describe('FsClient — cold storage', () => {
+  const thawingThenBytes = () => {
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls++;
+      if (calls === 1) {
+        return new Response(
+          JSON.stringify({ status: 'THAWING', detail: { retry_after: 0 } }),
+          { status: 202, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+    }) as unknown as typeof fetch;
+    return { fetchImpl, calls: () => calls };
+  };
+
+  test('a thaw notice is not returned as file content', async () => {
+    // 202 carries JSON explaining the file is being restored. Treating every
+    // sub-400 status as content hands that notice back as if it were the image:
+    // nothing throws and the bytes are simply wrong.
+    const { fetchImpl } = thawingThenBytes();
+    const client = new FsClient({ baseUrl: 'http://fs:8080', apiKey: 'k', fetchImpl });
+
+    await assert.rejects(
+      () => client.download('file_1'),
+      (err: FsError) => {
+        assert.equal(err.httpStatus, 202);
+        assert.equal(err.code, 'THAWING');
+        return true;
+      }
+    );
+  });
+
+  test('downloadWhenWarm waits out the thaw and returns the bytes', async () => {
+    const { fetchImpl, calls } = thawingThenBytes();
+    const client = new FsClient({ baseUrl: 'http://fs:8080', apiKey: 'k', fetchImpl });
+
+    const bytes = await client.downloadWhenWarm('file_1', { timeoutMs: 5_000 });
+    assert.deepEqual([...bytes], [1, 2, 3]);
+    assert.equal(calls(), 2, 'should have retried once after the notice');
+  });
+});
+
+describe('FsClient — updating content', () => {
+  const captureHeaders = () => {
+    const seen: Array<Record<string, string>> = [];
+    const fetchImpl = (async (_url: string, init: RequestInit) => {
+      seen.push(
+        Object.fromEntries(
+          Object.entries((init.headers ?? {}) as Record<string, string>).map(([k, v]) => [
+            k.toLowerCase(),
+            v,
+          ])
+        )
+      );
+      return new Response(
+        JSON.stringify({ file_id: 'f1', version: 2, etag: '"e2"', size: 3, unchanged: false }),
+        { status: 200 }
+      );
+    }) as unknown as typeof fetch;
+    return { fetchImpl, seen };
+  };
+
+  test('the current etag is sent verbatim as the write condition', async () => {
+    // Without it the service answers 428 rather than guessing, because a write
+    // that does not say which version it edits is the quietest way to lose data.
+    const { fetchImpl, seen } = captureHeaders();
+    const client = new FsClient({ baseUrl: 'http://fs:8080', apiKey: 'k', fetchImpl });
+
+    await client.updateContent('f1', {
+      etag: '"abc-1"',
+      data: new Uint8Array([9, 9, 9]),
+      mimeType: 'image/jpeg',
+    });
+
+    assert.equal(seen[0]['if-match'], '"abc-1"', 'quotes are part of the token');
+  });
+
+  test('the content hash is sent so an identical write is recognised', async () => {
+    // Measured against the running service: without this header a save that
+    // changes nothing still creates a version, and the history fills with
+    // entries that differ from their predecessor in nothing at all.
+    const { fetchImpl, seen } = captureHeaders();
+    const client = new FsClient({ baseUrl: 'http://fs:8080', apiKey: 'k', fetchImpl });
+
+    await client.updateContent('f1', {
+      etag: '"abc-1"',
+      data: new Uint8Array([9, 9, 9]),
+      mimeType: 'image/jpeg',
+    });
+
+    assert.match(seen[0]['x-content-sha256'], /^[0-9a-f]{64}$/);
+  });
+
+  test('a losing write reports the conflict rather than overwriting', async () => {
+    const fetchImpl = (async () =>
+      new Response(
+        JSON.stringify({
+          error: { code: 'VERSION_CONFLICT', message: 'stale', detail: { latest_etag: '"e9"' } },
+        }),
+        { status: 409 }
+      )) as unknown as typeof fetch;
+
+    const client = new FsClient({ baseUrl: 'http://fs:8080', apiKey: 'k', fetchImpl });
+
+    await assert.rejects(
+      () =>
+        client.updateContent('f1', {
+          etag: '"stale"',
+          data: new Uint8Array([1]),
+          mimeType: 'image/jpeg',
+        }),
+      (err: FsError) => {
+        assert.equal(err.httpStatus, 409);
+        assert.equal(err.code, 'VERSION_CONFLICT');
+        assert.equal(err.retryable, false, 'retrying the same stale etag cannot succeed');
+        return true;
+      }
+    );
   });
 });

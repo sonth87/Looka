@@ -1,6 +1,26 @@
 import { useEffect, Component, ReactNode } from "react";
 import { DeviceLayout, AppConfig } from "@sonth87/device-layout";
-import { FaceCaptureApp, LookaIcon } from "@face/ui";
+import { FaceCaptureApp, HttpCaptureSink, LookaIcon } from "@face/ui";
+
+/**
+ * Captures go to our own backend, which holds the file-service key.
+ *
+ * That key covers the whole namespace, so a page holding it could read and
+ * write every file this service owns. The browser therefore talks only to this
+ * API and never to the file-service directly.
+ */
+const captureSink = new HttpCaptureSink(
+  // Resolved at run time, not baked in at build time: the same bundle is served
+  // from a developer machine and from a kiosk on the network, and those do not
+  // share an API address. A deployment overrides it by setting the global before
+  // the bundle loads.
+  (window as { LOOKA_API_BASE_URL?: string }).LOOKA_API_BASE_URL ?? "http://localhost:3100",
+  // Same run-time-override pattern - the backend's ApiKeyMiddleware rejects
+  // every session/photo request without this.
+  (window as { LOOKA_API_KEY?: string }).LOOKA_API_KEY
+);
+
+const CaptureScreen = () => <FaceCaptureApp sink={captureSink} />;
 
 class AppErrorBoundary extends Component<
   { children: ReactNode },
@@ -46,7 +66,7 @@ const appsConfig: AppConfig[] = [
     name: "Looka",
     icon: LookaIcon,
     iconColor: ["#ffffff", "#e0f2fe"],
-    render: FaceCaptureApp,
+    render: CaptureScreen,
     rawIcon: true,
     defaultSize: { width: 1150, height: 780 },
     minSize: { width: 640, height: 480 },

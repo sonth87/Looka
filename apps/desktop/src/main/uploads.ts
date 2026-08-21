@@ -276,14 +276,16 @@ export async function downloadPhoto(
   if (!client) throw new Error('No file-service is configured, so the photo cannot be fetched.');
 
   await client.waitUntilReady(item.fsFileId, { timeoutMs: 30_000, pollMs: 2_000 });
-  const link = await client.issueDownloadLink(item.fsFileId, viewerId, 300);
 
-  const res = await fetch(link.url);
-  if (!res.ok) throw new Error(`Download failed with status ${res.status}`);
-
-  const buffer = Buffer.from(await res.arrayBuffer());
-  fs.writeFileSync(destPath, buffer);
-  return { savedPath: destPath, source: 'remote', bytes: buffer.byteLength };
+  // Fetched with the service's own key rather than through a share link. A link
+  // exists so a browser can load a file without the key; spending one here
+  // would burn a token and take the public route for a call this process is
+  // already entitled to make.
+  // Waits out a cold-storage thaw: a photo nobody has opened in months
+  // answers the first read with a restore notice rather than bytes.
+  const bytes = await client.downloadWhenWarm(item.fsFileId);
+  fs.writeFileSync(destPath, Buffer.from(bytes));
+  return { savedPath: destPath, source: 'remote', bytes: bytes.byteLength };
 }
 
 export function recentUploadEvents(limit = 50): WorkerEvent[] {
