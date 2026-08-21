@@ -1,13 +1,22 @@
 import { FacePlatformError, ERROR_CODES } from '@face/core';
 
 /** Lifecycle of a file on the server, mirrored locally for fast queries. */
+/**
+ * States the service reports for a file.
+ *
+ * TRASHED is not in the integration guide's table but comes back from a real
+ * server after a delete, so the union stays open: a state nobody anticipated
+ * must be visible as itself rather than forced into a known one.
+ */
 export type FsFileStatus =
   | 'UPLOADING'
   | 'SCANNING'
   | 'SCAN_PENDING'
   | 'READY'
   | 'QUARANTINED'
-  | 'FAILED';
+  | 'FAILED'
+  | 'TRASHED'
+  | (string & {});
 
 export interface FsClientConfig {
   /** e.g. http://fs-core:8080 */
@@ -68,7 +77,40 @@ export interface FsFileInfo {
 
 export interface DownloadLink {
   url: string;
+  /** Page a browser can open directly; the plain url is the raw byte stream. */
+  viewUrl?: string;
   expiresAt: string;
+  allowDownload?: boolean;
+}
+
+/** Outcome of writing new content over an existing file. */
+export interface UpdateResult {
+  fileId: string;
+  version: number;
+  etag: string;
+  size: number;
+  dedupHit: boolean;
+  /** True when the bytes matched the current version and nothing was created. */
+  unchanged: boolean;
+  /** Set by a rollback: which version the content was copied from. */
+  restoredFrom?: number;
+}
+
+export interface FsVersion {
+  version: number;
+  etag: string;
+  size: number;
+  /** Held by a legal or retention rule; cannot be removed. */
+  locked: boolean;
+  createdAt: string;
+  comment?: string;
+}
+
+/** Credentials handed back by the self-service provisioning endpoint. */
+export interface ProvisionResult {
+  apiKey: string;
+  tenantName: string;
+  namespace?: string;
 }
 
 export interface FsUsage {
@@ -95,7 +137,41 @@ export class FsError extends FacePlatformError {
    * at which a human notices.
    */
   public get retryable(): boolean {
+    // The integration guide is explicit: repeat only transport failures and
+    // server faults. A 4xx is the caller's mistake and will be rejected
+    // identically forever — 429 is the one exception, where the server is
+    // asking for a slower pace rather than refusing the request.
     return this.httpStatus === 0 || this.httpStatus === 429 || this.httpStatus >= 500;
+  }
+
+  /**
+   * Whether the chunked session is gone and must be reopened from zero.
+   *
+   * Distinct from a plain retry: reusing the same X-Upload-ID would keep hitting
+   * the same expired session, so the caller has to mint a new one.
+   */
+  public get needsNewSession(): boolean {
+    return this.httpStatus === 410;
+  }
+
+  /**
+   * Server-declared limits, present when a single-request upload was refused
+   * for being too large.
+   *
+   * The ceiling is an operator setting, so the guide warns against hardcoding
+   * it — the server states the value it wants alongside the rejection.
+   */
+  public get uploadLimits(): { maxSingleRequest: number; chunkSize: number } | null {
+    const detail = (this.details as Record<string, unknown> | undefined)?.detail as
+      | Record<string, unknown>
+      | undefined;
+    const max = Number(detail?.max_single_request);
+    const chunk = Number(detail?.chunk_size);
+    if (!Number.isFinite(max) || max <= 0) return null;
+    return {
+      maxSingleRequest: max,
+      chunkSize: Number.isFinite(chunk) && chunk > 0 ? chunk : Math.floor(max / 2),
+    };
   }
 }
 
@@ -105,4 +181,26 @@ export const FS_ERROR_CODES = {
   UPLOAD_INCOMPLETE: ERROR_CODES.UPLOAD_INCOMPLETE,
   QUARANTINED: ERROR_CODES.FILE_QUARANTINED,
   SCAN_TIMEOUT: ERROR_CODES.SCAN_TIMEOUT,
+} as const;
+
+/**
+ * Codes the server puts in `error.code`, which the guide names as the field to
+ * branch on. Kept as the server spells them so a log line can be matched
+ * against the documentation without translation.
+ */
+export const FS_SERVER_CODES = {
+  BAD_REQUEST: 'BAD_REQUEST',
+  TOKEN_INVALID: 'TOKEN_INVALID',
+  ACL_DENIED: 'ACL_DENIED',
+  NOT_FOUND: 'NOT_FOUND',
+  ALREADY_REGISTERED: 'ALREADY_REGISTERED',
+  VERSION_CONFLICT: 'VERSION_CONFLICT',
+  STATE_CHANGED: 'STATE_CHANGED',
+  SESSION_EXPIRED: 'SESSION_EXPIRED',
+  QUOTA_EXCEEDED: 'QUOTA_EXCEEDED',
+  FILE_QUARANTINED: 'FILE_QUARANTINED',
+  PRECONDITION_REQUIRED: 'PRECONDITION_REQUIRED',
+  RATE_LIMITED: 'RATE_LIMITED',
+  CHUNK_CHECKSUM_MISMATCH: 'CHUNK_CHECKSUM_MISMATCH',
+  INSUFFICIENT_STORAGE: 'INSUFFICIENT_STORAGE',
 } as const;
