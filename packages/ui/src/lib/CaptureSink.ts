@@ -104,3 +104,53 @@ export class HttpCaptureSink implements CaptureSink {
     await this.post(`/v1/sessions/${encodeURIComponent(sessionId)}/complete`, {});
   }
 }
+
+/**
+ * Hands captures to the desktop app's own main process instead of a server.
+ *
+ * The kiosk is offline-first (see the desktop app's own description): there is
+ * no bridge call to open a session with the file-service, and none is needed —
+ * `window.faceAPI.queueCapture` already writes each photo to local disk and a
+ * local outbox durably on its own, the same per-photo-not-per-session
+ * durability this interface's own doc comment calls for. `startSession` and
+ * `completeSession` exist only to satisfy CaptureSink; nothing to open or
+ * close lives on this side.
+ *
+ * `(window as any).faceAPI` rather than a typed global: matches how the rest
+ * of this package already reaches the preload bridge (see
+ * SessionReviewModal.tsx) without pulling apps/desktop's preload types into a
+ * package the web app also builds, where that global does not exist at all.
+ */
+export class ElectronCaptureSink implements CaptureSink {
+  public async startSession(): Promise<string> {
+    return crypto.randomUUID();
+  }
+
+  public async savePhoto(input: {
+    sessionId: string;
+    stepId: string;
+    attempt: number;
+    dataUrl: string;
+  }): Promise<void> {
+    const faceAPI = (window as any).faceAPI;
+    if (!faceAPI?.queueCapture) {
+      throw new Error('faceAPI.queueCapture is not available — not running inside the desktop app');
+    }
+    const result = await faceAPI.queueCapture({
+      sessionId: input.sessionId,
+      // Every capture this screen produces is a face-enrollment photo; see
+      // queueCapture's own doc comment for how this feeds the on-disk path.
+      kind: 'face',
+      stepId: input.stepId,
+      attempt: input.attempt,
+      dataUrl: input.dataUrl,
+    });
+    if (!result?.ok) {
+      throw new Error(result?.error ?? 'queueCapture failed');
+    }
+  }
+
+  public async completeSession(): Promise<void> {
+    // No-op — see class doc comment.
+  }
+}

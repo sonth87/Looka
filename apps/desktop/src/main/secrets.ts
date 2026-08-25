@@ -1,6 +1,16 @@
 import { app, safeStorage } from 'electron';
 import path from 'node:path';
+import { FsClient } from '@face/fs-client';
 import { SecretStore, CryptoProvider } from './SecretStore.js';
+
+// Same tenant apps/api provisions under by default (see its file-service.ts) —
+// both sides of this platform sharing one tenant name is intentional, not a
+// coincidence to preserve. Override with FS_TENANT if a deployment needs the
+// desktop kiosks split into their own tenant.
+const DEFAULT_FS_TENANT = 'looka-face-capture';
+// Same default apps/api uses for the same reason — override with
+// FS_CONTACT_EMAIL if a deployment needs a different contact on file.
+const DEFAULT_FS_CONTACT_EMAIL = 'camera@dainam.edu.vn';
 
 /**
  * Secret storage for the main process.
@@ -65,7 +75,7 @@ export interface FileServiceCredentials {
  * and first-run provisioning, then migrated into encrypted storage so the
  * plaintext copy stops being the source of truth.
  */
-export function getFileServiceCredentials(): FileServiceCredentials | null {
+export async function getFileServiceCredentials(): Promise<FileServiceCredentials | null> {
   const envBase = process.env.FS_BASE_URL?.trim();
   const envKey = process.env.FS_API_KEY?.trim();
 
@@ -83,7 +93,28 @@ export function getFileServiceCredentials(): FileServiceCredentials | null {
   }
 
   const baseUrl = getSecret('fs.baseUrl') ?? envBase ?? null;
-  const apiKey = getSecret('fs.apiKey') ?? envKey ?? null;
+  let apiKey = getSecret('fs.apiKey') ?? envKey ?? null;
+
+  if (baseUrl && !apiKey) {
+    // No key stored and none supplied — get one the same way apps/api's
+    // FileStorageService does at startup: self-service provisioning, keyed
+    // by tenant name and idempotent, so a later run just gets the same key
+    // back rather than an operator having to type one in by hand.
+    try {
+      const tenant = process.env.FS_TENANT?.trim() || DEFAULT_FS_TENANT;
+      const contactEmail = process.env.FS_CONTACT_EMAIL?.trim() || DEFAULT_FS_CONTACT_EMAIL;
+      const provisioned = await FsClient.provision(baseUrl, tenant, { contactEmail });
+      apiKey = provisioned.apiKey;
+      if (isEncryptionAvailable()) {
+        setSecret('fs.baseUrl', baseUrl);
+        setSecret('fs.apiKey', apiKey);
+      }
+      console.warn(`[secrets] provisioned a file-service key for tenant "${tenant}"`);
+    } catch (err) {
+      console.error('[secrets] self-service provisioning failed:', (err as Error).message);
+    }
+  }
+
   if (!baseUrl || !apiKey) return null;
 
   return { baseUrl, apiKey };

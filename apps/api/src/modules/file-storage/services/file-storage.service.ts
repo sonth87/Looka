@@ -44,7 +44,8 @@ export class FileStorageService implements OnModuleInit {
     // time, so asking at startup is safe and saves an operator copying a
     // secret by hand.
     const tenant = this.configService.get<string>('fileService.tenant')!;
-    const provisioned = await FsClient.provision(baseUrl, tenant);
+    const contactEmail = this.configService.get<string>('fileService.contactEmail');
+    const provisioned = await FsClient.provision(baseUrl, tenant, { contactEmail });
     this.logger.log(
       `provisioned key for "${tenant}" in ${provisioned.namespace ?? 'unknown namespace'}`,
     );

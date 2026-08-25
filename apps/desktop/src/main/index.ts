@@ -196,7 +196,7 @@ app.whenReady().then(async () => {
   // Background uploading is optional: without a configured server the kiosk
   // still captures and queues, and the backlog drains once one is set up.
   if (dbResult.ok) {
-    const uploadsRunning = startUploads(getFileServiceCredentials());
+    const uploadsRunning = startUploads(await getFileServiceCredentials());
     if (!uploadsRunning) {
       console.warn('[main] file-service not configured; captures will queue locally only');
     }
@@ -264,7 +264,7 @@ app.whenReady().then(async () => {
   ipcMain.handle('secrets:status', () => secretsStatus());
 
   /** Save credentials from the setup screen and (re)start uploading with them. */
-  ipcMain.handle('secrets:setFileService', (_, payload: { baseUrl?: unknown; apiKey?: unknown }) => {
+  ipcMain.handle('secrets:setFileService', async (_, payload: { baseUrl?: unknown; apiKey?: unknown }) => {
     const baseUrl = String(payload?.baseUrl ?? '').trim();
     const apiKey = String(payload?.apiKey ?? '').trim();
 
@@ -286,7 +286,7 @@ app.whenReady().then(async () => {
     }
 
     stopUploads();
-    const started = startUploads(getFileServiceCredentials());
+    const started = startUploads(await getFileServiceCredentials());
     return { ok: true, uploading: started };
   });
 
