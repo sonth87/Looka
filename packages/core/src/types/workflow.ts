@@ -21,6 +21,18 @@ export interface QualityRequirement {
   minBrightness?: number;
   maxBrightness?: number;
   minSharpness?: number;
+  /**
+   * Floor on `eyeOpenScore` (1 - blink blendshape). An ID photo with shut or
+   * squinting eyes fails identity verification later, not just this check.
+   */
+  minEyeOpenScore?: number;
+  /**
+   * Ceiling on `smileScore` (mouth-smile blendshape). ID photos require a
+   * neutral expression; this is deliberately a ceiling rather than a
+   * require-exact-zero, since a faint, natural mouth shape still reads as a
+   * nonzero smile blendshape on most faces at rest.
+   */
+  maxSmileScore?: number;
   sensitivity?: CaptureSensitivity;
 }
 
@@ -85,6 +97,10 @@ export type GuidancePriorityReason =
   | 'TOO_BRIGHT'
   | 'BLURRY'
   | 'OCCLUDED'
+  | 'EYES_CLOSED'
+  | 'SMILING'
+  | 'SHOULDERS_TILTED'
+  | 'SHOULDERS_NOT_VISIBLE'
   | 'HOLD_STILL'
   | 'READY';
 

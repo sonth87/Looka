@@ -14,6 +14,8 @@ export interface StepEvaluationResult {
   qualityValid: boolean;
   positionValid: boolean;
   sizeValid: boolean;
+  /** Shoulder-level check from the body-pose model. True when there is nothing to report — no pose model, no body detected — same "absence is not failure" rule FaceQualityResult's null fields follow. */
+  postureValid: boolean;
   reasons: string[];
 }
 

@@ -76,6 +76,7 @@ export class PoseEstimator {
   private alpha: number;
   private mirrored: boolean;
   private aspect: number;
+  private lastLogAt = 0;
 
   constructor(options: number | PoseEstimatorOptions = {}) {
     const opts: PoseEstimatorOptions = typeof options === 'number' ? { alpha: options } : options;
@@ -161,11 +162,43 @@ export class PoseEstimator {
     // Mirrored frames invert horizontal motion; yaw and roll flip, pitch does not.
     const flip = this.mirrored ? -1 : 1;
 
-    return {
+    const pose: FacePose = {
       yaw: clampDeg(yaw * flip),
       pitch: clampDeg(pitch),
       roll: clampDeg(roll * flip),
     };
+
+    this.logRawPose(nose, eyeL, eyeR, cheekL, cheekR, pose);
+
+    return pose;
+  }
+
+  /**
+   * Throttled to ~1/s: this runs once per video frame (up to ~30/s), so an
+   * unthrottled log would flood the console without adding anything a
+   * developer could actually read.
+   */
+  private logRawPose(
+    nose: FaceLandmark,
+    eyeL: FaceLandmark,
+    eyeR: FaceLandmark,
+    cheekL: FaceLandmark,
+    cheekR: FaceLandmark,
+    pose: FacePose
+  ): void {
+    const now = Date.now();
+    if (now - this.lastLogAt < 1000) return;
+    this.lastLogAt = now;
+    console.log('[PoseEstimator] 2D estimate', {
+      landmarks: {
+        nose: roundLandmark(nose),
+        eyeL: roundLandmark(eyeL),
+        eyeR: roundLandmark(eyeR),
+        cheekL: roundLandmark(cheekL),
+        cheekR: roundLandmark(cheekR),
+      },
+      pose,
+    });
   }
 
   /** Estimate pose and apply EMA smoothing to suppress frame-to-frame jitter. */
@@ -202,4 +235,8 @@ export class PoseEstimator {
 
 function clampDeg(value: number): number {
   return Number(Math.max(-90, Math.min(90, value)).toFixed(1));
+}
+
+function roundLandmark(lm: FaceLandmark): { x: number; y: number; z: number } {
+  return { x: Number(lm.x.toFixed(3)), y: Number(lm.y.toFixed(3)), z: Number(lm.z.toFixed(3)) };
 }

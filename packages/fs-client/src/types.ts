@@ -1,4 +1,5 @@
 import { FacePlatformError, ERROR_CODES } from '@face/core';
+import type { Visibility } from '@face/core';
 
 /** Lifecycle of a file on the server, mirrored locally for fast queries. */
 /**
@@ -25,15 +26,19 @@ export interface FsClientConfig {
   apiKey: string;
   /**
    * Bytes per chunk. Must not exceed the server's own chunk expectation.
-   * Default 4 MiB, matching the service default.
+   * Default 32 MiB, matching the service's documented preferred chunk size
+   * (see the integration guide, section 3.1 — smaller chunks cost more round
+   * trips than the bytes they save).
    */
   chunkSize?: number;
   /**
-   * Largest body the server accepts in a single request. Default 10 MiB.
-   *
-   * Full-resolution captures land at 8–12 MB, i.e. straddling this limit, so
-   * raw photos always take the chunked path rather than deciding per file —
-   * a size-dependent branch here fails on some images and not others.
+   * Largest body the server accepts in a single request. Default 10 MiB,
+   * matching the service's own default (operator-configurable via
+   * FS_DIRECT_MAX_UPLOAD_MB — never hardcode past this default, since
+   * `upload()` self-corrects from the 400 response if the real ceiling
+   * differs). Whether a given full-resolution capture (typically 8–12 MB)
+   * takes the direct or chunked path therefore depends on both this default
+   * and the operator's actual server-side setting, not a fixed guarantee.
    */
   directMaxBytes?: number;
   requestTimeoutMs?: number;
@@ -56,6 +61,14 @@ export interface UploadInput {
   tags?: string[];
   /** Key/value metadata. Must not carry personal data — see redactMetadata(). */
   metadata?: Record<string, string>;
+  /**
+   * public or private — whether the file is discoverable/readable from
+   * OUTSIDE this app/tenant, independent of the calling API key's own
+   * rights. Server defaults to public when omitted, so biometric captures
+   * (card photos, face images) must set this explicitly rather than rely on
+   * the default.
+   */
+  visibility?: Visibility;
 }
 
 export interface UploadResult {
@@ -66,6 +79,7 @@ export interface UploadResult {
   etag: string;
   version: number;
   dedupHit: boolean;
+  visibility: Visibility;
 }
 
 export interface FsFileInfo {
@@ -90,6 +104,8 @@ export interface UpdateResult {
   etag: string;
   size: number;
   dedupHit: boolean;
+  /** True when this version is stored intact; false when stored as a diff against the previous version to save space. */
+  snapshot: boolean;
   /** True when the bytes matched the current version and nothing was created. */
   unchanged: boolean;
   /** Set by a rollback: which version the content was copied from. */

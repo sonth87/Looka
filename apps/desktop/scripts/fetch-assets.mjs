@@ -27,6 +27,14 @@ const MODELS = [
     file: 'hand_landmarker.task',
     url: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
   },
+  {
+    // "lite" rather than "full"/"heavy": this runs alongside face and hand
+    // detection every frame on the same kiosk hardware, and the shoulder-
+    // level check it feeds only needs two landmarks to be roughly right, not
+    // studio-grade pose accuracy.
+    file: 'pose_landmarker_lite.task',
+    url: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',
+  },
 ];
 
 /**

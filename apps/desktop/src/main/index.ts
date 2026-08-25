@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
+import type { Visibility } from '@face/core';
 import {
   initDatabase,
   getDatabase,
@@ -377,6 +378,11 @@ app.whenReady().then(async () => {
         const mimeType = dataUrl.slice(5, dataUrl.indexOf(';'));
         const data = Buffer.from(dataUrl.replace(/^data:image\/\w+;base64,/, ''), 'base64');
 
+        // Every capture this kiosk takes is a face/attendance image — never
+        // public — decided here, at the one place that knows that, rather
+        // than assumed by the generic queue/upload machinery downstream.
+        const visibility: Visibility = 'private';
+
         const jobId = queueCapture({
           sessionId: safeFileToken(payload?.sessionId, 'session'),
           kind: safeFileToken(payload?.kind, 'raw'),
@@ -389,6 +395,7 @@ app.whenReady().then(async () => {
               ? (payload.metadata as Record<string, string>)
               : undefined,
           dependsOn: typeof payload?.dependsOn === 'string' ? payload.dependsOn : undefined,
+          visibility,
         });
 
         return { ok: true, jobId };

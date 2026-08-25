@@ -15,6 +15,10 @@ export type CameraScale = "compact" | "standard" | "large";
 
 export interface SharedCaptureViewProps {
   stream: MediaStream | null;
+  /** Digital zoom for the preview when the camera has no hardware zoom. See CameraPreview. */
+  zoomScale?: number;
+  /** Digital zoom's crop centre, as a ratio of the frame (0.5, 0.5 = middle). See CameraPreview. */
+  zoomOrigin?: { x: number; y: number };
   faceState?: FaceState | null;
   guidance: GuidanceState;
   steps: StepItem[];

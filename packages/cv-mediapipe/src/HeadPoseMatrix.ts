@@ -23,6 +23,13 @@ const RAD_TO_DEG = 180 / Math.PI;
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
 /**
+ * Module-level, not per-caller: one video pipeline decodes one stream of
+ * matrices through this function, so a single throttle is enough and avoids
+ * threading a stateful object through what is otherwise a pure function.
+ */
+let lastLogAt = 0;
+
+/**
  * Decompose the rotation block into intrinsic Z-Y-X Euler angles.
  *
  * Returned in the estimator's own convention, which describes the SUBJECT:
@@ -77,11 +84,24 @@ export function poseFromTransformationMatrix(
   // Confirmed on the deployed kiosk: a comfortably bowed head reads -24. The
   // 2D fallback managed -4 for the same pose, which is what made the DOWN step
   // impossible to complete.
-  return {
+  const pose: FacePose = {
     pitch: round(-xRad * RAD_TO_DEG),
     yaw: round(yRad * RAD_TO_DEG),
     roll: round(zRad * RAD_TO_DEG),
   };
+
+  // Throttled to ~1/s: a solved matrix arrives once per video frame.
+  const now = Date.now();
+  if (now - lastLogAt >= 1000) {
+    lastLogAt = now;
+    const r4 = (v: number) => Number(v.toFixed(4));
+    console.log('[HeadPoseMatrix] 3D solved pose', {
+      rotation: { r00: r4(r00), r10: r4(r10), r20: r4(r20), r21: r4(r21), r22: r4(r22) },
+      pose,
+    });
+  }
+
+  return pose;
 }
 
 function round(deg: number): number {

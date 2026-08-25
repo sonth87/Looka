@@ -2,6 +2,7 @@
 export * from './types/face.js';
 export * from './types/workflow.js';
 export * from './types/biometric.js';
+export * from './types/file-storage.js';
 
 // Interfaces
 export * from './interfaces/cv.js';

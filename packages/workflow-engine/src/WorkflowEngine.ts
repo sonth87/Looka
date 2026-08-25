@@ -185,12 +185,15 @@ export class WorkflowEngine implements IWorkflowEngine {
     try {
       // 1. Chụp ảnh TRƯỚC KHI nháy flash (Real Base64 Snapshot)
       const captureResult = await this.captureController.captureCurrentFrame();
-      const valid = await this.captureController.validateCapturedImage(
-        captureResult.imagePath,
-        (currentStep.quality as any) || {}
-      );
+      const valid =
+        captureResult !== null &&
+        (await this.captureController.validateCapturedImage(captureResult.imagePath, {
+          quality: faceState?.quality
+            ? { accepted: faceState.quality.accepted, reasons: faceState.quality.reasons }
+            : null,
+        }));
 
-      if (valid) {
+      if (valid && captureResult) {
         // advanceToNextStep clears the retake, so the flag is read while it still stands.
         const wasRetake = this.retakeReturnIdx !== null;
         this.updateStepStatus(currentStep.id, 'COMPLETED', captureResult.imagePath, faceState || undefined);

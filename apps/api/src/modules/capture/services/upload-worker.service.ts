@@ -1,5 +1,6 @@
 import { FileStorageService } from '@app/modules/file-storage/services/file-storage.service';
-import { FsError } from '@face/fs-client';
+import type { Visibility } from '@face/core';
+import { FsError, deterministicUuid } from '@face/fs-client';
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { InjectDataSource } from '@nestjs/typeorm';
@@ -14,6 +15,12 @@ interface OutboxRow {
   mime_type: string;
   content: Buffer;
   attempts: number;
+  visibility: Visibility | null;
+}
+
+interface ScanningPhotoRow {
+  id: string;
+  fs_file_id: string;
 }
 
 /**
@@ -97,6 +104,7 @@ export class UploadWorkerService implements OnModuleInit {
         if (!job) break;
         await this.send(job);
       }
+      await this.pollScans();
     } catch (err) {
       // A background drain must never take the process down. The queue is
       // durable, so whatever went wrong here is retried on the next tick;
@@ -113,9 +121,19 @@ export class UploadWorkerService implements OnModuleInit {
    * LOCKED` lets a second replica work the queue at the same time without
    * either of them picking up a row the other already holds - not expressible
    * through TypeORM's query builder, so this stays raw SQL.
+   *
+   * `DataSource.query()` (unlike `EntityManager.query()` inside a
+   * transaction - see PhotoService.addPhoto's INSERT ... RETURNING) returns
+   * `[rows, affectedCount]` for a non-SELECT statement with RETURNING, not a
+   * flat rows array. Destructuring straight into `rows` used to bind the
+   * WHOLE TUPLE to that name: `rows[0]` was the inner rows array itself
+   * (still truthy with zero rows claimed, so the caller's drain loop never
+   * saw `null` and span forever), and every real row's fields read as
+   * undefined off it. Confirmed against a live DataSource before fixing -
+   * this codepath had never actually been run end-to-end before.
    */
   private async claimNext(): Promise<OutboxRow | null> {
-    const rows: OutboxRow[] = await this.dataSource.query(
+    const [rows]: [OutboxRow[], number] = await this.dataSource.query(
       `UPDATE upload_outbox
           SET status = 'SENDING', attempts = attempts + 1
         WHERE id = (
@@ -125,9 +143,51 @@ export class UploadWorkerService implements OnModuleInit {
            FOR UPDATE SKIP LOCKED
            LIMIT 1
         )
-        RETURNING id, photo_id, idem_key, virtual_path, mime_type, content, attempts`,
+        RETURNING id, photo_id, idem_key, virtual_path, mime_type, content, attempts, visibility`,
     );
     return rows[0] ?? null;
+  }
+
+  /**
+   * Advance photos whose bytes are already on the file-service but which are
+   * still being scanned there.
+   *
+   * `send()` only records the status the upload response carried at that
+   * instant (typically SCANNING); nothing else in this service ever looks at
+   * a file again afterwards, so without this a photo can sit at SCANNING
+   * forever even once the server has finished. apps/desktop's `UploadWorker`
+   * has the same second stage (`pollScans`) for the same reason.
+   */
+  private async pollScans(): Promise<void> {
+    const rows: ScanningPhotoRow[] = await this.dataSource.query(
+      `SELECT id, fs_file_id
+         FROM photos
+        WHERE fs_file_id IS NOT NULL
+          AND fs_status IN ('UPLOADING', 'SCANNING', 'SCAN_PENDING')
+        ORDER BY updated_at ASC
+        LIMIT 20`,
+    );
+
+    for (const row of rows) {
+      try {
+        const info = await this.fileStorage.getFile(row.fs_file_id);
+        // Written unconditionally, including "still scanning" states: the
+        // server can move SCAN_PENDING -> SCANNING before landing on READY,
+        // and there is no cheaper way to tell that apart from "unchanged"
+        // without also fetching the row's current fs_status up front.
+        await this.dataSource.query(
+          `UPDATE photos SET fs_status = $2 WHERE id = $1`,
+          [row.id, info.status],
+        );
+      } catch (err) {
+        // A scan check failing (network hiccup, transient upstream error) is
+        // not a reason to touch a row that hasn't actually changed state -
+        // the next tick tries again.
+        this.logger.warn(
+          `pollScans failed for photo ${row.id}: ${(err as Error).message}`,
+        );
+      }
+    }
   }
 
   private async send(job: OutboxRow): Promise<void> {
@@ -137,6 +197,9 @@ export class UploadWorkerService implements OnModuleInit {
         mimeType: job.mime_type,
         data: new Uint8Array(job.content),
         idempotencyKey: job.idem_key,
+        // Carried through from the row, not decided here — see PhotoService
+        // where the outbox row is written and this value is actually chosen.
+        visibility: job.visibility ?? undefined,
       });
 
       await this.dataSource.transaction(async (manager) => {
@@ -185,6 +248,16 @@ export class UploadWorkerService implements OnModuleInit {
     const terminal = fsErr !== null && !fsErr.retryable;
 
     if (terminal) {
+      // Best-effort: if this job ever went chunked, the server holds a
+      // session (and the quota it reserved) under the uploadId derived the
+      // same way FsClient derives it internally. Releasing it here means the
+      // tenant isn't charged for it until the session times out on its own.
+      // A cancel failing (no session ever existed, network down) must not
+      // block marking the row FAILED - that would leave it stuck SENDING.
+      await this.fileStorage
+        .cancelUpload(deterministicUuid(job.idem_key))
+        .catch(() => undefined);
+
       await this.dataSource.query(
         `UPDATE upload_outbox SET status = 'FAILED', last_error = $2 WHERE id = $1`,
         [job.id, message],

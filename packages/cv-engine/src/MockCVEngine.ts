@@ -91,9 +91,12 @@ export class MockCVEngine implements CVEngine {
       faceSizeRatio: 0.45,
       centerXOffset: 0.02,
       centerYOffset: 0.01,
+      eyeOpenScore: 0.9,
+      smileScore: 0.05,
       eyesVisible: true,
       mouthVisible: true,
       occluded: false,
+      neutralExpression: true,
       reasons: [],
     };
 

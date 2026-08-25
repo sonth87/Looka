@@ -3,6 +3,7 @@ import { SqlDriver } from '../sql/SqlDriver.js';
 import { MIGRATION_001_INIT } from './001-init.js';
 import { MIGRATION_002_INDEXES } from './002-indexes.js';
 import { MIGRATION_003_UPLOAD_OUTBOX } from './003-upload-outbox.js';
+import { MIGRATION_004_OUTBOX_VISIBILITY } from './004-outbox-visibility.js';
 
 export interface Migration {
   version: number;
@@ -19,6 +20,7 @@ export const MIGRATIONS: Migration[] = [
   MIGRATION_001_INIT,
   MIGRATION_002_INDEXES,
   MIGRATION_003_UPLOAD_OUTBOX,
+  MIGRATION_004_OUTBOX_VISIBILITY,
 ];
 
 const MIGRATION_TABLE = `
@@ -77,3 +79,4 @@ export function runMigrations(driver: SqlDriver, migrations: Migration[] = MIGRA
 export { MIGRATION_001_INIT } from './001-init.js';
 export { MIGRATION_002_INDEXES } from './002-indexes.js';
 export { MIGRATION_003_UPLOAD_OUTBOX } from './003-upload-outbox.js';
+export { MIGRATION_004_OUTBOX_VISIBILITY } from './004-outbox-visibility.js';

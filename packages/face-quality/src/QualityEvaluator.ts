@@ -55,6 +55,21 @@ import { BoundingBox, CaptureSensitivity, FaceQualityResult, QualityRequirement 
  * Calibrated against one field capture plus the synthetic curve, so treat them
  * as a starting point: re-measure on the deployed camera before tightening.
  */
+/**
+ * Eye-open and expression thresholds, on the same 0..1 blendshape scale as
+ * MediaPipe reports them.
+ *
+ * `minEyeOpenScore` loosens from HIGH/VERY_HIGH down to VERY_LOW for the same
+ * reason the pixel-based thresholds do: a permissive tier is meant to still
+ * accept a marginal capture rather than force a retake, and eyelid position
+ * genuinely varies by person (heavy-lidded eyes read lower even fully open).
+ *
+ * `maxSmileScore` tightens the same direction, down to a near-ICAO-strict
+ * ceiling at VERY_HIGH. Both are calibrated on the ARKit-style 52-blendshape
+ * output MediaPipe FaceLandmarker produces with `outputFaceBlendshapes: true`
+ * — not measured on the deployed kiosk yet, so treat them as a starting point
+ * the same way YAW_GAIN/PITCH_GAIN in PoseEstimator.ts are.
+ */
 export const SENSITIVITY_PRESETS: Record<CaptureSensitivity, Required<QualityRequirement>> = {
   VERY_LOW: {
     minSharpness: 0.06,
@@ -64,6 +79,8 @@ export const SENSITIVITY_PRESETS: Record<CaptureSensitivity, Required<QualityReq
     maxFaceSizeRatio: 0.55,
     maxCenterOffsetX: 0.20,
     maxCenterOffsetY: 0.20,
+    minEyeOpenScore: 0.30,
+    maxSmileScore: 0.60,
     sensitivity: 'VERY_LOW',
   },
   LOW: {
@@ -74,6 +91,8 @@ export const SENSITIVITY_PRESETS: Record<CaptureSensitivity, Required<QualityReq
     maxFaceSizeRatio: 0.50,
     maxCenterOffsetX: 0.18,
     maxCenterOffsetY: 0.18,
+    minEyeOpenScore: 0.40,
+    maxSmileScore: 0.50,
     sensitivity: 'LOW',
   },
   MEDIUM: {
@@ -84,6 +103,8 @@ export const SENSITIVITY_PRESETS: Record<CaptureSensitivity, Required<QualityReq
     maxFaceSizeRatio: 0.55,
     maxCenterOffsetX: 0.15,
     maxCenterOffsetY: 0.15,
+    minEyeOpenScore: 0.50,
+    maxSmileScore: 0.40,
     sensitivity: 'MEDIUM',
   },
   HIGH: {
@@ -94,6 +115,8 @@ export const SENSITIVITY_PRESETS: Record<CaptureSensitivity, Required<QualityReq
     maxFaceSizeRatio: 0.40,
     maxCenterOffsetX: 0.12,
     maxCenterOffsetY: 0.12,
+    minEyeOpenScore: 0.60,
+    maxSmileScore: 0.30,
     sensitivity: 'HIGH',
   },
   VERY_HIGH: {
@@ -104,11 +127,14 @@ export const SENSITIVITY_PRESETS: Record<CaptureSensitivity, Required<QualityReq
     maxFaceSizeRatio: 0.38,
     maxCenterOffsetX: 0.10,
     maxCenterOffsetY: 0.10,
+    minEyeOpenScore: 0.65,
+    maxSmileScore: 0.20,
     sensitivity: 'VERY_HIGH',
   },
 };
 
 export class QualityEvaluator {
+  private lastLogAt = 0;
 
   /**
    * Evaluates image brightness from an RGBA pixel array (Uint8ClampedArray).
@@ -272,7 +298,19 @@ export class QualityEvaluator {
      * only a FaceState — apply its own thresholds to figures the CV engine has
      * already paid to compute, instead of skipping the checks entirely.
      */
-    measured?: { brightness?: number | null; sharpness?: number | null }
+    measured?: {
+      brightness?: number | null;
+      sharpness?: number | null;
+      /**
+       * 1 - eye-blink blendshape. Unlike brightness/sharpness this package has
+       * no pixel-based fallback for it — MediaPipe's blendshape output is the
+       * only source, so a caller with no blendshapes leaves it null rather
+       * than guessing from geometry.
+       */
+      eyeOpenScore?: number | null;
+      /** Mouth-smile blendshape, under the same rule as `eyeOpenScore`. */
+      smileScore?: number | null;
+    }
   ): FaceQualityResult {
     const sensitivity = requirement?.sensitivity || 'MEDIUM';
     const basePreset = SENSITIVITY_PRESETS[sensitivity] || SENSITIVITY_PRESETS.MEDIUM;
@@ -322,6 +360,18 @@ export class QualityEvaluator {
       reasons.push('BLURRY');
     }
 
+    // Eye-open and expression. Blendshapes only — no pixel fallback exists,
+    // so these stay null unless a caller actually handed them in.
+    const eyeOpenScore: number | null = measured?.eyeOpenScore ?? null;
+    const smileScore: number | null = measured?.smileScore ?? null;
+
+    if (eyeOpenScore !== null && eyeOpenScore < req.minEyeOpenScore) {
+      reasons.push('EYES_CLOSED');
+    }
+    if (smileScore !== null && smileScore > req.maxSmileScore) {
+      reasons.push('SMILING');
+    }
+
     const accepted = reasons.length === 0;
 
     // Score size against the middle of the band this preset accepts. A fixed
@@ -350,10 +400,16 @@ export class QualityEvaluator {
     if (sharpness !== null) {
       scoreFactors.push(sharpness >= req.minSharpness ? 1 : 0.4);
     }
+    if (eyeOpenScore !== null) {
+      scoreFactors.push(eyeOpenScore >= req.minEyeOpenScore ? 1 : 0.4);
+    }
+    if (smileScore !== null) {
+      scoreFactors.push(smileScore <= req.maxSmileScore ? 1 : 0.4);
+    }
 
     const overallScore = scoreFactors.reduce((a, b) => a + b, 0) / scoreFactors.length;
 
-    return {
+    const result: FaceQualityResult = {
       overallScore: Number(overallScore.toFixed(2)),
       accepted,
       sharpness: sharpness === null ? null : Number(sharpness.toFixed(2)),
@@ -361,13 +417,32 @@ export class QualityEvaluator {
       faceSizeRatio: Number(faceSizeRatio.toFixed(2)),
       centerXOffset: Number(centerXOffset.toFixed(2)),
       centerYOffset: Number(centerYOffset.toFixed(2)),
-      // Nothing here inspects eyelids, mouths or coverings. Reporting "eyes
-      // visible, not occluded" was a claim the pipeline had never checked, and
-      // it stayed true for a masked face with its eyes shut.
-      eyesVisible: null,
+      eyeOpenScore: eyeOpenScore === null ? null : Number(eyeOpenScore.toFixed(2)),
+      smileScore: smileScore === null ? null : Number(smileScore.toFixed(2)),
+      eyesVisible: eyeOpenScore === null ? null : eyeOpenScore >= req.minEyeOpenScore,
+      neutralExpression: smileScore === null ? null : smileScore <= req.maxSmileScore,
+      // Nothing here inspects covered mouths or other occlusion. Reporting
+      // "not occluded" was a claim the pipeline had never checked, and it
+      // stayed true for a face hidden behind a mask.
       mouthVisible: null,
       occluded: null,
       reasons,
     };
+
+    this.logResult(req.sensitivity, result);
+
+    return result;
+  }
+
+  /**
+   * Throttled to ~1/s: quality is re-evaluated on every video frame, so an
+   * unthrottled log would flood the console without adding anything a
+   * developer could actually read.
+   */
+  private logResult(sensitivity: CaptureSensitivity, result: FaceQualityResult): void {
+    const now = Date.now();
+    if (now - this.lastLogAt < 1000) return;
+    this.lastLogAt = now;
+    console.log('[QualityEvaluator] evaluateQuality', { sensitivity, ...result });
   }
 }

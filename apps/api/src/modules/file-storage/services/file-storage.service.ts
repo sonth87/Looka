@@ -1,5 +1,7 @@
 import { CustomException, ERROR_CODE } from '@app/common/errors';
+import type { Visibility } from '@face/core';
 import { FsClient, FsError } from '@face/fs-client';
+import type { FsFileInfo } from '@face/fs-client';
 import { HttpStatus, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
@@ -55,8 +57,23 @@ export class FileStorageService implements OnModuleInit {
     mimeType: string;
     data: Uint8Array;
     idempotencyKey: string;
+    visibility?: Visibility;
   }) {
     return this.client.uploadRaw(input);
+  }
+
+  /**
+   * Release a chunked session's quota hold instead of waiting for it to
+   * expire on its own. Best-effort — the caller decides whether a failure
+   * here should stop anything else.
+   */
+  cancelUpload(uploadId: string) {
+    return this.client.cancelUpload(uploadId);
+  }
+
+  /** Current scan/lifecycle state for a file already accepted by the server. */
+  getFile(fileId: string): Promise<FsFileInfo> {
+    return this.client.getFile(fileId);
   }
 
   /**

@@ -32,6 +32,10 @@ export class GuidanceEngine implements IGuidanceEngine {
     // telling them to keep still sends them chasing the wrong thing.
     BLURRY: 'Ảnh chưa nét — giữ yên đầu và tìm chỗ sáng hơn',
     OCCLUDED: 'Vui lòng bỏ khẩu trang hoặc vật che mặt',
+    EYES_CLOSED: 'Vui lòng mở mắt và nhìn thẳng vào camera',
+    SMILING: 'Vui lòng giữ biểu cảm bình thường, không cười',
+    SHOULDERS_TILTED: 'Vui lòng giữ vai ngang, không nghiêng người',
+    SHOULDERS_NOT_VISIBLE: 'Vui lòng lùi lại để thấy rõ cả hai vai',
     HOLD_STILL: 'Giữ nguyên tư thế...',
     READY: 'Tư thế đúng! Giữ nguyên...',
   };
@@ -92,10 +96,14 @@ export class GuidanceEngine implements IGuidanceEngine {
       'LOOK_UP',
       'LOOK_DOWN',
       'TILT_CORRECT',
+      'SHOULDERS_TILTED',
+      'SHOULDERS_NOT_VISIBLE',
       'TOO_DARK',
       'TOO_BRIGHT',
       'BLURRY',
       'OCCLUDED',
+      'EYES_CLOSED',
+      'SMILING',
     ];
 
     for (const reason of priorityOrder) {

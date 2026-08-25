@@ -22,6 +22,10 @@ export type { CameraScale };
 
 export interface GuidedCaptureScreenProps {
   stream: MediaStream | null;
+  /** Digital zoom for the preview when the camera has no hardware zoom. See CameraPreview. */
+  zoomScale?: number;
+  /** Digital zoom's crop centre, as a ratio of the frame (0.5, 0.5 = middle). See CameraPreview. */
+  zoomOrigin?: { x: number; y: number };
   faceState?: FaceState | null;
   guidance: GuidanceState;
   steps: StepItem[];
@@ -65,6 +69,8 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (
 ) => {
   const {
     stream,
+    zoomScale,
+    zoomOrigin,
     faceState,
     guidance,
     steps,
@@ -385,6 +391,8 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (
 
   const sharedProps: SharedCaptureViewProps = {
     stream,
+    zoomScale,
+    zoomOrigin,
     faceState,
     guidance,
     steps,

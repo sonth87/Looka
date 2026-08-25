@@ -48,9 +48,12 @@ describe('WorkflowEngine & Evaluators', () => {
       faceSizeRatio: 0.5,
       centerXOffset: 0.02,
       centerYOffset: 0.01,
+      eyeOpenScore: 0.9,
+      smileScore: 0.05,
       eyesVisible: true,
       mouthVisible: true,
       occluded: false,
+      neutralExpression: true,
       reasons: [],
     },
   });
@@ -83,6 +86,13 @@ describe('WorkflowEngine & Evaluators', () => {
   test('WorkflowEngine should advance steps and complete session', async () => {
     const engine = new WorkflowEngine();
     let completedSession: any = null;
+    let shot = 0;
+    // Long enough to pass CaptureController's plausible-payload length floor —
+    // a real capture's base64 payload runs to many kilobytes; this only needs
+    // to be long enough that the check exercises the real code path rather
+    // than always failing on payload length before the capture is even
+    // wired into the workflow.
+    engine.setSnapshotProvider(() => `data:image/jpeg;base64,${'x'.repeat(120)}${++shot}`);
 
     engine.on('completed', (session) => {
       completedSession = session;

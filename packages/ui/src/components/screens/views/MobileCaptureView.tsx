@@ -16,6 +16,8 @@ import { cn } from "../../../lib/utils.js";
 export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
   const {
     stream,
+    zoomScale,
+    zoomOrigin,
     faceState,
     guidance,
     steps,
@@ -129,6 +131,8 @@ export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
         >
           <CameraPreview
             stream={stream}
+            zoomScale={zoomScale}
+            zoomOrigin={zoomOrigin}
             aspectRatio="auto"
             className={cn(
               "w-full h-full flex-1 rounded-3xl overflow-hidden transition-all shadow-xl",

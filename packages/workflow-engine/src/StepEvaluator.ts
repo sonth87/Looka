@@ -43,6 +43,7 @@ export class StepEvaluator implements IStepEvaluator {
         qualityValid: false,
         positionValid: false,
         sizeValid: false,
+        postureValid: false,
         reasons,
       };
     }
@@ -88,11 +89,12 @@ export class StepEvaluator implements IStepEvaluator {
       ...step.quality,
     };
 
-    // No pixels reach this far — only a FaceState — but the CV engine already
-    // measured brightness and sharpness from the same frame. Passing those
+    // No pixels (or blendshapes) reach this far — only a FaceState — but the
+    // CV engine already measured all four from the same frame. Passing them
     // through lets the step apply its own thresholds to real figures; without
-    // them the gate skipped both checks entirely, so BLURRY and TOO_DARK could
-    // never block a capture no matter how bad the frame was.
+    // them the gate skipped every check entirely, so BLURRY, TOO_DARK,
+    // EYES_CLOSED and SMILING could never block a capture no matter how bad
+    // the frame was.
     const qualityResult = this.qualityEvaluator.evaluateQuality(
       faceState.detection.boundingBox,
       frameWidth,
@@ -102,6 +104,8 @@ export class StepEvaluator implements IStepEvaluator {
       {
         brightness: faceState.quality?.brightness ?? null,
         sharpness: faceState.quality?.sharpness ?? null,
+        eyeOpenScore: faceState.quality?.eyeOpenScore ?? null,
+        smileScore: faceState.quality?.smileScore ?? null,
       }
     );
 
@@ -115,7 +119,17 @@ export class StepEvaluator implements IStepEvaluator {
       reasons.push(...qualityResult.reasons);
     }
 
-    const passed = presenceValid && poseValid && qualityValid;
+    // 4. Posture check (shoulder level, from the body-pose model)
+    //
+    // No pose model, or nothing wrong with what it saw, both read as valid —
+    // this is additional guidance layered on top of the face checks above,
+    // not a second prerequisite a kiosk without the model could never pass.
+    const postureValid = !faceState.posture || faceState.posture.reasons.length === 0;
+    if (!postureValid && faceState.posture) {
+      reasons.push(...faceState.posture.reasons);
+    }
+
+    const passed = presenceValid && poseValid && qualityValid && postureValid;
 
     return {
       passed,
@@ -124,6 +138,7 @@ export class StepEvaluator implements IStepEvaluator {
       qualityValid,
       positionValid,
       sizeValid,
+      postureValid,
       reasons: Array.from(new Set(reasons)),
     };
   }

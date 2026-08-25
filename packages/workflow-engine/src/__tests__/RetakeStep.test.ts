@@ -24,11 +24,19 @@ describe('WorkflowEngine retake', () => {
     ],
   };
 
-  /** Numbered snapshots, so a replaced image can be told apart from the one it replaced. */
+  /**
+   * Numbered snapshots, so a replaced image can be told apart from the one it
+   * replaced. Padded past CaptureController's plausible-payload length floor
+   * — a real capture's base64 payload runs to many kilobytes — and built
+   * from a-z/0-9 only, since '-' is not in the base64 alphabet the payload
+   * pattern actually validates against.
+   */
+  const shotUrl = (n: number): string => `data:image/jpeg;base64,${'a'.repeat(120)}shot${n}`;
+
   const createEngine = (): WorkflowEngine => {
     const engine = new WorkflowEngine();
     let shot = 0;
-    engine.setSnapshotProvider(() => `data:image/jpeg;base64,shot-${++shot}`);
+    engine.setSnapshotProvider(() => shotUrl(++shot));
     return engine;
   };
 
@@ -72,12 +80,12 @@ describe('WorkflowEngine retake', () => {
     assert.equal(engine.currentSession?.completedAt, undefined);
     assert.equal(engine.currentState.stepId, 'step-front');
     // The photo being replaced survives until the replacement actually lands.
-    assert.equal(stepOf(engine, 'step-front').capturedImagePath, 'data:image/jpeg;base64,shot-1');
+    assert.equal(stepOf(engine, 'step-front').capturedImagePath, shotUrl(1));
 
     await engine.triggerManualCapture();
 
-    assert.equal(stepOf(engine, 'step-front').capturedImagePath, 'data:image/jpeg;base64,shot-3');
-    assert.equal(stepOf(engine, 'step-left').capturedImagePath, 'data:image/jpeg;base64,shot-2');
+    assert.equal(stepOf(engine, 'step-front').capturedImagePath, shotUrl(3));
+    assert.equal(stepOf(engine, 'step-left').capturedImagePath, shotUrl(2));
     assert.equal(stepOf(engine, 'step-front').status, 'COMPLETED');
     assert.equal(stepOf(engine, 'step-left').status, 'COMPLETED');
     assert.equal(engine.currentSession?.status, 'COMPLETED');
@@ -100,7 +108,7 @@ describe('WorkflowEngine retake', () => {
     await engine.triggerManualCapture();
 
     assert.deepEqual(retaken, [
-      { stepId: 'step-front', imagePath: 'data:image/jpeg;base64,shot-2' },
+      { stepId: 'step-front', imagePath: shotUrl(2) },
     ]);
     // Capture resumes where the retake interrupted it rather than running off the end.
     assert.equal(engine.currentState.stepId, 'step-left');

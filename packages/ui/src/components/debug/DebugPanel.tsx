@@ -3,6 +3,7 @@ import { Bug, Activity } from 'lucide-react';
 import { FaceState } from '@face/core';
 import { DraggablePanel } from './DraggablePanel.js';
 import { cn } from '../../lib/utils.js';
+import { QUALITY_REASON_LABEL } from '../../lib/qualityReasonLabels.js';
 
 export interface DebugPanelProps {
   faceState?: FaceState | null;
@@ -27,16 +28,6 @@ const PRESENCE_LABEL: Record<string, string> = {
   MULTIPLE_FACES: 'Nhiều khuôn mặt',
 };
 
-const QUALITY_REASON_LABEL: Record<string, string> = {
-  FACE_TOO_SMALL: 'Mặt quá nhỏ',
-  FACE_TOO_LARGE: 'Mặt quá to',
-  OFF_CENTER: 'Lệch khỏi giữa khung',
-  TOO_DARK: 'Thiếu sáng',
-  TOO_BRIGHT: 'Quá sáng',
-  BLURRY: 'Ảnh bị mờ',
-  OCCLUDED: 'Mặt bị che',
-};
-
 export const DebugPanel: React.FC<DebugPanelProps> = ({
   faceState,
   fps = 0,
@@ -48,6 +39,7 @@ export const DebugPanel: React.FC<DebugPanelProps> = ({
 }) => {
   const pose = faceState?.pose || { yaw: 0, pitch: 0, roll: 0 };
   const quality = faceState?.quality;
+  const posture = faceState?.posture;
 
   const presenceColor =
     faceState?.presence === 'SINGLE_FACE'
@@ -179,11 +171,27 @@ export const DebugPanel: React.FC<DebugPanelProps> = ({
                   {Math.max(quality.centerXOffset, quality.centerYOffset)}
                 </span>
               </div>
+              <div className={cn('flex justify-between px-2.5 py-1 rounded-lg border', liquidCardStyle)}>
+                <span className={theme === 'dark' ? 'text-slate-400' : 'text-slate-600'}>Mắt mở:</span>
+                <span className="font-semibold">{quality.eyeOpenScore ?? 'chưa đo'}</span>
+              </div>
+              <div className={cn('flex justify-between px-2.5 py-1 rounded-lg border', liquidCardStyle)}>
+                <span className={theme === 'dark' ? 'text-slate-400' : 'text-slate-600'}>Độ cười:</span>
+                <span className="font-semibold">{quality.smileScore ?? 'chưa đo'}</span>
+              </div>
+              {posture && (
+                <div className={cn('flex justify-between px-2.5 py-1 rounded-lg border', liquidCardStyle)}>
+                  <span className={theme === 'dark' ? 'text-slate-400' : 'text-slate-600'}>Vai:</span>
+                  <span className="font-semibold">
+                    {posture.shoulderRoll !== null ? `${posture.shoulderRoll}°` : 'chưa thấy'}
+                  </span>
+                </div>
+              )}
             </div>
 
-            {quality.reasons.length > 0 && (
+            {(quality.reasons.length > 0 || (posture?.reasons.length ?? 0) > 0) && (
               <div className="mt-1 flex flex-wrap gap-1">
-                {quality.reasons.map((r, idx) => (
+                {[...quality.reasons, ...(posture?.reasons ?? [])].map((r, idx) => (
                   <span
                     key={idx}
                     className="px-2 py-0.5 text-[9px] bg-rose-500/20 text-rose-300 rounded-md border border-rose-400/30 font-semibold backdrop-blur-md shadow-sm"

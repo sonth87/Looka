@@ -1,6 +1,7 @@
 import { CustomException, ERROR_CODE } from '@app/common/errors';
 import { toDao } from '@app/common/helpers';
 import { CommonService } from '@app/modules/shared/common/common.service';
+import type { Visibility } from '@face/core';
 import { HttpStatus, Injectable } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { createHash } from 'node:crypto';
@@ -115,11 +116,17 @@ export class PhotoService extends CommonService<Photo> {
       );
       const id = rows[0].id;
 
+      // Every capture through this endpoint is a card photo - biometric data
+      // - decided here because this is the one place that actually knows
+      // that; the outbox/upload worker downstream just carries the value
+      // through as a plain column rather than choosing it themselves.
+      const visibility: Visibility = 'private';
+
       await manager.query(
-        `INSERT INTO upload_outbox (photo_id, idem_key, virtual_path, mime_type, content)
-         VALUES ($1, $2, $3, $4, $5)
+        `INSERT INTO upload_outbox (photo_id, idem_key, virtual_path, mime_type, content, visibility)
+         VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (idem_key) DO NOTHING`,
-        [id, idemKey, virtualPath, mimeType, data],
+        [id, idemKey, virtualPath, mimeType, data, visibility],
       );
 
       return id;

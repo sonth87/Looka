@@ -1,3 +1,4 @@
+import type { Visibility } from '@face/core';
 import { FsClient } from './FsClient.js';
 import { FsError, UploadResult } from './types.js';
 
@@ -25,6 +26,14 @@ export interface OutboxJob {
   attempts: number;
   metadata: Record<string, string> | null;
   fsFileId: string | null;
+  /**
+   * Decided by whoever enqueued the job — the point that actually knows what
+   * kind of capture this is — and carried through unchanged. This worker has
+   * no basis of its own for choosing public vs. private, so it never
+   * substitutes a default; `null`/`undefined` here means the server's own
+   * default applies, not "private by omission."
+   */
+  visibility?: Visibility | null;
 }
 
 /** Reads a captured image from local storage. Injected so tests need no disk. */
@@ -147,6 +156,9 @@ export class UploadWorker {
       idempotencyKey: job.idemKey,
       uploadId: job.uploadId,
       metadata: job.metadata ?? undefined,
+      // Passed through from whoever enqueued the job, never decided here —
+      // see the comment on OutboxJob.visibility.
+      visibility: job.visibility ?? undefined,
     };
     // Full-resolution captures always go chunked; derived artefacts are small
     // enough for a single request.
@@ -162,6 +174,11 @@ export class UploadWorker {
     // A rejected request stays rejected; only give repeated attempts to
     // failures that could plausibly clear on their own.
     if (!retryable || attempts >= this.opts.maxAttempts) {
+      // Best-effort: release the server-side session/quota hold rather than
+      // waiting for it to expire on its own. A cancel failing here (session
+      // already gone, network down) must not stop the job from being marked
+      // failed — that would leave it stuck SENDING forever.
+      void this.opts.client.cancelUpload(job.uploadId).catch(() => {});
       this.opts.outbox.markFailedPermanent(job.id, err.message);
       this.emit({ type: 'failed', jobId: job.id, error: err.message });
       return;

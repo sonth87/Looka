@@ -45,10 +45,13 @@ import {
   TooltipContent,
 } from "../../ui/tooltip.js";
 import { cn } from "../../../lib/utils.js";
+import { QUALITY_REASON_LABEL } from "../../../lib/qualityReasonLabels.js";
 
 export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
   const {
     stream,
+    zoomScale,
+    zoomOrigin,
     faceState,
     guidance,
     steps,
@@ -452,6 +455,8 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
             {/* Camera Preview Canvas */}
             <CameraPreview
               stream={stream}
+              zoomScale={zoomScale}
+              zoomOrigin={zoomOrigin}
               aspectRatio={isFullscreen ? "auto" : "16/9"}
               className={cn(
                 "w-full h-full overflow-hidden transition-all",
@@ -936,6 +941,28 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                           </div>
                         )}
 
+                        {/* Digital zoom, so it's visible whether the auto-zoom fallback is actually engaging */}
+                        {!!zoomScale && zoomScale > 1.001 && (
+                          <div className="flex items-center justify-between text-[11px] pt-2 border-t border-slate-800/40">
+                            <span className="text-slate-400 font-bold">Zoom số:</span>
+                            <span className="font-mono font-bold text-amber-400">
+                              {zoomScale.toFixed(2)}x
+                            </span>
+                          </div>
+                        )}
+
+                        {/* Shoulder-level check — separate model, separate failure mode from face quality below */}
+                        {faceState.posture && (
+                          <div className="flex items-center justify-between text-[11px] pt-2 border-t border-slate-800/40">
+                            <span className="text-slate-400 font-bold">Vai:</span>
+                            <span className="font-mono font-bold text-blue-400">
+                              {faceState.posture.shoulderRoll !== null
+                                ? `${faceState.posture.shoulderRoll}°`
+                                : "chưa thấy"}
+                            </span>
+                          </div>
+                        )}
+
                         {/* Biometric Quality Check */}
                         {faceState.quality && (
                           <div className="space-y-1.5 pt-2 border-t border-slate-800/40">
@@ -958,9 +985,12 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                             </div>
 
                             {(() => {
-                              const qualityReasons =
-                                (faceState.quality as any)?.reasons ||
-                                (faceState.quality as any)?.rejectReasons;
+                              const qualityReasons = [
+                                ...((faceState.quality as any)?.reasons ||
+                                  (faceState.quality as any)?.rejectReasons ||
+                                  []),
+                                ...(faceState.posture?.reasons ?? []),
+                              ];
                               if (
                                 !qualityReasons ||
                                 qualityReasons.length === 0
@@ -974,7 +1004,7 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                                   <ul className="list-disc list-inside">
                                     {qualityReasons.map(
                                       (r: string, i: number) => (
-                                        <li key={i}>{r}</li>
+                                        <li key={i}>{QUALITY_REASON_LABEL[r] ?? r}</li>
                                       ),
                                     )}
                                   </ul>
