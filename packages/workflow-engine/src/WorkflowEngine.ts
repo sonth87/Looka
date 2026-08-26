@@ -110,8 +110,19 @@ export class WorkflowEngine implements IWorkflowEngine {
   }
 
   private isCapturing = false;
+  /**
+   * The most recent frame this engine has actually seen, kept independently
+   * of the early-return guards below.
+   *
+   * triggerManualCapture() needs something to gate a MANUAL/OFF-mode capture
+   * against even when its caller has no frame handy to pass — see the doc
+   * comment there for why that must never mean "skip the check".
+   */
+  private lastFaceState: FaceState | null = null;
 
   public async processFrame(faceState: FaceState): Promise<GuidanceState> {
+    this.lastFaceState = faceState;
+
     if (
       this.isCapturing ||
       !this._currentSession ||
@@ -142,8 +153,15 @@ export class WorkflowEngine implements IWorkflowEngine {
       this.sensitivity
     );
 
-    // 2. Track Stability (prioritize step duration, then configured autoHoldMs, then default 500ms)
-    const stabilityDuration = currentStep.stability?.durationMs || this.autoHoldMs || 500;
+    // 2. Track Stability (prioritize step duration, then configured autoHoldMs, then a
+    // 2000ms floor — the same default every other surface uses: settingsStore,
+    // FaceOverlay's countdown ring, OverlayConfigPanel's slider, CaptureTriggerEvaluator.
+    // This used to fall back to 500ms, and nothing seeded `autoHoldMs` at engine
+    // construction (see FaceCaptureApp.tsx), so every session ran on a 0.5s hold
+    // instead of the intended 2s until an operator happened to touch the slider —
+    // long enough for the checks to pass for an instant mid-adjustment, not long
+    // enough for someone to actually finish posing before the shutter fired.
+    const stabilityDuration = currentStep.stability?.durationMs || this.autoHoldMs || 2000;
     const stability = this.stabilityTracker.update(evalResult.passed, stabilityDuration);
 
     // 3. Evaluate Guidance
@@ -179,6 +197,33 @@ export class WorkflowEngine implements IWorkflowEngine {
     const currentStep = this.activeWorkflow.steps[this.currentStepIdx];
     if (!currentStep || !currentStep.capture?.enabled) return false;
 
+    // AUTO mode always has a frame to hand (processFrame passes its own), but
+    // a MANUAL-gesture or OFF-shutter trigger comes from the UI instead, and
+    // used to call this with no faceState at all. That silently skipped the
+    // quality re-check below (`policy.quality` ended up null, which
+    // CaptureController.validateCapturedImage treats as "nothing to check"),
+    // so a smiling capture that a UI-level pre-check missed — or a UI call
+    // site that just forgot to pass one — sailed through with no gate behind
+    // it whatsoever. Falling back to the last frame this engine actually
+    // processed means the gate always has real data, even then.
+    const gateFaceState = faceState ?? this.lastFaceState;
+
+    // Re-run the same step-aware evaluation AUTO mode's stability tracking is
+    // built on (see processFrame's evalResult), rather than trusting
+    // faceState.quality.accepted — the CV engine's *generic*, sensitivity-only
+    // reading with no idea what this particular step requires. The two agree
+    // today only because no step in this app overrides `quality`; the moment
+    // one does, a caller re-deriving its own "is this ok" from the generic
+    // reading (as the gesture loop and shutter button do, for their own
+    // pre-capture UI state) could disagree with the step's real requirement.
+    // Evaluating here, at the point of actually committing the photo, is the
+    // one check that can't drift from what the step actually asks for.
+    let qualitySnapshot: { accepted: boolean; reasons: string[] } | null = null;
+    if (gateFaceState) {
+      const stepResult = this.stepEvaluator.evaluate(gateFaceState, currentStep, this.sensitivity);
+      qualitySnapshot = { accepted: stepResult.passed, reasons: stepResult.reasons };
+    }
+
     this.isCapturing = true;
     this.stabilityTracker.reset();
 
@@ -188,15 +233,13 @@ export class WorkflowEngine implements IWorkflowEngine {
       const valid =
         captureResult !== null &&
         (await this.captureController.validateCapturedImage(captureResult.imagePath, {
-          quality: faceState?.quality
-            ? { accepted: faceState.quality.accepted, reasons: faceState.quality.reasons }
-            : null,
+          quality: qualitySnapshot,
         }));
 
       if (valid && captureResult) {
         // advanceToNextStep clears the retake, so the flag is read while it still stands.
         const wasRetake = this.retakeReturnIdx !== null;
-        this.updateStepStatus(currentStep.id, 'COMPLETED', captureResult.imagePath, faceState || undefined);
+        this.updateStepStatus(currentStep.id, 'COMPLETED', captureResult.imagePath, gateFaceState || undefined);
 
         // Phát sự kiện trigger để UI hiển thị Flash & Freeze Base64 & Animation bay ảnh
         this.emit('capture-trigger', {

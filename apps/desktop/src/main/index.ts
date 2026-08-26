@@ -14,6 +14,7 @@ import {
   startUploads,
   stopUploads,
   queueCapture,
+  approveSessionUpload,
   uploadStatus,
   retryFailedUpload,
   pingFileService,
@@ -29,6 +30,25 @@ import {
   secretsStatus,
 } from './secrets.js';
 import { initLogger, installCrashHandlers, closeLogger, logFilePath } from './logger.js';
+
+/**
+ * Disable Chromium's hardware-accelerated (D3D11/Media Foundation) webcam
+ * capture path on Windows.
+ *
+ * On some GPU/driver combinations that pipeline fails with
+ * MF_E_HW_MFT_FAILED_START_STREAMING (0xC00D3704, "lack of hardware
+ * resources") — reproduced here after several rapid app restarts in a row,
+ * which fragments GPU-process resources across the repeated launches.
+ * Chromium then reports this to the page as a bare "Could not start video
+ * source", with nothing short of a reboot fixing it while the hardware path
+ * stays wedged. Falling back to Chromium's software capture path sidesteps
+ * the hardware MFT entirely, at the cost of slightly higher CPU use for
+ * decoding — an easy trade for a kiosk that must reliably reopen its camera.
+ *
+ * Must be set before app.whenReady() / any BrowserWindow — Chromium reads
+ * this switch during its own startup, not on demand.
+ */
+app.commandLine.appendSwitch('disable-features', 'MediaFoundationD3D11VideoCapture');
 
 /**
  * Name the user-data folder explicitly.
@@ -406,6 +426,28 @@ app.whenReady().then(async () => {
       }
     }
   );
+
+  /**
+   * Release a reviewed session's staged captures for upload.
+   *
+   * The renderer calls this from SessionReviewModal's "Xác nhận & Lưu hồ sơ"
+   * button, after the operator has reviewed every step. Every row queueCapture
+   * wrote for this session so far — and only this session — becomes eligible
+   * for the existing background UploadWorker from here; nothing here talks to
+   * the file-service directly. A session with nothing left to approve
+   * (already approved, or unknown) is not an error: `approved: 0` reports
+   * that plainly so the caller can tell a genuine approval from a no-op.
+   */
+  ipcMain.handle('session:approveUpload', (_, payload: { sessionId?: unknown }) => {
+    const sessionId = String(payload?.sessionId ?? '');
+    if (!sessionId) return { ok: false, error: 'A session id is required.' };
+    try {
+      const approved = approveSessionUpload(sessionId);
+      return { ok: true, approved };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  });
 
   // Native File Export IPC
   ipcMain.handle(

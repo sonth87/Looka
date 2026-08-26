@@ -19,6 +19,13 @@ export interface OutboxItem {
   /** Decided by the caller that enqueued the job. null means "let the file-service apply its own default." */
   visibility: Visibility | null;
   status: OutboxStatus;
+  /**
+   * When the operator approved this row's session for upload, or null while
+   * it is still staged awaiting review. Gates claimDue() — see
+   * approveSession() — and doubles as this session's upload history: paired
+   * with `doneAt`, it answers "was this actually sent, and when."
+   */
+  approvedAt: number | null;
   attempts: number;
   nextRetryAt: number | null;
   lastError: string | null;
@@ -76,6 +83,11 @@ export class UploadOutboxRepository {
    * Call inside the same transaction that writes the image row, so a capture is
    * either fully recorded or not recorded at all. Re-enqueuing the same idemKey
    * is ignored rather than duplicated.
+   *
+   * The row starts staged — `approved_at` is left NULL, so claimDue() will not
+   * pick it up — until the operator reviews the session and approveSession()
+   * releases it. This is the "capture first, upload only after explicit
+   * approval" gate; see approveSession()'s own doc comment.
    */
   public enqueue(input: EnqueueInput): void {
     this.db.run(
@@ -105,12 +117,19 @@ export class UploadOutboxRepository {
   }
 
   /**
-   * Jobs ready to send: due, and not waiting on an unfinished dependency.
+   * Jobs ready to send: due, approved, and not waiting on an unfinished
+   * dependency.
+   *
+   * `approved_at IS NOT NULL` is the staging gate — a row a session's operator
+   * has not yet confirmed sits here forever, harmlessly, until
+   * approveSession() releases it. See that method and migration 005 for why
+   * this is a separate column rather than a new `status` value.
    */
   public claimDue(now: number, limit = 5): OutboxItem[] {
     const rows = this.db.exec<Record<string, unknown>>(
       `SELECT o.* FROM upload_outbox o
        WHERE o.status = 'PENDING'
+         AND o.approved_at IS NOT NULL
          AND (o.next_retry_at IS NULL OR o.next_retry_at <= ?)
          AND (o.depends_on IS NULL OR EXISTS (
                SELECT 1 FROM upload_outbox d
@@ -120,6 +139,49 @@ export class UploadOutboxRepository {
       [now, limit]
     );
     return rows.map(toItem);
+  }
+
+  /**
+   * Release a reviewed session's staged captures for upload.
+   *
+   * The operator has just confirmed this session in the review screen; every
+   * row still awaiting approval for it is stamped with the approval time and
+   * becomes visible to claimDue() from here on — the existing UploadWorker
+   * drains it exactly as it always has, unaware anything changed. Rows
+   * already approved (or from a different session) are left untouched, so
+   * calling this again for the same session — a double click, or a retried
+   * IPC call — is a harmless no-op that returns 0.
+   *
+   * `next_retry_at` is cleared defensively: a freshly staged row is always
+   * already due (enqueue() sets it to "now"), so this is not required for the
+   * normal path, but it keeps this method correct even if something upstream
+   * ever changes that assumption.
+   *
+   * A session nobody ever approves — the operator walks away, the app
+   * crashes, the run is cancelled — simply never has this called for it. Its
+   * rows stay staged indefinitely: harmless and recoverable, never uploaded
+   * behind the operator's back and never deleted. See FaceCaptureApp's
+   * handleRestart/handleCancelWorkflow for the run-abandonment paths this
+   * relies on never reaching this method.
+   *
+   * Returns how many rows this call actually moved, so a caller can tell a
+   * genuine approval from a no-op repeat.
+   */
+  public approveSession(sessionId: string): number {
+    const before = this.db.exec<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM upload_outbox WHERE session_id = ? AND approved_at IS NULL`,
+      [sessionId]
+    );
+    const count = Number(before[0]?.n ?? 0);
+    if (count === 0) return 0;
+
+    this.db.run(
+      `UPDATE upload_outbox
+          SET approved_at = ?, next_retry_at = NULL
+        WHERE session_id = ? AND approved_at IS NULL`,
+      [Date.now(), sessionId]
+    );
+    return count;
   }
 
   public markSending(id: string): void {
@@ -265,6 +327,7 @@ function toItem(r: Record<string, unknown>): OutboxItem {
     dependsOn: r.depends_on ? String(r.depends_on) : null,
     visibility: r.visibility === 'public' || r.visibility === 'private' ? r.visibility : null,
     status: String(r.status) as OutboxStatus,
+    approvedAt: r.approved_at === null || r.approved_at === undefined ? null : Number(r.approved_at),
     attempts: Number(r.attempts ?? 0),
     nextRetryAt: r.next_retry_at === null || r.next_retry_at === undefined ? null : Number(r.next_retry_at),
     lastError: r.last_error ? String(r.last_error) : null,

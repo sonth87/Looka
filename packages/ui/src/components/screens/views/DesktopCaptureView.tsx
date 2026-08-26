@@ -448,6 +448,35 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                       Toàn màn hình
                     </TooltipContent>
                   </Tooltip>
+
+                  {/*
+                    The header housing the normal "Xem kết quả" button is
+                    hidden entirely in fullscreen (see `{!isFullscreen &&
+                    (<header>...` above), which otherwise strands an operator
+                    who toggled to the clean camera-only view with no way
+                    back to already-captured photos short of guessing that
+                    exiting fullscreen brings the header back. This HUD row
+                    is not hidden in fullscreen, so mirroring the button here
+                    keeps review reachable without leaving fullscreen. Only
+                    rendered in fullscreen to avoid a second, redundant
+                    button sitting right above the header's copy the rest of
+                    the time.
+                  */}
+                  {isFullscreen && hasCapturedImages && onOpenReview && (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          onClick={onOpenReview}
+                          className="p-1 rounded-lg text-xs transition-colors cursor-pointer bg-blue-600 hover:bg-blue-500 text-white"
+                        >
+                          <Images className="w-3.5 h-3.5" />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent side="bottom" theme={theme}>
+                        Xem kết quả
+                      </TooltipContent>
+                    </Tooltip>
+                  )}
                 </div>
               </TooltipProvider>
             </div>
@@ -964,55 +993,63 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                         )}
 
                         {/* Biometric Quality Check */}
-                        {faceState.quality && (
-                          <div className="space-y-1.5 pt-2 border-t border-slate-800/40">
-                            <div className="flex items-center justify-between text-[11px]">
-                              <span className="text-slate-400 font-bold">
-                                Chất lượng sinh trắc:
-                              </span>
-                              <span
-                                className={cn(
-                                  "px-2 py-0.5 rounded-full font-bold text-[10px] border",
-                                  faceState.quality.accepted
-                                    ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/40"
-                                    : "bg-rose-500/20 text-rose-400 border-rose-500/40",
-                                )}
-                              >
-                                {faceState.quality.accepted
-                                  ? "ĐẠT CHUẨN ✓"
-                                  : "KHÔNG ĐẠT ✕"}
-                              </span>
-                            </div>
+                        {faceState.quality && (() => {
+                          // Single source of truth for "why can't this capture
+                          // right now": the engine's own step-aware evaluation
+                          // (WorkflowEngine -> StepEvaluator -> GuidanceEngine
+                          // -> guidance.hints), which already covers presence,
+                          // pose-vs-this-step's-target, quality, and posture
+                          // (posture only when the active step checks it — see
+                          // CaptureStep.postureCheck; LEFT/RIGHT opt out since
+                          // turning legitimately rotates the shoulder line).
+                          //
+                          // This badge used to re-derive its own narrower list
+                          // from faceState.quality/posture directly, which
+                          // never looked at pose at all — turning the wrong
+                          // way (or not far enough) during LEFT/RIGHT still
+                          // showed ĐẠT CHUẨN, because a pose mismatch was
+                          // invisible to this panel even though it was the
+                          // actual, correct reason capture never fired.
+                          const reasonHints = guidance.hints ?? [];
+                          const accepted = reasonHints.length === 0;
 
-                            {(() => {
-                              const qualityReasons = [
-                                ...((faceState.quality as any)?.reasons ||
-                                  (faceState.quality as any)?.rejectReasons ||
-                                  []),
-                                ...(faceState.posture?.reasons ?? []),
-                              ];
-                              if (
-                                !qualityReasons ||
-                                qualityReasons.length === 0
-                              )
-                                return null;
-                              return (
+                          return (
+                            <div className="space-y-1.5 pt-2 border-t border-slate-800/40">
+                              <div className="flex items-center justify-between text-[11px]">
+                                <span className="text-slate-400 font-bold">
+                                  Chất lượng sinh trắc:
+                                </span>
+                                <span
+                                  className={cn(
+                                    "px-2 py-0.5 rounded-full font-bold text-[10px] border",
+                                    accepted
+                                      ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/40"
+                                      : "bg-rose-500/20 text-rose-400 border-rose-500/40",
+                                  )}
+                                >
+                                  {accepted ? "ĐẠT CHUẨN ✓" : "KHÔNG ĐẠT ✕"}
+                                </span>
+                              </div>
+
+                              {reasonHints.length > 0 && (
                                 <div className="p-2 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-400 text-[10px] space-y-0.5">
                                   <span className="font-bold block">
                                     Lý do chưa đạt:
                                   </span>
                                   <ul className="list-disc list-inside">
-                                    {qualityReasons.map(
-                                      (r: string, i: number) => (
-                                        <li key={i}>{QUALITY_REASON_LABEL[r] ?? r}</li>
-                                      ),
-                                    )}
+                                    {reasonHints.map((hint, i) => (
+                                      // QUALITY_REASON_LABEL has curated short labels for
+                                      // the quality/posture codes; guidance's own message
+                                      // (already Vietnamese) covers the pose/presence codes
+                                      // it doesn't have an entry for.
+                                      <li key={i}>{QUALITY_REASON_LABEL[hint.code] ?? hint.message}</li>
+                                    ))}
                                   </ul>
                                 </div>
-                              );
-                            })()}
-                          </div>
-                        )}
+                              )}
+                            </div>
+                          );
+                        })()}
                       </div>
                     )}
                   </div>

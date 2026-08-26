@@ -119,13 +119,14 @@ export class StepEvaluator implements IStepEvaluator {
       reasons.push(...qualityResult.reasons);
     }
 
-    // 4. Posture check (shoulder level, from the body-pose model)
-    //
-    // No pose model, or nothing wrong with what it saw, both read as valid —
-    // this is additional guidance layered on top of the face checks above,
-    // not a second prerequisite a kiosk without the model could never pass.
-    const postureValid = !faceState.posture || faceState.posture.reasons.length === 0;
-    if (!postureValid && faceState.posture) {
+    // 4. Posture check (shoulder level, from the body-pose model) — only for
+    // steps where it's meaningful. Turning the head for LEFT/RIGHT legitimately
+    // rotates the shoulder line and can take a shoulder out of frame; neither
+    // is a posture defect, so those steps opt out via step.postureCheck.
+    const postureCheckEnabled = step.postureCheck !== false;
+    const postureValid =
+      !postureCheckEnabled || !faceState.posture || faceState.posture.reasons.length === 0;
+    if (postureCheckEnabled && !postureValid && faceState.posture) {
       reasons.push(...faceState.posture.reasons);
     }
 

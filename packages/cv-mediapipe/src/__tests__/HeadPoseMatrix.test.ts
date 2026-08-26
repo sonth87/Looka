@@ -77,3 +77,92 @@ describe('head pose from the transformation matrix', () => {
     assert.ok(Math.abs(pose!.roll) <= 90);
   });
 });
+
+/**
+ * Regression coverage for the LEFT step being permanently unreachable.
+ *
+ * The round-trip tests above only prove poseFromTransformationMatrix and
+ * transformationMatrixFromEuler agree with EACH OTHER — both live in this file
+ * and share whatever sign convention they were written with, so a matching bug
+ * in both would round-trip cleanly and still be wrong for a real camera. These
+ * tests instead build the rotation matrix by hand, independently of
+ * transformationMatrixFromEuler, straight from MediaPipe's documented camera
+ * coordinate space: right-handed, camera looking down -Z, so X is image-right,
+ * Y is up, Z points from the face towards the camera
+ * (developers.googleblog.com/mediapipe-3d-face-transform).
+ *
+ * A pure rotation about Y by +theta swings the face's forward axis (+Z) toward
+ * +X, i.e. the nose moves toward image-right. For a subject facing the camera,
+ * image-right is THEIR OWN LEFT — the same relationship a photo has: someone
+ * facing you has their left hand on your right. So theta > 0 here is a real,
+ * physical turn to the subject's own left.
+ */
+describe('head pose yaw sign matches a real physical turn (regression)', () => {
+  /**
+   * Column-major 4x4 for a pure rotation about the world/camera Y axis,
+   * built directly from the matrix definition rather than via
+   * transformationMatrixFromEuler, so a shared bug between compose and
+   * decompose cannot hide behind a passing round-trip.
+   */
+  function pureYawRotationMatrix(thetaDeg: number): number[] {
+    const t = (thetaDeg * Math.PI) / 180;
+    const c = Math.cos(t);
+    const s = Math.sin(t);
+    // Columns: [r00,r10,r20,0], [r01,r11,r21,0], [r02,r12,r22,0], [0,0,0,1]
+    return [c, 0, -s, 0, 0, 1, 0, 0, s, 0, c, 0, 0, 0, 0, 1];
+  }
+
+  test('nose swinging toward image-right (own-left turn) reads as negative yaw', () => {
+    // theta = +65: the exact motion needed to satisfy step-left
+    // (pose.yaw.target -65, tolerance 25 → accepts [-90, -40]) in
+    // FaceCaptureApp.tsx's defaultWorkflow.
+    const pose = poseFromTransformationMatrix(pureYawRotationMatrix(65));
+    assert.ok(pose, 'expected a pose');
+    assert.ok(
+      pose!.yaw >= -90 && pose!.yaw <= -40,
+      `a 65-degree turn to the subject's own left must satisfy the LEFT step (target -65 +/-25), got yaw ${pose!.yaw}`
+    );
+  });
+
+  test('nose swinging toward image-left (own-right turn) reads as positive yaw', () => {
+    // theta = -65: the mirror-image motion, matching step-right's target of
+    // +65 (tolerance 25 → accepts [40, 90]).
+    const pose = poseFromTransformationMatrix(pureYawRotationMatrix(-65));
+    assert.ok(pose, 'expected a pose');
+    assert.ok(
+      pose!.yaw >= 40 && pose!.yaw <= 90,
+      `a 65-degree turn to the subject's own right must satisfy the RIGHT step (target +65 +/-25), got yaw ${pose!.yaw}`
+    );
+  });
+
+  test('turning further to the subject’s own left moves yaw further negative, never back positive', () => {
+    // This is the exact shape of the field bug: turning further in the
+    // "correct" direction has to get closer to the LEFT step's negative
+    // target, not drift further away from it. A hard sign inversion is the
+    // one failure mode where "turn further" never helps, no matter how far
+    // the subject turns — which is what made the step permanently stuck.
+    const readings = [10, 30, 50, 65, 80].map(
+      (theta) => poseFromTransformationMatrix(pureYawRotationMatrix(theta))!.yaw
+    );
+
+    for (let i = 1; i < readings.length; i++) {
+      assert.ok(
+        readings[i] < readings[i - 1],
+        `deeper left turns must read more negative: ${readings.join(', ')}`
+      );
+    }
+    assert.ok(readings.every((y) => y < 0), `every own-left turn must read negative yaw, got ${readings.join(', ')}`);
+  });
+
+  test('agrees with the 2D fallback on sign: own-left turn is negative in both pose sources', () => {
+    // PoseEstimator.test.ts independently pins "turning to their own LEFT
+    // gives negative yaw" from pure image-space landmark geometry, with no
+    // dependency on this file's matrix math. The 3D and 2D pose sources feed
+    // the same EMA smoother in MediaPipeCVEngine and must never disagree on
+    // sign, or a session that switches between them mid-capture (e.g. a
+    // frame where MediaPipe fails to solve the matrix) would see the
+    // reported yaw jump to the opposite side of zero.
+    const pose = poseFromTransformationMatrix(pureYawRotationMatrix(30));
+    assert.ok(pose!.yaw < 0, `expected the 3D path to agree with the 2D own-left convention (negative), got ${pose!.yaw}`);
+  });
+});

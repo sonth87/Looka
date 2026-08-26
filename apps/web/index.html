@@ -9,6 +9,14 @@
   </head>
   <body class="bg-slate-950 text-slate-100 antialiased fixed inset-0 h-[100dvh] w-screen overflow-hidden overscroll-none touch-none select-none">
     <div id="root"></div>
+    <script>
+      // Local dev default only — matches apps/api's own .env.example dev
+      // default. A real deployment overrides both globals before this loads;
+      // this just lets `pnpm dev:web` talk to a `pnpm dev:app` (api) running
+      // on its own default port without extra setup.
+      window.LOOKA_API_BASE_URL = window.LOOKA_API_BASE_URL ?? "http://localhost:3100";
+      window.LOOKA_API_KEY = window.LOOKA_API_KEY ?? "dev-local-test-key";
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

@@ -23,14 +23,22 @@ const job = (id: string, over: Partial<Parameters<UploadOutboxRepository['enqueu
 });
 
 describe('UploadOutbox — queueing', () => {
-  test('a queued job becomes due immediately', async () => {
+  test('a queued job is staged, not due, until the session is approved', async () => {
     const { adapter, repo } = await makeRepo();
     repo.enqueue(job('j1'));
+
+    // Captured and queued, but nobody has reviewed it yet — must not be
+    // picked up by the background worker.
+    assert.equal(repo.claimDue(Date.now()).length, 0);
+    assert.equal(repo.getById('j1')!.approvedAt, null);
+
+    repo.approveSession('sess_1');
 
     const due = repo.claimDue(Date.now());
     assert.equal(due.length, 1);
     assert.equal(due[0].virtualPath, 'raw/sess_1/j1.jpg');
     assert.equal(due[0].status, 'PENDING');
+    assert.ok(due[0].approvedAt !== null && due[0].approvedAt <= Date.now());
     adapter.close();
   });
 
@@ -50,6 +58,9 @@ describe('UploadOutbox — queueing', () => {
     const { adapter, repo } = await makeRepo();
     repo.enqueue(job('raw1'));
     repo.enqueue(job('card1', { kind: 'card_3x4', dependsOn: 'raw1' }));
+    // Both belong to sess_1 (the job() helper's default) and are reviewed
+    // together — approval is orthogonal to the dependsOn ordering under test.
+    repo.approveSession('sess_1');
 
     let due = repo.claimDue(Date.now());
     assert.deepEqual(due.map((d) => d.id), ['raw1']);
@@ -63,10 +74,46 @@ describe('UploadOutbox — queueing', () => {
   });
 });
 
+describe('UploadOutbox — staging and approval', () => {
+  test('approveSession only releases the targeted session, leaving others staged', async () => {
+    const { adapter, repo } = await makeRepo();
+    repo.enqueue(job('a1', { sessionId: 'sess_A', virtualPath: 'raw/sess_A/a1.jpg', idemKey: 'sess_A:a1:1:raw' }));
+    repo.enqueue(job('b1', { sessionId: 'sess_B', virtualPath: 'raw/sess_B/b1.jpg', idemKey: 'sess_B:b1:1:raw' }));
+
+    repo.approveSession('sess_A');
+
+    assert.deepEqual(repo.claimDue(Date.now()).map((d) => d.id), ['a1']);
+    assert.equal(repo.getById('a1')!.approvedAt !== null, true);
+    assert.equal(repo.getById('b1')!.approvedAt, null, 'a different session is untouched');
+    adapter.close();
+  });
+
+  test('approveSession reports how many rows it moved, and is a no-op the second time', async () => {
+    const { adapter, repo } = await makeRepo();
+    repo.enqueue(job('j1'));
+    repo.enqueue(job('j2', { idemKey: 'sess_1:j2:1:raw', virtualPath: 'raw/sess_1/j2.jpg' }));
+
+    const firstCall = repo.approveSession('sess_1');
+    assert.equal(firstCall, 2, 'both staged rows were released');
+
+    const secondCall = repo.approveSession('sess_1');
+    assert.equal(secondCall, 0, 'nothing left to approve — a harmless no-op');
+    assert.equal(repo.claimDue(Date.now()).length, 2, 'the earlier approval still holds');
+    adapter.close();
+  });
+
+  test('a session with nothing staged approves harmlessly', async () => {
+    const { adapter, repo } = await makeRepo();
+    assert.equal(repo.approveSession('sess_nonexistent'), 0);
+    adapter.close();
+  });
+});
+
 describe('UploadOutbox — retry and failure', () => {
   test('a retry is scheduled in the future and is not due yet', async () => {
     const { adapter, repo } = await makeRepo();
     repo.enqueue(job('j1'));
+    repo.approveSession('sess_1');
     repo.markSending('j1');
     repo.markRetry('j1', 'connection reset', 60_000);
 
@@ -83,6 +130,7 @@ describe('UploadOutbox — retry and failure', () => {
   test('a permanently failed job leaves the queue until someone retries it', async () => {
     const { adapter, repo } = await makeRepo();
     repo.enqueue(job('j1'));
+    repo.approveSession('sess_1');
     repo.markFailedPermanent('j1', 'rejected: bad request');
 
     assert.equal(repo.claimDue(Date.now() + 10_000_000).length, 0);
@@ -110,6 +158,7 @@ describe('UploadOutbox — crash recovery', () => {
     const { adapter, repo } = await makeRepo();
     repo.enqueue(job('j1'));
     repo.enqueue(job('j2'));
+    repo.approveSession('sess_1');
     repo.markSending('j1');
     repo.markSending('j2');
 
