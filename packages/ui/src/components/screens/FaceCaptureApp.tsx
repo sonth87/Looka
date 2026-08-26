@@ -12,7 +12,6 @@ import {
   GuidanceState,
 } from '@face/core';
 import { BrowserCameraService } from '@face/camera';
-import { zoomFactorToReach } from '@face/face-quality';
 import { MockCVEngine, FramePipeline } from '@face/cv-engine';
 import { MediaPipeCVEngine } from '@face/cv-mediapipe';
 import { MediaPipeGestureEngine } from '@face/hand-gesture';
@@ -168,6 +167,14 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   const livePipelineRef = useRef<FramePipeline | null>(null);
   /** Set when a capture could not be stored; surfaced, never swallowed. */
   const [storeError, setStoreError] = useState<string | null>(null);
+  /**
+   * Mirror BrowserCameraService's digital zoom so CameraPreview can show the
+   * same crop the analysis frame and saved still are using — see the
+   * auto-zoom effect below. Scale is 1 and centre is (0.5, 0.5) whenever
+   * hardware zoom is available instead.
+   */
+  const [digitalZoomScale, setDigitalZoomScale] = useState(1);
+  const [digitalZoomCenter, setDigitalZoomCenter] = useState({ x: 0.5, y: 0.5 });
   const sessionIdRef = useRef<string | null>(null);
   /**
    * Local record of the session, in the browser's own sql.js database.
@@ -551,9 +558,12 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           brightness: 0.5,
           centerXOffset: 0,
           centerYOffset: 0,
+          eyeOpenScore: 1,
+          smileScore: 0,
           eyesVisible: true,
           mouthVisible: true,
           occluded: false,
+          neutralExpression: true,
           reasons: [],
         },
         timestamp: Date.now(),
@@ -683,37 +693,167 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    */
 
   /**
-   * Nudge the camera's own zoom until the face fills a workable share of frame.
+   * Nudge the camera's zoom until the face fills a workable share of frame,
+   * centred in it.
    *
-   * Only real camera zoom is used. Scaling the picture up afterwards would make
-   * the face look closer while capturing exactly the same pixels — worse than
-   * useless for a photo that gets cropped and matched later. Cameras without a
-   * zoom capability keep their fixed framing and the operator is told to step
-   * closer by the existing quality guidance instead.
+   * Hardware zoom (setZoom) is always preferred: it adds real sensor pixels,
+   * so the captured still stays full quality — but it can only shrink or
+   * enlarge the same fixed field of view, never recentre it, so centring is
+   * digital-only (see the digital branch below) regardless of which zoom
+   * path is active. When the camera reports no zoom capability at all, size
+   * falls back to a software crop+scale too (BrowserCameraService.
+   * setDigitalZoom) — applied to the CV analysis frame AND the saved still,
+   * by explicit choice, accepting some sharpness loss in the printed card so
+   * an operator with a fixed webcam never has to physically move it or the
+   * subject. See card-photo-quality-checks.md.
+   *
+   * Bidirectional: zooms in when the face is too small AND back out when it
+   * moves closer than the target — unlike face-quality's zoomFactorToReach,
+   * which by design only ever zooms in. Without the zoom-out half, a face
+   * that stepped up close after triggering zoom-in stayed over-magnified for
+   * the rest of the session, with the FACE_TOO_LARGE guidance ("lùi xa
+   * camera") firing against a frame that was already artificially too tight
+   * — not the raw picture the operator was actually standing in front of.
+   * Zoom only bottoms out at 1x (hardware clamps to its own reported
+   * minimum), so a face that is genuinely too close for the lens itself
+   * still reaches that same FACE_TOO_LARGE guidance once there is no more
+   * zoom left to give back.
+   *
+   * Also capped by the shoulder-level check (posture): face size alone would
+   * happily zoom in until the shoulders — and with them, most of the
+   * headroom above the crown — are cropped out of frame, which is exactly
+   * what the posture check needs in frame to do its job. There is no
+   * landmark for the literal crown of the head to target directly, so
+   * `shouldersVisible` (a real per-frame reading from the pose model, not a
+   * geometric guess) is the closest available proxy: once it goes false,
+   * further zoom-in is refused and the target backs off instead, the same
+   * way FACE_TOO_LARGE backs zoom off once the face itself is too close.
    */
   useEffect(() => {
     if (!stream) return;
     const camera = cameraServiceRef.current;
-    if (!camera || !camera.getZoomCapability()) return;
+    if (!camera) return;
 
     const TARGET_RATIO = 0.32;
     const DEADBAND = 0.05;
+    const MAX_MAGNIFICATION = 3;
+    // Unlike zoomFactorToReach (face-quality), this moves both ways: >1
+    // zooms in, <1 zooms back out. Only clamped at the top — the caller
+    // clamps the bottom (setZoom to the hardware's own minimum, the digital
+    // path to 1x below).
+    const magnificationToReach = (ratio: number): number =>
+      ratio > 0 ? Math.min(MAX_MAGNIFICATION, TARGET_RATIO / ratio) : 1;
+    const caps = camera.getZoomCapability();
+    console.log('[AutoZoom] camera zoom capability:', caps);
+    // A capability object is only a claim. Some drivers advertise a zoom
+    // range and then reject every applyConstraints() call for it (caught
+    // below) — this flips to digital for the rest of the session the first
+    // time that happens, rather than trusting the advertisement forever.
+    let hardwareZoomFailed = false;
+    // Sync React state to whatever the camera actually holds at the start of
+    // this stream — stop() resets it to 1x/centre, but this keeps the
+    // preview honest even if that assumption ever changes.
+    setDigitalZoomScale(camera.getDigitalZoom());
+    setDigitalZoomCenter(camera.getDigitalZoomCenter());
 
     const id = setInterval(() => {
-      const ratio = faceStateRef.current?.quality?.faceSizeRatio;
-      if (!ratio || ratio <= 0) return;
-      if (Math.abs(ratio - TARGET_RATIO) < DEADBAND) return;
+      const faceState = faceStateRef.current;
+      const ratio = faceState?.quality?.faceSizeRatio;
+      const useHardware = caps && !hardwareZoomFailed;
+      // See the doc comment above: a real per-frame reading, not a guess —
+      // undefined/null (no pose model, or none yet this tick) must not
+      // restrict zoom, only an explicit false.
+      const shouldersLost = faceState?.posture?.shouldersVisible === false;
 
-      const caps = camera.getZoomCapability();
-      const current = camera.getZoom();
-      if (!caps || current === null) return;
+      if (useHardware) {
+        if (!ratio || ratio <= 0) return;
+        if (Math.abs(ratio - TARGET_RATIO) < DEADBAND && !shouldersLost) return;
 
-      // Damped, so someone leaning in and out does not send the lens racing.
-      const wanted = current * zoomFactorToReach(ratio, TARGET_RATIO, 3);
-      const next = current + (wanted - current) * 0.4;
-      if (Math.abs(next - current) < caps.step) return;
+        const current = camera.getZoom();
+        if (current === null) {
+          hardwareZoomFailed = true;
+          return;
+        }
 
-      void camera.setZoom(next);
+        // Damped, so someone leaning in and out does not send the lens racing.
+        let wanted = current * magnificationToReach(ratio);
+        if (shouldersLost) wanted = Math.min(wanted, current * 0.9);
+        const next = current + (wanted - current) * 0.4;
+        if (Math.abs(next - current) < caps!.step) return;
+
+        void camera.setZoom(next).then((applied) => {
+          if (applied === null) {
+            console.log('[AutoZoom] hardware setZoom rejected by driver, switching to digital zoom');
+            hardwareZoomFailed = true;
+          } else {
+            console.log('[AutoZoom] hardware zoom ->', applied);
+          }
+        });
+        return;
+      }
+
+      // Digital fallback — no hardware capability, or it turned out not to
+      // actually work. Resets to 1x/centre whenever no face is being
+      // tracked, so a new or closer subject standing up next is never seen
+      // through a stale, off-centre crop left over from whoever was there
+      // before them.
+      if (!faceState?.detected || !ratio || ratio <= 0) {
+        if (camera.getDigitalZoom() !== 1) {
+          camera.setDigitalZoom(1);
+          setDigitalZoomScale(1);
+          setDigitalZoomCenter({ x: 0.5, y: 0.5 });
+        }
+        return;
+      }
+
+      const currentScale = camera.getDigitalZoom();
+      const sizeInBand = Math.abs(ratio - TARGET_RATIO) < DEADBAND;
+      let wantedScale = sizeInBand && !shouldersLost
+        ? currentScale
+        : currentScale * magnificationToReach(ratio);
+      if (shouldersLost) wantedScale = Math.min(wantedScale, currentScale * 0.9);
+      // Floored at 1x here (not just inside setDigitalZoom) so the debug
+      // readout and the damping comparison below both see the real target
+      // rather than a negative-looking overshoot past "no zoom".
+      const nextScale = Math.max(1, currentScale + (wantedScale - currentScale) * 0.4);
+
+      // Where the face actually sits in the FULL original frame, not just
+      // within whatever crop window produced this tick's analysis frame —
+      // composed from the crop BrowserCameraService actually used
+      // (getDigitalZoomCropRect), so this never drifts from what
+      // getFrame()/captureBase64Snapshot() really drew. Centring, unlike
+      // size, is not gated on a deadband here: it is already damped below,
+      // and OFF_CENTER's own tolerance is what decides whether a small
+      // residual offset still counts as "centred enough".
+      const { x: currentCenterX, y: currentCenterY } = camera.getDigitalZoomCenter();
+      let nextCenterX = currentCenterX;
+      let nextCenterY = currentCenterY;
+      if (faceState.center && faceState.frameWidth && faceState.frameHeight) {
+        const crop = camera.getDigitalZoomCropRect();
+        const faceRelX = faceState.center.x / faceState.frameWidth;
+        const faceRelY = faceState.center.y / faceState.frameHeight;
+        const targetCenterX = crop.sxRatio + faceRelX * crop.swRatio;
+        const targetCenterY = crop.syRatio + faceRelY * crop.shRatio;
+        nextCenterX = currentCenterX + (targetCenterX - currentCenterX) * 0.4;
+        nextCenterY = currentCenterY + (targetCenterY - currentCenterY) * 0.4;
+      }
+
+      const scaleChanged = Math.abs(nextScale - currentScale) >= 0.02;
+      const centerChanged =
+        Math.abs(nextCenterX - currentCenterX) >= 0.01 || Math.abs(nextCenterY - currentCenterY) >= 0.01;
+      if (!scaleChanged && !centerChanged) return;
+
+      console.log(
+        '[AutoZoom] digital zoom',
+        currentScale.toFixed(2), '->', nextScale.toFixed(2),
+        'center', `(${currentCenterX.toFixed(2)},${currentCenterY.toFixed(2)})`,
+        '->', `(${nextCenterX.toFixed(2)},${nextCenterY.toFixed(2)})`,
+        'ratio', ratio,
+        shouldersLost ? '| shoulders lost, capping zoom-in' : ''
+      );
+      camera.setDigitalZoom(nextScale, nextCenterX, nextCenterY);
+      setDigitalZoomScale(nextScale);
+      setDigitalZoomCenter({ x: nextCenterX, y: nextCenterY });
     }, 700);
 
     return () => clearInterval(id);
@@ -846,6 +986,8 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
       )}
       <GuidedCaptureScreen
         stream={stream}
+        zoomScale={digitalZoomScale}
+        zoomOrigin={digitalZoomCenter}
         isCameraLoading={isCameraLoading}
         cameraError={cameraError}
         faceState={faceState}

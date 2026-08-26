@@ -96,6 +96,11 @@ class StubClient {
   async getFile(fileId: string) {
     return { fileId, virtualPath: 'p', status: this.fileStatus, size: 10 };
   }
+
+  public cancelledUploadIds: string[] = [];
+  async cancelUpload(uploadId: string) {
+    this.cancelledUploadIds.push(uploadId);
+  }
 }
 
 const files = { read: async () => new Uint8Array(10).fill(1) };
@@ -187,6 +192,11 @@ describe('UploadWorker — failures', () => {
 
     assert.equal(outbox.statusOf('j1'), 'FAILED_PERMANENT');
     assert.ok(events.some((e) => e.type === 'failed'));
+    assert.deepEqual(
+      client.cancelledUploadIds,
+      ['upload-j1'],
+      'releases the server-side session instead of leaving it to expire'
+    );
   });
 
   test('gives up after the attempt budget is spent', async () => {
@@ -198,6 +208,7 @@ describe('UploadWorker — failures', () => {
 
     await worker.tick();
     assert.equal(outbox.statusOf('j1'), 'FAILED_PERMANENT');
+    assert.deepEqual(client.cancelledUploadIds, ['upload-j1']);
   });
 
   test('a quarantined file stops the job and is reported', async () => {

@@ -46,21 +46,51 @@ export interface FaceQualityResult {
   centerXOffset: number;
   centerYOffset: number;
   /**
-   * Null until something actually looks.
+   * 1 - the eye-blink blendshape (averaged over both eyes). Null when no
+   * blendshapes were handed in — this package has no pixel-based way to
+   * measure it, unlike brightness/sharpness.
+   */
+  eyeOpenScore: number | null;
+  /** The mouth-smile blendshape, averaged over both sides. Null likewise. */
+  smileScore: number | null;
+  /**
+   * `eyeOpenScore` against `minEyeOpenScore`. Kept as its own boolean, next to
+   * the raw score, in the same shape as brightness/sharpness passing their
+   * own thresholds.
    *
-   * Nothing in the pipeline detects eyelids, mouths or occlusion today. These
-   * were hardcoded to "eyes visible, not occluded", which reported a masked or
-   * closed-eyed face as fully verified — a claim no code had earned.
+   * Null until something actually looks. Nothing in the pipeline detects
+   * mouths or occlusion today. These were hardcoded to "eyes visible, not
+   * occluded", which reported a masked or closed-eyed face as fully verified
+   * — a claim no code had earned.
    */
   eyesVisible: boolean | null;
   mouthVisible: boolean | null;
   occluded: boolean | null;
+  /** `smileScore` against `maxSmileScore`. Null under the same rule as `eyesVisible`. */
+  neutralExpression: boolean | null;
   reasons: string[];
 }
 
 export interface FaceDetection {
   boundingBox: BoundingBox;
   confidence: number;
+}
+
+/**
+ * Shoulder-level check from a body-pose model (MediaPipe PoseLandmarker),
+ * separate from `FaceQualityResult`: it answers a different question — is
+ * the SUBJECT positioned correctly — not whether the face image itself is
+ * usable, and it comes from an entirely different model with its own
+ * detection failure mode (shoulders out of frame, not "face rejected").
+ */
+export interface BodyPostureResult {
+  /** Angle of the shoulder line from horizontal, in degrees. Positive = right shoulder lower. Null when shoulders were not detected confidently enough to trust. */
+  shoulderRoll: number | null;
+  /** Both shoulder landmarks were detected above the visibility floor. Null until a pose was actually looked for. */
+  shouldersVisible: boolean | null;
+  /** `shoulderRoll` within tolerance. Null under the same rule as `shouldersVisible`. */
+  leveled: boolean | null;
+  reasons: string[];
 }
 
 export type FacePresenceState = 'NO_FACE' | 'SINGLE_FACE' | 'MULTIPLE_FACES';
@@ -88,6 +118,8 @@ export interface FaceState {
   center?: Point2D;
   pose?: FacePose;
   quality?: FaceQualityResult;
+  /** Shoulder-level check from a body-pose model. Null when nothing looked (no pose model available, or no body detected). */
+  posture?: BodyPostureResult | null;
   /** Estimated standing distance. Null when it could not be measured. */
   distance?: FaceDistance | null;
   landmarks?: FaceLandmark[];

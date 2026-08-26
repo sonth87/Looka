@@ -63,7 +63,12 @@ export class FsClient {
     this.cfg = {
       // 32 MiB is the size the service documents as its preferred chunk.
       chunkSize: 32 * MiB,
-      directMaxBytes: 2048 * MiB,
+      // 10 MiB matches the service's own documented default. Deliberately not
+      // set higher: `upload()` below self-corrects from the 400 response if
+      // the real operator-configured ceiling differs, so a conservative guess
+      // costs at most one wasted round trip, while an inflated guess would
+      // send an oversized body before ever learning the true limit.
+      directMaxBytes: 10 * MiB,
       requestTimeoutMs: 60_000,
       fetchImpl: config.fetchImpl ?? globalThis.fetch,
       ...config,
@@ -471,6 +476,7 @@ export class FsClient {
       etag: String(b.etag ?? ''),
       size: Number(b.size ?? 0),
       dedupHit: Boolean(b.dedup_hit),
+      snapshot: Boolean(b.snapshot),
       // Present only when the bytes matched what was already stored: no version
       // was created, which is a no-op rather than a failure.
       unchanged: b.unchanged === true,
@@ -512,6 +518,10 @@ export class FsClient {
       etag: String(b.etag ?? ''),
       size: Number(b.size ?? 0),
       dedupHit: false,
+      // Not confirmed in the curl example for this endpoint (rollback/restore
+      // are not among the response fields shown there); read it defensively
+      // rather than assume a value the spec did not state for this call.
+      snapshot: Boolean(b.snapshot),
       unchanged: false,
       restoredFrom: b.restored_from === undefined ? undefined : Number(b.restored_from),
     };
@@ -570,6 +580,7 @@ export class FsClient {
     };
     if (input.tags?.length) headers['X-Tags'] = input.tags.join(',');
     if (input.metadata) headers['X-Metadata'] = encodeMetadata(input.metadata);
+    if (input.visibility) headers['X-Visibility'] = input.visibility;
     return headers;
   }
 
@@ -639,6 +650,7 @@ function toUploadResult(body: unknown): UploadResult {
     etag: String(b.etag ?? ''),
     version: Number(b.version ?? 1),
     dedupHit: Boolean(b.dedup_hit),
+    visibility: b.visibility === 'private' ? 'private' : 'public',
   };
 }
 

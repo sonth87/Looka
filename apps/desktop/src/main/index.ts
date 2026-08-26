@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
+import type { Visibility } from '@face/core';
 import {
   initDatabase,
   getDatabase,
@@ -195,7 +196,7 @@ app.whenReady().then(async () => {
   // Background uploading is optional: without a configured server the kiosk
   // still captures and queues, and the backlog drains once one is set up.
   if (dbResult.ok) {
-    const uploadsRunning = startUploads(getFileServiceCredentials());
+    const uploadsRunning = startUploads(await getFileServiceCredentials());
     if (!uploadsRunning) {
       console.warn('[main] file-service not configured; captures will queue locally only');
     }
@@ -263,7 +264,7 @@ app.whenReady().then(async () => {
   ipcMain.handle('secrets:status', () => secretsStatus());
 
   /** Save credentials from the setup screen and (re)start uploading with them. */
-  ipcMain.handle('secrets:setFileService', (_, payload: { baseUrl?: unknown; apiKey?: unknown }) => {
+  ipcMain.handle('secrets:setFileService', async (_, payload: { baseUrl?: unknown; apiKey?: unknown }) => {
     const baseUrl = String(payload?.baseUrl ?? '').trim();
     const apiKey = String(payload?.apiKey ?? '').trim();
 
@@ -285,7 +286,7 @@ app.whenReady().then(async () => {
     }
 
     stopUploads();
-    const started = startUploads(getFileServiceCredentials());
+    const started = startUploads(await getFileServiceCredentials());
     return { ok: true, uploading: started };
   });
 
@@ -377,6 +378,11 @@ app.whenReady().then(async () => {
         const mimeType = dataUrl.slice(5, dataUrl.indexOf(';'));
         const data = Buffer.from(dataUrl.replace(/^data:image\/\w+;base64,/, ''), 'base64');
 
+        // Every capture this kiosk takes is a face/attendance image — never
+        // public — decided here, at the one place that knows that, rather
+        // than assumed by the generic queue/upload machinery downstream.
+        const visibility: Visibility = 'private';
+
         const jobId = queueCapture({
           sessionId: safeFileToken(payload?.sessionId, 'session'),
           kind: safeFileToken(payload?.kind, 'raw'),
@@ -389,6 +395,7 @@ app.whenReady().then(async () => {
               ? (payload.metadata as Record<string, string>)
               : undefined,
           dependsOn: typeof payload?.dependsOn === 'string' ? payload.dependsOn : undefined,
+          visibility,
         });
 
         return { ok: true, jobId };

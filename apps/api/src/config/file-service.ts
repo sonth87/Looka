@@ -15,4 +15,10 @@ export const fileService = registerAs('fileService', () => ({
   // Left empty on purpose when unset: FileStorageService then obtains one via
   // self-service provisioning at startup, which is idempotent per tenant name.
   apiKey: process.env.FS_API_KEY ?? '',
+  // Only read when actually provisioning (apiKey above is empty) — the
+  // file-service self-service endpoint records this as the tenant's contact
+  // for the camera capture pipeline. Fixed default matches the operational
+  // mailbox this deployment reports under; override via env only if a given
+  // environment needs a different tenant contact.
+  contactEmail: process.env.FS_CONTACT_EMAIL ?? 'camera@dainam.edu.vn',
 }));

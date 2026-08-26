@@ -30,3 +30,5 @@ builder-effective-config.yaml
 # ~32 MB per app of binaries that would otherwise land in every clone.
 apps/*/public/wasm/
 apps/*/public/models/
+
+.serena

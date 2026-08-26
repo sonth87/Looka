@@ -1,3 +1,4 @@
+import type { Visibility } from '@face/core';
 import { SqlExecutor } from '../sql/SqlDriver.js';
 
 export type OutboxStatus = 'PENDING' | 'SENDING' | 'UPLOADED' | 'DONE' | 'FAILED_PERMANENT';
@@ -15,6 +16,8 @@ export interface OutboxItem {
   idemKey: string;
   uploadId: string;
   dependsOn: string | null;
+  /** Decided by the caller that enqueued the job. null means "let the file-service apply its own default." */
+  visibility: Visibility | null;
   status: OutboxStatus;
   attempts: number;
   nextRetryAt: number | null;
@@ -41,6 +44,12 @@ export interface EnqueueInput {
   uploadId: string;
   /** Upload this only after the referenced item has finished. */
   dependsOn?: string;
+  /**
+   * public or private, decided here — the point that knows what this capture
+   * actually is. Omitted means the file-service applies its own default;
+   * this repository never substitutes one on the caller's behalf.
+   */
+  visibility?: Visibility;
 }
 
 export interface OutboxStats {
@@ -72,8 +81,8 @@ export class UploadOutboxRepository {
     this.db.run(
       `INSERT INTO upload_outbox (
          id, session_id, kind, local_path, virtual_path, mime_type, sha256, size_bytes,
-         metadata, idem_key, upload_id, depends_on, status, attempts, next_retry_at, created_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, ?, ?)
+         metadata, idem_key, upload_id, depends_on, visibility, status, attempts, next_retry_at, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, ?, ?)
        ON CONFLICT(idem_key) DO NOTHING`,
       [
         input.id,
@@ -88,6 +97,7 @@ export class UploadOutboxRepository {
         input.idemKey,
         input.uploadId,
         input.dependsOn ?? null,
+        input.visibility ?? null,
         Date.now(),
         Date.now(),
       ]
@@ -253,6 +263,7 @@ function toItem(r: Record<string, unknown>): OutboxItem {
     idemKey: String(r.idem_key),
     uploadId: String(r.upload_id),
     dependsOn: r.depends_on ? String(r.depends_on) : null,
+    visibility: r.visibility === 'public' || r.visibility === 'private' ? r.visibility : null,
     status: String(r.status) as OutboxStatus,
     attempts: Number(r.attempts ?? 0),
     nextRetryAt: r.next_retry_at === null || r.next_retry_at === undefined ? null : Number(r.next_retry_at),

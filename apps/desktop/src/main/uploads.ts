@@ -1,6 +1,7 @@
 import { app } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
+import type { Visibility } from '@face/core';
 import { FsClient, UploadWorker, WorkerEvent, deterministicUuid, sha256Hex } from '@face/fs-client';
 import { UploadOutboxRepository, nextRetryDelayMs } from '@face/database';
 import { getDatabase } from './db.js';
@@ -74,6 +75,12 @@ export interface QueueCaptureInput {
   metadata?: Record<string, string>;
   /** Upload this only after the referenced job finishes. */
   dependsOn?: string;
+  /**
+   * public or private — decided by the caller, which knows what this capture
+   * is (a card photo, a face image, or something else). Omitted means the
+   * file-service applies its own default; nothing here substitutes one.
+   */
+  visibility?: Visibility;
 }
 
 /**
@@ -119,6 +126,7 @@ export function queueCapture(input: QueueCaptureInput): string {
       idemKey,
       uploadId: deterministicUuid(idemKey),
       dependsOn: input.dependsOn,
+      visibility: input.visibility,
     });
   });
 

@@ -32,6 +32,20 @@ export class BrowserCameraService implements CameraService {
    * cannot drift apart: whatever the preview shows, the still matches.
    */
   private mirrorStills = true;
+  /**
+   * Software crop+scale, for cameras `getZoomCapability()` reports as having
+   * no hardware zoom at all. Scale 1 = no zoom; centre defaults to the frame
+   * middle and moves to auto-centre a tracked face (see FaceCaptureApp.tsx's
+   * auto-zoom effect, which drives both).
+   *
+   * Unlike `setZoom()`, this adds no real sensor pixels — it enlarges pixels
+   * already captured, at some cost to sharpness in the printed still. Applied
+   * to the still as well as the analysis frame, by explicit choice of the
+   * caller that decides hardware vs. digital zoom.
+   */
+  private digitalZoomScale = 1;
+  private digitalZoomCenterX = 0.5;
+  private digitalZoomCenterY = 0.5;
   private listeners: Map<string, Set<(...args: any[]) => void>> = new Map();
   private deviceChangeListener: (() => void) | null = null;
 
@@ -197,6 +211,12 @@ export class BrowserCameraService implements CameraService {
     this.canvasContext = null;
     this.selectedDevice = null;
     this.isPaused = false;
+    // A stale crop from whoever used this camera last must not carry into
+    // the next session — this instance is reused across sessions rather than
+    // recreated per capture.
+    this.digitalZoomScale = 1;
+    this.digitalZoomCenterX = 0.5;
+    this.digitalZoomCenterY = 0.5;
   }
 
   public pause(): void {
@@ -240,13 +260,20 @@ export class BrowserCameraService implements CameraService {
         this.canvasElement.width = width;
         this.canvasElement.height = height;
       }
-      (this.canvasContext as CanvasRenderingContext2D).drawImage(video, 0, 0, width, height);
-      const imageData = (this.canvasContext as CanvasRenderingContext2D).getImageData(
-        0,
-        0,
-        width,
-        height
-      );
+      const ctx = this.canvasContext as CanvasRenderingContext2D;
+      if (this.digitalZoomScale > 1.001) {
+        const { sx, sy, sw, sh } = cropRectForZoom(
+          video.videoWidth,
+          video.videoHeight,
+          this.digitalZoomScale,
+          this.digitalZoomCenterX,
+          this.digitalZoomCenterY
+        );
+        ctx.drawImage(video, sx, sy, sw, sh, 0, 0, width, height);
+      } else {
+        ctx.drawImage(video, 0, 0, width, height);
+      }
+      const imageData = ctx.getImageData(0, 0, width, height);
 
       return {
         data: imageData.data,
@@ -281,7 +308,18 @@ export class BrowserCameraService implements CameraService {
       ctx.translate(width, 0);
       ctx.scale(-1, 1);
     }
-    ctx.drawImage(video, 0, 0, width, height);
+    if (this.digitalZoomScale > 1.001) {
+      const { sx, sy, sw, sh } = cropRectForZoom(
+        width,
+        height,
+        this.digitalZoomScale,
+        this.digitalZoomCenterX,
+        this.digitalZoomCenterY
+      );
+      ctx.drawImage(video, sx, sy, sw, sh, 0, 0, width, height);
+    } else {
+      ctx.drawImage(video, 0, 0, width, height);
+    }
     return canvas.toDataURL('image/jpeg', 0.85);
   }
 
@@ -348,6 +386,37 @@ export class BrowserCameraService implements CameraService {
     }
   }
 
+  /**
+   * Set the software crop+scale used when this camera has no hardware zoom.
+   * Scale clamped to >= 1 (1 = no zoom); centre ratios clamped to 0..1 and
+   * default to the frame middle when omitted (matches the reset in `stop()`).
+   */
+  public setDigitalZoom(scale: number, centerXRatio = 0.5, centerYRatio = 0.5): void {
+    this.digitalZoomScale = Math.max(1, Number.isFinite(scale) ? scale : 1);
+    this.digitalZoomCenterX = clamp01(centerXRatio);
+    this.digitalZoomCenterY = clamp01(centerYRatio);
+  }
+
+  public getDigitalZoom(): number {
+    return this.digitalZoomScale;
+  }
+
+  public getDigitalZoomCenter(): { x: number; y: number } {
+    return { x: this.digitalZoomCenterX, y: this.digitalZoomCenterY };
+  }
+
+  /**
+   * The current digital-zoom crop window, in ratios of the full source frame
+   * (0..1, resolution-independent). Exposed so a caller reading a face's
+   * position out of the already-cropped analysis frame can compose it back
+   * into absolute frame coordinates — the same math `getFrame()` used to
+   * produce that frame in the first place, not a second approximation of it.
+   */
+  public getDigitalZoomCropRect(): { sxRatio: number; syRatio: number; swRatio: number; shRatio: number } {
+    const { sx, sy, sw, sh } = cropRectForZoom(1, 1, this.digitalZoomScale, this.digitalZoomCenterX, this.digitalZoomCenterY);
+    return { sxRatio: sx, syRatio: sy, swRatio: sw, shRatio: sh };
+  }
+
   public getSelectedDevice(): CameraDevice | null {
     return this.selectedDevice;
   }
@@ -404,4 +473,33 @@ export class BrowserCameraService implements CameraService {
       navigator.mediaDevices.ondevicechange = this.deviceChangeListener;
     }
   }
+}
+
+/**
+ * Source-frame rectangle that, drawn scaled to fill the full canvas,
+ * produces a `scale`x digital zoom centred at (centerXRatio, centerYRatio).
+ *
+ * The crop is clamped to stay inside the source frame rather than allowed to
+ * run off it — a centre near an edge (a face that walked to the side of
+ * frame before zoom caught up) still yields a valid, fully-populated crop,
+ * just not perfectly centred on that point anymore.
+ */
+function cropRectForZoom(
+  sourceWidth: number,
+  sourceHeight: number,
+  scale: number,
+  centerXRatio: number,
+  centerYRatio: number
+): { sx: number; sy: number; sw: number; sh: number } {
+  const sw = sourceWidth / scale;
+  const sh = sourceHeight / scale;
+  const cx = centerXRatio * sourceWidth;
+  const cy = centerYRatio * sourceHeight;
+  const sx = Math.min(Math.max(0, cx - sw / 2), sourceWidth - sw);
+  const sy = Math.min(Math.max(0, cy - sh / 2), sourceHeight - sh);
+  return { sx, sy, sw, sh };
+}
+
+function clamp01(v: number): number {
+  return Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0.5;
 }
