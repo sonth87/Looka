@@ -51,7 +51,17 @@ export class GuidanceEngine implements IGuidanceEngine {
 
     // Apply hysteresis to prevent rapid instruction flickering
     const stableReason = this.applyHysteresis(primaryReason);
-    const instruction = step.instruction || this.MESSAGES[stableReason];
+    // step.instruction is a required field, so `step.instruction || ...`
+    // could never actually fall through to a reason-specific message — every
+    // real workflow sets one on every step, which made this always show the
+    // step's fixed text (e.g. "Nhìn thẳng vào camera") even while the real
+    // blocker was something that text says nothing about, like a tilted
+    // shoulder or closed eyes. Show the step's own instruction only while
+    // there is nothing to correct (READY); otherwise surface what's actually
+    // wrong, falling back to the step text only for a reason with no message
+    // of its own.
+    const instruction =
+      stableReason === 'READY' ? step.instruction : this.MESSAGES[stableReason] || step.instruction;
 
     let status: GuidanceStatus = statusOverride || 'ADJUSTING';
     if (!statusOverride) {

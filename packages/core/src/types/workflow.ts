@@ -56,6 +56,14 @@ export interface CaptureStep {
   capture: {
     enabled: boolean;
   };
+  /**
+   * Whether the shoulder-level posture check gates this step's capture.
+   * Defaults to true. Turning the head 40-90 degrees for a LEFT/RIGHT step
+   * legitimately rotates the projected shoulder line and can also take one
+   * shoulder out of camera view — neither is a real posture problem, so
+   * those steps should set this to false.
+   */
+  postureCheck?: boolean;
 }
 
 export interface CaptureWorkflow {

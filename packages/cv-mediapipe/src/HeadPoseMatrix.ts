@@ -84,9 +84,27 @@ export function poseFromTransformationMatrix(
   // Confirmed on the deployed kiosk: a comfortably bowed head reads -24. The
   // 2D fallback managed -4 for the same pose, which is what made the DOWN step
   // impossible to complete.
+  //
+  // Yaw needs the same kind of negation, for the same reason. MediaPipe's CCS
+  // is right-handed with the camera looking down -Z (X to image-right, Y up,
+  // Z towards the viewer) — see developers.googleblog.com/mediapipe-3d-face-transform.
+  // A positive rotation about +Y swings the face's forward axis (+Z, pointing
+  // at the camera at rest) towards +X, i.e. the nose moves towards image-right.
+  // For someone facing the camera, image-right is THEIR OWN LEFT (like a photo
+  // of someone facing you: their left hand is on your right). So yRad > 0 means
+  // the subject turned to their own left, but FacePose defines yaw > 0 as
+  // turning to their own RIGHT — the opposite. yRad is therefore negated here,
+  // exactly like xRad is negated for pitch above.
+  //
+  // This also matches PoseEstimator's independently-derived 2D fallback, which
+  // reports negative yaw for the same "nose towards image-right" motion (see
+  // PoseEstimator.test.ts). Before this fix the 3D path disagreed with the 2D
+  // one on sign, and a person turning further to their own left only drove the
+  // reported yaw further positive — away from the LEFT step's negative target,
+  // so the step could never be completed no matter which way they turned.
   const pose: FacePose = {
     pitch: round(-xRad * RAD_TO_DEG),
-    yaw: round(yRad * RAD_TO_DEG),
+    yaw: round(-yRad * RAD_TO_DEG),
     roll: round(zRad * RAD_TO_DEG),
   };
 
@@ -121,7 +139,11 @@ export function transformationMatrixFromEuler(
   rollDeg: number
 ): number[] {
   const x = (-pitchDeg / RAD_TO_DEG);
-  const y = yawDeg / RAD_TO_DEG;
+  // yawDeg is in FacePose convention (positive = subject's own right); the
+  // internal Y-rotation used by the R = Rz*Ry*Rx composition runs the other
+  // way, exactly mirroring the pitch negation above — see the comment on the
+  // yaw negation in poseFromTransformationMatrix.
+  const y = -yawDeg / RAD_TO_DEG;
   const z = rollDeg / RAD_TO_DEG;
 
   const cx = Math.cos(x), sx = Math.sin(x);

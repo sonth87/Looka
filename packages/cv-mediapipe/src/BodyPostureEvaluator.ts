@@ -5,8 +5,12 @@ import { BodyPostureResult } from '@face/core';
  * Shoulders only — nothing else needed to answer "is this person square to
  * the camera", and every extra landmark asked for is another point that can
  * fail to detect.
+ *
+ * These are the subject's own (anatomical) shoulders, not image-space sides —
+ * see the image-space swap below, which follows the same convention
+ * PoseEstimator.ts uses for eyeImageLeft/eyeImageRight.
  */
-const IDX = { leftShoulder: 11, rightShoulder: 12 } as const;
+const IDX = { anatomicalLeftShoulder: 11, anatomicalRightShoulder: 12 } as const;
 
 /**
  * Below this, PoseLandmarker's own visibility score means "probably not
@@ -46,22 +50,33 @@ export function evaluatePosture(
 ): BodyPostureResult {
   const reasons: string[] = [];
 
-  if (!landmarks || landmarks.length <= IDX.rightShoulder) {
+  if (!landmarks || landmarks.length <= IDX.anatomicalRightShoulder) {
     return { shoulderRoll: null, shouldersVisible: null, leveled: null, reasons };
   }
 
-  const left = landmarks[IDX.leftShoulder];
-  const right = landmarks[IDX.rightShoulder];
+  const anatomicalLeft = landmarks[IDX.anatomicalLeftShoulder];
+  const anatomicalRight = landmarks[IDX.anatomicalRightShoulder];
   const shouldersVisible =
-    (left?.visibility ?? 0) >= MIN_SHOULDER_VISIBILITY &&
-    (right?.visibility ?? 0) >= MIN_SHOULDER_VISIBILITY;
+    (anatomicalLeft?.visibility ?? 0) >= MIN_SHOULDER_VISIBILITY &&
+    (anatomicalRight?.visibility ?? 0) >= MIN_SHOULDER_VISIBILITY;
 
   if (!shouldersVisible) {
     reasons.push('SHOULDERS_NOT_VISIBLE');
     return { shoulderRoll: null, shouldersVisible: false, leveled: null, reasons };
   }
 
-  const roll = Math.atan2(right.y - left.y, (right.x - left.x) * aspect) * (180 / Math.PI);
+  // Facing an unmirrored camera, the subject's anatomical LEFT shoulder falls
+  // on the image's RIGHT side (larger x) and vice versa — the same mirroring
+  // PoseEstimator's face landmarks go through (see its eyeImageLeft/
+  // eyeImageRight comment). Swapping here before the atan2 keeps this an
+  // image-left-to-image-right vector, which is what the formula assumes;
+  // feeding it the anatomical pair directly made a level pair of shoulders
+  // read as ~180 degrees instead of ~0, since anatomicalRight.x - anatomicalLeft.x
+  // is negative for a person square to the camera.
+  const imageLeft = anatomicalRight;
+  const imageRight = anatomicalLeft;
+
+  const roll = Math.atan2(imageRight.y - imageLeft.y, (imageRight.x - imageLeft.x) * aspect) * (180 / Math.PI);
   const leveled = Math.abs(roll) <= MAX_SHOULDER_TILT_DEG;
   if (!leveled) reasons.push('SHOULDERS_TILTED');
 

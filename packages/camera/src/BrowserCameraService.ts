@@ -46,6 +46,22 @@ export class BrowserCameraService implements CameraService {
   private digitalZoomScale = 1;
   private digitalZoomCenterX = 0.5;
   private digitalZoomCenterY = 0.5;
+  /**
+   * Extra zoom layered on top of `digitalZoomScale` for the analysis frame
+   * and the saved still ONLY — never for what the operator sees.
+   *
+   * `CameraPreview` renders its own `<video>` element with a CSS transform
+   * driven by `digitalZoomScale` directly; it never calls `getFrame()`. That
+   * means the preview and the analysis crop were already two independent
+   * rendering paths sharing one number by coincidence, not by necessity. This
+   * gives the caller a second number for the case where the visible zoom has
+   * already reached whatever ceiling it should stay under, but the face still
+   * measures too small for the quality check — rather than pushing the
+   * visible zoom past a comfortable point to fix that, the extra zoom is
+   * applied only where it's actually needed: the frame CV measures and the
+   * frame that gets saved.
+   */
+  private analysisZoomBoost = 1;
   private listeners: Map<string, Set<(...args: any[]) => void>> = new Map();
   private deviceChangeListener: (() => void) | null = null;
 
@@ -217,6 +233,7 @@ export class BrowserCameraService implements CameraService {
     this.digitalZoomScale = 1;
     this.digitalZoomCenterX = 0.5;
     this.digitalZoomCenterY = 0.5;
+    this.analysisZoomBoost = 1;
   }
 
   public pause(): void {
@@ -261,11 +278,12 @@ export class BrowserCameraService implements CameraService {
         this.canvasElement.height = height;
       }
       const ctx = this.canvasContext as CanvasRenderingContext2D;
-      if (this.digitalZoomScale > 1.001) {
+      const analysisZoom = this.effectiveAnalysisZoom;
+      if (analysisZoom > 1.001) {
         const { sx, sy, sw, sh } = cropRectForZoom(
           video.videoWidth,
           video.videoHeight,
-          this.digitalZoomScale,
+          analysisZoom,
           this.digitalZoomCenterX,
           this.digitalZoomCenterY
         );
@@ -308,11 +326,12 @@ export class BrowserCameraService implements CameraService {
       ctx.translate(width, 0);
       ctx.scale(-1, 1);
     }
-    if (this.digitalZoomScale > 1.001) {
+    const analysisZoom = this.effectiveAnalysisZoom;
+    if (analysisZoom > 1.001) {
       const { sx, sy, sw, sh } = cropRectForZoom(
         width,
         height,
-        this.digitalZoomScale,
+        analysisZoom,
         this.digitalZoomCenterX,
         this.digitalZoomCenterY
       );
@@ -401,6 +420,26 @@ export class BrowserCameraService implements CameraService {
     return this.digitalZoomScale;
   }
 
+  /**
+   * Layer extra zoom onto the analysis frame and saved still, without moving
+   * what the preview shows — see the field doc comment on `analysisZoomBoost`.
+   * Clamped to >= 1 for the same reason `setDigitalZoom` is: this only ever
+   * adds crop, it never widens the frame back out past what the preview zoom
+   * already established.
+   */
+  public setAnalysisZoomBoost(boost: number): void {
+    this.analysisZoomBoost = Math.max(1, Number.isFinite(boost) ? boost : 1);
+  }
+
+  public getAnalysisZoomBoost(): number {
+    return this.analysisZoomBoost;
+  }
+
+  /** Total zoom actually applied to the analysis frame and saved still. */
+  private get effectiveAnalysisZoom(): number {
+    return this.digitalZoomScale * this.analysisZoomBoost;
+  }
+
   public getDigitalZoomCenter(): { x: number; y: number } {
     return { x: this.digitalZoomCenterX, y: this.digitalZoomCenterY };
   }
@@ -413,7 +452,7 @@ export class BrowserCameraService implements CameraService {
    * produce that frame in the first place, not a second approximation of it.
    */
   public getDigitalZoomCropRect(): { sxRatio: number; syRatio: number; swRatio: number; shRatio: number } {
-    const { sx, sy, sw, sh } = cropRectForZoom(1, 1, this.digitalZoomScale, this.digitalZoomCenterX, this.digitalZoomCenterY);
+    const { sx, sy, sw, sh } = cropRectForZoom(1, 1, this.effectiveAnalysisZoom, this.digitalZoomCenterX, this.digitalZoomCenterY);
     return { sxRatio: sx, syRatio: sy, swRatio: sw, shRatio: sh };
   }
 

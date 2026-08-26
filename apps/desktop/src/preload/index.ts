@@ -59,6 +59,13 @@ export interface QueueCaptureResult {
   error?: string;
 }
 
+export interface ApproveSessionUploadResult {
+  ok: boolean;
+  /** Rows this call actually released; 0 for an already-approved session. */
+  approved?: number;
+  error?: string;
+}
+
 export interface FaceAPIBridge {
   getAppVersion: () => Promise<string>;
   getSystemStatus: () => Promise<SystemStatus>;
@@ -79,6 +86,17 @@ export interface FaceAPIBridge {
     metadata?: Record<string, string>;
     dependsOn?: string;
   }) => Promise<QueueCaptureResult>;
+
+  /**
+   * Release a reviewed session's staged captures for upload.
+   *
+   * Until this is called, that session's rows sit on disk and in the local
+   * queue but are invisible to the background uploader — see queueCapture's
+   * own doc comment and `session:approveUpload`'s handler in the main
+   * process. Safe to call more than once for the same session; a repeat call
+   * finds nothing left to approve and reports `approved: 0`.
+   */
+  approveSessionUpload: (payload: { sessionId: string }) => Promise<ApproveSessionUploadResult>;
 
   getUploadStatus: () => Promise<UploadStatus>;
   pingFileService: () => Promise<boolean>;
@@ -135,6 +153,7 @@ const faceAPI: FaceAPIBridge = {
   recordAttendance: (params: any) => ipcRenderer.invoke('attendance:record', params),
 
   queueCapture: (payload) => ipcRenderer.invoke('capture:queue', payload),
+  approveSessionUpload: (payload) => ipcRenderer.invoke('session:approveUpload', payload),
   getUploadStatus: () => ipcRenderer.invoke('uploads:status'),
   pingFileService: () => ipcRenderer.invoke('uploads:ping'),
   retryUpload: (jobId) => ipcRenderer.invoke('uploads:retry', jobId),

@@ -133,6 +133,24 @@ export function queueCapture(input: QueueCaptureInput): string {
   return jobId;
 }
 
+/**
+ * Release a reviewed session's staged captures for upload.
+ *
+ * Thin delegation to the repository, which owns the actual query — see
+ * UploadOutboxRepository.approveSession() for what "eligible" means and why a
+ * session nobody ever approves is left staged rather than uploaded or
+ * deleted. From here, the existing UploadWorker drains the released rows on
+ * its next tick exactly as it always has; nothing here talks to it directly.
+ *
+ * Returns how many rows this call actually moved (0 for an already-approved
+ * or nonexistent session — never an error, since "nothing to do" is a
+ * perfectly valid outcome for a duplicate approve call).
+ */
+export function approveSessionUpload(sessionId: string): number {
+  const repo = outbox ?? new UploadOutboxRepository(getDatabase());
+  return repo.approveSession(sessionId);
+}
+
 export interface UploadStatus {
   configured: boolean;
   pending: number;

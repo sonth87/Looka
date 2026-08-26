@@ -22,7 +22,7 @@ import { SimulationSliders, SimulationSettings } from '../debug/SimulationSlider
 import { StepItem } from '../workflow/StepProgress.js';
 import { TooltipProvider, Tooltip, TooltipTrigger, TooltipContent } from '../ui/tooltip.js';
 import { getSettings, updateSettings } from '../../lib/settingsStore.js';
-import { CaptureSink } from '../../lib/CaptureSink.js';
+import { CaptureSink, RunScopedCaptureSession } from '../../lib/CaptureSink.js';
 import { SQLiteStorageAdapter, SessionRepository } from '@face/database';
 
 const defaultWorkflow: CaptureWorkflow = {
@@ -39,21 +39,40 @@ const defaultWorkflow: CaptureWorkflow = {
       // solved 3D pose reports the actual angle, and a webcam sitting below eye
       // level already puts a seated person 10 degrees or so off axis before
       // they have moved at all.
-      pose: { yaw: { target: 0, tolerance: 12 }, pitch: { target: 0, tolerance: 12 } },
+      //
+      // roll was missing entirely here, so a tilted head passed FRONT
+      // unflagged — StepEvaluator only checks an axis the step actually
+      // declares a target for, and this is meant to be the one straight,
+      // level reference shot of the five.
+      pose: {
+        yaw: { target: 0, tolerance: 12 },
+        pitch: { target: 0, tolerance: 12 },
+        roll: { target: 0, tolerance: 12 },
+      },
+      // Posture/shoulder-level checking is skipped for every step, not just
+      // LEFT/RIGHT — see postureCheck on those steps for the mechanism.
+      postureCheck: false,
       capture: { enabled: true },
     },
     {
       id: 'step-left',
       type: 'LEFT',
-      instruction: 'Quay mặt sang trái (40° - 90°)',
-      pose: { yaw: { target: -65, tolerance: 25 } },
+      instruction: 'Quay mặt sang trái (15° - 30°)',
+      // Was target -65/tolerance 25 (a 40-90 degree window) — a much shallower
+      // turn than the operator actually wants for this angle. At 15-30 degrees
+      // perspective foreshortening (~cos(yaw)) is negligible (0.97x-0.87x), so
+      // the FACE_TOO_SMALL floor this used to need at the old, deeper angle
+      // no longer applies — MEDIUM's default minFaceSizeRatio is fine here.
+      pose: { yaw: { target: -22.5, tolerance: 7.5 } },
+      postureCheck: false,
       capture: { enabled: true },
     },
     {
       id: 'step-right',
       type: 'RIGHT',
-      instruction: 'Quay mặt sang phải (40° - 90°)',
-      pose: { yaw: { target: 65, tolerance: 25 } },
+      instruction: 'Quay mặt sang phải (15° - 30°)',
+      pose: { yaw: { target: 22.5, tolerance: 7.5 } },
+      postureCheck: false,
       capture: { enabled: true },
     },
     {
@@ -168,14 +187,19 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   /** Set when a capture could not be stored; surfaced, never swallowed. */
   const [storeError, setStoreError] = useState<string | null>(null);
   /**
-   * Mirror BrowserCameraService's digital zoom so CameraPreview can show the
-   * same crop the analysis frame and saved still are using — see the
-   * auto-zoom effect below. Scale is 1 and centre is (0.5, 0.5) whenever
-   * hardware zoom is available instead.
+   * Fixed at no-zoom/centred now that auto-zoom has been removed (see the
+   * removal note further down) — CameraPreview still takes scale/origin
+   * props, so these stay as the values that mean "native framing."
    */
-  const [digitalZoomScale, setDigitalZoomScale] = useState(1);
-  const [digitalZoomCenter, setDigitalZoomCenter] = useState({ x: 0.5, y: 0.5 });
-  const sessionIdRef = useRef<string | null>(null);
+  const digitalZoomScale = 1;
+  const digitalZoomCenter = { x: 0.5, y: 0.5 };
+  /**
+   * Caches the sink's session id for the run currently in progress. See
+   * RunScopedCaptureSession's own doc comment for why a run that is
+   * abandoned (cancelled, or "Chụp lại toàn bộ") must call `.reset()` rather
+   * than let the next run silently reuse this id.
+   */
+  const runSessionRef = useRef<RunScopedCaptureSession>(new RunScopedCaptureSession(sink));
   /**
    * Local record of the session, in the browser's own sql.js database.
    *
@@ -207,55 +231,62 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   }, [faceState]);
 
   /**
-   * Open the record this run's photos attach to.
-   *
-   * Created lazily on the first capture rather than on mount, so idly opening
-   * the screen does not leave empty sessions behind.
-   */
-  const ensureSession = async (): Promise<string | null> => {
-    if (!sink) return null;
-    if (sessionIdRef.current) return sessionIdRef.current;
-    try {
-      const id = await sink.startSession({});
-      sessionIdRef.current = id;
-      return id;
-    } catch (err) {
-      setStoreError((err as Error).message);
-      return null;
-    }
-  };
-
-  /**
    * Store one capture as its step completes.
    *
    * A failure is shown rather than logged: the operator is the only one who can
    * tell whether to retake now, and a photo silently missing from a finished
-   * session is discovered far too late to do anything about.
+   * session is discovered far too late to do anything about. The record this
+   * run's photos attach to is opened lazily, on this first call, by
+   * RunScopedCaptureSession itself — so idly opening the screen does not leave
+   * empty sessions behind.
    */
   const storePhoto = async (stepId: string, dataUrl: string, attempt: number) => {
     if (!sink) {
       setStoreError('Chưa cấu hình nơi lưu ảnh — ảnh chụp sẽ không được giữ lại.');
       return;
     }
-    const sessionId = await ensureSession();
-    if (!sessionId) return;
-
     try {
-      await sink.savePhoto({ sessionId, stepId, attempt, dataUrl });
+      await runSessionRef.current.savePhoto({ stepId, attempt, dataUrl });
       setStoreError(null);
     } catch (err) {
+      console.error('[FaceCaptureApp] storePhoto failed:', err);
       setStoreError(`Không lưu được ảnh ${stepId}: ${(err as Error).message}`);
+    }
+  };
+
+  /**
+   * Release this run's staged captures for upload, now that the operator has
+   * reviewed and confirmed them in SessionReviewModal.
+   *
+   * Called from onAccept, before finishSession — see RunScopedCaptureSession's
+   * own doc comment on why the order matters: finishSession drops the cached
+   * session id, and calling this after that would silently find nothing to
+   * approve. Returns whether it succeeded so onAccept can decide whether it is
+   * safe to close the review screen: on failure, the captures are still safe
+   * (they simply remain staged, exactly as an abandoned run would), so the
+   * modal is left open and the operator can retry by pressing the same button
+   * again rather than losing the chance to approve this run at all.
+   */
+  const approveUpload = async (): Promise<boolean> => {
+    try {
+      await runSessionRef.current.approve();
+      setStoreError(null);
+      return true;
+    } catch (err) {
+      console.error('[FaceCaptureApp] approveUpload failed:', err);
+      setStoreError(
+        `Không xác nhận được lượt tải lên (ảnh vẫn được giữ an toàn trên máy) — vui lòng bấm "Xác nhận & Lưu hồ sơ" để thử lại: ${(err as Error).message}`
+      );
+      return false;
     }
   };
 
   /** Close the record. The photos are already stored; this only ends the run. */
   const finishSession = async () => {
-    const sessionId = sessionIdRef.current;
-    if (!sink || !sessionId) return;
     try {
-      await sink.completeSession(sessionId);
-      sessionIdRef.current = null;
+      await runSessionRef.current.complete();
     } catch (err) {
+      console.error('[FaceCaptureApp] finishSession failed:', err);
       setStoreError(`Không đóng được phiên: ${(err as Error).message}`);
     }
   };
@@ -278,6 +309,13 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
 
         const simEngine = new WorkflowEngine();
         simEngine.setSensitivity(sensitivity);
+        // Without this, autoHoldMs stays null until the operator touches the
+        // hold-time slider, and the engine's own fallback default silently
+        // took over instead — see the comment on WorkflowEngine.processFrame.
+        simEngine.setCaptureTriggerConfig({
+          mode: getSettings().captureMode || 'AUTO',
+          autoHoldMs: getSettings().autoHoldMs || 2000,
+        });
         simEngine.setSnapshotProvider(() => {
           const canvas = document.createElement('canvas');
           canvas.width = 640;
@@ -306,7 +344,8 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           setSession(completedSession);
           setShowReviewModal(true);
           if (repoRef.current) void repoRef.current.saveSession(completedSession);
-          void finishSession();
+          // finishSession() is NOT called here — see the identical comment on
+          // liveEngine's 'completed' handler below for why.
         });
 
         const mockCv = new MockCVEngine({ simulatedDelayMs: 10 });
@@ -329,6 +368,10 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
 
         const liveEngine = new WorkflowEngine();
         liveEngine.setSensitivity(sensitivity);
+        liveEngine.setCaptureTriggerConfig({
+          mode: getSettings().captureMode || 'AUTO',
+          autoHoldMs: getSettings().autoHoldMs || 2000,
+        });
         liveEngine.setSnapshotProvider(() => {
           if (cameraServiceRef.current) {
             return cameraServiceRef.current.captureBase64Snapshot();
@@ -355,7 +398,18 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           setSession(completedSession);
           setShowReviewModal(true);
           if (repoRef.current) void repoRef.current.saveSession(completedSession);
-          void finishSession();
+          // Used to call finishSession() right here — wrong once approval was
+          // introduced. finishSession() -> runSessionRef.current.complete()
+          // clears the cached session id (see RunScopedCaptureSession's own
+          // doc comment: approve() must run BEFORE complete(), never after).
+          // Calling it the instant the workflow completes tore down the
+          // session before the operator had even seen the review screen this
+          // handler just opened, so clicking "Xác nhận & Lưu hồ sơ" moments
+          // later always found no session left to approve — every natural
+          // (non-manual-review) completion hit this, which is the common
+          // case. finishSession() now runs only from onAccept, after
+          // approveUpload() succeeds, which is the one place with the
+          // correct ordering.
         });
 
         await liveEngine.startSession(defaultWorkflow);
@@ -451,7 +505,14 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
               if (decision.capture && liveWorkflowEngineRef.current) {
                 captureTriggerRef.current.reset();
                 const wf = liveWorkflowEngineRef.current as any;
-                if (wf.triggerManualCapture) wf.triggerManualCapture();
+                // Pass the same frame isFaceReady was just computed from, so
+                // the engine's own quality gate (WorkflowEngine.
+                // triggerManualCapture) has something real to re-check at the
+                // moment the gesture actually fires. Calling this with no
+                // faceState at all used to skip that check silently — this
+                // gesture path had nothing else standing between a smiling
+                // face and a completed capture.
+                if (wf.triggerManualCapture) wf.triggerManualCapture(currentFaceState);
               }
             } catch (e) {
               // ignore
@@ -471,7 +532,12 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   const handleShutterCapture = useCallback(() => {
     if (liveWorkflowEngineRef.current && faceState?.detected) {
       const wf = liveWorkflowEngineRef.current as any;
-      if (wf.triggerManualCapture) wf.triggerManualCapture();
+      // Same reasoning as the gesture trigger above: pass the faceState this
+      // click was actually decided under so the engine's quality gate has
+      // real data to re-check, instead of silently accepting whatever the
+      // shutter button's own `enabled` prop happened to miss (e.g. a smile
+      // that started the instant before the click landed).
+      if (wf.triggerManualCapture) wf.triggerManualCapture(faceState);
     }
   }, [faceState]);
 
@@ -685,179 +751,16 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   };
 
 
-  /**
-   * Re-enter one already-captured step and replace only its photo.
-   *
-   * The engine keeps the existing image until a replacement actually lands, so
-   * abandoning a retake leaves the session exactly as it was.
-   */
-
-  /**
-   * Nudge the camera's zoom until the face fills a workable share of frame,
-   * centred in it.
-   *
-   * Hardware zoom (setZoom) is always preferred: it adds real sensor pixels,
-   * so the captured still stays full quality — but it can only shrink or
-   * enlarge the same fixed field of view, never recentre it, so centring is
-   * digital-only (see the digital branch below) regardless of which zoom
-   * path is active. When the camera reports no zoom capability at all, size
-   * falls back to a software crop+scale too (BrowserCameraService.
-   * setDigitalZoom) — applied to the CV analysis frame AND the saved still,
-   * by explicit choice, accepting some sharpness loss in the printed card so
-   * an operator with a fixed webcam never has to physically move it or the
-   * subject. See card-photo-quality-checks.md.
-   *
-   * Bidirectional: zooms in when the face is too small AND back out when it
-   * moves closer than the target — unlike face-quality's zoomFactorToReach,
-   * which by design only ever zooms in. Without the zoom-out half, a face
-   * that stepped up close after triggering zoom-in stayed over-magnified for
-   * the rest of the session, with the FACE_TOO_LARGE guidance ("lùi xa
-   * camera") firing against a frame that was already artificially too tight
-   * — not the raw picture the operator was actually standing in front of.
-   * Zoom only bottoms out at 1x (hardware clamps to its own reported
-   * minimum), so a face that is genuinely too close for the lens itself
-   * still reaches that same FACE_TOO_LARGE guidance once there is no more
-   * zoom left to give back.
-   *
-   * Also capped by the shoulder-level check (posture): face size alone would
-   * happily zoom in until the shoulders — and with them, most of the
-   * headroom above the crown — are cropped out of frame, which is exactly
-   * what the posture check needs in frame to do its job. There is no
-   * landmark for the literal crown of the head to target directly, so
-   * `shouldersVisible` (a real per-frame reading from the pose model, not a
-   * geometric guess) is the closest available proxy: once it goes false,
-   * further zoom-in is refused and the target backs off instead, the same
-   * way FACE_TOO_LARGE backs zoom off once the face itself is too close.
-   */
-  useEffect(() => {
-    if (!stream) return;
-    const camera = cameraServiceRef.current;
-    if (!camera) return;
-
-    const TARGET_RATIO = 0.32;
-    const DEADBAND = 0.05;
-    const MAX_MAGNIFICATION = 3;
-    // Unlike zoomFactorToReach (face-quality), this moves both ways: >1
-    // zooms in, <1 zooms back out. Only clamped at the top — the caller
-    // clamps the bottom (setZoom to the hardware's own minimum, the digital
-    // path to 1x below).
-    const magnificationToReach = (ratio: number): number =>
-      ratio > 0 ? Math.min(MAX_MAGNIFICATION, TARGET_RATIO / ratio) : 1;
-    const caps = camera.getZoomCapability();
-    console.log('[AutoZoom] camera zoom capability:', caps);
-    // A capability object is only a claim. Some drivers advertise a zoom
-    // range and then reject every applyConstraints() call for it (caught
-    // below) — this flips to digital for the rest of the session the first
-    // time that happens, rather than trusting the advertisement forever.
-    let hardwareZoomFailed = false;
-    // Sync React state to whatever the camera actually holds at the start of
-    // this stream — stop() resets it to 1x/centre, but this keeps the
-    // preview honest even if that assumption ever changes.
-    setDigitalZoomScale(camera.getDigitalZoom());
-    setDigitalZoomCenter(camera.getDigitalZoomCenter());
-
-    const id = setInterval(() => {
-      const faceState = faceStateRef.current;
-      const ratio = faceState?.quality?.faceSizeRatio;
-      const useHardware = caps && !hardwareZoomFailed;
-      // See the doc comment above: a real per-frame reading, not a guess —
-      // undefined/null (no pose model, or none yet this tick) must not
-      // restrict zoom, only an explicit false.
-      const shouldersLost = faceState?.posture?.shouldersVisible === false;
-
-      if (useHardware) {
-        if (!ratio || ratio <= 0) return;
-        if (Math.abs(ratio - TARGET_RATIO) < DEADBAND && !shouldersLost) return;
-
-        const current = camera.getZoom();
-        if (current === null) {
-          hardwareZoomFailed = true;
-          return;
-        }
-
-        // Damped, so someone leaning in and out does not send the lens racing.
-        let wanted = current * magnificationToReach(ratio);
-        if (shouldersLost) wanted = Math.min(wanted, current * 0.9);
-        const next = current + (wanted - current) * 0.4;
-        if (Math.abs(next - current) < caps!.step) return;
-
-        void camera.setZoom(next).then((applied) => {
-          if (applied === null) {
-            console.log('[AutoZoom] hardware setZoom rejected by driver, switching to digital zoom');
-            hardwareZoomFailed = true;
-          } else {
-            console.log('[AutoZoom] hardware zoom ->', applied);
-          }
-        });
-        return;
-      }
-
-      // Digital fallback — no hardware capability, or it turned out not to
-      // actually work. Resets to 1x/centre whenever no face is being
-      // tracked, so a new or closer subject standing up next is never seen
-      // through a stale, off-centre crop left over from whoever was there
-      // before them.
-      if (!faceState?.detected || !ratio || ratio <= 0) {
-        if (camera.getDigitalZoom() !== 1) {
-          camera.setDigitalZoom(1);
-          setDigitalZoomScale(1);
-          setDigitalZoomCenter({ x: 0.5, y: 0.5 });
-        }
-        return;
-      }
-
-      const currentScale = camera.getDigitalZoom();
-      const sizeInBand = Math.abs(ratio - TARGET_RATIO) < DEADBAND;
-      let wantedScale = sizeInBand && !shouldersLost
-        ? currentScale
-        : currentScale * magnificationToReach(ratio);
-      if (shouldersLost) wantedScale = Math.min(wantedScale, currentScale * 0.9);
-      // Floored at 1x here (not just inside setDigitalZoom) so the debug
-      // readout and the damping comparison below both see the real target
-      // rather than a negative-looking overshoot past "no zoom".
-      const nextScale = Math.max(1, currentScale + (wantedScale - currentScale) * 0.4);
-
-      // Where the face actually sits in the FULL original frame, not just
-      // within whatever crop window produced this tick's analysis frame —
-      // composed from the crop BrowserCameraService actually used
-      // (getDigitalZoomCropRect), so this never drifts from what
-      // getFrame()/captureBase64Snapshot() really drew. Centring, unlike
-      // size, is not gated on a deadband here: it is already damped below,
-      // and OFF_CENTER's own tolerance is what decides whether a small
-      // residual offset still counts as "centred enough".
-      const { x: currentCenterX, y: currentCenterY } = camera.getDigitalZoomCenter();
-      let nextCenterX = currentCenterX;
-      let nextCenterY = currentCenterY;
-      if (faceState.center && faceState.frameWidth && faceState.frameHeight) {
-        const crop = camera.getDigitalZoomCropRect();
-        const faceRelX = faceState.center.x / faceState.frameWidth;
-        const faceRelY = faceState.center.y / faceState.frameHeight;
-        const targetCenterX = crop.sxRatio + faceRelX * crop.swRatio;
-        const targetCenterY = crop.syRatio + faceRelY * crop.shRatio;
-        nextCenterX = currentCenterX + (targetCenterX - currentCenterX) * 0.4;
-        nextCenterY = currentCenterY + (targetCenterY - currentCenterY) * 0.4;
-      }
-
-      const scaleChanged = Math.abs(nextScale - currentScale) >= 0.02;
-      const centerChanged =
-        Math.abs(nextCenterX - currentCenterX) >= 0.01 || Math.abs(nextCenterY - currentCenterY) >= 0.01;
-      if (!scaleChanged && !centerChanged) return;
-
-      console.log(
-        '[AutoZoom] digital zoom',
-        currentScale.toFixed(2), '->', nextScale.toFixed(2),
-        'center', `(${currentCenterX.toFixed(2)},${currentCenterY.toFixed(2)})`,
-        '->', `(${nextCenterX.toFixed(2)},${nextCenterY.toFixed(2)})`,
-        'ratio', ratio,
-        shouldersLost ? '| shoulders lost, capping zoom-in' : ''
-      );
-      camera.setDigitalZoom(nextScale, nextCenterX, nextCenterY);
-      setDigitalZoomScale(nextScale);
-      setDigitalZoomCenter({ x: nextCenterX, y: nextCenterY });
-    }, 700);
-
-    return () => clearInterval(id);
-  }, [stream]);
+  // Auto-zoom (both the face-size seeking and its digital-crop-based
+  // recentring) was removed at the operator's request — it kept fighting
+  // real-world framing (tight crops, false FACE_TOO_SMALL at a turned
+  // profile, zoom chasing perspective foreshortening as if the subject had
+  // moved). Centring is handled by the existing OFF_CENTER quality check
+  // instead: the operator physically moves into frame, guided by
+  // GuidanceEngine's own instruction text, the same as FACE_TOO_SMALL/
+  // FACE_TOO_LARGE already ask them to step closer or back off. The camera
+  // now always runs at its native 1x framing — see BrowserCameraService's
+  // digital-zoom methods, still there but unused unless something calls them.
 
   const handleRetakeStep = async (stepId: string) => {
     const engine = liveWorkflowEngineRef.current;
@@ -877,6 +780,15 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     setLatestCapturedImage(null);
     setIsWorkflowStarted(false);
     isWorkflowStartedRef.current = false;
+    // "Chụp lại toàn bộ" reaches here before the session has necessarily
+    // completed (SessionReviewModal allows reviewing, and retaking
+    // everything, from as little as one captured step). Without this, the
+    // next run's first capture of each step reuses the abandoned run's
+    // sink session id and collides in idemKey space with it — see
+    // RunScopedCaptureSession's doc comment for the full mechanism. Already
+    // reset (a run that finished naturally clears it via finishSession) is a
+    // harmless no-op here.
+    runSessionRef.current.reset();
     const activeEngine = mode === 'live' ? liveWorkflowEngineRef.current : simWorkflowEngineRef.current;
     if (activeEngine) {
       await activeEngine.startSession(defaultWorkflow);
@@ -962,6 +874,10 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     setIsWorkflowStarted(false);
     isWorkflowStartedRef.current = false;
     setLatestCapturedImage(null);
+    // Cancelling abandons a run that has not completed, same as "Chụp lại
+    // toàn bộ" in handleRestart — see RunScopedCaptureSession's doc comment
+    // for why the next run must not inherit this one's session id.
+    runSessionRef.current.reset();
     const activeEngine = mode === 'live' ? liveWorkflowEngineRef.current : simWorkflowEngineRef.current;
     if (activeEngine) {
       await activeEngine.startSession(defaultWorkflow);
@@ -1029,9 +945,32 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
 
       {showReviewModal && (
         <SessionReviewModal
-          session={session}
-          onAccept={() => {
-            alert('Đã xác nhận hồ sơ. Ảnh được lưu qua máy chủ.');
+          // activeSession is the engine's own live session object — it already
+          // has whichever steps have been captured so far. `session` (React
+          // state) is only ever set by the 'completed' handler below, so
+          // before the last step it stays null and this modal would render
+          // nothing at all for the "Xem kết quả" button opened mid-session.
+          // Falling back to `session` keeps this working after a session ends
+          // and a new one has not started yet (activeSession would be gone).
+          session={activeSession ?? session}
+          // Captures are staged (written to disk, queued, but not yet
+          // eligible for upload — see queueCapture's own doc comment) the
+          // instant each step is shot, long before review. This button is the
+          // one place that turns "staged" into "sent": approveUpload releases
+          // this run's rows to the existing background UploadWorker, which
+          // picks them up completely unchanged from here. Only once that
+          // succeeds do we close out the local record and the modal — a
+          // failed approval leaves the review open so the operator can retry
+          // without losing anything (the photos stay safely staged either
+          // way; see approveUpload's own doc comment).
+          onAccept={async () => {
+            const completedSession = activeSession ?? session;
+            if (completedSession && repoRef.current) {
+              void repoRef.current.saveSession(completedSession);
+            }
+            const approved = await approveUpload();
+            if (!approved) return;
+            await finishSession();
             setShowReviewModal(false);
           }}
           onRetake={handleRestart}

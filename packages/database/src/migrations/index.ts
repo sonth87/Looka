@@ -4,6 +4,7 @@ import { MIGRATION_001_INIT } from './001-init.js';
 import { MIGRATION_002_INDEXES } from './002-indexes.js';
 import { MIGRATION_003_UPLOAD_OUTBOX } from './003-upload-outbox.js';
 import { MIGRATION_004_OUTBOX_VISIBILITY } from './004-outbox-visibility.js';
+import { MIGRATION_005_OUTBOX_APPROVAL } from './005-outbox-approval.js';
 
 export interface Migration {
   version: number;
@@ -21,6 +22,7 @@ export const MIGRATIONS: Migration[] = [
   MIGRATION_002_INDEXES,
   MIGRATION_003_UPLOAD_OUTBOX,
   MIGRATION_004_OUTBOX_VISIBILITY,
+  MIGRATION_005_OUTBOX_APPROVAL,
 ];
 
 const MIGRATION_TABLE = `
@@ -80,3 +82,4 @@ export { MIGRATION_001_INIT } from './001-init.js';
 export { MIGRATION_002_INDEXES } from './002-indexes.js';
 export { MIGRATION_003_UPLOAD_OUTBOX } from './003-upload-outbox.js';
 export { MIGRATION_004_OUTBOX_VISIBILITY } from './004-outbox-visibility.js';
+export { MIGRATION_005_OUTBOX_APPROVAL } from './005-outbox-approval.js';
