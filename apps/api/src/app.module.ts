@@ -9,7 +9,7 @@ import { DeviceManagementModule } from '@app/modules/device-management/device-ma
 import { CampaignController } from '@app/modules/device-management/controllers/campaign.controller';
 import { DeviceController } from '@app/modules/device-management/controllers/device.controller';
 import { DeviceExpiryMiddleware } from '@app/modules/device-management/middlewares/device-expiry.middleware';
-import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
+import { MiddlewareConsumer, Module, NestModule, RequestMethod } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
 import { TypeOrmModule } from '@nestjs/typeorm';
@@ -40,8 +40,23 @@ export class AppModule implements NestModule {
     // DeviceSelfController is deliberately absent here: a kiosk reading its
     // own config authenticates via DeviceCredentialsGuard's device secret
     // instead, never this admin key (see that controller's own doc comment).
+    //
+    // The explicit exclude is load-bearing, not defensive: DeviceController's
+    // `GET devices/:id` is an unconstrained path segment, so it also matches
+    // the literal strings `config`/`events` — DeviceSelfController's own
+    // routes. Middleware path-matching happens ahead of (and independently
+    // of) which controller ultimately resolves the request, so without this
+    // exclude, every kiosk's device-credentialed config/events call was
+    // silently rejected demanding an admin API key instead of ever reaching
+    // DeviceCredentialsGuard. Found only via a live round-trip test against a
+    // real Postgres — no unit test exercises this controller/middleware
+    // composition together.
     consumer
       .apply(ApiKeyMiddleware)
+      .exclude(
+        { path: 'devices/config', method: RequestMethod.GET, version: '1' },
+        { path: 'devices/events', method: RequestMethod.POST, version: '1' },
+      )
       .forRoutes(SessionController, PhotoController, CampaignController, DeviceController);
 
     // Pass-through when no device headers are sent — see the middleware's

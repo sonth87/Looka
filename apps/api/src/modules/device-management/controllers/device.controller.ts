@@ -57,6 +57,14 @@ export class DeviceController {
     return this.deviceService.findAllByCampaign(campaignId);
   }
 
+  // A bare `:id` here would match the literal strings `config`/`events` too
+  // — DeviceSelfController's own routes — and Express's router (and
+  // ApiKeyMiddleware's own path matching, see app.module.ts's exclude() list)
+  // both match on path shape, not which controller "should" own it. Rather
+  // than a route-level regex constraint (path-to-regexp on the Express
+  // version this app uses no longer supports inline `(pattern)` groups —
+  // that was tried and threw at startup), the exclusion is declared once, at
+  // the middleware, in app.module.ts.
   @Get('devices/:id')
   @ApiOperation({ summary: 'Get one device' })
   @ApiResponseDecorator(DeviceDao)
