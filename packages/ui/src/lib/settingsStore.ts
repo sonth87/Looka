@@ -42,7 +42,7 @@ const SETTINGS_KEY = 'face_platform_settings';
  * kept the false it had written, so the feature looked broken on the machines
  * that had been used the most.
  */
-const SETTINGS_VERSION = 1;
+const SETTINGS_VERSION = 2;
 
 export const defaultSettings: AppSettings = {
   theme: 'light',
@@ -57,7 +57,9 @@ export const defaultSettings: AppSettings = {
   showLandmarks: true,
   landmarkSize: 1.5,
   showScreenDebugStats: true,
-  captureMode: 'AUTO',
+  // Click-to-capture until a campaign's own config can turn AUTO on — see
+  // docs/plans/multi-camera-device-management-discussion.md §3.8.
+  captureMode: 'MANUAL',
   autoHoldMs: 2000,
   allowedGestures: ['VICTORY', 'THUMBS_UP', 'OPEN_PALM'],
   panels: {},
@@ -81,6 +83,9 @@ function applyDefaultMigrations(settings: AppSettings): AppSettings {
 
   // v1 — landmark dots became visible by default.
   if (storedVersion < 1) next.showLandmarks = true;
+  // v2 — capture defaults to click-to-capture (MANUAL) instead of AUTO; see
+  // docs/plans/multi-camera-device-management-discussion.md §3.8.
+  if (storedVersion < 2) next.captureMode = 'MANUAL';
 
   next.settingsVersion = SETTINGS_VERSION;
   try {

@@ -164,6 +164,28 @@ tình huống rối nhất trong thực tế, nhưng sơ đồ chỉ có 1 nhán
 - Đây cũng là lý do "Manual confirm ok" trong sơ đồ là bước **bắt buộc phải giữ
   lại**, không nên tối ưu bỏ đi kể cả khi auto-capture hoạt động tốt.
 
+**API tra cứu Info SV — 1 endpoint mới trong `apps/api`:**
+
+- `GET /v1/identify/lookup?code=<mã SV>` (theo đúng convention `/v1/...` đã
+  có sẵn, xem `HttpCaptureSink`) — nhận `code` bắt buộc, kèm các trường bổ
+  sung tuỳ chọn nếu cần disambiguate (VD lớp/khoá học) khi biết rõ hệ thống
+  Admin thật cần gì.
+- Bên trong, endpoint này **gọi ra 1 hệ thống Admin bên ngoài** để lấy thông
+  tin SV — đúng dạng phụ thuộc đã gặp ở mục 2.9 (AI Vision server): hệ thống
+  đã có sẵn, Looka chỉ đóng vai trò client gọi sang, **giao thức/API cụ thể
+  chưa có, sẽ được cung cấp sau**. Base URL + key gọi ra ngoài nên cấu hình
+  qua biến môi trường (đúng pattern `FS_BASE_URL`/`FS_API_KEY` đang dùng cho
+  fs-core), không hardcode, vì chưa biết trước sẽ trỏ tới đâu.
+- Response map thẳng vào đúng 2 trong 3 nhánh đã chốt ở trên: **1 kết quả
+  khớp** → `FOUND` (trả thông tin SV); **0 kết quả** → `NOT_FOUND`; **nhiều
+  kết quả gần giống** → `AMBIGUOUS`. Nhánh `DUPLICATE` (đã có ảnh đăng ký từ
+  trước) **không đến từ API này** — đó là kiểm tra riêng trên dữ liệu đã
+  chụp của chính Looka (đã tồn tại session/hồ sơ nào gắn với mã SV này chưa),
+  không phải điều hệ thống Admin ngoài biết.
+- Vì giao thức thật chưa có, endpoint này trước mắt chỉ dừng ở **thiết kế**
+  (route, input/output, chỗ gọi ra ngoài) — chưa viết code, đợi tài liệu
+  API/giao thức thật từ bên sở hữu hệ thống Admin.
+
 ### 2.4. Bước xin sự đồng ý (consent)
 
 **Vấn đề:** Sơ đồ không có bước nào thu thập sự đồng ý trước khi bắt đầu ghi
@@ -177,9 +199,29 @@ chẽ hơn nhiều so với một tấm ảnh thẻ SV thông thường.
   SV xác nhận đồng ý (chạm nút, hoặc CB Help xác nhận thay nếu SV không tự thao
   tác được) → lưu lại **thời điểm + phiên bản nội dung đồng ý** cùng với session,
   không chỉ lưu "đã đồng ý: true/false".
-- Cân nhắc: nội dung consent có thể cần khác nhau tuỳ đơn vị triển khai (khác
-  nhau về mục đích sử dụng ảnh) → nên để admin portal cấu hình được nội dung
-  này theo từng thiết bị/đơn vị, không hardcode trong app.
+- Nội dung consent cấu hình theo **campaign**, không theo từng thiết bị —
+  đúng lý do campaign đã nhóm thiết bị theo mục đích sử dụng (mục 3.2): 1
+  campaign "chụp thẻ SV" và 1 campaign "đăng ký KYC/FaceID" (mục 3.7) có mục
+  đích dùng ảnh khác hẳn nhau, nên hiển nhiên cần nội dung consent khác nhau
+  — không hợp lý nếu gắn theo từng thiết bị riêng lẻ trong khi mọi thiết bị
+  cùng 1 campaign đều phục vụ cùng 1 mục đích.
+- Schema: `campaigns.consent_content` (text) + `campaigns.consent_version`
+  (số, tăng lên mỗi lần admin sửa nội dung). Nếu campaign chưa cấu hình
+  riêng, dùng 1 nội dung mặc định chung chung (`consent_version = 0`, dành
+  riêng cho "chưa cấu hình") — để bước này **không bao giờ chặn luồng chụp**
+  chỉ vì thiếu cấu hình.
+- Lưu lại mỗi lần đồng ý vào 1 bảng riêng (hoặc cột trên bảng session):
+  `session_id`, `campaign_id`, `consent_version` (bản đã hiển thị lúc đó,
+  không phải bản mới nhất — tránh trường hợp admin sửa nội dung sau này làm
+  sai lệch lịch sử), `accepted_at`, `accepted_by` (`SUBJECT` | `CB_HELP`) —
+  cùng kiểu audit trail đã dùng cho Manual confirm ở mục 2.7.
+- Luôn hỏi lại **mỗi session**, kể cả SV quay lại chụp lần 2 (nhánh
+  `DUPLICATE` ở mục 2.3) — không cố nhớ/bỏ qua dựa trên lần đồng ý trước, vì
+  mỗi session là 1 lần ghi hình sinh trắc học mới, cần bằng chứng đồng ý
+  riêng cho chính lần đó.
+- Nội dung consent thật (câu chữ pháp lý cụ thể) vẫn cần lấy từ bên có thẩm
+  quyền của đơn vị triển khai — Looka chỉ đảm bảo **cơ chế** (versioned,
+  theo campaign, có audit trail), không tự soạn nội dung pháp lý.
 
 ### 2.5. Lưu trữ và dọn dẹp video
 
@@ -338,57 +380,84 @@ Looka nữa):
 
 ### 3.2. Đăng ký thiết bị — mỗi kiosk vật lý = 1 thiết bị
 
-**Mô hình triển khai (làm rõ qua trao đổi, tránh hiểu nhầm):** `apps/desktop`
-trong repo này **là 1 bản build duy nhất**, đóng gói thành 1 file cài đặt, và
-**chính file cài đặt đó** được cài giống hệt nhau lên mọi máy kiosk (máy A,
-máy B, máy C...) — không có chuyện đăng ký xong thì sinh ra 1 app riêng để
-tải về, và cũng không cần build lại app cho từng máy.
+**Mô hình triển khai:** `apps/desktop` trong repo này **là 1 bản build duy
+nhất**, đóng gói thành 1 file cài đặt, và **chính file cài đặt đó** được cài
+giống hệt nhau lên mọi máy kiosk (máy A, máy B, máy C...) — không có chuyện
+mỗi thiết bị có 1 bản build code khác nhau, và cũng không cần build lại app
+cho từng máy.
 
 Cái khác nhau giữa các kiosk là **cấu hình cục bộ**, không phải code khác
 nhau:
 
-- `device_id`/`device_secret` — sinh ra ngay trên máy đó, lần đầu app chạy
-  (hoặc nhập qua mã kích hoạt, tuỳ phương án chọn ở phần câu hỏi bên dưới),
-  lưu trong `secrets.dat` riêng của máy đó.
+- `device_id`/`device_secret` — sinh ra trên CMS lúc đăng ký, giao cho app
+  qua mã/file kích hoạt, rồi app mới lưu vào `secrets.dat` riêng của máy đó.
 - Camera nào đóng vai trò CENTER/LEFT/RIGHT — app dùng API liệt kê thiết bị
   camera tiêu chuẩn của hệ điều hành/trình duyệt (`enumerateDevices()` —
   chính cơ chế đang dùng hôm nay cho 1 camera, thấy rõ trong component
   `CameraSelector` hiện có), API này tự trả về **bất kỳ camera vật lý nào**
   đang cắm vào máy đó tại thời điểm chạy. CB Help chỉ cần gán vai trò cho các
   camera mà máy tự phát hiện được (nối đúng ý tưởng bảng mapping ở mục 2.1) —
-  không cần viết thêm code tích hợp riêng cho từng loại camera.
+  không cần viết thêm code tích hợp riêng cho từng loại camera. Bước này chỉ
+  làm được **trên chính máy kiosk, sau khi cài** (không thể biết trước lúc
+  đăng ký trên CMS, vì phụ thuộc camera vật lý nào thực sự cắm vào máy đó).
 
-Nói cách khác: thứ tự đúng là **cài app (giống nhau) trước → app tự đăng ký
-sau**, không phải chiều ngược lại. Đăng ký chỉ tạo ra 1 bản ghi trong database
-của admin portal, không tạo ra file nào để tải về.
+**Luồng đăng ký/cài đặt:**
 
-Đã chốt thêm (qua trao đổi): **2 bước tách rời nhau** — (1) build/cài app lên
-máy desktop trước, (2) đăng ký thiết bị sau đó là 1 hành động riêng, không
-gộp chung vào lúc cài đặt. Và: **thời hạn là tuỳ chọn khi đăng ký** — nếu
-không truyền ngày kết thúc (`end`), thiết bị mặc định **vĩnh viễn** (không
-bao giờ hết hạn), thay vì bắt buộc phải chọn 1 ngày hết hạn cụ thể.
+```
+0. (Nếu chưa có) Admin tạo 1 **campaign** mới trên CMS: tên, mô tả, và
+   **thời hạn sử dụng** (để trống = vĩnh viễn, xem quy tắc NULL bên dưới) —
+   hạn này áp dụng chung cho MỌI thiết bị đăng ký bên trong campaign đó,
+   không đặt riêng lại ở bước 1 dưới đây.
+1. Admin vào trang "Đăng ký thiết bị" trên CMS (admin portal, mục 3.4),
+   chọn campaign vừa tạo (hoặc 1 campaign có sẵn), rồi nhập: tên thiết bị,
+   số góc chụp (nối mục 3.6), API endpoint lấy thông tin xác thực (đơn
+   vị/tenant nào sẽ dùng cho thiết bị này). Không nhập hạn ở đây — thiết bị
+   kế thừa hạn của campaign.
+   → Mã thiết bị (device_id) do HỆ THỐNG TỰ SINH — admin không tự gõ.
+2. CMS tạo 1 bản ghi thiết bị (status: đã đăng ký, chưa kích hoạt) + sinh
+   kèm 1 device_secret, ghi cả hai (cùng các cấu hình vừa nhập) vào 1 file
+   kích hoạt (VD `activation.json`) riêng cho lần đăng ký này.
+3. CMS đóng gói (zip) ngay lúc đó file kích hoạt vừa sinh cùng bản installer
+   app desktop (installer là **file tĩnh có sẵn, giống hệt nhau mọi lần** —
+   không build lại code, chỉ copy vào gói) thành **1 file duy nhất** để admin
+   bấm tải — VD `looka-kiosk-<device_id>.zip`.
+4. CB Help/kỹ thuật nhận file zip đó, giải nén, chạy installer trên máy
+   kiosk vật lý; app đọc `activation.json` đi kèm trong gói ngay khi cài đặt
+   (không cần dán mã tay) → lưu device_id/device_secret nhận được vào
+   `secrets.dat` (đúng cơ chế mã hoá `safeStorage` đã có sẵn trong
+   `apps/desktop/src/main/secrets.ts`) và bắt đầu hoạt động theo đúng cấu
+   hình + thời hạn đã đăng ký từ bước 1.
+```
 
-- Mỗi máy kiosk cần 1 **device identity** sinh ra 1 lần lúc cài đặt/kích hoạt
-  lần đầu (ví dụ 1 `device_id` UUID + 1 `device_secret`, lưu trong
-  `secrets.dat` — đúng cơ chế mã hoá `safeStorage` đã có sẵn trong
-  `apps/desktop/src/main/secrets.ts`, chỉ thêm field mới). Bước này xảy ra
-  ngay khi app khởi động lần đầu, **trước khi** biết thiết bị đã được đăng ký
-  hay chưa — tức là 1 app cài xong có thể tồn tại ở trạng thái "đã cài, chưa
-  đăng ký" trong 1 khoảng thời gian.
-- Đăng ký thiết bị = gọi 1 API tới admin portal (mục 3.4) **là 1 bước riêng,
-  làm sau khi cài đặt** (ví dụ người quản trị vào admin portal, nhập
-  `device_id` app đã sinh ra để kích hoạt, hoặc app tự gọi API đăng ký rồi
-  chờ người quản trị duyệt — cách nào cần chốt thêm, xem câu hỏi bên dưới).
-  Nhận về cấu hình: loại tài liệu (ảnh/video/cả hai), **ngày hết hạn — có thể
-  để trống**, ngưỡng timeout ở mục 2.2, nội dung consent ở mục 2.4 — tương tự
-  cơ chế self-service provisioning đã có với fs-core (`FsClient.provision()`),
-  có thể học theo đúng pattern đó.
+**Campaign — nhóm nhiều thiết bị lại với nhau:**
+
+Một admin có thể đăng ký **nhiều thiết bị cho nhiều campaign khác nhau**
+(VD "Đợt chụp thẻ SV — Tháng 9/2026 — Trường ABC" là 1 campaign, chứa N
+thiết bị đăng ký bên trong). Mô hình đơn giản:
+
+- `campaigns` là 1 bảng riêng trên admin portal (id, tên, mô tả, thời điểm
+  tạo) — mỗi thiết bị (`devices.campaign_id`) thuộc về đúng 1 campaign, chọn
+  lúc đăng ký (bước 1 ở luồng trên).
+- Quan hệ **1 campaign → N thiết bị**, không phải chiều ngược lại.
+- **Không cần API "chuyển campaign" cho thiết bị đã đăng ký.** Vì mỗi gói
+  tải về (zip installer + activation, bước 3) đã tự mang theo hạn dùng
+  riêng của nó — khi hết hạn, gói đó (và device_id gắn với nó) tự ngừng hoạt
+  động theo đúng cơ chế chặn đã chốt ở mục 3.3, không cần thao tác gì thêm.
+  Muốn dùng lại **cùng 1 máy vật lý** cho 1 campaign mới: chỉ cần đăng ký
+  mới trên CMS (chọn/tạo campaign mới) → tải gói zip mới → cài đè lên máy
+  đó. Đây là 1 lần đăng ký hoàn toàn độc lập, sinh `device_id` mới — không
+  phải "gia hạn" hay "đổi campaign" cho bản ghi cũ.
+- Hệ quả cho mục 3.4 (thống kê): cần thêm 1 chiều lọc/gộp theo **campaign**
+  (không chỉ theo từng thiết bị riêng lẻ) — VD "tổng số ảnh chụp được của
+  toàn bộ campaign X", cộng dồn từ mọi thiết bị thuộc campaign đó.
+
 - **Quy tắc mặc định khi không truyền ngày hết hạn:** cột lưu ngày hết hạn
-  (ví dụ `expires_at`) để **NULL = vĩnh viễn**, không phải 1 giá trị đặc biệt
-  kiểu "9999-12-31" hay tương tự — middleware kiểm tra hạn (mục 3.3) phải
-  hiểu rõ `NULL` nghĩa là "không bao giờ chặn", tránh lỗi kinh điển là hiểu
-  nhầm `NULL`/`undefined` thành "đã hết hạn" (hết hạn = rỗng) thay vì "chưa
-  từng đặt hạn" (không giới hạn).
+  (`campaigns.expires_at` — **không phải cột trên bảng thiết bị**, xem cập
+  nhật campaign-level ở trên) để **NULL = vĩnh viễn**, không phải 1 giá trị
+  đặc biệt kiểu "9999-12-31" hay tương tự — middleware kiểm tra hạn (mục 3.3)
+  phải hiểu rõ `NULL` nghĩa là "không bao giờ chặn", tránh lỗi kinh điển là
+  hiểu nhầm `NULL`/`undefined` thành "đã hết hạn" (hết hạn = rỗng) thay vì
+  "chưa từng đặt hạn" (không giới hạn).
 - Mọi request từ kiosk lên backend Looka (`apps/api`) và lên admin portal cần
   gắn `device_id` + `device_secret` (như 1 header riêng, song song với
   `x-api-key` hiện tại) — đây là nền tảng để mục 3.3 (chặn khi hết hạn) và
@@ -397,30 +466,64 @@ bao giờ hết hạn), thay vì bắt buộc phải chọn 1 ngày hết hạn 
 **Đã chốt (qua trao đổi):**
 
 - **Admin là người thực hiện đăng ký**, không phải app tự động tự đăng ký.
-  Người quản trị chủ động đăng ký thiết bị đó trên admin portal — cơ chế trao
-  đổi cụ thể giữa admin và app (nhập `device_id` thủ công, hay 1 mã kích hoạt)
-  là chi tiết triển khai, không đổi quyết định cốt lõi này.
-- **Trạng thái "đã cài, chưa đăng ký": chặn hoàn toàn**, không gọi được API
-  nào — cùng triết lý với lúc hết hạn ("đến hạn thì không được call bất kỳ gì
-  nữa", mục 3.3): trước khi admin đăng ký cũng vậy, chưa có danh tính hợp lệ
-  thì chưa được phép làm gì cả, không có trạng thái "chạy giới hạn" ở giữa.
-- **Vĩnh viễn ↔ có hạn: đổi được (gia hạn được)** — admin có thể set hạn dùng
-  cho 1 thiết bị đang vĩnh viễn, hoặc gia hạn thêm cho 1 thiết bị sắp hết hạn.
-  Đúng như đã nêu, đây là thao tác quản trị nên có audit trail riêng (nối mục
-  2.7).
+  Người quản trị chủ động đăng ký thiết bị trên CMS **trước khi** app được
+  cài lên máy nào cả (xem luồng mới ở trên).
+- **Cơ chế nạp kích hoạt: app tự đọc file, không dán mã tay** — CMS đóng gói
+  sẵn `activation.json` cùng installer vào 1 file zip tải về (bước 3 ở luồng
+  trên), nên khi cài đặt app tự tìm và đọc file này ngay cạnh installer —
+  không cần CB Help gõ tay bất kỳ mã kích hoạt nào.
+- **Trạng thái "đã cài nhưng chưa nạp mã kích hoạt": chặn hoàn toàn**, không
+  gọi được API nào — cùng triết lý với lúc hết hạn ("đến hạn thì không được
+  call bất kỳ gì nữa", mục 3.3): app cài xong mà chưa nạp mã kích hoạt (dù
+  thiết bị đã có bản ghi đăng ký trên CMS từ trước) thì vẫn chưa có danh tính
+  hợp lệ để gọi API, không có trạng thái "chạy giới hạn" ở giữa.
+- **Vĩnh viễn ↔ có hạn: đổi được (gia hạn được)** — admin set/sửa hạn ở cấp
+  **campaign**; gia hạn 1 campaign tự động gia hạn **mọi thiết bị** đăng ký
+  bên trong nó cùng lúc (không cần sửa từng thiết bị). Đây là thao tác quản
+  trị nên có audit trail riêng (nối mục 2.7).
 
-### 3.3. Chặn API khi hết hạn — cả 2 lớp
+### 3.3. Chặn API khi hết hạn — cả 2 lớp, và kết nối kiosk ↔ backend
 
 Đã chốt: chặn ở cả backend Looka và fs-core.
 
-- **Lớp Looka (`apps/api`)**: 1 middleware mới (song song
-  `ApiKeyMiddleware` hiện có), kiểm tra `device_id` gửi lên còn hạn không
-  (tra bảng thiết bị, hoặc cache ngắn hạn để không phải hỏi admin portal mỗi
-  request) → hết hạn thì trả lỗi rõ ràng (`DEVICE_EXPIRED`), chặn trước khi
-  chạm tới logic tạo session/upload. Đúng theo quy tắc đã chốt ở mục 3.2:
-  `expires_at = NULL` → luôn cho qua (thiết bị vĩnh viễn); chỉ chặn khi
-  `expires_at` có giá trị **và** giá trị đó đã ở quá khứ.
-- **Cùng middleware này cũng phải chặn thiết bị chưa từng đăng ký** (không có
+**Lưu ý kiến trúc:** `apps/desktop` (kiosk) **hiện không hề gọi tới
+`apps/api`** — nó đi thẳng tới fs-core qua `FsClient` (tự provision key
+riêng, lưu `fs.baseUrl`/`fs.apiKey` trong `secrets.dat`, xem
+`apps/desktop/src/main/secrets.ts`). `apps/api` hiện chỉ được luồng
+**web** dùng (qua `HttpCaptureSink`). Vì vậy phần "Lớp Looka (`apps/api`)"
+bên dưới **chỉ áp dụng đúng nghĩa cho luồng web** — với kiosk desktop, cần
+1 kết nối riêng, từ kiosk thẳng tới admin portal (không qua `apps/api`),
+phục vụ đúng 2 việc: kiểm tra hạn dùng, và đẩy dữ liệu thống kê.
+
+- **Lớp Looka (`apps/api`) — áp dụng cho luồng web:** 1 middleware mới (song
+  song `ApiKeyMiddleware` hiện có), kiểm tra `device_id` gửi lên còn hạn
+  không (join sang campaign của thiết bị đó, tra `campaigns.expires_at`,
+  không phải cột trên bảng thiết bị — xem mục 3.2) → hết hạn thì trả lỗi rõ
+  ràng (`DEVICE_EXPIRED`), chặn trước khi chạm tới
+  logic tạo session/upload. `expires_at = NULL` (campaign vĩnh viễn) → luôn
+  cho qua; chỉ chặn khi có giá trị **và** giá trị đó đã ở quá khứ.
+- **Kết nối mới cho kiosk desktop — `DeviceApiClient` trong
+  `apps/desktop/src/main`** (song song `FsClient` đã có, nhưng trỏ tới admin
+  portal thay vì fs-core):
+  - **Kiểm tra hạn dùng:** gọi `GET /devices/:device_id/status` lúc app khởi
+    động + định kỳ (VD mỗi 15-30 phút) → nhận `{ valid, reason, expiresAt }`.
+    Cache kết quả cục bộ (đúng tinh thần "cache ngắn hạn" đã nêu) — kiosk vốn
+    offline-first, không thể để mỗi thao tác chụp phải chờ gọi mạng thành
+    công mới cho chạy. Đề xuất: dùng kết quả cache tối đa **24h** kể từ lần
+    gọi thành công cuối, quá mốc đó mà vẫn không liên lạc được với admin
+    portal thì mới chuyển sang chặn (fail-closed) — cân bằng giữa "không
+    chặn nhầm kiosk đang mất mạng tạm thời" và "không để 1 thiết bị hết hạn
+    chạy vô thời hạn chỉ vì ngắt mạng".
+  - **Đẩy dữ liệu thống kê (mục 3.4):** tái dùng đúng pattern
+    `UploadOutboxRepository`/`UploadWorker` đã có — thêm 1 bảng
+    `stats_event_outbox` cục bộ (session hoàn tất, upload thành công/lỗi, số
+    lần chụp lại, lần cần CB Help can thiệp), có worker riêng gửi định kỳ
+    lên admin portal, tận dụng lại cơ chế retry/queue đã được kiểm chứng
+    thay vì viết mới từ đầu.
+  - Cả 2 việc trên đều **không được chặn luồng chụp ảnh chính** — chỉ có kết
+    quả "hết hạn đã xác nhận" (không phải "không liên lạc được") mới thực sự
+    chặn app, đúng triết lý offline-first của toàn hệ thống.
+- **Cùng cơ chế này cũng phải chặn thiết bị chưa từng đăng ký** (không có
   `device_id` hợp lệ nào trong bảng thiết bị), không chỉ thiết bị đã đăng ký
   nhưng hết hạn — hai điều kiện chặn khác nhau (chưa tồn tại vs. tồn tại
   nhưng hết hạn) nhưng cùng một kết quả: chặn hoàn toàn, không có trạng thái
@@ -433,7 +536,9 @@ bao giờ hết hạn), thay vì bắt buộc phải chọn 1 ngày hết hạn 
   "cả 2 lớp chặn độc lập nhau" đã chọn, không phải 1 lớp giả, 1 lớp thật.
 - Cảnh báo trước hạn: admin portal nên cấu hình được ngưỡng cảnh báo (ví dụ còn
   7 ngày) để thông báo cho người quản lý trước khi thiết bị thực sự bị chặn,
-  tránh kiosk đột ngột ngừng hoạt động giữa ca mà không ai biết trước.
+  tránh kiosk đột ngột ngừng hoạt động giữa ca mà không ai biết trước — vì hạn
+  giờ nằm ở cấp campaign, cảnh báo này nên gộp theo campaign ("campaign X sắp
+  hết hạn, ảnh hưởng N thiết bị") thay vì báo riêng lẻ từng thiết bị.
 
 ### 3.4. Admin portal riêng — đăng ký, hết hạn, thống kê
 
@@ -447,9 +552,10 @@ sau" như phương án đã cân nhắc ban đầu.
   gọn, và trộn lẫn 2 nhóm người dùng khác nhau (kiosk vận hành tự động vs. người
   quản trị dùng trình duyệt) vào chung 1 codebase.
 - **Kiến trúc đề xuất:** service admin portal riêng (NestJS hoặc framework
-  khác tuỳ chọn), sở hữu DB riêng cho: bảng thiết bị (device_id, tên, đơn vị,
-  ngày kích hoạt, ngày hết hạn, loại tài liệu cho phép, trạng thái), bảng log
-  sự kiện theo thiết bị (mỗi lần upload/lỗi/manual confirm — nối dữ liệu này
+  khác tuỳ chọn), sở hữu DB riêng cho: bảng **campaigns** (id, tên, mô tả —
+  xem mục 3.2), bảng thiết bị (device_id, tên, `campaign_id`, đơn vị, ngày
+  kích hoạt, ngày hết hạn, loại tài liệu cho phép, trạng thái), bảng log sự
+  kiện theo thiết bị (mỗi lần upload/lỗi/manual confirm — nối dữ liệu này
   từ `apps/api` gửi sang, ví dụ qua webhook hoặc queue, để `apps/api` không cần
   biết chi tiết schema thống kê).
 - **Hiện trạng đã có trong code (nhưng chưa dùng được):** `packages/database`
@@ -464,7 +570,9 @@ sau" như phương án đã cân nhắc ban đầu.
   công vs. thất bại (nối `fs_status`/`last_error` đã có sẵn trong
   `upload_outbox` — chỉ cần đẩy dữ liệu này sang, không cần tính toán lại từ
   đầu); tỷ lệ phải chụp lại (nối số lần "Chụp lại"/attempts đã có trong DB);
-  số lần cần CB Help can thiệp (nối mục 2.2 + 2.7).
+  số lần cần CB Help can thiệp (nối mục 2.2 + 2.7). Mọi số liệu trên cần xem
+  được **theo từng thiết bị lẫn cộng dồn theo campaign** (mục 3.2) — dashboard
+  nên cho lọc/group theo campaign, không chỉ liệt kê từng thiết bị rời rạc.
 - **Mở rộng thêm (qua trao đổi): cần cả thời gian trung bình, không chỉ số
   lượng.** Ví dụ: thời gian trung bình từ lúc chụp tới lúc upload xong, thời
   gian trung bình xử lý 1 session trọn vẹn. Đây là yêu cầu về **dữ liệu lịch
@@ -598,6 +706,62 @@ cả hai" đã được đưa vào cấu hình đó.
 3. Đổi cấu hình cho 1 thiết bị đã đăng ký — áp dụng ngay cho phiên chụp tiếp
    theo, hay cần khởi động lại app?
 
+### 3.7. Mở rộng: đăng ký KYC/FaceID cho hệ thống ngoài
+
+**Yêu cầu:** hạ tầng campaign/thiết bị đang thiết kế cần dùng lại được cho 1
+mục đích khác ngoài "chụp thẻ SV" — SV/người dùng chụp các góc mặt để **đăng
+ký hồ sơ KYC/FaceID** cho 1 hệ thống KYC/nhận diện đã có sẵn (khớp đúng mô tả
+"AI Vision server" đã chốt ở mục 2.9: hệ thống bên ngoài, Looka không tự xây
+recognition). Đây **không phải quét/xác thực 1:1 hay 1:N** (Looka không tự so
+khớp danh tính) — vẫn là 1 luồng **capture nhiều góc mặt**, chỉ khác điểm đến
+của dữ liệu sau khi chụp.
+
+**Vì sao tận dụng được gần như nguyên vẹn hạ tầng đã thiết kế:**
+
+- Về mặt UI/capture, đây chính là luồng đã có (`FaceCaptureApp`, workflow
+  nhiều bước) — không cần màn hình mới, chỉ khác **bộ góc chụp yêu cầu** (có
+  thể không phải đúng 5 góc FRONT/LEFT/RIGHT/UP/DOWN hiện tại, mà theo đúng
+  spec góc mà hệ thống KYC/AI Vision bên ngoài yêu cầu) — nối thẳng vào cơ
+  chế **số góc chụp cấu hình theo thiết bị** đã chốt ở mục 3.6.
+- Khác biệt thật sự nằm ở **đích đến của dữ liệu sau khi chụp**: campaign
+  "chụp thẻ SV" hiện tại lưu ảnh lên fs-core (in thẻ); campaign "đăng ký
+  KYC/FaceID" cần thêm 1 đích gửi khác — gửi ảnh (hoặc vector đã tiền xử lý,
+  đúng khái niệm "CLIENT tiền xử lý" còn bỏ ngỏ ở mục 2.9) sang API của hệ
+  thống KYC/AI Vision ngoài đó.
+- Đề xuất: thêm 1 field **"mục đích campaign"** (VD `purpose`:
+  `STUDENT_CARD` | `KYC_ENROLLMENT`) lúc tạo campaign (mục 3.2) — dùng field
+  này để quyết định: (a) bộ góc chụp mặc định gợi ý (không bắt buộc, admin
+  vẫn chỉnh được qua cơ chế 3.6), và (b) ảnh chụp xong route tới đích nào
+  (fs-core, hay API của hệ thống KYC ngoài, hoặc cả hai).
+- **Vẫn còn đúng khoảng trống đã nêu ở mục 2.9, chưa giải quyết ở đây**: cần
+  tài liệu API/giao thức thật từ bên sở hữu hệ thống KYC/AI Vision (REST?
+  định dạng ảnh hay vector? xác thực bằng gì?) trước khi thiết kế được chi
+  tiết bước "gửi đi" này — mục 3.7 này chỉ xác nhận **nó dùng chung hạ tầng
+  campaign/thiết bị**, chưa chốt được giao thức gửi dữ liệu cụ thể.
+
+### 3.8. Chế độ kích hoạt chụp (AUTO/MANUAL) cấu hình theo campaign
+
+**Hiện trạng trong code:** `WorkflowEngine` đã có sẵn cả 2 chế độ —
+`setCaptureTriggerConfig({ mode, autoHoldMs })` nhận `mode: 'AUTO' | 'MANUAL'
+| 'OFF'`; `AUTO` tự chụp khi giữ đúng tư thế đủ `autoHoldMs`; `MANUAL` chờ SV
+hoặc CB Help bấm nút/cử chỉ để gọi `triggerManualCapture()` (đã sửa để
+re-check đúng quality gate của bước hiện tại tại đúng thời điểm bấm, không
+tin vào trạng thái cũ). Vấn đề: giá trị `mode`/`autoHoldMs` hiện đọc từ
+`getSettings()` — **1 cấu hình cục bộ trên từng máy** (chỉnh qua debug
+panel), không phải cấu hình tập trung, nên đổi chế độ hôm nay phải làm tay
+từng máy.
+
+**Đề xuất:** nối `captureMode` (+ `autoHoldMs` khi ở AUTO) vào đúng cơ chế
+cấu hình theo campaign đã dùng cho số góc chụp (mục 3.6) — cùng 1 lần gọi
+cấu hình lúc đăng ký/khởi động, thêm 1 field nữa vào cùng payload, không
+phải xây cơ chế tải cấu hình riêng.
+
+**Yêu cầu trước mắt:** mặc định chế độ chụp là **MANUAL — SV/CB Help chủ
+động bấm nút chụp**, thay vì AUTO như code hiện đang mặc định
+(`getSettings().captureMode || 'AUTO'`). AUTO vẫn giữ để dùng khi campaign
+bật lên qua cấu hình, không xoá code, chỉ đổi hành vi mặc định khi campaign
+chưa cấu hình gì.
+
 ---
 
 ## 4. Câu hỏi / quyết định còn mở
@@ -608,6 +772,13 @@ cả hai" đã được đưa vào cấu hình đó.
    → **RESOLVED**: C0 (giữa) bắt buộc phải sống — hỏng thì dừng session. C1/C2
    (2 bên) hot-swap thủ công qua CB Help (chỉ định camera khác bù vai trò), hệ
    thống không tự huỷ session cũng không tự bỏ qua góc thiếu. Chi tiết mục 2.1.
+4. ~~Nội dung + cơ chế consent — có cần đúng từ pháp lý cụ thể không, hay tạm
+   thời dùng 1 câu chung chung?~~ → **RESOLVED một phần**: cơ chế đã chốt —
+   nội dung consent cấu hình theo **campaign** (versioned, mặc định 1 nội
+   dung chung chung nếu chưa cấu hình riêng), lưu lại thời điểm + bản đã
+   hiển thị + ai xác nhận cho mỗi session, luôn hỏi lại mỗi session kể cả
+   chụp lại. **Câu chữ pháp lý cụ thể vẫn cần lấy từ bên có thẩm quyền của
+   đơn vị triển khai** — Looka không tự soạn nội dung. Chi tiết mục 2.4.
 5. ~~"AI Vision" server: đã có sẵn hay cần xây mới? Giao thức giao tiếp là
    gì?~~ → **RESOLVED một phần**: đã có sẵn, bên thứ 3/hệ thống khác của đơn vị
    — không xây mới. Giao thức cụ thể (REST/gRPC, định dạng payload) **vẫn cần
@@ -634,18 +805,18 @@ cả hai" đã được đưa vào cấu hình đó.
     nối vào cơ chế cấu hình đăng ký thiết bị ở mục 3.2. Hiện tại đang hardcode
     trong `defaultWorkflow`, chưa triển khai thay đổi. Chi tiết mục 3.6.
 17. ~~Trạng thái "đã cài, chưa đăng ký" có chạy được không? Ai bấm "đăng ký"?
-    Vĩnh viễn có đổi thành có hạn được không?~~ → **RESOLVED**: admin là
-    người đăng ký thiết bị (không phải app tự đăng ký); trước khi đăng ký,
-    app bị chặn hoàn toàn (cùng triết lý với chặn khi hết hạn); vĩnh viễn và
-    có hạn đổi qua lại được (gia hạn được). Chi tiết mục 3.2.
+    Vĩnh viễn có đổi thành có hạn được không?~~ → **RESOLVED**: admin đăng ký
+    thiết bị trên CMS **trước** khi app được cài (không phải app tự đăng ký,
+    và không phải cài trước rồi mới đăng ký); trạng thái chặn là "đã cài
+    nhưng chưa nạp mã kích hoạt" — chưa nạp thì app bị chặn hoàn toàn (cùng
+    triết lý với chặn khi hết hạn); vĩnh viễn và có hạn đổi qua lại được (gia
+    hạn được, ở cấp campaign). Chi tiết mục 3.2.
 
 ### Còn mở (OPEN)
 
 2. Ngưỡng retry/timeout cụ thể (số lần, số phút) — hay để admin portal cấu hình
    theo từng thiết bị?
 3. Video có upload lên fs-core như ảnh không, hay chỉ giữ local + tự xoá?
-4. Nội dung + cơ chế consent — có cần đúng từ pháp lý cụ thể không, hay tạm thời
-   dùng 1 câu chung chung?
 7. Mỗi kiosk có API key fs-core riêng (theo đề xuất mục 3.3) — có chấp nhận
    được việc phải quản lý N key thay vì 1 key chung như hiện tại không?
 9. **(Mới, phát sinh từ mục 2.1)** Khi C0 kiêm nhiệm vai trò LEFT/RIGHT thay

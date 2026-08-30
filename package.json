@@ -13,6 +13,8 @@
     "dev": "turbo run dev",
     "dev:web": "pnpm --filter @face/web dev",
     "dev:app": "pnpm --filter @face/desktop dev",
+    "dev:cms": "pnpm --filter @face/cms dev",
+    "dev:api": "pnpm --filter @face/api start:dev",
     "build:app": "pnpm --filter @face/desktop build",
     "package:app": "pnpm --filter @face/desktop package",
     "package:app:mac": "pnpm --filter @face/desktop package:mac",

@@ -45,7 +45,39 @@ test('an install saved before the bump gets the new landmark default', async () 
 
   const persisted = JSON.parse(data.get(SETTINGS_KEY)!);
   assert.equal(persisted.showLandmarks, true, 'the migration must be written back');
-  assert.equal(persisted.settingsVersion, 1, 'and stamped so it does not repeat');
+  assert.equal(persisted.settingsVersion, 2, 'and stamped so it does not repeat');
+});
+
+test('an install saved before the bump gets click-to-capture by default', async () => {
+  const data = installFakeStorage();
+  // Written before captureMode existed at all — AUTO ran implicitly, never stored.
+  data.set(
+    SETTINGS_KEY,
+    JSON.stringify({ theme: 'light', showLandmarks: true, sensitivity: 'MEDIUM' })
+  );
+
+  const { getSettings } = await loadStore();
+  assert.equal(
+    getSettings().captureMode,
+    'MANUAL',
+    'capture should wait for a click, not fire on its own'
+  );
+
+  const persisted = JSON.parse(data.get(SETTINGS_KEY)!);
+  assert.equal(persisted.captureMode, 'MANUAL', 'the migration must be written back');
+  assert.equal(persisted.settingsVersion, 2, 'and stamped so it does not repeat');
+});
+
+test('choosing AUTO after migrating is respected', async () => {
+  const data = installFakeStorage();
+  data.set(SETTINGS_KEY, JSON.stringify({ captureMode: 'AUTO', settingsVersion: 2 }));
+
+  const { getSettings } = await loadStore();
+  assert.equal(
+    getSettings().captureMode,
+    'AUTO',
+    'a machine already at the current version must keep the operator’s choice'
+  );
 });
 
 test('turning landmarks off after migrating is respected', async () => {
@@ -88,4 +120,5 @@ test('a fresh install starts with landmarks on and live mode', async () => {
   const s = getSettings();
   assert.equal(s.showLandmarks, true);
   assert.equal(s.engineMode, 'live', 'a camera kiosk should not boot into mock data');
+  assert.equal(s.captureMode, 'MANUAL', 'capture should be click-to-capture until a campaign turns AUTO on');
 });
