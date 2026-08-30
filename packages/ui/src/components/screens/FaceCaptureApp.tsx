@@ -102,11 +102,12 @@ const defaultWorkflow: CaptureWorkflow = {
  * The steps a session actually runs — `defaultWorkflow` above, unless the
  * kiosk's campaign configures its own set (`captureAngles`, see
  * docs/plans/multi-camera-device-management-discussion.md §3.6). Called at
- * the start of every session, not cached here: `window.faceAPI.getDeviceConfig()`
+ * the start of every session, not cached here: `window.faceAPI.getDeviceAccessStatus()`
  * already has its own process-lifetime cache on the main-process side (see
  * `deviceApi.ts`), so re-reading it here just picks up whatever change an
  * admin made without needing a restart — resolving open question #3 in that
- * doc's §4 in favor of "next session picks it up."
+ * doc's §4 in favor of "next session picks it up." Also carries §3.3's
+ * fail-closed verdict (`blockedReason`) — see this function's return type.
  *
  * `(window as any).faceAPI` rather than a typed global: matches how the rest
  * of this package already reaches the preload bridge (see CaptureSink.ts and
@@ -124,6 +125,14 @@ const defaultWorkflow: CaptureWorkflow = {
 async function resolveActiveWorkflow(): Promise<{
   workflow: CaptureWorkflow;
   triggerConfig: { mode: CaptureTriggerMode; autoHoldMs: number };
+  /**
+   * §3.3's fail-closed verdict — non-null means the caller must refuse to
+   * start a session at all, not merely fall back to defaultWorkflow. Distinct
+   * from a config-fetch error (handled below by falling back, same as
+   * always): this is the admin portal actively saying this device may not
+   * capture, or having said nothing confirmable in over 24h.
+   */
+  blockedReason: 'unauthorized' | 'unreachable-too-long' | null;
 }> {
   const faceAPI = (window as any).faceAPI;
   let workflow = defaultWorkflow;
@@ -132,8 +141,11 @@ async function resolveActiveWorkflow(): Promise<{
   // settings (debug panel) decide, same as before this existed.
   let campaignMode: CaptureTriggerMode | null | undefined;
   let campaignAutoHoldMs: number | null | undefined;
+  let blockedReason: 'unauthorized' | 'unreachable-too-long' | null = null;
   try {
-    const config = await faceAPI?.getDeviceConfig?.();
+    const status = await faceAPI?.getDeviceAccessStatus?.();
+    blockedReason = status?.blocked ? status.reason ?? 'unauthorized' : null;
+    const config = status?.config;
     if (config?.captureAngles && Array.isArray(config.captureAngles) && config.captureAngles.length > 0) {
       workflow = { ...defaultWorkflow, steps: config.captureAngles };
     }
@@ -158,6 +170,7 @@ async function resolveActiveWorkflow(): Promise<{
       mode: campaignMode ?? settings.captureMode ?? 'MANUAL',
       autoHoldMs: campaignAutoHoldMs ?? settings.autoHoldMs ?? 2000,
     },
+    blockedReason,
   };
 }
 
@@ -258,13 +271,29 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    * passed to `startSession`.
    */
   const [activeWorkflow, setActiveWorkflow] = useState<CaptureWorkflow>(defaultWorkflow);
+  /**
+   * §3.3's fail-closed verdict — non-null means every session-start call site
+   * below must refuse to start one at all, and the render below replaces the
+   * whole capture screen with a blocking message instead. Cleared the moment
+   * a later `resolveActiveWorkflow()` call comes back unblocked (device
+   * reactivated, connectivity restored within the 24h window, etc.).
+   */
+  const [deviceBlockedReason, setDeviceBlockedReason] = useState<'unauthorized' | 'unreachable-too-long' | null>(
+    null
+  );
 
   const handleStartWorkflow = async () => {
     setIsWorkflowStarted(true);
     isWorkflowStartedRef.current = true;
     const activeEngine = mode === 'live' ? liveWorkflowEngineRef.current : simWorkflowEngineRef.current;
     if (activeEngine) {
-      const { workflow, triggerConfig } = await resolveActiveWorkflow();
+      const { workflow, triggerConfig, blockedReason } = await resolveActiveWorkflow();
+      setDeviceBlockedReason(blockedReason);
+      if (blockedReason) {
+        setIsWorkflowStarted(false);
+        isWorkflowStartedRef.current = false;
+        return;
+      }
       setActiveWorkflow(workflow);
       activeEngine.setCaptureTriggerConfig(triggerConfig);
       await activeEngine.startSession(workflow);
@@ -457,10 +486,15 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           await simEngine.processFrame(state);
         });
 
-        const { workflow: simWorkflow, triggerConfig: simTriggerConfig } = await resolveActiveWorkflow();
+        const {
+          workflow: simWorkflow,
+          triggerConfig: simTriggerConfig,
+          blockedReason: simBlockedReason,
+        } = await resolveActiveWorkflow();
+        setDeviceBlockedReason(simBlockedReason);
         setActiveWorkflow(simWorkflow);
         simEngine.setCaptureTriggerConfig(simTriggerConfig);
-        await simEngine.startSession(simWorkflow);
+        if (!simBlockedReason) await simEngine.startSession(simWorkflow);
 
         const liveEngine = new WorkflowEngine();
         liveEngine.setSensitivity(sensitivity);
@@ -508,10 +542,15 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           // correct ordering.
         });
 
-        const { workflow: liveWorkflow, triggerConfig: liveTriggerConfig } = await resolveActiveWorkflow();
+        const {
+          workflow: liveWorkflow,
+          triggerConfig: liveTriggerConfig,
+          blockedReason: liveBlockedReason,
+        } = await resolveActiveWorkflow();
+        setDeviceBlockedReason(liveBlockedReason);
         setActiveWorkflow(liveWorkflow);
         liveEngine.setCaptureTriggerConfig(liveTriggerConfig);
-        await liveEngine.startSession(liveWorkflow);
+        if (!liveBlockedReason) await liveEngine.startSession(liveWorkflow);
 
         // Opening the camera was gated behind a user-agent test, so a desktop
         // showed a live-mode interface with no picture in it: stream stayed
@@ -896,10 +935,11 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     runSessionRef.current.reset();
     const activeEngine = mode === 'live' ? liveWorkflowEngineRef.current : simWorkflowEngineRef.current;
     if (activeEngine) {
-      const { workflow, triggerConfig } = await resolveActiveWorkflow();
+      const { workflow, triggerConfig, blockedReason } = await resolveActiveWorkflow();
+      setDeviceBlockedReason(blockedReason);
       setActiveWorkflow(workflow);
       activeEngine.setCaptureTriggerConfig(triggerConfig);
-      await activeEngine.startSession(workflow);
+      if (!blockedReason) await activeEngine.startSession(workflow);
     }
     if (mode === 'simulation') {
       setFaceState(null);
@@ -1119,15 +1159,33 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     runSessionRef.current.reset();
     const activeEngine = mode === 'live' ? liveWorkflowEngineRef.current : simWorkflowEngineRef.current;
     if (activeEngine) {
-      const { workflow, triggerConfig } = await resolveActiveWorkflow();
+      const { workflow, triggerConfig, blockedReason } = await resolveActiveWorkflow();
+      setDeviceBlockedReason(blockedReason);
       setActiveWorkflow(workflow);
       activeEngine.setCaptureTriggerConfig(triggerConfig);
-      await activeEngine.startSession(workflow);
+      if (!blockedReason) await activeEngine.startSession(workflow);
     }
   }, [mode]);
 
   return (
     <div className="relative h-full w-full overflow-hidden flex flex-col bg-slate-950 text-slate-100">
+      {/*
+        §3.3's fail-closed verdict — a confirmed rejection, or unreachable for
+        over 24h. Deliberately opaque and undismissable, unlike storeError
+        below: the whole point is that capture must not proceed, not just be
+        flagged while continuing underneath.
+      */}
+      {deviceBlockedReason && (
+        <div className="absolute inset-0 z-[200] bg-slate-950/98 flex flex-col items-center justify-center gap-4 px-8 text-center">
+          <span className="text-5xl">🔒</span>
+          <h2 className="text-xl font-semibold">Thiết bị đã bị khoá</h2>
+          <p className="max-w-md text-sm text-slate-300">
+            {deviceBlockedReason === 'unauthorized'
+              ? 'Thiết bị này không còn được phép hoạt động (đã hết hạn hoặc bị thu hồi). Vui lòng liên hệ quản trị viên.'
+              : 'Không thể liên lạc với hệ thống quản trị trong hơn 24 giờ. Vui lòng kiểm tra kết nối mạng hoặc liên hệ quản trị viên.'}
+          </p>
+        </div>
+      )}
       {/*
         A capture that was not stored has to be visible while the person is
         still standing there. Discovering it once the session is finished is too

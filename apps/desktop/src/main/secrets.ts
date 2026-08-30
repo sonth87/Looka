@@ -34,6 +34,7 @@ export type SecretKey =
   | 'device.secret'
   | 'device.campaignId'
   | 'device.apiBaseUrl'
+  | 'device.lastVerified'
   | 'camera.roleMapping';
 
 const electronCrypto: CryptoProvider = {
@@ -109,7 +110,16 @@ export async function getFileServiceCredentials(): Promise<FileServiceCredential
     // by tenant name and idempotent, so a later run just gets the same key
     // back rather than an operator having to type one in by hand.
     try {
-      const tenant = process.env.FS_TENANT?.trim() || DEFAULT_FS_TENANT;
+      // Per-device tenant (§3.3): a kiosk that has gone through activation
+      // provisions its OWN fs-core key, keyed by its device id — so revoking
+      // one expired/misbehaving device only means invalidating that one key
+      // at fs-core, not the whole fleet's shared key. Falls back to the old
+      // shared tenant for a kiosk with no device identity yet (predates
+      // device registration, or still mid-setup).
+      const tenant =
+        getDeviceCredentials()?.deviceId ||
+        process.env.FS_TENANT?.trim() ||
+        DEFAULT_FS_TENANT;
       const contactEmail = process.env.FS_CONTACT_EMAIL?.trim() || DEFAULT_FS_CONTACT_EMAIL;
       const provisioned = await FsClient.provision(baseUrl, tenant, { contactEmail });
       apiKey = provisioned.apiKey;
@@ -192,6 +202,12 @@ export async function importActivationFile(filePath: string): Promise<DeviceCred
   setSecret('device.secret', deviceSecret);
   setSecret('device.campaignId', campaignId);
   if (apiBaseUrl) setSecret('device.apiBaseUrl', apiBaseUrl);
+  // Seeds the §3.3 24h fail-closed clock at activation time, with no config
+  // yet — an admin just registered this exact device, which is itself a
+  // trust-establishing moment. Without this, a kiosk whose network isn't up
+  // yet on its very first boot would read as "never verified" and could be
+  // treated as already-expired before it ever got a chance to phone home.
+  setLastVerifiedDeviceState(null, Date.now());
 
   return { deviceId, deviceSecret, campaignId, apiBaseUrl };
 }
@@ -235,6 +251,37 @@ export function clearDeviceCredentials(): void {
   deleteSecret('device.secret');
   deleteSecret('device.campaignId');
   deleteSecret('device.apiBaseUrl');
+  deleteSecret('device.lastVerified');
+}
+
+export interface LastVerifiedDeviceState {
+  /** The last CampaignConfig the admin portal actually returned. Opaque here — deviceApi.ts owns the shape. */
+  config: unknown;
+  /** epoch ms of that successful contact — what the §3.3 24h fail-closed policy counts from. */
+  verifiedAt: number;
+}
+
+/**
+ * The last confirmed-good contact with the admin portal, persisted to disk —
+ * see docs/plans/multi-camera-device-management-discussion.md §3.3's 24h
+ * fail-closed cache. Deliberately NOT the same as `getCampaignConfig()`'s own
+ * 15-minute in-memory cache in deviceApi.ts: that one exists to avoid hitting
+ * the network on every session start and is lost on restart; this one is
+ * what a kiosk falls back on across restarts while offline, and what its
+ * age is measured against to decide fail-open vs fail-closed.
+ */
+export function getLastVerifiedDeviceState(): LastVerifiedDeviceState | null {
+  const raw = getSecret('device.lastVerified');
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as LastVerifiedDeviceState;
+  } catch {
+    return null;
+  }
+}
+
+export function setLastVerifiedDeviceState(config: unknown, verifiedAt: number): void {
+  setSecret('device.lastVerified', JSON.stringify({ config, verifiedAt }));
 }
 
 /** What the renderer is allowed to know: configured or not, never the values. */

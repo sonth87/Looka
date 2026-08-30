@@ -29,13 +29,12 @@ import {
   clearFileServiceCredentials,
   secretsStatus,
   findAndImportActivationFileIfPresent,
-  hasDeviceCredentials,
   getCameraRoleMapping,
   setCameraRoleMapping,
   type CameraRoleMapping,
 } from './secrets.js';
 import { openCameraSetupWindow } from './cameraSetupWindow.js';
-import { getCampaignConfig } from './deviceApi.js';
+import { getDeviceAccessStatus } from './deviceApi.js';
 import { startVideoStream, endVideoStream } from './streams.js';
 import { recordStatsEvent, startStatsEventPush, stopStatsEventPush } from './statsEvents.js';
 import type { StatsEventType } from '@face/database';
@@ -311,15 +310,14 @@ app.whenReady().then(async () => {
 
   /**
    * This kiosk's own campaign config — capture angles (§3.6), capture
-   * mode/autoHoldMs (§3.8), consent text/version (§2.4). `null` when this
-   * kiosk has no device identity yet, or the admin portal is unreachable;
-   * callers fall back to `defaultWorkflow`/local settings in that case,
-   * never block capture on it (see DeviceApiClient's own doc comment).
+   * mode/autoHoldMs (§3.8), consent text/version (§2.4) — plus whether §3.3's
+   * fail-closed policy says capture must be blocked outright (a confirmed
+   * `401`, or unreachable for more than 24h since the last confirmed-good
+   * contact). A kiosk with no device identity at all is left alone (`blocked:
+   * false, config: null`) — it predates device management, or was never
+   * registered through the CMS; see getDeviceAccessStatus's own doc comment.
    */
-  ipcMain.handle('device:getConfig', () => {
-    if (!hasDeviceCredentials()) return null;
-    return getCampaignConfig();
-  });
+  ipcMain.handle('device:getAccessStatus', () => getDeviceAccessStatus());
 
   /**
    * The renderer reporting a stats-worthy moment it just observed (a

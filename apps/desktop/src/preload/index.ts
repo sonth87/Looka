@@ -99,6 +99,16 @@ export interface CampaignConfig {
   autoHoldMs: number | null;
 }
 
+/**
+ * §3.3's fail-closed verdict alongside the config itself — see
+ * deviceApi.ts's DeviceAccessStatus (this is its IPC-facing mirror).
+ */
+export interface DeviceAccessStatus {
+  blocked: boolean;
+  reason?: 'unauthorized' | 'unreachable-too-long';
+  config: CampaignConfig | null;
+}
+
 export interface FaceAPIBridge {
   getAppVersion: () => Promise<string>;
   getSystemStatus: () => Promise<SystemStatus>;
@@ -166,12 +176,14 @@ export interface FaceAPIBridge {
   getSecretsStatus: () => Promise<SecretsStatus>;
 
   /**
-   * This kiosk's own campaign config (§3.6/§3.8/§2.4) — `null` when this
-   * kiosk has no device identity yet, or the admin portal could not be
-   * reached. Callers fall back to `defaultWorkflow`/local settings in that
-   * case; this must never block capture.
+   * This kiosk's own campaign config (§3.6/§3.8/§2.4) plus the §3.3
+   * fail-closed verdict. `config` is `null` when this kiosk has no device
+   * identity yet, or none has ever been confirmed by the admin portal —
+   * callers fall back to `defaultWorkflow`/local settings in that case.
+   * `blocked: true` means capture must actually be refused, not just
+   * defaulted around — see DeviceAccessStatus's own doc comment.
    */
-  getDeviceConfig: () => Promise<CampaignConfig | null>;
+  getDeviceAccessStatus: () => Promise<DeviceAccessStatus>;
 
   /**
    * Report the workflow this session just started with, so the CB Help
@@ -258,7 +270,7 @@ const faceAPI: FaceAPIBridge = {
   downloadPhoto: (payload) => ipcRenderer.invoke('photos:download', payload),
 
   getSecretsStatus: () => ipcRenderer.invoke('secrets:status'),
-  getDeviceConfig: () => ipcRenderer.invoke('device:getConfig'),
+  getDeviceAccessStatus: () => ipcRenderer.invoke('device:getAccessStatus'),
 
   notifyCbHelpSessionStarted: (steps) => ipcRenderer.invoke('cbhelp:sessionStarted', steps),
   getCbHelpState: () => ipcRenderer.invoke('cbhelp:getState'),
