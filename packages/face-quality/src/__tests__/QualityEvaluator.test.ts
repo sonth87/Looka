@@ -1,7 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { BoundingBox, CaptureSensitivity } from '@face/core';
-import { QualityEvaluator, SENSITIVITY_PRESETS } from '../QualityEvaluator.js';
+import { QualityEvaluator, SENSITIVITY_PRESETS, MIN_FACE_RESOLUTION_PX } from '../QualityEvaluator.js';
 
 /** The resolution BrowserCameraService asks the camera for. */
 const FRAME_W = 1280;
@@ -74,10 +74,12 @@ describe('QualityEvaluator', () => {
   });
 
   test('should accept face with valid size, position, and quality', () => {
+    // 640x480 wide enough that a 0.5-ratio face also clears the §2.8 absolute
+    // resolution floor (320x240 would fail on height alone at MIN_FACE_RESOLUTION_PX=250).
     const result = evaluator.evaluateQuality(
-      { x: 160, y: 120, width: 320, height: 240 },
-      640,
-      480
+      { x: 320, y: 240, width: 640, height: 480 },
+      1280,
+      960
     );
 
     assert.equal(result.accepted, true);
@@ -133,7 +135,27 @@ describe('QualityEvaluator', () => {
           undefined,
           { sensitivity: level }
         );
-        assert.equal(inside.accepted, true, `${level} should accept just above its floor`);
+        // On a real 1280px-wide camera, VERY_LOW/LOW/MEDIUM's ratio floors sit
+        // well under the §2.8 absolute floor (250px) — see that section's own
+        // distance table. The ratio check alone says "close enough"; the
+        // absolute floor still correctly rejects it as too few real pixels.
+        // Only HIGH/VERY_HIGH's floors (320px/384px at this frame width)
+        // clear 250px on their own.
+        const widthPx = Math.round((floor + 0.005) * FRAME_W);
+        if (widthPx >= MIN_FACE_RESOLUTION_PX) {
+          assert.equal(inside.accepted, true, `${level} should accept just above its floor`);
+        } else {
+          assert.equal(
+            inside.accepted,
+            false,
+            `${level} should still be rejected at ${widthPx}px, just under the absolute floor`
+          );
+          assert.ok(inside.reasons.includes('FACE_RESOLUTION_TOO_LOW'));
+          assert.ok(
+            !inside.reasons.includes('FACE_TOO_SMALL'),
+            'the ratio check itself should still pass — only the absolute floor should reject'
+          );
+        }
 
         const outside = evaluator.evaluateQuality(
           boxOfRatio(floor - 0.005),
@@ -176,9 +198,14 @@ describe('QualityEvaluator', () => {
   });
 
   describe('far-distance regression', () => {
-    test('a face at roughly half the old floor is accepted by the permissive levels', () => {
+    test('a face at roughly half the old floor clears the ratio gate, but §2.8 now catches it on absolute resolution', () => {
       // Around a metre out on a 1280 px frame — the distance at which the
-      // operator was being told to come closer.
+      // operator was being told to come closer. The ratio gate itself was
+      // fixed to accept this distance; §2.8 (the absolute pixel floor) is a
+      // separate, later finding that this same distance is still too few
+      // real pixels on a 1280px-wide camera (128px hull at MEDIUM's floor,
+      // per that section's own table) — this test now documents both facts
+      // rather than just the first one.
       const cases: [CaptureSensitivity, number][] = [
         ['VERY_LOW', 0.085],
         ['LOW', 0.095],
@@ -193,10 +220,42 @@ describe('QualityEvaluator', () => {
           undefined,
           { sensitivity: level }
         );
+        assert.ok(
+          !result.reasons.includes('FACE_TOO_SMALL'),
+          `${level} should still pass the ratio gate at ${ratio}, got ${result.reasons.join(',')}`
+        );
+        assert.ok(
+          result.reasons.includes('FACE_RESOLUTION_TOO_LOW'),
+          `${level} should be caught by the absolute floor at ${ratio} on a 1280px frame`
+        );
+      }
+    });
+
+    test('the same far distance is accepted once the save resolution is high enough', () => {
+      // Same ratios and analysis-frame size as above, but the camera's real
+      // (save) resolution is higher than the 1280px analysis frame — e.g. a
+      // 4K sensor downscaled for CV. Demonstrates saveFrameSize is what the
+      // absolute floor actually measures against, not the analysis frame.
+      const cases: [CaptureSensitivity, number][] = [
+        ['VERY_LOW', 0.085],
+        ['LOW', 0.095],
+        ['MEDIUM', 0.11],
+      ];
+
+      for (const [level, ratio] of cases) {
+        const result = evaluator.evaluateQuality(
+          boxOfRatio(ratio),
+          FRAME_W,
+          FRAME_H,
+          undefined,
+          { sensitivity: level },
+          undefined,
+          { width: 3840, height: 2160 }
+        );
         assert.equal(
           result.accepted,
           true,
-          `${level} should accept ratio ${ratio}, got ${result.reasons.join(',')}`
+          `${level} should accept ratio ${ratio} at a high save resolution, got ${result.reasons.join(',')}`
         );
       }
     });
@@ -234,14 +293,61 @@ describe('QualityEvaluator', () => {
     });
 
     test('an accepted distant face is not scored as though it were nearly invalid', () => {
-      const distant = evaluator.evaluateQuality(boxOfRatio(0.12), FRAME_W, FRAME_H, undefined, {
+      // 0.20, not the original 0.12: that ratio is still "distant" relative
+      // to MEDIUM's [0.10, 0.55] band, but 0.12 * 1280 = 154px no longer
+      // clears §2.8's absolute floor on its own, which would fail this test
+      // for a reason unrelated to what it actually checks (scoring).
+      const distant = evaluator.evaluateQuality(boxOfRatio(0.20), FRAME_W, FRAME_H, undefined, {
         sensitivity: 'MEDIUM',
       });
 
-      assert.equal(distant.accepted, true);
+      assert.equal(distant.accepted, true, distant.reasons.join(','));
       // Feeds the embedding weighting, so an accepted capture must not be
       // discounted to near nothing purely for being far away.
       assert.ok(distant.overallScore > 0.6, `score was ${distant.overallScore}`);
+    });
+  });
+
+  describe('absolute face-resolution floor (§2.8)', () => {
+    test('rejects a face under 250px via FACE_RESOLUTION_TOO_LOW, distinct from FACE_TOO_SMALL', () => {
+      // MEDIUM's ratio floor is 0.10; 0.15 clears it comfortably, but
+      // 0.15 * 1280 = 192px still fails the absolute floor.
+      const result = evaluator.evaluateQuality(boxOfRatio(0.15), FRAME_W, FRAME_H, undefined, {
+        sensitivity: 'MEDIUM',
+      });
+
+      assert.equal(result.accepted, false);
+      assert.ok(result.reasons.includes('FACE_RESOLUTION_TOO_LOW'));
+      assert.ok(!result.reasons.includes('FACE_TOO_SMALL'));
+    });
+
+    test('exposes faceWidthPx/faceHeightPx on the result', () => {
+      const result = evaluator.evaluateQuality(
+        { x: 320, y: 240, width: 640, height: 480 },
+        1280,
+        960
+      );
+      assert.equal(result.faceWidthPx, 640);
+      assert.equal(result.faceHeightPx, 480);
+    });
+
+    test('HIGH and VERY_HIGH ratio floors already clear 250px on a 1280px camera', () => {
+      for (const level of ['HIGH', 'VERY_HIGH'] as CaptureSensitivity[]) {
+        const floor = SENSITIVITY_PRESETS[level].minFaceSizeRatio;
+        const result = evaluator.evaluateQuality(boxOfRatio(floor + 0.005), FRAME_W, FRAME_H, undefined, {
+          sensitivity: level,
+        });
+        assert.ok(
+          !result.reasons.includes('FACE_RESOLUTION_TOO_LOW'),
+          `${level}'s own floor (${floor}) should already clear 250px, got ${result.reasons.join(',')}`
+        );
+      }
+    });
+
+    test('a region overlapping the frame edge does not throw off the resolution check', () => {
+      const result = evaluator.evaluateQuality({ x: -10, y: -10, width: 300, height: 300 }, FRAME_W, FRAME_H);
+      assert.equal(result.faceWidthPx, 300);
+      assert.equal(result.faceHeightPx, 300);
     });
   });
 

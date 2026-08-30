@@ -36,7 +36,11 @@ describe('WorkflowEngine & Evaluators', () => {
     faceCount: 1,
     presence: 'SINGLE_FACE',
     detection: {
-      boundingBox: { x: 160, y: 120, width: 320, height: 240 },
+      // 320x320, not 320x240: on the 640x480 fallback frame (no frameWidth/
+      // frameHeight set here), a 240px-tall box fails §2.8's 250px absolute
+      // resolution floor and blocks every step in this file for a reason
+      // unrelated to what it actually tests (pose/stability advancement).
+      boundingBox: { x: 160, y: 80, width: 320, height: 320 },
       confidence: 0.98,
     },
     pose: { yaw, pitch: 0, roll: 0 },
@@ -54,6 +58,8 @@ describe('WorkflowEngine & Evaluators', () => {
       mouthVisible: true,
       occluded: false,
       neutralExpression: true,
+      faceWidthPx: 320,
+      faceHeightPx: 320,
       reasons: [],
     },
   });

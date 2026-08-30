@@ -95,6 +95,7 @@ export type GuidancePriorityReason =
   | 'MULTIPLE_FACES'
   | 'FACE_TOO_SMALL'
   | 'FACE_TOO_LARGE'
+  | 'FACE_RESOLUTION_TOO_LOW'
   | 'OFF_CENTER'
   | 'TURN_LEFT'
   | 'TURN_RIGHT'

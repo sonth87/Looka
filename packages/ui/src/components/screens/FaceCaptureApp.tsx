@@ -98,6 +98,86 @@ const defaultWorkflow: CaptureWorkflow = {
   ],
 };
 
+/**
+ * The steps a session actually runs — `defaultWorkflow` above, unless the
+ * kiosk's campaign configures its own set (`captureAngles`, see
+ * docs/plans/multi-camera-device-management-discussion.md §3.6). Called at
+ * the start of every session, not cached here: `window.faceAPI.getDeviceConfig()`
+ * already has its own process-lifetime cache on the main-process side (see
+ * `deviceApi.ts`), so re-reading it here just picks up whatever change an
+ * admin made without needing a restart — resolving open question #3 in that
+ * doc's §4 in favor of "next session picks it up."
+ *
+ * `(window as any).faceAPI` rather than a typed global: matches how the rest
+ * of this package already reaches the preload bridge (see CaptureSink.ts and
+ * SessionReviewModal.tsx) without pulling apps/desktop's preload types into a
+ * package the web app also builds, where that global does not exist at all —
+ * which is also why this is wrapped in try/catch and always has
+ * `defaultWorkflow` to fall back to: the web build, and any error reaching
+ * the admin portal, must never block a session from starting.
+ *
+ * Also reports the resolved steps to the CB Help display (§3.5), if one is
+ * open, via `notifyCbHelpSessionStarted` — the one place every session-start
+ * call site already passes through, so that screen's "new run" reset never
+ * has to be wired in separately at each of them.
+ */
+async function resolveActiveWorkflow(): Promise<{
+  workflow: CaptureWorkflow;
+  triggerConfig: { mode: CaptureTriggerMode; autoHoldMs: number };
+}> {
+  const faceAPI = (window as any).faceAPI;
+  let workflow = defaultWorkflow;
+  // Campaign-configured capture mode/hold time (§3.8) — undefined/null when
+  // the campaign hasn't set one, in which case this machine's own local
+  // settings (debug panel) decide, same as before this existed.
+  let campaignMode: CaptureTriggerMode | null | undefined;
+  let campaignAutoHoldMs: number | null | undefined;
+  try {
+    const config = await faceAPI?.getDeviceConfig?.();
+    if (config?.captureAngles && Array.isArray(config.captureAngles) && config.captureAngles.length > 0) {
+      workflow = { ...defaultWorkflow, steps: config.captureAngles };
+    }
+    campaignMode = config?.captureMode;
+    campaignAutoHoldMs = config?.autoHoldMs;
+  } catch (err) {
+    console.error('[FaceCaptureApp] resolveActiveWorkflow failed, using defaultWorkflow:', err);
+  }
+
+  try {
+    await faceAPI?.notifyCbHelpSessionStarted?.(
+      workflow.steps.map((s) => ({ id: s.id, type: s.type, instruction: s.instruction }))
+    );
+  } catch {
+    /* no CB Help window open, or not running under the desktop app at all — fine either way */
+  }
+
+  const settings = getSettings();
+  return {
+    workflow,
+    triggerConfig: {
+      mode: campaignMode ?? settings.captureMode ?? 'MANUAL',
+      autoHoldMs: campaignAutoHoldMs ?? settings.autoHoldMs ?? 2000,
+    },
+  };
+}
+
+type StatsEventType = 'SESSION_COMPLETED' | 'UPLOAD_SUCCESS' | 'UPLOAD_FAILED' | 'RETAKE' | 'CB_HELP_INTERVENTION';
+
+/**
+ * Reports a stats-worthy moment (§3.4) to the desktop main process, if this
+ * is running under the desktop app at all — a no-op on the web build, same
+ * `(window as any).faceAPI` guard as `resolveActiveWorkflow`. Never throws:
+ * a failed/impossible report must not interrupt the capture flow that
+ * triggered it, so this is fire-and-forget from every call site.
+ */
+function reportStatsEvent(type: StatsEventType, metadata?: Record<string, unknown>): void {
+  try {
+    void (window as any).faceAPI?.recordStatsEvent?.({ type, metadata });
+  } catch {
+    /* no bridge, or not running under the desktop app — fine either way */
+  }
+}
+
 export interface FaceCaptureAppProps {
   appId?: string;
   windowId?: string;
@@ -169,12 +249,25 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     isWorkflowStartedRef.current = isWorkflowStarted;
   }, [isWorkflowStarted]);
 
+  /**
+   * The workflow actually running — `defaultWorkflow` until
+   * `resolveActiveWorkflow()` resolves, at every session start, to whatever
+   * the kiosk's campaign configures instead (see that function's own doc
+   * comment). `stepsList` below renders from this, not `defaultWorkflow`
+   * directly, so the on-screen step indicator matches whatever was actually
+   * passed to `startSession`.
+   */
+  const [activeWorkflow, setActiveWorkflow] = useState<CaptureWorkflow>(defaultWorkflow);
+
   const handleStartWorkflow = async () => {
     setIsWorkflowStarted(true);
     isWorkflowStartedRef.current = true;
     const activeEngine = mode === 'live' ? liveWorkflowEngineRef.current : simWorkflowEngineRef.current;
     if (activeEngine) {
-      await activeEngine.startSession(defaultWorkflow);
+      const { workflow, triggerConfig } = await resolveActiveWorkflow();
+      setActiveWorkflow(workflow);
+      activeEngine.setCaptureTriggerConfig(triggerConfig);
+      await activeEngine.startSession(workflow);
     }
   };
 
@@ -313,7 +406,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         // hold-time slider, and the engine's own fallback default silently
         // took over instead — see the comment on WorkflowEngine.processFrame.
         simEngine.setCaptureTriggerConfig({
-          mode: getSettings().captureMode || 'AUTO',
+          mode: getSettings().captureMode || 'MANUAL',
           autoHoldMs: getSettings().autoHoldMs || 2000,
         });
         simEngine.setSnapshotProvider(() => {
@@ -364,12 +457,15 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           await simEngine.processFrame(state);
         });
 
-        await simEngine.startSession(defaultWorkflow);
+        const { workflow: simWorkflow, triggerConfig: simTriggerConfig } = await resolveActiveWorkflow();
+        setActiveWorkflow(simWorkflow);
+        simEngine.setCaptureTriggerConfig(simTriggerConfig);
+        await simEngine.startSession(simWorkflow);
 
         const liveEngine = new WorkflowEngine();
         liveEngine.setSensitivity(sensitivity);
         liveEngine.setCaptureTriggerConfig({
-          mode: getSettings().captureMode || 'AUTO',
+          mode: getSettings().captureMode || 'MANUAL',
           autoHoldMs: getSettings().autoHoldMs || 2000,
         });
         liveEngine.setSnapshotProvider(() => {
@@ -412,7 +508,10 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           // correct ordering.
         });
 
-        await liveEngine.startSession(defaultWorkflow);
+        const { workflow: liveWorkflow, triggerConfig: liveTriggerConfig } = await resolveActiveWorkflow();
+        setActiveWorkflow(liveWorkflow);
+        liveEngine.setCaptureTriggerConfig(liveTriggerConfig);
+        await liveEngine.startSession(liveWorkflow);
 
         // Opening the camera was gated behind a user-agent test, so a desktop
         // showed a live-mode interface with no picture in it: stream stayed
@@ -630,6 +729,11 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           mouthVisible: true,
           occluded: false,
           neutralExpression: true,
+          // Matches primaryBox below (320x336 on the 640x480 dummyFrame) —
+          // simulation mode's synthetic box, not driven by the faceSizeRatio
+          // slider, same as the rest of this mock quality reading.
+          faceWidthPx: 320,
+          faceHeightPx: 336,
           reasons: [],
         },
         timestamp: Date.now(),
@@ -780,6 +884,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     setLatestCapturedImage(null);
     setIsWorkflowStarted(false);
     isWorkflowStartedRef.current = false;
+    reportStatsEvent('RETAKE');
     // "Chụp lại toàn bộ" reaches here before the session has necessarily
     // completed (SessionReviewModal allows reviewing, and retaking
     // everything, from as little as one captured step). Without this, the
@@ -791,7 +896,10 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     runSessionRef.current.reset();
     const activeEngine = mode === 'live' ? liveWorkflowEngineRef.current : simWorkflowEngineRef.current;
     if (activeEngine) {
-      await activeEngine.startSession(defaultWorkflow);
+      const { workflow, triggerConfig } = await resolveActiveWorkflow();
+      setActiveWorkflow(workflow);
+      activeEngine.setCaptureTriggerConfig(triggerConfig);
+      await activeEngine.startSession(workflow);
     }
     if (mode === 'simulation') {
       setFaceState(null);
@@ -803,11 +911,142 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   const activeEngine = mode === 'live' ? liveWorkflowEngineRef.current : simWorkflowEngineRef.current;
   const activeSession = activeEngine?.currentSession;
 
+  /**
+   * Local video recording alongside the session — see
+   * docs/plans/multi-camera-device-management-discussion.md §3.1. A
+   * self-contained effect, independent of the capture/quality-gate logic
+   * elsewhere in this file: it only watches whether a session is running and
+   * a camera stream exists, and starts/stops a `MediaRecorder` accordingly.
+   *
+   * `activeSession?.id` may briefly still name the previous run in the gap
+   * between `setIsWorkflowStarted(true)` and the engine actually creating a
+   * new session — acceptable here, since `capture_streams.session_id` is a
+   * plain grouping tag on the desktop side, not an enforced foreign key
+   * (see CaptureStreamRepository's own doc comment): worst case one
+   * recording is tagged with the wrong session id, nothing is lost or
+   * corrupted.
+   *
+   * No upload path here on purpose — whether video ever leaves the kiosk is
+   * still an open question (that doc's §4 #3); this only ever writes to
+   * local disk.
+   */
+  useEffect(() => {
+    if (!stream || !isWorkflowStarted) return;
+    const faceAPI = (window as any).faceAPI;
+    if (!faceAPI?.startVideoStream) return; // web build, or no bridge to a desktop main process
+
+    let cancelled = false;
+    let recorder: MediaRecorder | null = null;
+    let streamId: string | null = null;
+    const chunks: BlobPart[] = [];
+    const startedAt = Date.now();
+
+    void (async () => {
+      const mimeType =
+        typeof MediaRecorder !== 'undefined'
+          ? ['video/webm;codecs=vp8', 'video/webm'].find((t) => MediaRecorder.isTypeSupported(t))
+          : undefined;
+
+      try {
+        const result = await faceAPI.startVideoStream({
+          sessionId: activeSession?.id ?? 'unknown',
+          cameraId: selectedDeviceId || 'default',
+          mimeType,
+        });
+        if (cancelled) return;
+        streamId = result.streamId;
+
+        recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+        recorder.ondataavailable = (e) => {
+          if (e.data.size > 0) chunks.push(e.data);
+        };
+        recorder.start();
+      } catch (err) {
+        console.error('[FaceCaptureApp] video recording failed to start:', err);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (!recorder || (recorder as MediaRecorder).state === 'inactive') return;
+
+      const finishedRecorder = recorder;
+      const finishedStreamId = streamId;
+      finishedRecorder.onstop = async () => {
+        if (!finishedStreamId) return;
+        try {
+          const blob = new Blob(chunks, { type: finishedRecorder.mimeType });
+          const data = new Uint8Array(await blob.arrayBuffer());
+          await faceAPI.endVideoStream({
+            streamId: finishedStreamId,
+            data,
+            durationMs: Date.now() - startedAt,
+          });
+        } catch (err) {
+          console.error('[FaceCaptureApp] video recording failed to save:', err);
+        }
+      };
+      finishedRecorder.stop();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stream, isWorkflowStarted]);
+
+  /**
+   * Camera role mapping (§2.1) — which physical camera plays CENTER/LEFT/
+   * RIGHT, set once via the desktop app's camera setup screen
+   * (`Ctrl/Cmd+Shift+K`). Fetched once on mount; `(window as any).faceAPI`
+   * is undefined on the web build, so `cameraRoleMapping` just stays `{}`
+   * there and every effect below becomes a no-op — exactly today's
+   * single-camera behavior, unchanged.
+   */
+  const [cameraRoleMapping, setCameraRoleMapping] = useState<Record<string, string>>({});
+  useEffect(() => {
+    const faceAPI = (window as any).faceAPI;
+    faceAPI?.getCameraRoleMapping?.()
+      .then((m: Record<string, string>) => setCameraRoleMapping(m ?? {}))
+      .catch(() => {
+        /* no bridge, or no mapping saved yet — stay on {} */
+      });
+  }, []);
+
+  /**
+   * Switches the active camera to whichever one is mapped to the role the
+   * current step needs — see docs/plans/multi-camera-device-management-discussion.md
+   * §2.1. This is the entire "use multi-camera instead of turning your head"
+   * feature: it reuses `handleSelectCamera` exactly as the manual camera
+   * picker already does (same `camera.start({ deviceId })` call,
+   * `BrowserCameraService`/`WorkflowEngine`/`StepEvaluator` never learn the
+   * difference) — deliberately not a new capture path, to avoid touching
+   * the step-evaluation/quality-gate code this file's own history of
+   * subtle bugs (see the capture-trigger comments elsewhere here) warns
+   * against changing without being able to run the app to verify.
+   *
+   * FRONT/UP/DOWN stay on CENTER (there is no "up" or "down" camera — those
+   * two still need the subject to tilt their head, same as today). LEFT/RIGHT
+   * switch to their mapped camera when one exists, so the subject can look
+   * straight ahead while that camera captures the side angle instead of
+   * turning to face a single camera. No mapping configured (today's common
+   * case — no site has 3 physical cameras yet) → this never fires, and the
+   * app behaves exactly as it does now.
+   */
+  useEffect(() => {
+    if (mode !== 'live') return;
+    const role =
+      activeGuidance.stepType === 'LEFT' ? 'LEFT' : activeGuidance.stepType === 'RIGHT' ? 'RIGHT' : 'CENTER';
+    const mappedDeviceId = cameraRoleMapping[role];
+    if (!mappedDeviceId) return;
+    if (mappedDeviceId === selectedDeviceId) return;
+    if (!devices.some((d) => d.id === mappedDeviceId)) return; // mapped camera not plugged in right now
+
+    void handleSelectCamera(mappedDeviceId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, activeGuidance.stepType, activeGuidance.currentStepIndex, cameraRoleMapping]);
+
   // Annotated on the callback, not just on stepsList: an object literal returned
   // from an unannotated .map() is checked for assignability only, so a misspelt
   // field is dropped in silence — which is how the step thumbnails were passed
   // under a name StepItem does not have and never rendered.
-  const stepsList: StepItem[] = defaultWorkflow.steps.map((s, idx): StepItem => {
+  const stepsList: StepItem[] = activeWorkflow.steps.map((s, idx): StepItem => {
     const sessionStep = activeSession?.steps.find((st) => st.stepId === s.id);
     const isCompleted = sessionStep?.status === 'COMPLETED' || idx < activeGuidance.currentStepIndex;
     const isCurrent = isWorkflowStarted && idx === activeGuidance.currentStepIndex && !isCompleted;
@@ -880,7 +1119,10 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     runSessionRef.current.reset();
     const activeEngine = mode === 'live' ? liveWorkflowEngineRef.current : simWorkflowEngineRef.current;
     if (activeEngine) {
-      await activeEngine.startSession(defaultWorkflow);
+      const { workflow, triggerConfig } = await resolveActiveWorkflow();
+      setActiveWorkflow(workflow);
+      activeEngine.setCaptureTriggerConfig(triggerConfig);
+      await activeEngine.startSession(workflow);
     }
   }, [mode]);
 
@@ -971,6 +1213,12 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
             const approved = await approveUpload();
             if (!approved) return;
             await finishSession();
+            // The one true "this session is done" moment — the operator
+            // confirmed it and approval actually succeeded, not merely that
+            // the last capture step was reached (see this handler's own
+            // doc comment on why finishSession lives here, not in the
+            // engine's 'completed' handler above).
+            reportStatsEvent('SESSION_COMPLETED');
             setShowReviewModal(false);
           }}
           onRetake={handleRestart}

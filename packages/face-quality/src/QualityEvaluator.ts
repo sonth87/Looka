@@ -133,6 +133,17 @@ export const SENSITIVITY_PRESETS: Record<CaptureSensitivity, Required<QualityReq
   },
 };
 
+/**
+ * Absolute floor on saved face resolution, in pixels (§2.8 of
+ * docs/plans/multi-camera-device-management-discussion.md) — ">250x250,
+ * ideally 300-500". Independent of `minFaceSizeRatio`/sensitivity: a face can
+ * clear the ratio floor and still be too few real pixels once the camera's
+ * resolution is low enough (see that section's own distance table), so this
+ * applies at every sensitivity level rather than being one more per-preset
+ * tunable.
+ */
+export const MIN_FACE_RESOLUTION_PX = 250;
+
 export class QualityEvaluator {
   private lastLogAt = 0;
 
@@ -310,7 +321,15 @@ export class QualityEvaluator {
       eyeOpenScore?: number | null;
       /** Mouth-smile blendshape, under the same rule as `eyeOpenScore`. */
       smileScore?: number | null;
-    }
+    },
+    /**
+     * The resolution the capture will actually be SAVED at, when it differs
+     * from `frameWidth`/`frameHeight` — those may come from a downscaled
+     * analysis frame (see FrameInput.nativeWidth's doc comment). Defaults to
+     * `frameWidth`/`frameHeight` when omitted, i.e. "assume the frame given
+     * here is the save resolution too."
+     */
+    saveFrameSize?: { width: number; height: number }
   ): FaceQualityResult {
     const sensitivity = requirement?.sensitivity || 'MEDIUM';
     const basePreset = SENSITIVITY_PRESETS[sensitivity] || SENSITIVITY_PRESETS.MEDIUM;
@@ -323,6 +342,22 @@ export class QualityEvaluator {
       reasons.push('FACE_TOO_SMALL');
     } else if (faceSizeRatio > req.maxFaceSizeRatio) {
       reasons.push('FACE_TOO_LARGE');
+    }
+
+    // Absolute face resolution on the saved image (§2.8) — deliberately
+    // independent of faceSizeRatio above: that is a ratio, so a low-resolution
+    // camera can hold a face at a ratio well inside every sensitivity's band
+    // while still never reaching enough real pixels to print or match against
+    // reliably. Computed by scaling the ratio (scale-invariant — the same
+    // crop, just measured on the frame that will actually be written to disk)
+    // rather than re-deriving from boundingBox directly, since boundingBox's
+    // own coordinates are in the (possibly downscaled) analysis frame.
+    const saveWidth = saveFrameSize?.width ?? frameWidth;
+    const saveHeight = saveFrameSize?.height ?? frameHeight;
+    const faceWidthPx = faceSizeRatio * saveWidth;
+    const faceHeightPx = (boundingBox.height / frameHeight) * saveHeight;
+    if (faceWidthPx < MIN_FACE_RESOLUTION_PX || faceHeightPx < MIN_FACE_RESOLUTION_PX) {
+      reasons.push('FACE_RESOLUTION_TOO_LOW');
     }
 
     // Center Offset
@@ -426,6 +461,8 @@ export class QualityEvaluator {
       // stayed true for a face hidden behind a mask.
       mouthVisible: null,
       occluded: null,
+      faceWidthPx: Math.round(faceWidthPx),
+      faceHeightPx: Math.round(faceHeightPx),
       reasons,
     };
 

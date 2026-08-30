@@ -298,6 +298,10 @@ export class BrowserCameraService implements CameraService {
         width,
         height,
         timestamp: Date.now(),
+        // The resolution captureBase64Snapshot() will actually save at — see
+        // FrameInput.nativeWidth's own doc comment.
+        nativeWidth: video.videoWidth,
+        nativeHeight: video.videoHeight,
       };
     }
 

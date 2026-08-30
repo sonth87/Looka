@@ -106,13 +106,24 @@ export class StepEvaluator implements IStepEvaluator {
         sharpness: faceState.quality?.sharpness ?? null,
         eyeOpenScore: faceState.quality?.eyeOpenScore ?? null,
         smileScore: faceState.quality?.smileScore ?? null,
-      }
+      },
+      // §2.8's absolute resolution floor must be measured against the
+      // resolution the capture will actually be SAVED at, not `frameWidth`/
+      // `frameHeight` above (the CV analysis frame, which may be downscaled
+      // — see FrameInput.nativeWidth's doc comment). Falls back to the
+      // analysis frame itself when the CV engine reports no native
+      // resolution (e.g. simulation mode), same as evaluateQuality's own
+      // default.
+      faceState.captureFrameWidth && faceState.captureFrameHeight
+        ? { width: faceState.captureFrameWidth, height: faceState.captureFrameHeight }
+        : undefined
     );
 
     const qualityValid = qualityResult.accepted;
     const sizeValid =
       !qualityResult.reasons.includes('FACE_TOO_SMALL') &&
-      !qualityResult.reasons.includes('FACE_TOO_LARGE');
+      !qualityResult.reasons.includes('FACE_TOO_LARGE') &&
+      !qualityResult.reasons.includes('FACE_RESOLUTION_TOO_LOW');
     const positionValid = !qualityResult.reasons.includes('OFF_CENTER');
 
     if (!qualityValid) {
