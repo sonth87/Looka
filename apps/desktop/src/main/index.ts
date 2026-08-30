@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, screen, shell } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
 import type { Visibility } from '@face/core';
@@ -28,7 +28,24 @@ import {
   setFileServiceCredentials,
   clearFileServiceCredentials,
   secretsStatus,
+  findAndImportActivationFileIfPresent,
+  hasDeviceCredentials,
+  getCameraRoleMapping,
+  setCameraRoleMapping,
+  type CameraRoleMapping,
 } from './secrets.js';
+import { openCameraSetupWindow } from './cameraSetupWindow.js';
+import { getCampaignConfig } from './deviceApi.js';
+import { startVideoStream, endVideoStream } from './streams.js';
+import { recordStatsEvent, startStatsEventPush, stopStatsEventPush } from './statsEvents.js';
+import type { StatsEventType } from '@face/database';
+import {
+  maybeOpenCbHelpWindow,
+  cbHelpSessionStarted,
+  cbHelpCaptureAdded,
+  getCbHelpState,
+  type CbHelpStep,
+} from './cbHelpWindow.js';
 import { initLogger, installCrashHandlers, closeLogger, logFilePath } from './logger.js';
 
 /**
@@ -205,6 +222,10 @@ app.whenReady().then(async () => {
     }
   }
 
+  // One-time: pick up activation.json left next to the install, if this
+  // kiosk has not already loaded one — see secrets.ts's own doc comment.
+  await findAndImportActivationFileIfPresent();
+
   const dbResult = await initDatabase();
   if (!dbResult.ok) {
     // Deliberately not fatal here — the window still opens so an operator sees
@@ -220,6 +241,11 @@ app.whenReady().then(async () => {
     if (!uploadsRunning) {
       console.warn('[main] file-service not configured; captures will queue locally only');
     }
+    // Independent of fs-core being configured — a kiosk with no device
+    // identity yet just never has anything to push (DeviceApiClient.pushEvents
+    // returns false with no baseUrl/creds), same offline-first shape as
+    // uploads. See statsEvents.ts's own doc comment.
+    startStatsEventPush();
   }
 
   ipcMain.handle('app:getVersion', () => app.getVersion());
@@ -282,6 +308,86 @@ app.whenReady().then(async () => {
    * A secret that can be read back over IPC is a secret the renderer can leak.
    */
   ipcMain.handle('secrets:status', () => secretsStatus());
+
+  /**
+   * This kiosk's own campaign config — capture angles (§3.6), capture
+   * mode/autoHoldMs (§3.8), consent text/version (§2.4). `null` when this
+   * kiosk has no device identity yet, or the admin portal is unreachable;
+   * callers fall back to `defaultWorkflow`/local settings in that case,
+   * never block capture on it (see DeviceApiClient's own doc comment).
+   */
+  ipcMain.handle('device:getConfig', () => {
+    if (!hasDeviceCredentials()) return null;
+    return getCampaignConfig();
+  });
+
+  /**
+   * The renderer reporting a stats-worthy moment it just observed (a
+   * session completed, a retake) — see docs/plans/multi-camera-device-management-discussion.md
+   * §3.4. Queued locally and pushed on `statsEvents.ts`'s own schedule;
+   * never blocks or throws back to the caller.
+   */
+  ipcMain.handle('stats:recordEvent', (_, payload: { type?: unknown; metadata?: unknown }) => {
+    const type = payload?.type as StatsEventType | undefined;
+    if (!type) return false;
+    recordStatsEvent(type, (payload?.metadata as Record<string, unknown>) ?? undefined);
+    return true;
+  });
+
+  /**
+   * The main kiosk window reports the workflow it just started; the CB Help
+   * window (if one is open) resets to show that run instead of whatever
+   * came before. See cbHelpWindow.ts's own doc comment.
+   */
+  ipcMain.handle('cbhelp:sessionStarted', (_, steps: unknown) => {
+    const list = Array.isArray(steps) ? (steps as CbHelpStep[]) : [];
+    cbHelpSessionStarted(list);
+    return true;
+  });
+
+  /** Hydration for a CB Help window that just opened or reloaded mid-session. */
+  ipcMain.handle('cbhelp:getState', () => getCbHelpState());
+
+  /**
+   * Runtime camera role mapping (§2.1) — which physical camera plays
+   * CENTER/LEFT/RIGHT. Set from the camera setup screen
+   * (`Ctrl/Cmd+Shift+K`), read by the main kiosk window to know which
+   * `enumerateDevices()` id corresponds to which logical role.
+   */
+  ipcMain.handle('camera:getRoleMapping', () => getCameraRoleMapping());
+  ipcMain.handle('camera:setRoleMapping', (_, mapping: unknown) => {
+    setCameraRoleMapping((mapping ?? {}) as CameraRoleMapping);
+    return true;
+  });
+
+  /**
+   * Local video recording — see streams.ts's own doc comment. `stream:start`
+   * registers the row before any bytes exist; `stream:end` writes the
+   * recorded bytes once `MediaRecorder` actually stops.
+   */
+  ipcMain.handle('stream:start', (_, payload: { sessionId?: unknown; cameraId?: unknown; mimeType?: unknown }) => {
+    return startVideoStream({
+      sessionId: safeFileToken(payload?.sessionId, 'session'),
+      cameraId: safeFileToken(payload?.cameraId, 'camera'),
+      mimeType: typeof payload?.mimeType === 'string' ? payload.mimeType : undefined,
+    });
+  });
+
+  ipcMain.handle(
+    'stream:end',
+    (_, payload: { streamId?: unknown; data?: unknown; durationMs?: unknown }) => {
+      const streamId = String(payload?.streamId ?? '');
+      if (!streamId) return { ok: false, error: 'streamId is required' };
+      if (!(payload?.data instanceof Uint8Array)) {
+        return { ok: false, error: 'data must be a Uint8Array' };
+      }
+      return endVideoStream({
+        streamId,
+        data: payload.data,
+        durationMs: Number(payload?.durationMs ?? 0) || 0,
+      });
+    }
+  );
 
   /** Save credentials from the setup screen and (re)start uploading with them. */
   ipcMain.handle('secrets:setFileService', async (_, payload: { baseUrl?: unknown; apiKey?: unknown }) => {
@@ -418,6 +524,16 @@ app.whenReady().then(async () => {
           visibility,
         });
 
+        // View-only feed for whoever is watching the CB Help display, if one
+        // is open — see cbHelpWindow.ts's own doc comment. A no-op when no
+        // such window exists.
+        cbHelpCaptureAdded({
+          stepId: safeFileToken(payload?.stepId, 'step'),
+          attempt: Number(payload?.attempt ?? 1) || 1,
+          dataUrl,
+          capturedAt: Date.now(),
+        });
+
         return { ok: true, jobId };
       } catch (err) {
         // Storage failed: say so. A capture that was not stored must never be
@@ -528,6 +644,22 @@ app.whenReady().then(async () => {
 
   createWindow();
 
+  // Only opens something when a second display is actually connected — see
+  // maybeOpenCbHelpWindow's own doc comment. Deferred one tick past
+  // createWindow() so mainWindow's bounds are settled before asking which
+  // display it is on.
+  if (mainWindow) {
+    const mainDisplay = screen.getDisplayMatching(mainWindow.getBounds());
+    maybeOpenCbHelpWindow(mainDisplay.id);
+  }
+
+  // CB Help's entry point into the camera role-assignment screen (§2.1) —
+  // see cameraSetupWindow.ts's own doc comment for why this is a separate
+  // window rather than something bolted onto the kiosk UI. A global shortcut
+  // rather than an on-screen button: this app has no resolved "CB Help mode"
+  // surface yet (open question §4 #16) to put a button on.
+  globalShortcut.register('CommandOrControl+Shift+K', () => openCameraSetupWindow());
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -535,12 +667,15 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   stopUploads();
+  stopStatsEventPush();
   closeDatabase();
   if (process.platform !== 'darwin') app.quit();
 });
 
 app.on('before-quit', () => {
   stopUploads();
+  stopStatsEventPush();
   closeDatabase();
   closeLogger();
+  globalShortcut.unregisterAll();
 });

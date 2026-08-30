@@ -26,6 +26,10 @@ export { AttendanceRepository, businessDayOf } from './repositories/AttendanceRe
 export type { AttendanceRecordParams, LastAttendance } from './repositories/AttendanceRepository.js';
 export { UploadOutboxRepository, nextRetryDelayMs } from './repositories/UploadOutboxRepository.js';
 export type { OutboxItem, OutboxStatus, EnqueueInput, OutboxStats } from './repositories/UploadOutboxRepository.js';
+export { CaptureStreamRepository } from './repositories/CaptureStreamRepository.js';
+export type { CaptureStreamItem, StartStreamInput, EndStreamInput } from './repositories/CaptureStreamRepository.js';
+export { StatsEventRepository } from './repositories/StatsEventRepository.js';
+export type { StatsEventItem, StatsEventType, EnqueueStatsEventInput } from './repositories/StatsEventRepository.js';
 export { PersonRepository } from './repositories/PersonRepository.js';
 export { FaceProfileRepository } from './repositories/FaceProfileRepository.js';
 export type { SaveProfileParams, ModelIdentity } from './repositories/FaceProfileRepository.js';
