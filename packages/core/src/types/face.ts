@@ -54,6 +54,17 @@ export interface FaceQualityResult {
   /** The mouth-smile blendshape, averaged over both sides. Null likewise. */
   smileScore: number | null;
   /**
+   * Face width/height in pixels, on the resolution the capture will actually
+   * be SAVED at — not `frameWidth`/`frameHeight` above when those come from a
+   * downscaled analysis frame (see FrameInput.nativeWidth's doc comment).
+   * Backs `FACE_RESOLUTION_TOO_LOW` (§2.8 of
+   * docs/plans/multi-camera-device-management-discussion.md): a face can
+   * clear `faceSizeRatio`'s floor and still be too few real pixels to print
+   * or match reliably.
+   */
+  faceWidthPx: number;
+  faceHeightPx: number;
+  /**
    * `eyeOpenScore` against `minEyeOpenScore`. Kept as its own boolean, next to
    * the raw score, in the same shape as brightness/sharpness passing their
    * own thresholds.
@@ -124,9 +135,17 @@ export interface FaceState {
   distance?: FaceDistance | null;
   landmarks?: FaceLandmark[];
   confidence?: number;
-  /** Input frame dimensions */
+  /** Input frame dimensions — the (possibly downscaled) analysis frame. */
   frameWidth?: number;
   frameHeight?: number;
+  /**
+   * The camera's native resolution — what the saved capture will actually
+   * use — when it differs from `frameWidth`/`frameHeight` above. See
+   * FrameInput.nativeWidth's doc comment. Undefined falls back to
+   * `frameWidth`/`frameHeight` wherever this is consumed.
+   */
+  captureFrameWidth?: number;
+  captureFrameHeight?: number;
   /** List of all face detections when faceCount > 1 */
   allDetections?: FaceDetection[];
   /** List of landmark arrays for all detected faces */

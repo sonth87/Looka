@@ -24,6 +24,9 @@ export interface LastAttendance {
   type: string;
 }
 
+/** Pinned per FIX-PLAN.md step 16 — business-day boundaries must not depend on host OS timezone. */
+const BUSINESS_DAY_TIMEZONE = 'Asia/Ho_Chi_Minh';
+
 /**
  * Working day of a timestamp.
  *
@@ -32,11 +35,19 @@ export interface LastAttendance {
  * configurable per deployment if a site runs a different roster.
  */
 export function businessDayOf(timestamp: number, dayStartHour = 4): string {
+  // Explicit IANA zone, not the host process's local time — a kiosk with its
+  // OS clock set to the wrong timezone (or a build running in CI/dev on a
+  // developer's machine) must still bucket attendance the same way
+  // production does. See FIX-PLAN.md step 16.
   const shifted = new Date(timestamp - dayStartHour * 3600_000);
-  const y = shifted.getFullYear();
-  const m = String(shifted.getMonth() + 1).padStart(2, '0');
-  const d = String(shifted.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: BUSINESS_DAY_TIMEZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(shifted);
+  const get = (type: string) => parts.find((p) => p.type === type)!.value;
+  return `${get('year')}-${get('month')}-${get('day')}`;
 }
 
 export class AttendanceRepository {

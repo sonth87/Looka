@@ -298,13 +298,22 @@ export class MediaPipeCVEngine implements CVEngine {
       // Evaluate Quality for primary face
       const pixelData =
         frame.data instanceof Uint8ClampedArray ? frame.data : undefined;
+      // §2.8's absolute resolution floor needs the resolution the capture
+      // will actually be SAVED at, not `frame.width`/`frame.height` — those
+      // are the (possibly downscaled) analysis frame. See
+      // FrameInput.nativeWidth's own doc comment.
+      const saveFrameSize =
+        frame.nativeWidth && frame.nativeHeight
+          ? { width: frame.nativeWidth, height: frame.nativeHeight }
+          : undefined;
       const quality = this.qualityEvaluator.evaluateQuality(
         boundingBox,
         frame.width,
         frame.height,
         pixelData,
         { sensitivity: this.sensitivity },
-        { eyeOpenScore, smileScore }
+        { eyeOpenScore, smileScore },
+        saveFrameSize
       );
 
       // Standing distance, derived from how much of the frame the face spans.
@@ -339,6 +348,8 @@ export class MediaPipeCVEngine implements CVEngine {
         landmarks,
         frameWidth: frame.width,
         frameHeight: frame.height,
+        captureFrameWidth: frame.nativeWidth ?? frame.width,
+        captureFrameHeight: frame.nativeHeight ?? frame.height,
         allDetections,
         allLandmarks,
         confidence: 0.95,

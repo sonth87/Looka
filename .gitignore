@@ -32,3 +32,4 @@ apps/*/public/wasm/
 apps/*/public/models/
 
 .serena
+# .claude

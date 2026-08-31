@@ -11,6 +11,7 @@
 export const QUALITY_REASON_LABEL: Record<string, string> = {
   FACE_TOO_SMALL: 'Mặt quá nhỏ',
   FACE_TOO_LARGE: 'Mặt quá to',
+  FACE_RESOLUTION_TOO_LOW: 'Độ phân giải khuôn mặt quá thấp (<250px)',
   OFF_CENTER: 'Lệch khỏi giữa khung',
   TOO_DARK: 'Thiếu sáng',
   TOO_BRIGHT: 'Quá sáng',

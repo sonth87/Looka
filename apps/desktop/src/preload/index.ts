@@ -36,6 +36,10 @@ export interface SystemStatus {
   dbPath: string;
   dbSizeBytes: number | null;
   pendingSync: number | null;
+  /** null until this process has performed its first successful write. */
+  lastWriteAt: number | null;
+  /** Live-pinged on every call (`GET /api/v1/health`, 5s timeout) — see aiService.ts. */
+  aiServiceReachable: boolean;
   uploads: UploadStatus;
   secrets: SecretsStatus;
   appVersion: string;
@@ -64,6 +68,49 @@ export interface ApproveSessionUploadResult {
   /** Rows this call actually released; 0 for an already-approved session. */
   approved?: number;
   error?: string;
+}
+
+export type CameraRole = 'CENTER' | 'LEFT' | 'RIGHT';
+export type CameraRoleMapping = Partial<Record<CameraRole, string>>;
+
+export interface CbHelpStep {
+  id: string;
+  type: string;
+  instruction: string;
+}
+
+export interface CbHelpCapture {
+  stepId: string;
+  attempt: number;
+  dataUrl: string;
+  capturedAt: number;
+}
+
+export interface CbHelpState {
+  steps: CbHelpStep[];
+  captures: Record<string, CbHelpCapture>;
+}
+
+export interface CampaignConfig {
+  id: string;
+  name: string;
+  purpose: 'STUDENT_CARD' | 'KYC_ENROLLMENT';
+  expiresAt: string | null;
+  consentContent: string | null;
+  consentVersion: number;
+  captureAngles: unknown[] | null;
+  captureMode: 'AUTO' | 'MANUAL' | 'OFF' | null;
+  autoHoldMs: number | null;
+}
+
+/**
+ * §3.3's fail-closed verdict alongside the config itself — see
+ * deviceApi.ts's DeviceAccessStatus (this is its IPC-facing mirror).
+ */
+export interface DeviceAccessStatus {
+  blocked: boolean;
+  reason?: 'unauthorized' | 'unreachable-too-long';
+  config: CampaignConfig | null;
 }
 
 export interface FaceAPIBridge {
@@ -131,6 +178,69 @@ export interface FaceAPIBridge {
    * renderer is a secret the renderer can leak. Only whether one is configured.
    */
   getSecretsStatus: () => Promise<SecretsStatus>;
+
+  /**
+   * This kiosk's own campaign config (§3.6/§3.8/§2.4) plus the §3.3
+   * fail-closed verdict. `config` is `null` when this kiosk has no device
+   * identity yet, or none has ever been confirmed by the admin portal —
+   * callers fall back to `defaultWorkflow`/local settings in that case.
+   * `blocked: true` means capture must actually be refused, not just
+   * defaulted around — see DeviceAccessStatus's own doc comment.
+   */
+  getDeviceAccessStatus: () => Promise<DeviceAccessStatus>;
+
+  /**
+   * Report the workflow this session just started with, so the CB Help
+   * display (§3.5) — if a second one is open — resets to show this run.
+   * A harmless no-op call when no such window exists.
+   */
+  notifyCbHelpSessionStarted: (steps: CbHelpStep[]) => Promise<boolean>;
+
+  /**
+   * Only meaningful from inside the CB Help window itself: hydrates on open
+   * (or after a reload) with whatever the main kiosk window has reported so
+   * far, before the next push arrives.
+   */
+  getCbHelpState: () => Promise<CbHelpState>;
+
+  /**
+   * Only meaningful from inside the CB Help window: subscribes to every
+   * state push from the main process (a new session, or one more capture).
+   * Returns an unsubscribe function.
+   */
+  onCbHelpUpdate: (callback: (state: CbHelpState) => void) => () => void;
+
+  /**
+   * Local video recording (§3.1) — registers a row before any bytes exist.
+   * See `streams.ts`'s own doc comment for the two-call start/end shape.
+   */
+  startVideoStream: (payload: {
+    sessionId: string;
+    cameraId: string;
+    mimeType?: string;
+  }) => Promise<{ streamId: string; localPath: string }>;
+
+  /** Writes the recorded bytes and closes out the row `startVideoStream` opened. */
+  endVideoStream: (payload: {
+    streamId: string;
+    data: Uint8Array;
+    durationMs: number;
+  }) => Promise<{ ok: boolean; error?: string }>;
+
+  /** Runtime camera role mapping (§2.1) — set from the camera setup screen. */
+  getCameraRoleMapping: () => Promise<CameraRoleMapping>;
+  setCameraRoleMapping: (mapping: CameraRoleMapping) => Promise<boolean>;
+
+  /**
+   * Reports a stats-worthy moment (§3.4) — queued locally and pushed to the
+   * admin portal on its own schedule. Never rejects; a failed/impossible
+   * report must not interrupt the capture flow that triggered it.
+   */
+  recordStatsEvent: (payload: {
+    type: 'SESSION_COMPLETED' | 'UPLOAD_SUCCESS' | 'UPLOAD_FAILED' | 'RETAKE' | 'CB_HELP_INTERVENTION';
+    metadata?: Record<string, unknown>;
+  }) => Promise<boolean>;
+
   setFileServiceCredentials: (payload: {
     baseUrl: string;
     apiKey: string;
@@ -164,6 +274,23 @@ const faceAPI: FaceAPIBridge = {
   downloadPhoto: (payload) => ipcRenderer.invoke('photos:download', payload),
 
   getSecretsStatus: () => ipcRenderer.invoke('secrets:status'),
+  getDeviceAccessStatus: () => ipcRenderer.invoke('device:getAccessStatus'),
+
+  notifyCbHelpSessionStarted: (steps) => ipcRenderer.invoke('cbhelp:sessionStarted', steps),
+  getCbHelpState: () => ipcRenderer.invoke('cbhelp:getState'),
+  onCbHelpUpdate: (callback) => {
+    const listener = (_: unknown, state: CbHelpState) => callback(state);
+    ipcRenderer.on('cbhelp:state', listener);
+    return () => ipcRenderer.removeListener('cbhelp:state', listener);
+  },
+
+  startVideoStream: (payload) => ipcRenderer.invoke('stream:start', payload),
+  endVideoStream: (payload) => ipcRenderer.invoke('stream:end', payload),
+
+  getCameraRoleMapping: () => ipcRenderer.invoke('camera:getRoleMapping'),
+  setCameraRoleMapping: (mapping) => ipcRenderer.invoke('camera:setRoleMapping', mapping),
+
+  recordStatsEvent: (payload) => ipcRenderer.invoke('stats:recordEvent', payload),
   setFileServiceCredentials: (payload) => ipcRenderer.invoke('secrets:setFileService', payload),
   clearFileServiceCredentials: () => ipcRenderer.invoke('secrets:clearFileService'),
 

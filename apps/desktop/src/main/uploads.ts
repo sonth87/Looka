@@ -5,6 +5,7 @@ import type { Visibility } from '@face/core';
 import { FsClient, UploadWorker, WorkerEvent, deterministicUuid, sha256Hex } from '@face/fs-client';
 import { UploadOutboxRepository, nextRetryDelayMs } from '@face/database';
 import { getDatabase } from './db.js';
+import { recordStatsEvent } from './statsEvents.js';
 
 /** Reads captures from local disk for the worker. */
 const diskReader = {
@@ -51,6 +52,13 @@ export function startUploads(config: UploadsConfig | null): boolean {
       if (event.type === 'failed' || event.type === 'quarantined') {
         console.warn('[uploads]', event);
       }
+      // Stats events (§3.4) only on a *final* outcome, not every transient
+      // retry attempt: 'uploaded' is bytes actually accepted by fs-core;
+      // 'quarantined' is a permanent rejection. 'failed'/'retry'/'ready' are
+      // operational noise the retry loop already handles on its own and
+      // would wildly over-count if treated as the stats-facing signal.
+      if (event.type === 'uploaded') recordStatsEvent('UPLOAD_SUCCESS', { jobId: event.jobId });
+      if (event.type === 'quarantined') recordStatsEvent('UPLOAD_FAILED', { jobId: event.jobId });
     },
   });
 

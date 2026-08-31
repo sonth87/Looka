@@ -31,6 +31,8 @@ export class PersistentStorageAdapter implements IStorageAdapter, SqlExecutor {
   private driver: SqlDriver | null = null;
   private readonly options: PersistentStorageAdapterOptions;
   private migrationReport: MigrationReport | null = null;
+  /** Set on every successful write, through `run()` — see its own doc comment. */
+  private lastWriteAt: number | null = null;
 
   constructor(options: PersistentStorageAdapterOptions) {
     this.options = options;
@@ -59,6 +61,16 @@ export class PersistentStorageAdapter implements IStorageAdapter, SqlExecutor {
     }
   }
 
+  /**
+   * When the last write actually committed, or null if this adapter has never
+   * written anything since it was constructed (not persisted across restarts —
+   * a fresh `null` after opening an existing, previously-written database file
+   * is expected and not itself a problem).
+   */
+  public getLastWriteAt(): number | null {
+    return this.lastWriteAt;
+  }
+
   public close(): void {
     this.driver?.close();
     this.driver = null;
@@ -70,8 +82,10 @@ export class PersistentStorageAdapter implements IStorageAdapter, SqlExecutor {
     return this.require().all<T>(sql, params);
   }
 
+  /** The single write path every repository and the key/value surface below both fund through — see getLastWriteAt(). */
   public run(sql: string, params: readonly unknown[] = []): void {
     this.require().run(sql, params);
+    this.lastWriteAt = Date.now();
   }
 
   public transaction<T>(fn: () => T): T {
@@ -94,7 +108,7 @@ export class PersistentStorageAdapter implements IStorageAdapter, SqlExecutor {
   }
 
   public async set<T>(key: string, value: T): Promise<void> {
-    this.require().run(
+    this.run(
       `INSERT INTO app_settings (key, value, version) VALUES (?, ?, 1)
        ON CONFLICT(key) DO UPDATE SET value = excluded.value, version = version + 1`,
       [key, JSON.stringify(value)]
@@ -102,11 +116,11 @@ export class PersistentStorageAdapter implements IStorageAdapter, SqlExecutor {
   }
 
   public async delete(key: string): Promise<void> {
-    this.require().run('DELETE FROM app_settings WHERE key = ?', [key]);
+    this.run('DELETE FROM app_settings WHERE key = ?', [key]);
   }
 
   public async clear(): Promise<void> {
-    this.require().run('DELETE FROM app_settings', []);
+    this.run('DELETE FROM app_settings', []);
   }
 
   private require(): SqlDriver {

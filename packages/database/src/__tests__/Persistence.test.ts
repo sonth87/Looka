@@ -185,8 +185,11 @@ describe('Attendance transaction', () => {
   });
 
   test('business day starts at 04:00 so a night shift lands on the previous day', () => {
-    const at0130 = new Date(2026, 7, 15, 1, 30).getTime();
-    const at0930 = new Date(2026, 7, 15, 9, 30).getTime();
+    // Explicit +07:00 (Asia/Ho_Chi_Minh) offset, not the test runner's local
+    // time — businessDayOf() is pinned to that zone regardless of host OS
+    // timezone (FIX-PLAN.md step 16), so the test must not depend on it either.
+    const at0130 = new Date('2026-08-15T01:30:00+07:00').getTime();
+    const at0930 = new Date('2026-08-15T09:30:00+07:00').getTime();
     assert.equal(businessDayOf(at0130), '2026-08-14');
     assert.equal(businessDayOf(at0930), '2026-08-15');
   });

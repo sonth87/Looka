@@ -349,6 +349,7 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (
         NO_FACE: { icon: "👤", text: "Vui lòng di chuyển vào khung hình" },
         FACE_TOO_SMALL: { icon: "🔍", text: "Lại gần camera hơn" },
         FACE_TOO_LARGE: { icon: "↔️", text: "Lùi xa camera hơn một chút" },
+        FACE_RESOLUTION_TOO_LOW: { icon: "🔍", text: "Lại gần camera hơn để ảnh đủ nét" },
         OFF_CENTER: {
           icon: "🎯",
           text: "Di chuyển khuôn mặt vào giữa khung",
@@ -368,7 +369,10 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (
       // guessing how much. Only shown for the two reasons it explains.
       const d = faceState.distance;
       const distanceHint =
-        d && (primaryReason === "FACE_TOO_SMALL" || primaryReason === "FACE_TOO_LARGE")
+        d &&
+        (primaryReason === "FACE_TOO_SMALL" ||
+          primaryReason === "FACE_TOO_LARGE" ||
+          primaryReason === "FACE_RESOLUTION_TOO_LOW")
           ? ` (đang cách ~${d.meters.toFixed(1)} m)`
           : "";
 

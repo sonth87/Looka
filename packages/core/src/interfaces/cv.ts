@@ -6,6 +6,16 @@ export interface FrameInput {
   width: number;
   height: number;
   timestamp: number;
+  /**
+   * The camera's actual resolution, before any downscale for CV analysis
+   * (see BrowserCameraService.getFrame()'s own doc comment on ANALYSIS_WIDTH).
+   * `width`/`height` above may be smaller than this; the saved capture
+   * (captureBase64Snapshot()) always uses this resolution. Undefined when a
+   * caller has no native resolution to report (e.g. a synthetic frame in
+   * simulation mode).
+   */
+  nativeWidth?: number;
+  nativeHeight?: number;
 }
 
 export interface AlignedFace {

@@ -1,4 +1,5 @@
 import { app, safeStorage } from 'electron';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { FsClient } from '@face/fs-client';
 import { SecretStore, CryptoProvider } from './SecretStore.js';
@@ -26,7 +27,15 @@ const DEFAULT_FS_CONTACT_EMAIL = 'camera@dainam.edu.vn';
  * The storage rules live in SecretStore, which is testable without Electron.
  */
 
-export type SecretKey = 'fs.baseUrl' | 'fs.apiKey';
+export type SecretKey =
+  | 'fs.baseUrl'
+  | 'fs.apiKey'
+  | 'device.id'
+  | 'device.secret'
+  | 'device.campaignId'
+  | 'device.apiBaseUrl'
+  | 'device.lastVerified'
+  | 'camera.roleMapping';
 
 const electronCrypto: CryptoProvider = {
   isAvailable: () => safeStorage.isEncryptionAvailable(),
@@ -101,7 +110,16 @@ export async function getFileServiceCredentials(): Promise<FileServiceCredential
     // by tenant name and idempotent, so a later run just gets the same key
     // back rather than an operator having to type one in by hand.
     try {
-      const tenant = process.env.FS_TENANT?.trim() || DEFAULT_FS_TENANT;
+      // Per-device tenant (§3.3): a kiosk that has gone through activation
+      // provisions its OWN fs-core key, keyed by its device id — so revoking
+      // one expired/misbehaving device only means invalidating that one key
+      // at fs-core, not the whole fleet's shared key. Falls back to the old
+      // shared tenant for a kiosk with no device identity yet (predates
+      // device registration, or still mid-setup).
+      const tenant =
+        getDeviceCredentials()?.deviceId ||
+        process.env.FS_TENANT?.trim() ||
+        DEFAULT_FS_TENANT;
       const contactEmail = process.env.FS_CONTACT_EMAIL?.trim() || DEFAULT_FS_CONTACT_EMAIL;
       const provisioned = await FsClient.provision(baseUrl, tenant, { contactEmail });
       apiKey = provisioned.apiKey;
@@ -131,6 +149,141 @@ export function clearFileServiceCredentials(): void {
   deleteSecret('fs.apiKey');
 }
 
+
+export interface DeviceCredentials {
+  deviceId: string;
+  deviceSecret: string;
+  campaignId: string;
+  /** The admin-portal base URL this device talks to — activation.json's `authApiEndpoint`. */
+  apiBaseUrl: string | null;
+}
+
+/**
+ * Device identity, if this kiosk has loaded its activation file — see
+ * docs/plans/multi-camera-device-management-discussion.md §3.2. `null`
+ * means "installed but not yet activated," which is meant to block every
+ * authenticated call the same way an expired device does (§3.3) — callers
+ * must check for `null` before doing anything that needs a device identity,
+ * not assume registration always happened.
+ */
+export function getDeviceCredentials(): DeviceCredentials | null {
+  const deviceId = getSecret('device.id');
+  const deviceSecret = getSecret('device.secret');
+  const campaignId = getSecret('device.campaignId');
+  if (!deviceId || !deviceSecret || !campaignId) return null;
+
+  return { deviceId, deviceSecret, campaignId, apiBaseUrl: getSecret('device.apiBaseUrl') };
+}
+
+export function hasDeviceCredentials(): boolean {
+  return getDeviceCredentials() !== null;
+}
+
+/**
+ * Reads one `activation.json` (the payload `ActivationPackageService` zips
+ * up server-side — see its own doc comment) and stores its fields the same
+ * way `setFileServiceCredentials` does: encrypted, never left sitting in a
+ * plaintext file as the ongoing source of truth. Throws on a missing/malformed
+ * file rather than silently leaving the kiosk unactivated with no signal why.
+ */
+export async function importActivationFile(filePath: string): Promise<DeviceCredentials> {
+  const raw = await fs.readFile(filePath, 'utf8');
+  const parsed = JSON.parse(raw) as Record<string, unknown>;
+
+  const deviceId = typeof parsed.deviceId === 'string' ? parsed.deviceId : null;
+  const deviceSecret = typeof parsed.deviceSecret === 'string' ? parsed.deviceSecret : null;
+  const campaignId = typeof parsed.campaignId === 'string' ? parsed.campaignId : null;
+  if (!deviceId || !deviceSecret || !campaignId) {
+    throw new Error(`Malformed activation file at ${filePath}: missing deviceId/deviceSecret/campaignId`);
+  }
+  const apiBaseUrl = typeof parsed.authApiEndpoint === 'string' ? parsed.authApiEndpoint : null;
+
+  setSecret('device.id', deviceId);
+  setSecret('device.secret', deviceSecret);
+  setSecret('device.campaignId', campaignId);
+  if (apiBaseUrl) setSecret('device.apiBaseUrl', apiBaseUrl);
+  // Seeds the §3.3 24h fail-closed clock at activation time, with no config
+  // yet — an admin just registered this exact device, which is itself a
+  // trust-establishing moment. Without this, a kiosk whose network isn't up
+  // yet on its very first boot would read as "never verified" and could be
+  // treated as already-expired before it ever got a chance to phone home.
+  setLastVerifiedDeviceState(null, Date.now());
+
+  return { deviceId, deviceSecret, campaignId, apiBaseUrl };
+}
+
+/**
+ * Looks for `activation.json` next to this install and imports it if this
+ * kiosk has no device identity yet — a one-time import, the same shape as
+ * `getFileServiceCredentials`'s `FS_BASE_URL`/`FS_API_KEY` handling above.
+ * Already-activated kiosks skip this entirely, so a leftover activation.json
+ * from setup does not silently re-import over an operator's later changes.
+ *
+ * `LOOKA_ACTIVATION_PATH` overrides the lookup location for development and
+ * testing, where there is no real installed-next-to-the-exe layout to read
+ * from.
+ */
+export async function findAndImportActivationFileIfPresent(): Promise<boolean> {
+  if (hasDeviceCredentials()) return false;
+
+  const candidate =
+    process.env.LOOKA_ACTIVATION_PATH?.trim() ||
+    path.join(path.dirname(app.getPath('exe')), 'activation.json');
+
+  try {
+    await fs.access(candidate);
+  } catch {
+    return false;
+  }
+
+  try {
+    await importActivationFile(candidate);
+    console.warn(`[secrets] imported device activation from ${candidate}`);
+    return true;
+  } catch (err) {
+    console.error('[secrets] failed to import activation file:', (err as Error).message);
+    return false;
+  }
+}
+
+export function clearDeviceCredentials(): void {
+  deleteSecret('device.id');
+  deleteSecret('device.secret');
+  deleteSecret('device.campaignId');
+  deleteSecret('device.apiBaseUrl');
+  deleteSecret('device.lastVerified');
+}
+
+export interface LastVerifiedDeviceState {
+  /** The last CampaignConfig the admin portal actually returned. Opaque here — deviceApi.ts owns the shape. */
+  config: unknown;
+  /** epoch ms of that successful contact — what the §3.3 24h fail-closed policy counts from. */
+  verifiedAt: number;
+}
+
+/**
+ * The last confirmed-good contact with the admin portal, persisted to disk —
+ * see docs/plans/multi-camera-device-management-discussion.md §3.3's 24h
+ * fail-closed cache. Deliberately NOT the same as `getCampaignConfig()`'s own
+ * 15-minute in-memory cache in deviceApi.ts: that one exists to avoid hitting
+ * the network on every session start and is lost on restart; this one is
+ * what a kiosk falls back on across restarts while offline, and what its
+ * age is measured against to decide fail-open vs fail-closed.
+ */
+export function getLastVerifiedDeviceState(): LastVerifiedDeviceState | null {
+  const raw = getSecret('device.lastVerified');
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as LastVerifiedDeviceState;
+  } catch {
+    return null;
+  }
+}
+
+export function setLastVerifiedDeviceState(config: unknown, verifiedAt: number): void {
+  setSecret('device.lastVerified', JSON.stringify({ config, verifiedAt }));
+}
+
 /** What the renderer is allowed to know: configured or not, never the values. */
 export interface SecretsStatus {
   encryptionAvailable: boolean;
@@ -154,4 +307,32 @@ export function secretsStatus(): SecretsStatus {
     fileServiceConfigured: hasSecret('fs.apiKey') && baseUrl !== null,
     fileServiceHost: host,
   };
+}
+
+export type CameraRole = 'CENTER' | 'LEFT' | 'RIGHT';
+
+/** Which physical camera (by `enumerateDevices()` id) plays each logical role. */
+export type CameraRoleMapping = Partial<Record<CameraRole, string>>;
+
+/**
+ * Runtime camera-role mapping — see
+ * docs/plans/multi-camera-device-management-discussion.md §2.1. Set once by
+ * CB Help (via the camera setup screen) and reused across sessions and
+ * hot-swaps; not a secret in the credential sense, but stored the same way
+ * as everything else in this file since `secrets.dat` is already the
+ * established per-machine local-config store — no reason to invent a second
+ * one just for this.
+ */
+export function getCameraRoleMapping(): CameraRoleMapping {
+  const raw = getSecret('camera.roleMapping');
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw) as CameraRoleMapping;
+  } catch {
+    return {};
+  }
+}
+
+export function setCameraRoleMapping(mapping: CameraRoleMapping): void {
+  setSecret('camera.roleMapping', JSON.stringify(mapping));
 }

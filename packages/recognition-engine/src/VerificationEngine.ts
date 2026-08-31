@@ -1,16 +1,17 @@
 import { FaceProfile, RecognitionResult } from '@face/core';
 import { cosineSimilarity } from '@face/biometric';
-import { SecurityLevel, ThresholdPolicy } from './ThresholdPolicy.js';
+import { SecurityLevel, ThresholdPolicy, ThresholdProfile, formatPolicyVersion } from './ThresholdPolicy.js';
 
 export class VerificationEngine {
   public verify(
     probeVector: Float32Array,
     targetProfile: FaceProfile,
     targetCentroid: Float32Array,
-    level: SecurityLevel = 'BALANCED'
+    level: SecurityLevel = 'BALANCED',
+    thresholdOverrides?: Partial<Record<SecurityLevel, ThresholdProfile>>
   ): RecognitionResult {
     const startTime = performance.now();
-    const config = ThresholdPolicy.getThreshold(level);
+    const config = ThresholdPolicy.getThreshold(level, thresholdOverrides);
 
     const score = cosineSimilarity(probeVector, targetCentroid);
     const durationMs = Math.round(performance.now() - startTime);
@@ -22,6 +23,7 @@ export class VerificationEngine {
       personId: isMatch ? targetProfile.personId : undefined,
       score: Number(score.toFixed(4)),
       modelVersion: targetProfile.modelVersion,
+      policyVersion: formatPolicyVersion(config),
       durationMs,
     };
   }

@@ -97,6 +97,8 @@ export class MockCVEngine implements CVEngine {
       mouthVisible: true,
       occluded: false,
       neutralExpression: true,
+      faceWidthPx: 400,
+      faceHeightPx: 500,
       reasons: [],
     };
 

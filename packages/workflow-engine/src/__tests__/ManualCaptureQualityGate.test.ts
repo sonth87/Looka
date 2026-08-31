@@ -63,6 +63,8 @@ function smilingFaceState(smileScore: number, accepted?: boolean): FaceState {
       mouthVisible: true,
       occluded: false,
       neutralExpression: smileScore <= 0.4,
+      faceWidthPx: 320,
+      faceHeightPx: 336,
       reasons: genericAccepted ? [] : ['SMILING'],
     },
   };
