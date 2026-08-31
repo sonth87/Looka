@@ -62,6 +62,8 @@ export interface RecognitionResult {
   score?: number;
   candidates?: RecognitionCandidate[];
   modelVersion: string;
+  /** `${id}@v${version}` of the threshold profile this decision was made against — see FIX-PLAN.md step 15. */
+  policyVersion?: string;
   durationMs: number;
 }
 

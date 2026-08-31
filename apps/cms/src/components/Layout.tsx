@@ -4,16 +4,28 @@ import { getApiKey, setApiKey } from '../api';
 /**
  * Standard admin-CMS shell: a fixed sidebar (branding + nav) and a scrolling
  * content area — the layout every mainstream admin tool (Strapi, Directus,
- * Retool...) uses, rather than a single unstyled column of forms. Only one
- * nav item exists today (Campaigns); the sidebar is still worth having now
- * so a Devices-overview or Dashboard page has somewhere to slot in later
- * without another layout pass.
+ * Retool...) uses, rather than a single unstyled column of forms. Two nav
+ * items today (Tổng quan, Campaigns) — the sidebar was already built to make
+ * room for exactly this kind of Dashboard/overview addition.
  *
  * Light theme, deliberately: this is an office/daytime admin tool, distinct
  * from the dark kiosk-facing capture screen elsewhere in this monorepo — the
  * two run in different contexts and don't need to share a palette.
  */
-export function Layout({ children }: { children: ReactNode }) {
+export function Layout({
+  children,
+  activeNav,
+  onNavigate,
+}: {
+  children: ReactNode;
+  activeNav: 'overview' | 'campaigns';
+  onNavigate: (nav: 'overview' | 'campaigns') => void;
+}) {
+  const navItemClass = (nav: 'overview' | 'campaigns') =>
+    `w-full text-left px-2 py-2 rounded-lg text-sm font-medium ${
+      activeNav === nav ? 'bg-blue-50 text-blue-700' : 'text-gray-600 hover:bg-gray-100'
+    }`;
+
   return (
     <div className="min-h-screen flex bg-gray-50">
       <aside className="w-60 shrink-0 border-r border-gray-200 bg-white flex flex-col">
@@ -23,7 +35,12 @@ export function Layout({ children }: { children: ReactNode }) {
         </div>
 
         <nav className="flex-1 px-3 py-4 space-y-1">
-          <div className="px-2 py-2 rounded-lg bg-blue-50 text-blue-700 text-sm font-medium">Campaigns</div>
+          <button onClick={() => onNavigate('overview')} className={navItemClass('overview')}>
+            Tổng quan
+          </button>
+          <button onClick={() => onNavigate('campaigns')} className={navItemClass('campaigns')}>
+            Campaigns
+          </button>
         </nav>
 
         <div className="px-4 py-4 border-t border-gray-200">

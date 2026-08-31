@@ -8,8 +8,10 @@ import {
   getDatabaseError,
   getDatabasePath,
   isDatabaseHealthy,
+  getLastWriteAt,
   closeDatabase,
 } from './db.js';
+import { pingAiService } from './aiService.js';
 import {
   startUploads,
   stopUploads,
@@ -263,7 +265,7 @@ app.whenReady().then(async () => {
    * unconditionally, so an operator saw "database connected" on a machine where
    * nothing was being persisted.
    */
-  ipcMain.handle('app:getStatus', () => {
+  ipcMain.handle('app:getStatus', async () => {
     const dbConnected = isDatabaseHealthy();
     let pendingSync: number | null = null;
     let dbSizeBytes: number | null = null;
@@ -284,6 +286,11 @@ app.whenReady().then(async () => {
       }
     }
 
+    // Run alongside the synchronous checks above rather than after them —
+    // this is the only awaited step, and there is no reason to make the DB
+    // checks wait on it.
+    const aiServiceReachable = await pingAiService();
+
     return {
       status: dbConnected ? 'ONLINE' : 'DEGRADED',
       dbConnected,
@@ -291,6 +298,8 @@ app.whenReady().then(async () => {
       dbPath: getDatabasePath(),
       dbSizeBytes,
       pendingSync,
+      lastWriteAt: getLastWriteAt(),
+      aiServiceReachable,
       uploads: uploadStatus(),
       secrets: secretsStatus(),
       appVersion: app.getVersion(),

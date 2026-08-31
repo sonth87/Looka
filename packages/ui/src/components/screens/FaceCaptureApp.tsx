@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { SlidersHorizontal, Camera } from 'lucide-react';
 import {
   CameraDevice,
@@ -952,6 +952,39 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   const activeSession = activeEngine?.currentSession;
 
   /**
+   * Camera role mapping (§2.1) — which physical camera plays CENTER/LEFT/
+   * RIGHT, set once via the desktop app's camera setup screen
+   * (`Ctrl/Cmd+Shift+K`). Fetched once on mount; `(window as any).faceAPI`
+   * is undefined on the web build, so `cameraRoleMapping` just stays `{}`
+   * there and every effect below becomes a no-op — exactly today's
+   * single-camera behavior, unchanged.
+   */
+  const [cameraRoleMapping, setCameraRoleMapping] = useState<Record<string, string>>({});
+  useEffect(() => {
+    const faceAPI = (window as any).faceAPI;
+    faceAPI?.getCameraRoleMapping?.()
+      .then((m: Record<string, string>) => setCameraRoleMapping(m ?? {}))
+      .catch(() => {
+        /* no bridge, or no mapping saved yet — stay on {} */
+      });
+  }, []);
+
+  /**
+   * Unique, currently-plugged-in physical devices behind the CENTER/LEFT/
+   * RIGHT role mapping above — decides which of the two video-recording
+   * effects below applies. Two roles can point at the same physical device
+   * (e.g. C0 covering for a failed C1, see §2.1), so this dedupes by device
+   * id rather than counting roles.
+   */
+  const multiChannelDeviceIds = useMemo(
+    () =>
+      Array.from(new Set(Object.values(cameraRoleMapping))).filter(
+        (id): id is string => !!id && devices.some((d) => d.id === id)
+      ),
+    [cameraRoleMapping, devices]
+  );
+
+  /**
    * Local video recording alongside the session — see
    * docs/plans/multi-camera-device-management-discussion.md §3.1. A
    * self-contained effect, independent of the capture/quality-gate logic
@@ -969,9 +1002,13 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    * No upload path here on purpose — whether video ever leaves the kiosk is
    * still an open question (that doc's §4 #3); this only ever writes to
    * local disk.
+   *
+   * Fallback only: once ≥2 physical cameras are mapped to roles, the
+   * multi-channel effect below takes over instead, so this skips out to
+   * avoid double-recording whichever camera happens to be active.
    */
   useEffect(() => {
-    if (!stream || !isWorkflowStarted) return;
+    if (!stream || !isWorkflowStarted || multiChannelDeviceIds.length >= 2) return;
     const faceAPI = (window as any).faceAPI;
     if (!faceAPI?.startVideoStream) return; // web build, or no bridge to a desktop main process
 
@@ -1029,25 +1066,111 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
       finishedRecorder.stop();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stream, isWorkflowStarted]);
+  }, [stream, isWorkflowStarted, multiChannelDeviceIds.length]);
 
   /**
-   * Camera role mapping (§2.1) — which physical camera plays CENTER/LEFT/
-   * RIGHT, set once via the desktop app's camera setup screen
-   * (`Ctrl/Cmd+Shift+K`). Fetched once on mount; `(window as any).faceAPI`
-   * is undefined on the web build, so `cameraRoleMapping` just stays `{}`
-   * there and every effect below becomes a no-op — exactly today's
-   * single-camera behavior, unchanged.
+   * True simultaneous multi-channel recording — see ROADMAP.md's "what's
+   * actually left, in order" and
+   * docs/plans/multi-camera-device-management-discussion.md §3.1. Takes over
+   * from the single-stream effect above once ≥2 physical cameras are mapped
+   * to roles: instead of recording only whichever camera the CV pipeline
+   * currently has active (chopped into a separate clip every time the active
+   * camera switches per step — see the role-switch effect below), this opens
+   * one dedicated `MediaStream` + `MediaRecorder` per physical camera and
+   * keeps all of them rolling for the whole session.
+   *
+   * Deliberately opens its own streams via raw `getUserMedia`, entirely
+   * independent of `cameraServiceRef.current` (the single active stream the
+   * CV/capture pipeline switches per step) — this file's own history of
+   * subtle capture-trigger bugs is the reason that pipeline is left
+   * untouched here, same rationale as the role-switch effect below. No
+   * explicit resolution constraint on purpose: this is process evidence, not
+   * the print-quality still (see discussion doc §2.5), so the browser's
+   * default is lighter on the same USB/GPU bandwidth the CV stream is
+   * already drawing on.
+   *
+   * Known, unresolved risk: when a mapped role's device is also the CV
+   * pipeline's currently-active device, that physical camera ends up opened
+   * twice concurrently — the same kind of USB/driver contention
+   * docs/plans/multi-camera-device-management-discussion.md §2.1 already
+   * documented hitting with even a single camera. Not mitigated here; needs
+   * a real multi-camera hardware test pass, same caveat this file's
+   * single-stream recorder above had when it was first built (no
+   * display/simulator was available to exercise `MediaRecorder` live).
    */
-  const [cameraRoleMapping, setCameraRoleMapping] = useState<Record<string, string>>({});
   useEffect(() => {
     const faceAPI = (window as any).faceAPI;
-    faceAPI?.getCameraRoleMapping?.()
-      .then((m: Record<string, string>) => setCameraRoleMapping(m ?? {}))
-      .catch(() => {
-        /* no bridge, or no mapping saved yet — stay on {} */
-      });
-  }, []);
+    if (!isWorkflowStarted || multiChannelDeviceIds.length < 2 || !faceAPI?.startVideoStream) return;
+
+    let cancelled = false;
+    const sessionId = activeSession?.id ?? 'unknown';
+    const startedAt = Date.now();
+    const channels: Array<{
+      mediaStream: MediaStream;
+      recorder: MediaRecorder;
+      streamId: string;
+      chunks: BlobPart[];
+    }> = [];
+
+    void (async () => {
+      const mimeType =
+        typeof MediaRecorder !== 'undefined'
+          ? ['video/webm;codecs=vp8', 'video/webm'].find((t) => MediaRecorder.isTypeSupported(t))
+          : undefined;
+
+      for (const deviceId of multiChannelDeviceIds) {
+        try {
+          const mediaStream = await navigator.mediaDevices.getUserMedia({
+            audio: false,
+            video: { deviceId: { exact: deviceId } },
+          });
+          if (cancelled) {
+            mediaStream.getTracks().forEach((t) => t.stop());
+            continue;
+          }
+
+          const result = await faceAPI.startVideoStream({ sessionId, cameraId: deviceId, mimeType });
+          if (cancelled) {
+            mediaStream.getTracks().forEach((t) => t.stop());
+            continue;
+          }
+
+          const chunks: BlobPart[] = [];
+          const recorder = new MediaRecorder(mediaStream, mimeType ? { mimeType } : undefined);
+          recorder.ondataavailable = (e) => {
+            if (e.data.size > 0) chunks.push(e.data);
+          };
+          recorder.start();
+          channels.push({ mediaStream, recorder, streamId: result.streamId, chunks });
+        } catch (err) {
+          console.error(`[FaceCaptureApp] multi-channel recording failed to start for ${deviceId}:`, err);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      for (const channel of channels) {
+        const { recorder, mediaStream, streamId, chunks } = channel;
+        if (recorder.state === 'inactive') {
+          mediaStream.getTracks().forEach((t) => t.stop());
+          continue;
+        }
+        recorder.onstop = async () => {
+          mediaStream.getTracks().forEach((t) => t.stop());
+          try {
+            const blob = new Blob(chunks, { type: recorder.mimeType });
+            const data = new Uint8Array(await blob.arrayBuffer());
+            await faceAPI.endVideoStream({ streamId, data, durationMs: Date.now() - startedAt });
+          } catch (err) {
+            console.error(`[FaceCaptureApp] multi-channel recording failed to save for ${streamId}:`, err);
+          }
+        };
+        recorder.stop();
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isWorkflowStarted, multiChannelDeviceIds.join(',')]);
 
   /**
    * Switches the active camera to whichever one is mapped to the role the

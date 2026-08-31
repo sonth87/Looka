@@ -36,6 +36,10 @@ export interface SystemStatus {
   dbPath: string;
   dbSizeBytes: number | null;
   pendingSync: number | null;
+  /** null until this process has performed its first successful write. */
+  lastWriteAt: number | null;
+  /** Live-pinged on every call (`GET /api/v1/health`, 5s timeout) — see aiService.ts. */
+  aiServiceReachable: boolean;
   uploads: UploadStatus;
   secrets: SecretsStatus;
   appVersion: string;

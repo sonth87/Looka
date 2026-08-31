@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { ApiError, CampaignStats, getCampaignStats } from '../api';
 
-function StatTile({ label, value }: { label: string; value: number }) {
+export function StatTile({ label, value }: { label: string; value: number }) {
   return (
     <div className="rounded-xl border border-gray-200 bg-gray-50 px-4 py-3">
       <div className="text-2xl font-bold tabular-nums text-gray-900">{value.toLocaleString('vi-VN')}</div>

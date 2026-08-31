@@ -1,6 +1,6 @@
 import { FaceProfile, RecognitionCandidate, RecognitionResult } from '@face/core';
 import { cosineSimilarity } from '@face/biometric';
-import { SecurityLevel, ThresholdPolicy } from './ThresholdPolicy.js';
+import { SecurityLevel, ThresholdPolicy, ThresholdProfile, formatPolicyVersion } from './ThresholdPolicy.js';
 
 export interface GalleryEntry {
   profile: FaceProfile;
@@ -27,6 +27,8 @@ export interface IdentifyOptions {
   level?: SecurityLevel;
   /** Called when gallery entries are dropped as incompatible, so it is never silent. */
   onIncompatible?: (info: { skipped: number; total: number; required: ModelIdentity }) => void;
+  /** Forwarded to `ThresholdPolicy.getThreshold` — see its own doc comment. */
+  thresholdOverrides?: Partial<Record<SecurityLevel, ThresholdProfile>>;
 }
 
 /**
@@ -62,8 +64,9 @@ export class IdentificationEngine {
     options: IdentifyOptions
   ): IdentifyOutcome {
     const startTime = performance.now();
-    const { requiredModel, topK = 5, level = 'BALANCED' } = options;
-    const config = ThresholdPolicy.getThreshold(level);
+    const { requiredModel, topK = 5, level = 'BALANCED', thresholdOverrides } = options;
+    const config = ThresholdPolicy.getThreshold(level, thresholdOverrides);
+    const policyVersion = formatPolicyVersion(config);
 
     const modelVersion = `${requiredModel.modelFamily}/${requiredModel.modelVersion}/${requiredModel.preprocessingVersion}`;
     const total = gallery?.length ?? 0;
@@ -75,7 +78,7 @@ export class IdentificationEngine {
     }
 
     const empty = (durationMs: number): IdentifyOutcome => ({
-      result: { status: 'UNKNOWN', modelVersion, durationMs },
+      result: { status: 'UNKNOWN', modelVersion, policyVersion, durationMs },
       audit: { candidates: [], gallerySize: compatible.length, skippedIncompatible: skipped },
     });
 
@@ -100,18 +103,18 @@ export class IdentificationEngine {
 
     // Below threshold: not similar enough to anyone.
     if (best.score < config.matchThreshold) {
-      return { result: { status: 'UNKNOWN', modelVersion, durationMs }, audit };
+      return { result: { status: 'UNKNOWN', modelVersion, policyVersion, durationMs }, audit };
     }
 
     // Above threshold but too close to the runner-up: similar to more than one
     // person. Look-alikes and siblings live here, and this is exactly where a
     // threshold-only engine confidently attributes the wrong identity.
     if (top.length > 1 && best.score - top[1].score < config.ambiguityMargin) {
-      return { result: { status: 'AMBIGUOUS', modelVersion, durationMs }, audit };
+      return { result: { status: 'AMBIGUOUS', modelVersion, policyVersion, durationMs }, audit };
     }
 
     return {
-      result: { status: 'MATCH', personId: best.personId, score: best.score, modelVersion, durationMs },
+      result: { status: 'MATCH', personId: best.personId, score: best.score, modelVersion, policyVersion, durationMs },
       audit,
     };
   }

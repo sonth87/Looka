@@ -1,4 +1,5 @@
-export { ThresholdPolicy, SecurityLevel, ThresholdConfig } from './ThresholdPolicy.js';
+export { ThresholdPolicy, formatPolicyVersion } from './ThresholdPolicy.js';
+export type { SecurityLevel, ThresholdConfig, ThresholdProfile } from './ThresholdPolicy.js';
 export { VerificationEngine } from './VerificationEngine.js';
 export { IdentificationEngine } from './IdentificationEngine.js';
 export { TemporalConfirmer } from './TemporalConfirmer.js';

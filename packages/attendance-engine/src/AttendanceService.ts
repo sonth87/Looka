@@ -7,6 +7,7 @@ import {
   SecurityLevel,
   TemporalPolicy,
   TemporalDecision,
+  ThresholdProfile,
 } from '@face/recognition-engine';
 import { AttendanceRepository, PersonRepository, businessDayOf } from '@face/database';
 
@@ -22,6 +23,14 @@ export interface AttendanceServiceConfig {
   businessDayStartHour?: number;
   /** When true, a missing or failed liveness check rejects the attempt. */
   requireLiveness?: boolean;
+  /**
+   * Config-driven threshold profiles (FIX-PLAN.md step 15) — e.g. loaded from
+   * `app_settings` by the caller. Undefined (the default) resolves every
+   * level to `ThresholdPolicy`'s own built-in defaults; no caller loads real
+   * overrides yet, since nothing in the app constructs an `AttendanceService`
+   * today (see ROADMAP.md's cross-cutting finding).
+   */
+  thresholdOverrides?: Partial<Record<SecurityLevel, ThresholdProfile>>;
   /**
    * How many frames must agree before an identity counts.
    *
@@ -73,6 +82,7 @@ export class AttendanceService {
       attendanceSessionId: config.attendanceSessionId ?? `session_${Date.now()}`,
       businessDayStartHour: config.businessDayStartHour ?? 4,
       requireLiveness: config.requireLiveness ?? false,
+      thresholdOverrides: config.thresholdOverrides ?? {},
     };
     // Default on: a single frame is not enough evidence to attribute attendance
     // to a person. Opt out explicitly with `temporal: null`.
@@ -125,6 +135,7 @@ export class AttendanceService {
     const { result } = this.identificationEngine.identify(probeVector, gallery, {
       requiredModel: model,
       level: this.config.securityLevel,
+      thresholdOverrides: this.config.thresholdOverrides,
     });
 
     // 3. Agreement across frames.
@@ -186,7 +197,12 @@ export class AttendanceService {
         livenessScore: liveness ? liveness.score : null,
         qualityScore,
         modelVersion: result.modelVersion,
-        policyVersion: this.config.securityLevel,
+        // The real threshold-profile id+version this decision was made
+        // against (FIX-PLAN.md step 15) — `result.policyVersion` is always
+        // set by IdentificationEngine.identify(), the security-level name
+        // fallback here only guards against a hand-built RecognitionResult
+        // (e.g. in a test) that omits it.
+        policyVersion: result.policyVersion ?? this.config.securityLevel,
         deviceId: this.config.deviceId,
         businessDay,
       });

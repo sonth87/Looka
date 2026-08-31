@@ -71,6 +71,21 @@ export interface CampaignStats {
   cbHelpInterventions: number;
 }
 
+export interface CampaignStatsSummaryItem extends CampaignStats {
+  campaignName: string;
+}
+
+export interface AllCampaignsStats {
+  totalCampaigns: number;
+  totalDevices: number;
+  totalSessionsCompleted: number;
+  totalUploadSuccess: number;
+  totalUploadFailed: number;
+  totalRetakes: number;
+  totalCbHelpInterventions: number;
+  campaigns: CampaignStatsSummaryItem[];
+}
+
 const API_KEY_STORAGE = 'looka-cms-api-key';
 
 export function getApiKey(): string {
@@ -129,6 +144,7 @@ export const updateCampaign = (id: string, input: UpdateCampaignInput) =>
   request<Campaign>(`/v1/campaigns/${id}`, { method: 'PATCH', body: JSON.stringify(input) });
 
 export const getCampaignStats = (campaignId: string) => request<CampaignStats>(`/v1/campaigns/${campaignId}/stats`);
+export const getAllCampaignsStats = () => request<AllCampaignsStats>('/v1/campaigns/stats/summary');
 
 export const listDevices = (campaignId: string) => request<Device[]>(`/v1/campaigns/${campaignId}/devices`);
 export const getDevice = (id: string) => request<Device>(`/v1/devices/${id}`);

@@ -58,6 +58,12 @@ export function isDatabaseHealthy(): boolean {
   return adapter?.isHealthy() ?? false;
 }
 
+
+/** When the last write actually committed, or null if none has happened since this process started. */
+export function getLastWriteAt(): number | null {
+  return adapter?.getLastWriteAt() ?? null;
+}
+
 export function closeDatabase(): void {
   adapter?.close();
   adapter = null;

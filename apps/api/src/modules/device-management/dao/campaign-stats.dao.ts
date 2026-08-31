@@ -29,3 +29,41 @@ export class CampaignStatsDao {
   @ApiProperty()
   cbHelpInterventions: number;
 }
+
+/** One campaign's row inside `AllCampaignsStatsDao.campaigns` — same counts as `CampaignStatsDao`, plus the name a table needs to be readable without a second lookup. */
+export class CampaignStatsSummaryItemDao extends CampaignStatsDao {
+  @ApiProperty()
+  campaignName: string;
+}
+
+/**
+ * Sum of every campaign's `CampaignStatsDao`, plus the per-campaign
+ * breakdown it was summed from — so a dashboard can show one grand total
+ * without forcing a separate `GET :id/stats` call per campaign to build a
+ * table underneath it.
+ */
+export class AllCampaignsStatsDao {
+  @ApiProperty()
+  totalCampaigns: number;
+
+  @ApiProperty()
+  totalDevices: number;
+
+  @ApiProperty()
+  totalSessionsCompleted: number;
+
+  @ApiProperty()
+  totalUploadSuccess: number;
+
+  @ApiProperty()
+  totalUploadFailed: number;
+
+  @ApiProperty()
+  totalRetakes: number;
+
+  @ApiProperty()
+  totalCbHelpInterventions: number;
+
+  @ApiProperty({ type: [CampaignStatsSummaryItemDao] })
+  campaigns: CampaignStatsSummaryItemDao[];
+}
