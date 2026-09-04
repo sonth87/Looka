@@ -65,6 +65,7 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
     mode = "simulation",
     theme = "dark",
     onToggleTheme,
+    modeButton,
     onCancel,
     onStartLive,
     isCameraLoading = false,
@@ -193,6 +194,16 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                 onSelectDevice={onSelectDevice}
               />
             )}
+
+            {/*
+              Was a prop nobody rendered — `modeButton` (Mô phỏng/Live Camera
+              toggle) reached this component via GuidedCaptureScreen's
+              sharedProps but neither this view nor MobileCaptureView ever
+              placed it in the tree, so the feature existed in code with no
+              way to reach it from the UI. See FaceCaptureApp.tsx's own
+              `modeButton` JSX for what this renders.
+            */}
+            {modeButton}
 
             {/* Theme Toggle Button (Identical w-8 h-8 size) */}
             {onToggleTheme && (

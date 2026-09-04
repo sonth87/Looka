@@ -52,13 +52,17 @@ export interface UpdateCampaignInput {
   description?: string;
   expiresAt?: string | null;
   consentContent?: string;
+  captureAngles?: Record<string, unknown>[];
   captureMode?: CaptureTriggerMode;
   autoHoldMs?: number;
 }
 
+export type DesktopOs = 'mac' | 'win';
+
 export interface CreateDeviceInput {
   name: string;
   authApiEndpoint?: string;
+  os?: DesktopOs;
 }
 
 export interface CampaignStats {

@@ -28,6 +28,7 @@ export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
     countdownValue,
     theme = "dark",
     onToggleTheme,
+    modeButton,
     onCancel,
     onStartLive,
     isWorkflowStarted,
@@ -95,6 +96,14 @@ export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
               onSelectDevice={onSelectDevice}
             />
           )}
+
+          {/*
+            Same dead-prop bug as DesktopCaptureView had — `modeButton`
+            reached this component via GuidedCaptureScreen's sharedProps but
+            was never destructured or rendered, so the Mô phỏng/Live Camera
+            toggle was unreachable on narrow (<768px) viewports too.
+          */}
+          {modeButton}
 
           {onToggleTheme && (
             <button

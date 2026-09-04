@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import type { AttendanceResult, Person } from '@face/core';
 
 export interface ExportResult {
   success: boolean;
@@ -116,7 +117,22 @@ export interface DeviceAccessStatus {
 export interface FaceAPIBridge {
   getAppVersion: () => Promise<string>;
   getSystemStatus: () => Promise<SystemStatus>;
-  recordAttendance: (params: any) => Promise<any>;
+
+  /**
+   * Pillar B (recognition + attendance) wired for real — see
+   * apps/desktop/src/main/attendance.ts's own doc comment for why this is
+   * demo mode: `processAttendanceFrame` compares against a gallery that's
+   * always empty while the embedding model is still the mock one.
+   */
+  attendanceEnroll: (payload: { displayName: string }) => Promise<{
+    personId: string;
+    profileId: string;
+    profileStatus: string;
+    modelFamily: string;
+  }>;
+  attendanceListPersons: () => Promise<Person[]>;
+  attendanceProcessFrame: () => Promise<AttendanceResult>;
+  attendanceResetSession: () => Promise<boolean>;
 
   /**
    * Store a capture and queue it for upload.
@@ -260,7 +276,11 @@ export interface FaceAPIBridge {
 const faceAPI: FaceAPIBridge = {
   getAppVersion: () => ipcRenderer.invoke('app:getVersion'),
   getSystemStatus: () => ipcRenderer.invoke('app:getStatus'),
-  recordAttendance: (params: any) => ipcRenderer.invoke('attendance:record', params),
+
+  attendanceEnroll: (payload) => ipcRenderer.invoke('attendance:enroll', payload),
+  attendanceListPersons: () => ipcRenderer.invoke('attendance:listPersons'),
+  attendanceProcessFrame: () => ipcRenderer.invoke('attendance:processFrame'),
+  attendanceResetSession: () => ipcRenderer.invoke('attendance:resetSession'),
 
   queueCapture: (payload) => ipcRenderer.invoke('capture:queue', payload),
   approveSessionUpload: (payload) => ipcRenderer.invoke('session:approveUpload', payload),

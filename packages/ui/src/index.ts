@@ -58,6 +58,7 @@ export { LookaIcon } from './components/theme/LookaIcon.js';
 // Screens
 export { GuidedCaptureScreen } from './components/screens/GuidedCaptureScreen.js';
 export { KioskAttendanceScreen } from './components/screens/KioskAttendanceScreen.js';
+export { KioskAttendanceApp } from './components/screens/KioskAttendanceApp.js';
 export { FaceCaptureApp } from './components/screens/FaceCaptureApp.js';
 
 export * from './lib/CaptureSink.js';

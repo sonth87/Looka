@@ -54,7 +54,14 @@ export const CameraPreview: React.FC<CameraPreviewProps> = ({
 
     if (stream) {
       video.srcObject = stream;
-      video.play().catch(() => {});
+      // Was a silent catch — a play() rejection here means the stream is
+      // "live" at the JS API level but nothing ever actually decodes, which
+      // is indistinguishable from a working-but-black preview without this.
+      video.play().catch((err) =>
+        console.error(
+          `[CameraPreview] video.play() failed: name=${err?.name} message=${err?.message} readyState=${video.readyState} videoWidth=${video.videoWidth} videoHeight=${video.videoHeight}`
+        )
+      );
     } else {
       video.srcObject = null;
     }
