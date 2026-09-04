@@ -136,6 +136,39 @@ secondary display (§3.5) is view-only.
   `StepEvaluator`'s real capture gate — not just a cosmetic debug reading.
   Applies to the current single-camera 5-angle flow too, not only the
   multi-camera design.
+- **macOS kiosk: black camera preview, no error** — ✅ fixed 2026-09-04
+  (commits `04a475b`, `a40a0bb`, `34c6533`). Root cause: the packaged x64
+  app was completely unsigned (`codesign`: "not signed at all"), carried no
+  camera entitlement, and main never called
+  `systemPreferences.askForMediaAccess('camera')`, so macOS never showed the
+  TCC prompt and `getUserMedia` resolved with a stream that delivers no
+  frames ("Live Camera Ready", 30 FPS, 0 CV). Reproduced with an isolated
+  page in the signed dev Electron binary: gUM resolved at 1280x720,
+  `video.play()` never resolved, access status stayed `not-determined`.
+  Fix: ad-hoc signing (`mac.identity: "-"`, hardened runtime,
+  `apps/desktop/build/entitlements.mac.plist` with
+  `com.apple.security.device.camera`), Vietnamese
+  `NSCameraUsageDescription`, `ensureMacCameraAccess()` fired after
+  `createWindow()` (never awaited — a pending dialog must not hide the
+  kiosk window), every permission request logged to `main.log`, and
+  `startLiveMode` now starts the camera before MediaPipe init (20s timeout,
+  mock fallback). Also bundled sql.js wasm into the desktop build (was
+  fetched from `file:///wasm/` and aborted on every launch) and stopped
+  `prepackage` from wiping `release/`, which used to delete the other OS's
+  installer that `apps/api/.env` points at. **Verification caveat**: the
+  packaged build was launched via `open` on the Intel test Mac; TCC prompt
+  acceptance and live frames still need the operator's confirmation — check
+  `main.log` for `[camera] macOS media access status` /
+  `askForMediaAccess ... result` and the absence of
+  `[BrowserCameraService] getFrame(): video not ready`.
+- **24h fail-closed trap on activation** (§3.3): the CMS "API endpoint"
+  field at device registration is optional. When left empty,
+  `activation.json` carries no `authApiEndpoint`, `DeviceApiClient` reports
+  `unreachable` forever, and exactly 24h after first launch the kiosk shows
+  the full-screen "Thiết bị đã bị khoá" overlay with no recovery short of
+  re-activation. Either make the field mandatory in the CMS, or treat "no
+  endpoint configured" as "not participating" (fail open) in
+  `getDeviceAccessStatus()`. Not decided yet.
 - **AI Vision server integration protocol** (discussion doc §2.9): external
   dependency — needs the API/protocol docs from whichever team owns that
   system before client-side preprocessing can be designed.
