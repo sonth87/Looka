@@ -165,6 +165,15 @@ secondary display (§3.5) is view-only.
   with `open <app>` or from Finder. Diagnostics to check in `main.log`:
   `[camera] macOS media access status` / `askForMediaAccess ... result`
   and the absence of `[BrowserCameraService] getFrame(): video not ready`.
+- **Stills were mirrored** — ✅ fixed 2026-09-04. `BrowserCameraService`
+  defaulted `mirrorStills = true` to match the mirrored selfie-style preview,
+  so every saved FRONT photo was a mirror image (wrong for an ID photo).
+  **Product decision**: nothing is mirrored anywhere — stills are the raw
+  sensor orientation, and `CameraPreview`/`FaceOverlay`/`GestureOverlay`
+  default to unmirrored. The pose pipeline (`PoseEstimator`, yaw sign) and
+  guidance text were already defined in unmirrored image space, so they
+  needed no change and are now consistent with what the screen shows.
+  Multi-frame tiles and their snapshots were unmirrored from the start.
 - **24h fail-closed trap on activation** (§3.3): the CMS "API endpoint"
   field at device registration is optional. When left empty,
   `activation.json` carries no `authApiEndpoint`, `DeviceApiClient` reports
