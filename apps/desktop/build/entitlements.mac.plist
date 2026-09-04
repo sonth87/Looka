@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    Entitlements for the packaged macOS app.
+
+    com.apple.security.device.camera unlocks the TCC camera prompt path: on
+    macOS, getUserMedia() against an app that is unsigned (or ad-hoc signed
+    without this entitlement) and never triggers the camera permission
+    dialog resolves with a black video stream instead of throwing, which is
+    exactly the "black preview, no error" failure this kiosk hit. Chromium
+    only asks the OS for camera access — and the OS only shows the TCC
+    prompt — when the app is signed and carries this entitlement.
+
+    The cs.* entries are required because electron-builder signs this app
+    ad-hoc (identity: "-", see electron-builder.json) rather than with a
+    Developer ID certificate: Hardened Runtime's default library validation
+    rejects Electron's own pre-signed frameworks/helpers when the outer app
+    has a different (ad-hoc, Team-ID-less) signature, so validation must be
+    relaxed for the app to launch and JIT (V8) to run at all.
+  -->
+  <key>com.apple.security.device.camera</key>
+  <true/>
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+  <true/>
+</dict>
+</plist>

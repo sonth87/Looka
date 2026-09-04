@@ -420,7 +420,12 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
       // once one try/catch, so a browser that could not open sql.js never got as
       // far as starting the camera either.
       try {
-        const adapter = new SQLiteStorageAdapter();
+        // Relative, not '/wasm/' (the adapter's default): under file:// (the
+        // packaged desktop app) an absolute path resolves to file:///wasm/,
+        // which doesn't exist — './wasm/' resolves next to the loaded
+        // document (dist/index.html → dist/wasm/) and is equally correct for
+        // the web build, which is served from '/'.
+        const adapter = new SQLiteStorageAdapter({ wasmBaseUrl: './wasm/' });
         await adapter.initialize();
         repoRef.current = new SessionRepository(adapter);
       } catch (err) {
@@ -460,6 +465,15 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
 
         simEngine.on('capture-trigger', (data: { stepId: string; imagePath: string }) => {
           setLatestCapturedImage({ ...data });
+
+          // Mirrors liveEngine's identical handler below — without this,
+          // simulated captures only ever update the flash-preview state and
+          // never reach runSessionRef, so RunScopedCaptureSession.sessionId
+          // stays null for the whole run and the review screen's "Xác nhận"
+          // button fails with "no active session to approve" even though
+          // every step visibly completed.
+          const step = simEngine.currentSession?.steps.find((st) => st.stepId === data.stepId);
+          void storePhoto(data.stepId, data.imagePath, (step?.attempts ?? 0) + 1);
         });
 
         simEngine.on('completed', (completedSession: CaptureSession) => {
@@ -799,12 +813,70 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
       );
     }
 
+    // Preview first, CV second: the camera is started and rendered before the
+    // MediaPipe CV engine (GPU/WASM) is ever touched. Previously the CV and
+    // gesture engines were awaited before `camera.start()`, so a hung/slow
+    // WebGL or WASM init on a kiosk with a bad GPU meant the camera never
+    // started and the user saw a black preview with no error. Now
+    // getUserMedia is requested first so the preview appears as soon as it
+    // resolves, and the CV engine below is bounded by a hard timeout and can
+    // only ever fall back to the mock engine — it can no longer hide the
+    // camera. The frame loop (`processFrameLoop` in the effect keyed on
+    // `[mode]`) re-checks `livePipelineRef.current`/`cameraServiceRef.current`
+    // via requestAnimationFrame on every tick rather than once in an effect
+    // keyed on `stream`, so it needs no extra "CV ready" state: it naturally
+    // starts pushing frames the moment `livePipelineRef.current` is assigned
+    // below, whenever that happens relative to `setStream`.
+    try {
+      const camera = cameraServiceRef.current || new BrowserCameraService();
+      cameraServiceRef.current = camera;
+
+      const devs = await camera.enumerateDevices().catch(() => []);
+      setDevices(devs);
+      if (devs.length > 0) setSelectedDeviceId(devs[0].id);
+
+      const st = await camera.start();
+      setStream(st);
+      setIsCameraLoading(false);
+    } catch (err: any) {
+      console.warn('Live camera error:', err);
+      setStream(null);
+      setIsCameraLoading(false);
+
+      const errStr = String(err?.message || err || '');
+      if (errStr.includes('Permission') || errStr.includes('NotAllowedError')) {
+        setCameraError('Trình duyệt hoặc hệ thống đã từ chối quyền truy cập Camera. Vui lòng cho phép quyền Camera trên ô địa chỉ trình duyệt.');
+      } else if (errStr.includes('NotFound') || errStr.includes('DevicesNotFoundError')) {
+        setCameraError('Không tìm thấy thiết bị Camera nào trên máy tính/thiết bị này.');
+      } else {
+        setCameraError(`Không thể khởi động Camera: ${errStr || 'Vui lòng kiểm tra lại thiết bị camera.'}`);
+      }
+    }
+
+    // CV init runs after the camera is already showing, in its own try/catch
+    // isolated from the one above: a hung/slow/failing MediaPipe init must
+    // only log and fall back to mockEngineRef, never touch setCameraError or
+    // clear the stream the block above just set.
     try {
       if (!mediaPipeCvRef.current) {
         const mpCv = new MediaPipeCVEngine();
-        await mpCv.initialize().catch((e: any) => {
-          console.warn('MediaPipe initialization fallback to MockCVEngine:', e);
+        const CV_INIT_TIMEOUT_MS = 20000;
+        const initPromise = mpCv.initialize();
+        await Promise.race([
+          initPromise,
+          new Promise<void>((_, reject) =>
+            setTimeout(
+              () => reject(new Error(`MediaPipe init timed out after ${CV_INIT_TIMEOUT_MS}ms`)),
+              CV_INIT_TIMEOUT_MS
+            )
+          ),
+        ]).catch((e: any) => {
+          console.warn('[FaceCaptureApp] MediaPipe initialization fallback to MockCVEngine:', e);
         });
+        // If the timeout above won the race, `initialize()` is still running
+        // in the background; swallow whatever it eventually settles with so
+        // it doesn't surface as an unhandled promise rejection later.
+        initPromise.catch(() => {});
         if (mpCv.isInitialized) {
           mpCv.setSensitivity(sensitivity);
           mediaPipeCvRef.current = mpCv;
@@ -837,30 +909,8 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           }
         });
       }
-
-      const camera = cameraServiceRef.current || new BrowserCameraService();
-      cameraServiceRef.current = camera;
-
-      const devs = await camera.enumerateDevices().catch(() => []);
-      setDevices(devs);
-      if (devs.length > 0) setSelectedDeviceId(devs[0].id);
-
-      const st = await camera.start();
-      setStream(st);
-      setIsCameraLoading(false);
-    } catch (err: any) {
-      console.warn('Live camera error:', err);
-      setStream(null);
-      setIsCameraLoading(false);
-
-      const errStr = String(err?.message || err || '');
-      if (errStr.includes('Permission') || errStr.includes('NotAllowedError')) {
-        setCameraError('Trình duyệt hoặc hệ thống đã từ chối quyền truy cập Camera. Vui lòng cho phép quyền Camera trên ô địa chỉ trình duyệt.');
-      } else if (errStr.includes('NotFound') || errStr.includes('DevicesNotFoundError')) {
-        setCameraError('Không tìm thấy thiết bị Camera nào trên máy tính/thiết bị này.');
-      } else {
-        setCameraError(`Không thể khởi động Camera: ${errStr || 'Vui lòng kiểm tra lại thiết bị camera.'}`);
-      }
+    } catch (e: any) {
+      console.warn('[FaceCaptureApp] CV engine initialization failed, continuing with camera preview only:', e);
     }
   };
 
@@ -1038,8 +1088,12 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           if (e.data.size > 0) chunks.push(e.data);
         };
         recorder.start();
-      } catch (err) {
-        console.error('[FaceCaptureApp] video recording failed to start:', err);
+      } catch (err: any) {
+        // DOMException (e.g. from MediaRecorder/faceAPI) stringifies to
+        // "[object DOMException]" once console output is captured into the
+        // kiosk's main.log, so bake name/message into the string itself
+        // instead of relying on console's own object formatting.
+        console.error(`[FaceCaptureApp] video recording failed to start: ${err?.name}: ${err?.message}`);
       }
     })();
 
@@ -1142,8 +1196,10 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           };
           recorder.start();
           channels.push({ mediaStream, recorder, streamId: result.streamId, chunks });
-        } catch (err) {
-          console.error(`[FaceCaptureApp] multi-channel recording failed to start for ${deviceId}:`, err);
+        } catch (err: any) {
+          // Same DOMException-stringification fix as the single-stream
+          // recorder above — see the comment there.
+          console.error(`[FaceCaptureApp] multi-channel recording failed to start for ${deviceId}: ${err?.name}: ${err?.message}`);
         }
       }
     })();

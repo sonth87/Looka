@@ -11,7 +11,7 @@
     "package:mac": "pnpm prepackage && electron-builder --mac",
     "package:win": "pnpm prepackage && electron-builder --win",
     "test": "tsc -p tsconfig.electron.json && node --test dist/main/__tests__/*.test.js",
-    "prepackage": "rimraf dist release && pnpm fetch:assets && pnpm build",
+    "prepackage": "rimraf dist && pnpm fetch:assets && pnpm build",
     "package:win:dir": "pnpm prepackage && electron-builder --win --dir",
     "fetch:assets": "node ./scripts/fetch-assets.mjs",
     "start": "electron .",
