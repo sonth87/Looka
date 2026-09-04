@@ -136,6 +136,41 @@ function createWindow() {
 }
 
 /**
+ * macOS: resolve the camera permission without blocking the kiosk window.
+ *
+ * Root cause of the kiosk's black-camera-preview-with-no-error bug: on
+ * macOS, `getUserMedia()` called from an app that has never triggered the
+ * OS's TCC ("Privacy & Security") camera prompt resolves with a black
+ * video stream instead of throwing — Chromium does not surface a
+ * permission error, so there is nothing for the renderer to catch or
+ * display. Calling `askForMediaAccess('camera')` here — before the capture
+ * UI is actually used — forces that OS prompt to show (or reads back a
+ * status the operator already decided), so a real system dialog is what's
+ * seen instead of a silent black rectangle. This never blocks or fails
+ * startup: an error here just means the black-preview symptom can still
+ * occur, not that the kiosk shouldn't launch. Runs after the window exists
+ * and is never awaited, so a pending or missing TCC dialog can only delay
+ * camera frames, never the kiosk window.
+ */
+async function ensureMacCameraAccess(): Promise<void> {
+  if (process.platform === 'darwin') {
+    try {
+      const cameraAccessStatus = systemPreferences.getMediaAccessStatus('camera');
+      console.log(`[camera] macOS media access status: ${cameraAccessStatus}`);
+      if (cameraAccessStatus !== 'granted') {
+        const granted = await systemPreferences.askForMediaAccess('camera');
+        console.log(`[camera] macOS askForMediaAccess('camera') result: ${granted}`);
+        console.log(
+          `[camera] macOS media access status after prompt: ${systemPreferences.getMediaAccessStatus('camera')}`
+        );
+      }
+    } catch (err) {
+      console.error('[camera] failed to check/request macOS camera access:', err);
+    }
+  }
+}
+
+/**
  * Surface renderer failures in the main-process log.
  *
  * A blank window is the worst thing to debug because nothing reports it: the
@@ -699,35 +734,6 @@ app.whenReady().then(async () => {
   });
 
   /**
-   * macOS: proactively resolve the camera permission before any window opens.
-   *
-   * Root cause of the kiosk's black-camera-preview-with-no-error bug: on
-   * macOS, `getUserMedia()` called from an app that has never triggered the
-   * OS's TCC ("Privacy & Security") camera prompt resolves with a black
-   * video stream instead of throwing — Chromium does not surface a
-   * permission error, so there is nothing for the renderer to catch or
-   * display. Calling `askForMediaAccess('camera')` here — before the kiosk
-   * window (and therefore the capture UI) ever appears — forces that OS
-   * prompt to show (or reads back a status the operator already decided),
-   * so a real system dialog is what's seen instead of a silent black
-   * rectangle. This never blocks or fails startup: an error here just means
-   * the black-preview symptom can still occur, not that the kiosk shouldn't
-   * launch.
-   */
-  if (process.platform === 'darwin') {
-    try {
-      const cameraAccessStatus = systemPreferences.getMediaAccessStatus('camera');
-      console.log(`[camera] macOS media access status: ${cameraAccessStatus}`);
-      if (cameraAccessStatus !== 'granted') {
-        const granted = await systemPreferences.askForMediaAccess('camera');
-        console.log(`[camera] macOS askForMediaAccess('camera') result: ${granted}`);
-      }
-    } catch (err) {
-      console.error('[camera] failed to check/request macOS camera access:', err);
-    }
-  }
-
-  /**
    * Log every permission request the renderer triggers (camera/microphone via
    * getUserMedia chief among them) so a denial is visible in main.log rather
    * than silently failing inside the renderer. Electron's own default with no
@@ -741,6 +747,7 @@ app.whenReady().then(async () => {
   });
 
   createWindow();
+  void ensureMacCameraAccess();
 
   // Only opens something when a second display is actually connected — see
   // maybeOpenCbHelpWindow's own doc comment. Deferred one tick past
