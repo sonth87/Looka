@@ -21,7 +21,13 @@ export interface MultiFrameViewFrame {
   roleLabel: string;
   deviceLabel: string | null;
   stream: MediaStream | null;
-  status: "PENDING" | "CURRENT" | "COMPLETED" | "FAILED" | "MISSING";
+  /**
+   * 'UNASSIGNED': a live stream is showing (e.g. the CENTER/FRONT tile
+   * mirroring the main preview) but no camera device is actually mapped or
+   * connected to this role yet. Distinct from 'MISSING' (no stream at all) so
+   * the badge doesn't read as a broken camera when the video is clearly live.
+   */
+  status: "PENDING" | "CURRENT" | "COMPLETED" | "FAILED" | "MISSING" | "UNASSIGNED";
   imagePath?: string | null;
 }
 

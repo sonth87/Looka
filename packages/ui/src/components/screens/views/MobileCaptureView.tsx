@@ -159,7 +159,6 @@ export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                 landmarkSize={landmarkSize}
                 visible={overlayVisible}
                 opacity={overlayOpacity}
-                mirrored={true}
                 variant="capture"
                 stabilityProgress={stabilityProgress}
                 autoHoldMs={autoHoldMs}

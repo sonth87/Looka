@@ -6,6 +6,13 @@ export interface GestureOverlayProps {
   gestureState: GestureState | null;
   gestureProgress: number; // 0..1
   faceReady: boolean;
+  /**
+   * Whether the hand skeleton should be flipped to match a mirrored preview.
+   * Landmark coordinates come from the raw, unmirrored camera frame, so this
+   * must match whatever `mirrored` value the underlying `CameraPreview` is
+   * using. Default false, matching `CameraPreview`'s own default (product
+   * decision 2026-09-04: no mirroring anywhere).
+   */
   mirrored?: boolean;
   className?: string;
 }
@@ -45,7 +52,7 @@ export const GestureOverlay: React.FC<GestureOverlayProps> = ({
   gestureState,
   gestureProgress,
   faceReady,
-  mirrored = true,
+  mirrored = false,
   className,
 }) => {
   const [containerSize, setContainerSize] = React.useState<{ w: number; h: number }>({ w: 0, h: 0 });

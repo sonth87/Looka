@@ -3,6 +3,15 @@ import { cn } from '../../lib/utils.js';
 
 export interface CameraPreviewProps {
   stream: MediaStream | null;
+  /**
+   * Whether the preview is flipped horizontally. Default false: these are ID
+   * photos, and the operator-facing preview must show the subject as they
+   * truly appear — not mirror-image, selfie-style (product decision
+   * 2026-09-04). Pass true only for a selfie-style consumer that wants the
+   * mirror convention; if you do, keep any face-tracking overlay drawn on top
+   * of this preview (FaceOverlay, GestureOverlay, …) in sync by mirroring it
+   * too, or the overlay will sit off the face.
+   */
   mirrored?: boolean;
   aspectRatio?: '16/9' | '4/3' | '3/4' | '1/1' | 'auto';
   className?: string;
@@ -37,7 +46,7 @@ export interface CameraPreviewProps {
 
 export const CameraPreview: React.FC<CameraPreviewProps> = ({
   stream,
-  mirrored = true,
+  mirrored = false,
   aspectRatio = '16/9',
   className,
   videoClassName,

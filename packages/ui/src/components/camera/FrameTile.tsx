@@ -1,7 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import { cn } from '../../lib/utils.js';
 
-export type FrameTileStatus = 'PENDING' | 'CURRENT' | 'COMPLETED' | 'FAILED' | 'MISSING';
+export type FrameTileStatus = 'PENDING' | 'CURRENT' | 'COMPLETED' | 'FAILED' | 'MISSING' | 'UNASSIGNED';
 
 export interface FrameTileProps {
   /** The step's label — same value shown on the sequential path's step chips (its type, e.g. "LEFT"). */
@@ -22,6 +22,7 @@ const STATUS_LABEL_VI: Record<FrameTileStatus, string> = {
   COMPLETED: 'Đã chụp',
   FAILED: 'Thất bại',
   MISSING: 'Thiếu camera',
+  UNASSIGNED: 'Chưa gán vai trò',
 };
 
 /**
@@ -69,7 +70,7 @@ export const FrameTile: React.FC<FrameTileProps> = ({
       ? 'ring-blue-500'
       : status === 'FAILED'
       ? 'ring-rose-500'
-      : status === 'MISSING'
+      : status === 'MISSING' || status === 'UNASSIGNED'
       ? 'ring-amber-500'
       : 'ring-slate-700';
 
@@ -80,7 +81,7 @@ export const FrameTile: React.FC<FrameTileProps> = ({
       ? 'bg-blue-500/90 text-white'
       : status === 'FAILED'
       ? 'bg-rose-500/90 text-white'
-      : status === 'MISSING'
+      : status === 'MISSING' || status === 'UNASSIGNED'
       ? 'bg-amber-500/90 text-slate-950'
       : 'bg-slate-700/90 text-slate-200';
 

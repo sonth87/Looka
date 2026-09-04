@@ -25,15 +25,17 @@ export class BrowserCameraService implements CameraService {
   /** Throttles the getFrame() "video never became ready" diagnostic to once per ~2s instead of once per animation frame. */
   private lastNotReadyWarnAt = 0;
   /**
-   * Whether stills are written mirrored, matching a mirrored preview.
+   * Whether stills are written mirrored.
    *
-   * The preview is mirrored so people can position themselves as they would in
-   * a mirror, but drawImage copies the raw sensor frame — a CSS transform never
-   * reaches the pixels. Left alone, the photo therefore appears to flip the
-   * instant it is taken. This flag exists so the preview and the saved frame
-   * cannot drift apart: whatever the preview shows, the still matches.
+   * Stills default to the raw sensor orientation, unmirrored: these are ID
+   * photos, and they must be true-to-life — text on clothing reads correctly,
+   * hair parting and asymmetric features stay on the side they are really on.
+   * The preview is not mirrored either (product decision 2026-09-04), so there
+   * is no drift between what the operator sees and what gets saved to prevent.
+   * `setMirrorStills(true)` remains available for a selfie-style consumer that
+   * still wants the mirror convention.
    */
-  private mirrorStills = true;
+  private mirrorStills = false;
   /**
    * Software crop+scale, for cameras `getZoomCapability()` reports as having
    * no hardware zoom at all. Scale 1 = no zoom; centre defaults to the frame
@@ -357,11 +359,13 @@ export class BrowserCameraService implements CameraService {
   }
 
   /**
-   * Match saved stills to the preview orientation.
+   * Override the still's mirroring (default: unmirrored — see `mirrorStills`).
    *
-   * Pass false when the stored image must be the true, unmirrored view — text
-   * on a badge reads correctly and asymmetric features stay on the side they
-   * are really on, which matters if the photo is later compared against another
+   * Pass true only for a selfie-style consumer that wants the mirror
+   * convention on its saved image. ID-photo capture must never call this with
+   * true: the stored image needs to be the true, unmirrored view — text on a
+   * badge reads correctly and asymmetric features stay on the side they
+   * really are, which matters if the photo is later compared against another
    * source. Note that face embeddings are not mirror-invariant, so enrolment
    * and matching must agree on this.
    */

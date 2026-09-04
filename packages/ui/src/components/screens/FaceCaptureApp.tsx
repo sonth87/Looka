@@ -1599,13 +1599,14 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
             const isMissing = !!framePreflight?.missing.some((m) => m.stepId === frame.stepId);
             const deviceId = frame.role === 'CENTER' ? selectedDeviceId : cameraRoleMapping[frame.role];
             const deviceLabel = devices.find((d) => d.id === deviceId)?.label ?? null;
+            const frameStream = frame.role === 'CENTER' ? stream : frameStreams[frame.stepId] ?? null;
 
             return {
               stepId: frame.stepId,
               label: frame.label,
               roleLabel: CAMERA_ROLE_LABELS_VI[frame.role],
               deviceLabel,
-              stream: frame.role === 'CENTER' ? stream : frameStreams[frame.stepId] ?? null,
+              stream: frameStream,
               status: isCompleted
                 ? 'COMPLETED'
                 : isCurrent
@@ -1613,7 +1614,13 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
                 : sessionStep?.status === 'FAILED'
                 ? 'FAILED'
                 : isMissing
-                ? 'MISSING'
+                // A live stream with no mapped/connected device (today's CENTER
+                // case, which keeps showing the main preview's stream regardless
+                // of role mapping) reads as "not yet assigned", not "broken" —
+                // 'MISSING' is reserved for a tile with no stream to show at all.
+                ? frameStream
+                  ? 'UNASSIGNED'
+                  : 'MISSING'
                 : 'PENDING',
               imagePath: sessionStep?.capturedImagePath,
             };
