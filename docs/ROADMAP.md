@@ -155,12 +155,14 @@ secondary display (§3.5) is view-only.
   mock fallback). Also bundled sql.js wasm into the desktop build (was
   fetched from `file:///wasm/` and aborted on every launch) and stopped
   `prepackage` from wiping `release/`, which used to delete the other OS's
-  installer that `apps/api/.env` points at. **Verification caveat**: the
-  packaged build was launched via `open` on the Intel test Mac; TCC prompt
-  acceptance and live frames still need the operator's confirmation — check
-  `main.log` for `[camera] macOS media access status` /
-  `askForMediaAccess ... result` and the absence of
-  `[BrowserCameraService] getFrame(): video not ready`.
+  installer that `apps/api/.env` points at. **Verified 2026-09-04** on the
+  Intel test Mac: the rebuilt x64 app launched via `open` showed the macOS
+  camera prompt, the operator accepted it, and the live preview rendered
+  frames. Launching the binary directly from a shell does NOT reproduce
+  this (TCC attributes the request to the parent process), so always test
+  with `open <app>` or from Finder. Diagnostics to check in `main.log`:
+  `[camera] macOS media access status` / `askForMediaAccess ... result`
+  and the absence of `[BrowserCameraService] getFrame(): video not ready`.
 - **24h fail-closed trap on activation** (§3.3): the CMS "API endpoint"
   field at device registration is optional. When left empty,
   `activation.json` carries no `authApiEndpoint`, `DeviceApiClient` reports
