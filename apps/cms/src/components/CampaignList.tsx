@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 import { ApiError, Campaign, CampaignPurpose, createCampaign, listCampaigns } from '../api';
+import { CAPTURE_STEP_DEFS, StepType } from '../captureAngles';
+import { CaptureFramesEditor } from './CaptureFramesEditor';
 
 const PURPOSE_LABEL: Record<CampaignPurpose, string> = {
   STUDENT_CARD: 'Chụp thẻ SV',
@@ -59,6 +61,7 @@ export function CampaignList({ onOpenCampaign }: { onOpenCampaign: (id: string) 
               <th className="py-2.5 px-4">Mục đích</th>
               <th className="py-2.5 px-4">Hạn dùng</th>
               <th className="py-2.5 px-4">Consent v.</th>
+              <th className="py-2.5 px-4">Chế độ chụp</th>
               <th className="py-2.5 px-4" />
             </tr>
           </thead>
@@ -69,6 +72,13 @@ export function CampaignList({ onOpenCampaign }: { onOpenCampaign: (id: string) 
                 <td className="py-2.5 px-4 text-gray-500">{PURPOSE_LABEL[c.purpose]}</td>
                 <td className="py-2.5 px-4 text-gray-500">{formatExpiry(c)}</td>
                 <td className="py-2.5 px-4 text-gray-500">{c.consentVersion}</td>
+                <td className="py-2.5 px-4">
+                  {c.simultaneousCapture && (
+                    <span className="px-2 py-0.5 rounded-full bg-indigo-50 border border-indigo-200 text-indigo-700 text-xs font-medium">
+                      Đồng thời
+                    </span>
+                  )}
+                </td>
                 <td className="py-2.5 px-4 text-right">
                   <button onClick={() => onOpenCampaign(c.id)} className="text-blue-600 hover:text-blue-800 font-medium">
                     Xem →
@@ -88,12 +98,28 @@ function CreateCampaignForm({ onCreated }: { onCreated: () => void }) {
   const [description, setDescription] = useState('');
   const [purpose, setPurpose] = useState<CampaignPurpose>('STUDENT_CARD');
   const [expiresAt, setExpiresAt] = useState('');
+  const [enabledAngles, setEnabledAngles] = useState<Set<StepType>>(
+    () => new Set(Object.keys(CAPTURE_STEP_DEFS) as StepType[])
+  );
+  const [simultaneous, setSimultaneous] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
+  const toggleAngle = (type: StepType) => {
+    if (type === 'FRONT') return; // always on — see CaptureFramesEditor's own note below
+    setEnabledAngles((prev) => {
+      const next = new Set(prev);
+      if (next.has(type)) next.delete(type);
+      else next.add(type);
+      return next;
+    });
+  };
+
+  const tooFewFrames = enabledAngles.size < 3;
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim()) return;
+    if (!name.trim() || tooFewFrames) return;
     setSaving(true);
     setError(null);
     try {
@@ -102,6 +128,10 @@ function CreateCampaignForm({ onCreated }: { onCreated: () => void }) {
         description: description.trim() || undefined,
         purpose,
         expiresAt: expiresAt ? new Date(expiresAt).toISOString() : undefined,
+        captureAngles: (Object.keys(CAPTURE_STEP_DEFS) as StepType[])
+          .filter((type) => enabledAngles.has(type))
+          .map((type) => CAPTURE_STEP_DEFS[type]),
+        simultaneousCapture: simultaneous,
       });
       onCreated();
     } catch (err) {
@@ -155,10 +185,18 @@ function CreateCampaignForm({ onCreated }: { onCreated: () => void }) {
           />
         </div>
       </div>
+
+      <CaptureFramesEditor
+        enabled={enabledAngles}
+        onToggle={toggleAngle}
+        simultaneous={simultaneous}
+        onSimultaneousChange={setSimultaneous}
+      />
+
       {error && <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">{error}</div>}
       <button
         type="submit"
-        disabled={saving}
+        disabled={saving || tooFewFrames}
         className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-sm disabled:opacity-50"
       >
         {saving ? 'Đang tạo...' : 'Tạo campaign'}

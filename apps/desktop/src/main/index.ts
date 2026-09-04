@@ -43,7 +43,7 @@ import {
   findAndImportActivationFileIfPresent,
   getCameraRoleMapping,
   setCameraRoleMapping,
-  type CameraRoleMapping,
+  sanitizeCameraRoleMapping,
 } from './secrets.js';
 import { openCameraSetupWindow } from './cameraSetupWindow.js';
 import { getDeviceAccessStatus } from './deviceApi.js';
@@ -440,14 +440,18 @@ app.whenReady().then(async () => {
   ipcMain.handle('cbhelp:getState', () => getCbHelpState());
 
   /**
-   * Runtime camera role mapping (§2.1) — which physical camera plays
-   * CENTER/LEFT/RIGHT. Set from the camera setup screen
-   * (`Ctrl/Cmd+Shift+K`), read by the main kiosk window to know which
+   * Runtime camera role mapping (§2.1) — which physical camera plays each of
+   * `CAMERA_ROLES` (CENTER/LEFT/RIGHT/UP/DOWN). Set from the camera setup
+   * screen (`Ctrl/Cmd+Shift+K`), read by the main kiosk window to know which
    * `enumerateDevices()` id corresponds to which logical role.
    */
   ipcMain.handle('camera:getRoleMapping', () => getCameraRoleMapping());
   ipcMain.handle('camera:setRoleMapping', (_, mapping: unknown) => {
-    setCameraRoleMapping((mapping ?? {}) as CameraRoleMapping);
+    setCameraRoleMapping(sanitizeCameraRoleMapping(mapping));
+    return true;
+  });
+  ipcMain.handle('camera:openSetup', () => {
+    openCameraSetupWindow();
     return true;
   });
 

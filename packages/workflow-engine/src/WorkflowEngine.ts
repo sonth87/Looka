@@ -350,6 +350,53 @@ export class WorkflowEngine implements IWorkflowEngine {
     return true;
   }
 
+  /**
+   * Hands the engine a photo captured by another physical camera for
+   * `stepId` — the "simultaneous capture" flow, where one shutter press
+   * fires every frame's own camera at once and the UI routes each resulting
+   * image straight to its step, with no pose/quality gate (the subject looks
+   * straight ahead; the angle comes from which camera fired, not from
+   * posing). Marks the step COMPLETED through the same `updateStepStatus`
+   * bookkeeping a normal capture uses and emits the same `capture-trigger`
+   * payload, so `packages/ui`'s existing `storePhoto` handler and the
+   * review/retake UI need no special case for where the photo came from.
+   *
+   * Returns false — and changes nothing — if there is no active session,
+   * `stepId` isn't part of the current workflow, or that step is already
+   * COMPLETED. Never throws.
+   */
+  public recordExternalCapture(stepId: string, imagePath: string): boolean {
+    if (
+      !this.activeWorkflow ||
+      !this._currentSession ||
+      this._currentSession.status !== 'RUNNING'
+    ) {
+      return false;
+    }
+
+    const stepIdx = this.activeWorkflow.steps.findIndex((s) => s.id === stepId);
+    if (stepIdx === -1) return false;
+
+    const stepResult = this._currentSession.steps.find((s) => s.stepId === stepId);
+    if (!stepResult || stepResult.status === 'COMPLETED') return false;
+
+    // Counted before the bookkeeping below, the same way a retake counts its
+    // replacement shot: this call *is* the attempt.
+    stepResult.attempts++;
+    this.updateStepStatus(stepId, 'COMPLETED', imagePath);
+
+    this.emit('capture-trigger', { stepId, imagePath });
+
+    // Only the step ordered capture is actually waiting on moves the
+    // cursor; a future step just sits COMPLETED until advanceToNextStep's
+    // already-completed skip carries the current index past it later.
+    if (stepIdx === this.currentStepIdx) {
+      void this.advanceToNextStep();
+    }
+
+    return true;
+  }
+
   public async skipStep(): Promise<void> {
     if (!this._currentSession || !this.activeWorkflow) return;
     const step = this.activeWorkflow.steps[this.currentStepIdx];
@@ -385,9 +432,23 @@ export class WorkflowEngine implements IWorkflowEngine {
 
     // A retake re-entered a step the workflow had already passed, so ordered
     // capture picks up at the step it interrupted, not after the retaken one.
-    this.currentStepIdx =
-      this.retakeReturnIdx !== null ? this.retakeReturnIdx : this.currentStepIdx + 1;
+    let nextIdx = this.retakeReturnIdx !== null ? this.retakeReturnIdx : this.currentStepIdx + 1;
     this.retakeReturnIdx = null;
+
+    // recordExternalCapture can mark a step COMPLETED out of order (one
+    // shutter press feeding every physical camera at once), so ordered
+    // capture must skip past whatever is already done instead of re-asking
+    // for a photo it already has.
+    const steps = this.activeWorkflow.steps;
+    const session = this._currentSession;
+    while (
+      nextIdx < steps.length &&
+      session.steps.find((s) => s.stepId === steps[nextIdx].id)?.status === 'COMPLETED'
+    ) {
+      nextIdx++;
+    }
+    this.currentStepIdx = nextIdx;
+
     this.stepStartTime = Date.now();
     this.stabilityTracker.reset();
 

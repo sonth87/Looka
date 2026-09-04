@@ -10,8 +10,34 @@ import {
 } from "@face/core";
 import { StepItem } from "../../workflow/StepProgress.js";
 import { RectBounds } from "../../face/FlyingThumbnail.js";
+import { FramePreflight } from "../../../lib/multiFrame.js";
 
 export type CameraScale = "compact" | "standard" | "large";
+
+/** One tile's worth of data for the multi-frame simultaneous capture grid. */
+export interface MultiFrameViewFrame {
+  stepId: string;
+  label: string;
+  roleLabel: string;
+  deviceLabel: string | null;
+  stream: MediaStream | null;
+  status: "PENDING" | "CURRENT" | "COMPLETED" | "FAILED" | "MISSING";
+  imagePath?: string | null;
+}
+
+/**
+ * Multi-frame simultaneous capture (§ desktop kiosk multi-camera capture) —
+ * present only while the campaign's `simultaneousCapture` flag is on AND the
+ * kiosk is in live mode; `undefined` otherwise, which keeps the sequential
+ * single-camera path byte-for-byte unchanged in both views.
+ */
+export interface MultiFrameViewProps {
+  frames: MultiFrameViewFrame[];
+  /** Non-null once a preflight has run; `!blocked.ok` means the session must not start. */
+  blocked: FramePreflight | null;
+  onOpenCameraSetup: () => void;
+  onRecheck: () => void;
+}
 
 export interface SharedCaptureViewProps {
   stream: MediaStream | null;
@@ -83,4 +109,6 @@ export interface SharedCaptureViewProps {
   handleAllowedGesturesChange: (gestures: GestureType[]) => void;
   activeSensitivity: CaptureSensitivity;
   handleSensitivityChange: (sens: CaptureSensitivity) => void;
+  /** See MultiFrameViewProps. Absent (undefined) on the sequential single-camera path. */
+  multiFrame?: MultiFrameViewProps;
 }

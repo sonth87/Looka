@@ -92,6 +92,19 @@ describeDb('device management persistence', () => {
     expect(third.consentVersion).toBe(2);
   });
 
+  test('simultaneousCapture defaults to false and round-trips through create/update', async () => {
+    const campaign = await campaignService.createCampaign({ name: 'Simultaneous default' });
+    expect(campaign.simultaneousCapture).toBe(false);
+
+    const updated = await campaignService.updateCampaign(campaign.id, {
+      simultaneousCapture: true,
+    });
+    expect(updated.simultaneousCapture).toBe(true);
+
+    const reloaded = await campaignService.findCampaignOrFail(campaign.id);
+    expect(reloaded.simultaneousCapture).toBe(true);
+  });
+
   test('setting expiresAt to null on an expiring campaign makes it permanent again', async () => {
     const campaign = await campaignService.createCampaign({
       name: 'Renewable',

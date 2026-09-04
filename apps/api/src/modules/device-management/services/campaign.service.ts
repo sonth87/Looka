@@ -1,12 +1,13 @@
 import { toDao } from '@app/common/helpers';
 import { CustomException, ERROR_CODE } from '@app/common/errors';
 import { CommonService } from '@app/modules/shared/common/common.service';
-import { HttpStatus, Injectable } from '@nestjs/common';
+import { BadRequestException, HttpStatus, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { CampaignDao } from '../dao';
 import { CreateCampaignDto, UpdateCampaignDto } from '../dto';
 import { Campaign, CampaignPurpose } from '../entities/campaign.entity';
+import { validateCaptureAngles } from '../validation/capture-angles.validator';
 
 @Injectable()
 export class CampaignService extends CommonService<Campaign> {
@@ -18,6 +19,12 @@ export class CampaignService extends CommonService<Campaign> {
   }
 
   async createCampaign(dto: CreateCampaignDto): Promise<CampaignDao> {
+    const simultaneousCapture = dto.simultaneousCapture ?? false;
+    const captureAnglesCheck = validateCaptureAngles(dto.captureAngles, simultaneousCapture);
+    if (!captureAnglesCheck.ok) {
+      throw new BadRequestException(captureAnglesCheck.reason);
+    }
+
     const campaign = await this.create({
       name: dto.name,
       description: dto.description,
@@ -31,6 +38,7 @@ export class CampaignService extends CommonService<Campaign> {
       captureAngles: (dto.captureAngles as unknown as Campaign['captureAngles']) ?? null,
       captureMode: dto.captureMode ?? null,
       autoHoldMs: dto.autoHoldMs ?? null,
+      simultaneousCapture,
     });
 
     return toDao(CampaignDao, campaign);
@@ -67,6 +75,22 @@ export class CampaignService extends CommonService<Campaign> {
   async updateCampaign(id: string, dto: UpdateCampaignDto): Promise<CampaignDao> {
     const campaign = await this.findCampaignEntityOrFail(id);
 
+    // Validate the *merged* state - a new captureAngles against the existing
+    // flag, the existing angles against a newly-flipped flag, or both new -
+    // so toggling simultaneousCapture on a campaign whose already-saved
+    // angles collide is rejected too, not just a request that changes both
+    // fields at once.
+    const mergedSimultaneousCapture = dto.simultaneousCapture ?? campaign.simultaneousCapture;
+    const mergedCaptureAngles =
+      dto.captureAngles !== undefined ? dto.captureAngles : campaign.captureAngles;
+    const captureAnglesCheck = validateCaptureAngles(
+      mergedCaptureAngles,
+      mergedSimultaneousCapture,
+    );
+    if (!captureAnglesCheck.ok) {
+      throw new BadRequestException(captureAnglesCheck.reason);
+    }
+
     if (dto.name !== undefined) campaign.name = dto.name;
     if (dto.description !== undefined) campaign.description = dto.description;
     if (dto.expiresAt !== undefined) {
@@ -77,6 +101,9 @@ export class CampaignService extends CommonService<Campaign> {
     }
     if (dto.captureMode !== undefined) campaign.captureMode = dto.captureMode;
     if (dto.autoHoldMs !== undefined) campaign.autoHoldMs = dto.autoHoldMs;
+    if (dto.simultaneousCapture !== undefined) {
+      campaign.simultaneousCapture = dto.simultaneousCapture;
+    }
 
     // Bump only on an actual change — a no-op PATCH (or one that only
     // touches other fields) must not invalidate every device's already-shown

@@ -15,7 +15,7 @@ import { cn } from "../../lib/utils.js";
 import { LiquidGlassCard } from "../theme/LiquidGlassCard.js";
 import { DesktopCaptureView } from "./views/DesktopCaptureView.js";
 import { MobileCaptureView } from "./views/MobileCaptureView.js";
-import { SharedCaptureViewProps } from "./views/types.js";
+import { SharedCaptureViewProps, MultiFrameViewProps } from "./views/types.js";
 import type { CameraScale } from "./views/types.js";
 
 export type { CameraScale };
@@ -62,6 +62,8 @@ export interface GuidedCaptureScreenProps {
   onCaptureModeChange?: (mode: CaptureTriggerMode) => void;
   onAutoHoldMsChange?: (ms: number) => void;
   latestCapturedImage?: { stepId: string; imagePath: string } | null;
+  /** See MultiFrameViewProps. Absent (undefined) on the sequential single-camera path. */
+  multiFrame?: MultiFrameViewProps;
 }
 
 export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (
@@ -105,6 +107,7 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (
     onCaptureModeChange: externalOnCaptureModeChange,
     onAutoHoldMsChange: externalOnAutoHoldMsChange,
     latestCapturedImage,
+    multiFrame,
   } = props;
 
   const viewportRef = React.useRef<HTMLDivElement>(null);
@@ -456,6 +459,7 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (
     handleAllowedGesturesChange,
     activeSensitivity,
     handleSensitivityChange,
+    multiFrame,
   };
 
   if (isMobile) {

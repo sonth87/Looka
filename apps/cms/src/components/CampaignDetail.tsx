@@ -10,75 +10,9 @@ import {
   registerDevice,
   updateCampaign,
 } from '../api';
+import { CAPTURE_STEP_DEFS, StepType, enabledAnglesFromCampaign } from '../captureAngles';
+import { CaptureFramesEditor } from './CaptureFramesEditor';
 import { StatsPanel } from './StatsPanel';
-
-type StepType = 'FRONT' | 'LEFT' | 'RIGHT' | 'UP' | 'DOWN';
-
-/**
- * Simple toggle only — matches the "chỉ bật/tắt trong 5 góc có sẵn" option
- * from docs/plans/multi-camera-device-management-discussion.md §3.6 open
- * question #13, not the free-form editor its other option describes. Pose
- * targets/instructions here are a deliberate copy of `defaultWorkflow` in
- * packages/ui/src/components/screens/FaceCaptureApp.tsx — the app already
- * falls back to that exact workflow when a campaign sets no `captureAngles`,
- * so a campaign that enables all 5 here produces the same steps whether or
- * not this form ever touched it.
- */
-const CAPTURE_STEP_DEFS: Record<StepType, Record<string, unknown>> = {
-  FRONT: {
-    id: 'step-front',
-    type: 'FRONT',
-    instruction: 'Nhìn thẳng vào camera',
-    pose: { yaw: { target: 0, tolerance: 12 }, pitch: { target: 0, tolerance: 12 }, roll: { target: 0, tolerance: 12 } },
-    postureCheck: false,
-    capture: { enabled: true },
-  },
-  LEFT: {
-    id: 'step-left',
-    type: 'LEFT',
-    instruction: 'Quay mặt sang trái (15° - 30°)',
-    pose: { yaw: { target: -22.5, tolerance: 7.5 } },
-    postureCheck: false,
-    capture: { enabled: true },
-  },
-  RIGHT: {
-    id: 'step-right',
-    type: 'RIGHT',
-    instruction: 'Quay mặt sang phải (15° - 30°)',
-    pose: { yaw: { target: 22.5, tolerance: 7.5 } },
-    postureCheck: false,
-    capture: { enabled: true },
-  },
-  UP: {
-    id: 'step-up',
-    type: 'UP',
-    instruction: 'Ngẩng đầu lên (15° - 35°)',
-    pose: { pitch: { target: 25, tolerance: 10 } },
-    capture: { enabled: true },
-  },
-  DOWN: {
-    id: 'step-down',
-    type: 'DOWN',
-    instruction: 'Cúi đầu xuống (15° - 35°)',
-    pose: { pitch: { target: -25, tolerance: 10 } },
-    capture: { enabled: true },
-  },
-};
-
-const STEP_LABELS: Record<StepType, string> = {
-  FRONT: 'FRONT — nhìn thẳng',
-  LEFT: 'LEFT — quay trái',
-  RIGHT: 'RIGHT — quay phải',
-  UP: 'UP — ngẩng lên',
-  DOWN: 'DOWN — cúi xuống',
-};
-
-/** Every campaign's declared angles is either empty (app default = all 5) or a subset of the 5 fixed types above — CUSTOM angles aren't offered by this simple toggle editor. */
-function enabledAnglesFromCampaign(campaign: Campaign): Set<StepType> {
-  const angles = campaign.captureAngles;
-  if (!angles || angles.length === 0) return new Set(Object.keys(CAPTURE_STEP_DEFS) as StepType[]);
-  return new Set(angles.map((a) => a.type as StepType).filter((t) => t in CAPTURE_STEP_DEFS));
-}
 
 /** Triggers a real browser save — `<a download>` on an object URL, revoked right after. */
 function saveBlob(blob: Blob, filename: string) {
@@ -116,7 +50,14 @@ export function CampaignDetail({ campaignId, onBack }: { campaignId: string; onB
       <button onClick={onBack} className="text-gray-500 hover:text-gray-700 mb-4 text-sm">
         ← Danh sách campaign
       </button>
-      <h1 className="text-2xl font-bold mb-6 text-gray-900">{campaign.name}</h1>
+      <div className="flex items-center gap-2 mb-6">
+        <h1 className="text-2xl font-bold text-gray-900">{campaign.name}</h1>
+        {campaign.simultaneousCapture && (
+          <span className="px-2 py-0.5 rounded-full bg-indigo-50 border border-indigo-200 text-indigo-700 text-xs font-medium">
+            Đồng thời
+          </span>
+        )}
+      </div>
 
       <div className="mb-6">
         <StatsPanel campaignId={campaignId} />
@@ -135,12 +76,13 @@ function CampaignSettingsForm({ campaign, onSaved }: { campaign: Campaign; onSav
   const [consentContent, setConsentContent] = useState(campaign.consentContent ?? '');
   const [captureMode, setCaptureMode] = useState<CaptureTriggerMode | ''>(campaign.captureMode ?? '');
   const [enabledAngles, setEnabledAngles] = useState<Set<StepType>>(() => enabledAnglesFromCampaign(campaign));
+  const [simultaneous, setSimultaneous] = useState(campaign.simultaneousCapture ?? false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
   const toggleAngle = (type: StepType) => {
-    if (type === 'FRONT') return; // always on — see the checkbox's own note below
+    if (type === 'FRONT') return; // always on — see CaptureFramesEditor's own note below
     setEnabledAngles((prev) => {
       const next = new Set(prev);
       if (next.has(type)) next.delete(type);
@@ -149,8 +91,11 @@ function CampaignSettingsForm({ campaign, onSaved }: { campaign: Campaign; onSav
     });
   };
 
+  const tooFewFrames = enabledAngles.size < 3;
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (tooFewFrames) return;
     setSaving(true);
     setError(null);
     setSaved(false);
@@ -162,6 +107,7 @@ function CampaignSettingsForm({ campaign, onSaved }: { campaign: Campaign; onSav
           .filter((type) => enabledAngles.has(type))
           .map((type) => CAPTURE_STEP_DEFS[type]),
         captureMode: captureMode || undefined,
+        simultaneousCapture: simultaneous,
       });
       setSaved(true);
       onSaved();
@@ -213,32 +159,18 @@ function CampaignSettingsForm({ campaign, onSaved }: { campaign: Campaign; onSav
         </select>
       </div>
 
-      <div>
-        <label className="block text-sm text-gray-500 mb-1">Góc chụp (FRONT luôn bắt buộc — ảnh chính dùng để in)</label>
-        <div className="flex flex-wrap gap-3">
-          {(Object.keys(CAPTURE_STEP_DEFS) as StepType[]).map((type) => (
-            <label
-              key={type}
-              className={`flex items-center gap-1.5 text-sm ${type === 'FRONT' ? 'text-gray-400' : 'text-gray-700'}`}
-            >
-              <input
-                type="checkbox"
-                checked={enabledAngles.has(type)}
-                disabled={type === 'FRONT'}
-                onChange={() => toggleAngle(type)}
-                className="rounded border-gray-300"
-              />
-              {STEP_LABELS[type]}
-            </label>
-          ))}
-        </div>
-      </div>
+      <CaptureFramesEditor
+        enabled={enabledAngles}
+        onToggle={toggleAngle}
+        simultaneous={simultaneous}
+        onSimultaneousChange={setSimultaneous}
+      />
 
       {error && <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">{error}</div>}
       <div className="flex items-center gap-3">
         <button
           type="submit"
-          disabled={saving}
+          disabled={saving || tooFewFrames}
           className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold text-sm disabled:opacity-50"
         >
           {saving ? 'Đang lưu...' : 'Lưu'}

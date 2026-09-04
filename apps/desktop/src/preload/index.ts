@@ -102,6 +102,8 @@ export interface CampaignConfig {
   captureAngles: unknown[] | null;
   captureMode: 'AUTO' | 'MANUAL' | 'OFF' | null;
   autoHoldMs: number | null;
+  /** Whether this campaign expects every frame captured with every mapped camera at once, rather than one at a time. */
+  simultaneousCapture: boolean;
 }
 
 /**
@@ -248,6 +250,15 @@ export interface FaceAPIBridge {
   setCameraRoleMapping: (mapping: CameraRoleMapping) => Promise<boolean>;
 
   /**
+   * Opens the CB-Help camera setup window on demand — the same window
+   * `Ctrl/Cmd+Shift+K` opens. Used by the capture UI when a
+   * simultaneous-capture campaign (`CampaignConfig.simultaneousCapture`) has
+   * frames without a mapped camera, so an operator can assign one without
+   * knowing the shortcut.
+   */
+  openCameraSetup: () => Promise<boolean>;
+
+  /**
    * Reports a stats-worthy moment (§3.4) — queued locally and pushed to the
    * admin portal on its own schedule. Never rejects; a failed/impossible
    * report must not interrupt the capture flow that triggered it.
@@ -309,6 +320,7 @@ const faceAPI: FaceAPIBridge = {
 
   getCameraRoleMapping: () => ipcRenderer.invoke('camera:getRoleMapping'),
   setCameraRoleMapping: (mapping) => ipcRenderer.invoke('camera:setRoleMapping', mapping),
+  openCameraSetup: () => ipcRenderer.invoke('camera:openSetup'),
 
   recordStatsEvent: (payload) => ipcRenderer.invoke('stats:recordEvent', payload),
   setFileServiceCredentials: (payload) => ipcRenderer.invoke('secrets:setFileService', payload),

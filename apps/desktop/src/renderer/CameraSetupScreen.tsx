@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import { CAMERA_ROLES, type CameraRole } from '@face/core';
 
-type CameraRole = 'CENTER' | 'LEFT' | 'RIGHT';
 type CameraRoleMapping = Partial<Record<CameraRole, string>>;
 
 interface DeviceEntry {
@@ -8,11 +8,13 @@ interface DeviceEntry {
   label: string;
 }
 
-const ROLES: CameraRole[] = ['CENTER', 'LEFT', 'RIGHT'];
+const ROLES: CameraRole[] = [...CAMERA_ROLES];
 const ROLE_LABEL: Record<CameraRole, string> = {
   CENTER: 'Giữa (bắt buộc)',
   LEFT: 'Trái',
   RIGHT: 'Phải',
+  UP: 'Trên',
+  DOWN: 'Dưới',
 };
 
 /**
@@ -118,7 +120,10 @@ export default function CameraSetupScreen() {
       <header className="mb-6">
         <h1 className="text-2xl font-bold">Gán vai trò camera</h1>
         <p className="text-slate-400 mt-1">
-          Chọn camera nào là Giữa/Trái/Phải bằng cách xem preview trực tiếp bên dưới.
+          Chọn camera nào là Giữa/Trái/Phải/Trên/Dưới bằng cách xem preview trực tiếp bên dưới.
+        </p>
+        <p className="text-slate-500 mt-1 text-sm">
+          Chiến dịch chụp đồng thời cần mỗi khung hình một camera riêng.
         </p>
       </header>
 
