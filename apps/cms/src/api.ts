@@ -23,6 +23,7 @@ export interface Campaign {
   captureMode?: CaptureTriggerMode | null;
   autoHoldMs?: number | null;
   simultaneousCapture: boolean;
+  recordVideo: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -48,6 +49,7 @@ export interface CreateCampaignInput {
   captureMode?: CaptureTriggerMode;
   autoHoldMs?: number;
   simultaneousCapture?: boolean;
+  recordVideo?: boolean;
 }
 
 export interface UpdateCampaignInput {
@@ -59,6 +61,7 @@ export interface UpdateCampaignInput {
   captureMode?: CaptureTriggerMode;
   autoHoldMs?: number;
   simultaneousCapture?: boolean;
+  recordVideo?: boolean;
 }
 
 export type DesktopOs = 'mac' | 'win';

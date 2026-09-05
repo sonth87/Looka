@@ -10,8 +10,11 @@ export interface GestureOverlayProps {
    * Whether the hand skeleton should be flipped to match a mirrored preview.
    * Landmark coordinates come from the raw, unmirrored camera frame, so this
    * must match whatever `mirrored` value the underlying `CameraPreview` is
-   * using. Default false, matching `CameraPreview`'s own default (product
-   * decision 2026-09-04: no mirroring anywhere).
+   * using. Default true: this overlay only ever appears over the capture
+   * views' preview, and product decision 2026-09-05 restored mirroring there
+   * so raising a hand appears on the side of the screen it visually raised
+   * on, like a mirror (see CameraPreview's doc comment for the full story;
+   * the saved still stays unmirrored regardless).
    */
   mirrored?: boolean;
   className?: string;
@@ -52,7 +55,7 @@ export const GestureOverlay: React.FC<GestureOverlayProps> = ({
   gestureState,
   gestureProgress,
   faceReady,
-  mirrored = false,
+  mirrored = true,
   className,
 }) => {
   const [containerSize, setContainerSize] = React.useState<{ w: number; h: number }>({ w: 0, h: 0 });

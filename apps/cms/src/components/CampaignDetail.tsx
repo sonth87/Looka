@@ -57,6 +57,11 @@ export function CampaignDetail({ campaignId, onBack }: { campaignId: string; onB
             Đồng thời
           </span>
         )}
+        {campaign.recordVideo && (
+          <span className="px-2 py-0.5 rounded-full bg-rose-50 border border-rose-200 text-rose-700 text-xs font-medium">
+            Quay video
+          </span>
+        )}
       </div>
 
       <div className="mb-6">
@@ -77,6 +82,7 @@ function CampaignSettingsForm({ campaign, onSaved }: { campaign: Campaign; onSav
   const [captureMode, setCaptureMode] = useState<CaptureTriggerMode | ''>(campaign.captureMode ?? '');
   const [enabledAngles, setEnabledAngles] = useState<Set<StepType>>(() => enabledAnglesFromCampaign(campaign));
   const [simultaneous, setSimultaneous] = useState(campaign.simultaneousCapture ?? false);
+  const [recordVideo, setRecordVideo] = useState(campaign.recordVideo ?? false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
@@ -91,7 +97,7 @@ function CampaignSettingsForm({ campaign, onSaved }: { campaign: Campaign; onSav
     });
   };
 
-  const tooFewFrames = enabledAngles.size < 3;
+  const tooFewFrames = enabledAngles.size < 2;
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -108,6 +114,7 @@ function CampaignSettingsForm({ campaign, onSaved }: { campaign: Campaign; onSav
           .map((type) => CAPTURE_STEP_DEFS[type]),
         captureMode: captureMode || undefined,
         simultaneousCapture: simultaneous,
+        recordVideo,
       });
       setSaved(true);
       onSaved();
@@ -148,14 +155,24 @@ function CampaignSettingsForm({ campaign, onSaved }: { campaign: Campaign; onSav
 
       <div>
         <label className="block text-sm text-gray-500 mb-1">Chế độ chụp</label>
+        {/*
+          Labels below match CaptureTriggerEvaluator.evaluate exactly — the
+          previous copy here called MANUAL "bấm nút chụp" (shutter-button),
+          which is actually what OFF does; MANUAL is the held hand-gesture
+          trigger. That mismatch is the root cause behind the 2026-09-05 kiosk
+          bug (a campaign set to OFF showed no shutter button at all): an
+          admin picking a mode by this label got a different behavior than
+          the name promised. See docs/ROADMAP.md §3's "naming trap" entry.
+        */}
         <select
           value={captureMode}
           onChange={(e) => setCaptureMode(e.target.value as CaptureTriggerMode | '')}
           className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
         >
-          <option value="">Mặc định của app (MANUAL)</option>
-          <option value="MANUAL">MANUAL — bấm nút chụp</option>
-          <option value="AUTO">AUTO — tự chụp khi giữ đúng tư thế</option>
+          <option value="">Mặc định của app (theo cấu hình từng máy)</option>
+          <option value="AUTO">Tự động (giữ đúng tư thế)</option>
+          <option value="MANUAL">Cử chỉ tay (giơ tay để chụp)</option>
+          <option value="OFF">Bấm nút chụp (thủ công)</option>
         </select>
       </div>
 
@@ -165,6 +182,21 @@ function CampaignSettingsForm({ campaign, onSaved }: { campaign: Campaign; onSav
         simultaneous={simultaneous}
         onSimultaneousChange={setSimultaneous}
       />
+
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={recordVideo}
+          onChange={(e) => setRecordVideo(e.target.checked)}
+          className="rounded border-gray-300 mt-0.5"
+        />
+        <span>
+          <span className="block font-medium text-gray-700">Quay video trong lúc chụp</span>
+          <span className="block text-xs text-gray-500">
+            Ghi lại video local trên kiosk trong suốt phiên chụp (không upload lên máy chủ).
+          </span>
+        </span>
+      </label>
 
       {error && <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">{error}</div>}
       <div className="flex items-center gap-3">

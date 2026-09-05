@@ -20,6 +20,16 @@ export interface OverlayConfigPanelProps {
   onCaptureModeChange?: (mode: CaptureTriggerMode) => void;
   autoHoldMs?: number; // milliseconds
   onAutoHoldMsChange?: (ms: number) => void;
+  /**
+   * True while `captureMode` is dictated by the campaign rather than local
+   * settings (mirrors FaceCaptureApp's `effectiveTriggerConfig.fromCampaign`
+   * — see that component's own doc comment). Shows a "Theo cấu hình
+   * campaign" hint and disables the mode picker below instead of letting a
+   * local pick silently desync from what the engine was actually told.
+   * Callers that don't track a campaign (e.g. KioskAttendanceScreen today)
+   * simply never pass this, so the panel behaves exactly as before.
+   */
+  captureModeFromCampaign?: boolean;
   allowedGestures?: GestureType[];
   onAllowedGesturesChange?: (gestures: GestureType[]) => void;
   // Sensitivity / Strictness
@@ -63,6 +73,7 @@ export const OverlayConfigPanel: React.FC<OverlayConfigPanelProps> = ({
   onCaptureModeChange,
   autoHoldMs = 2000,
   onAutoHoldMsChange,
+  captureModeFromCampaign = false,
   allowedGestures = ["VICTORY", "THUMBS_UP", "OPEN_PALM"],
   onAllowedGesturesChange,
   sensitivity = "MEDIUM",
@@ -197,19 +208,34 @@ export const OverlayConfigPanel: React.FC<OverlayConfigPanelProps> = ({
         {/* ─── Chế độ chụp ─── */}
         {onCaptureModeChange && (
           <div className={cn("p-3 rounded-xl border space-y-2.5", liquidCardStyle)}>
-            <div className="flex items-center gap-1.5">
-              <Camera className="w-4 h-4 text-violet-400" />
-              <span className={labelClass}>Chế độ chụp</span>
+            <div className="flex items-center justify-between gap-1.5">
+              <div className="flex items-center gap-1.5">
+                <Camera className="w-4 h-4 text-violet-400" />
+                <span className={labelClass}>Chế độ chụp</span>
+              </div>
+              {captureModeFromCampaign && (
+                <span className="text-[9px] font-bold text-violet-400 whitespace-nowrap">
+                  Theo cấu hình campaign
+                </span>
+              )}
             </div>
 
-            {/* 3 Toggle Buttons */}
+            {/*
+              3 Toggle Buttons — disabled while the campaign dictates the
+              mode (captureModeFromCampaign), not just hinted: see
+              FaceCaptureApp's effectiveTriggerConfig doc comment for why a
+              local override here must not be offered at all.
+            */}
             <div className="flex gap-1.5">
               {(["AUTO", "MANUAL", "OFF"] as CaptureTriggerMode[]).map((m) => (
                 <button
                   key={m}
                   onClick={() => onCaptureModeChange(m)}
+                  disabled={captureModeFromCampaign}
+                  title={captureModeFromCampaign ? "Theo cấu hình campaign" : undefined}
                   className={cn(
-                    "flex-1 py-2 px-2 rounded-lg border text-xs font-bold transition-all cursor-pointer min-h-[40px] active:scale-95",
+                    "flex-1 py-2 px-2 rounded-lg border text-xs font-bold transition-all min-h-[40px] active:scale-95",
+                    captureModeFromCampaign ? "cursor-not-allowed opacity-50" : "cursor-pointer",
                     captureMode === m
                       ? "bg-violet-600 border-violet-500 text-white shadow-md"
                       : liquidButtonStyle,

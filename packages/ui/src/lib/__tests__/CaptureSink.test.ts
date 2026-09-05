@@ -1,6 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CaptureSink, RunScopedCaptureSession } from '../CaptureSink.js';
+import { CaptureSink, ElectronCaptureSink, RunScopedCaptureSession } from '../CaptureSink.js';
+
+/**
+ * Stubs the desktop preload bridge `ElectronCaptureSink` reaches through
+ * `(window as any).faceAPI`. This suite runs under plain Node (`node --test`,
+ * no DOM), so `window` does not exist until a test defines it — set here and
+ * always cleaned up in a `finally` so it cannot leak into an unrelated test
+ * in this same file.
+ */
+function withFakeWindow<T>(faceAPI: Record<string, unknown>, run: () => Promise<T>): Promise<T> {
+  (globalThis as any).window = { faceAPI };
+  return run().finally(() => {
+    delete (globalThis as any).window;
+  });
+}
 
 /**
  * Records every call so a test can assert not just outcomes but which sink
@@ -8,13 +22,31 @@ import { CaptureSink, RunScopedCaptureSession } from '../CaptureSink.js';
  * RunScopedCaptureSession's doc comment) is invisible in outcomes alone: the
  * call to `savePhoto` still "succeeds," it just silently reuses an id it
  * should not.
+ *
+ * `startSessionDelayMs` lets a test force `startSession` to resolve on a
+ * later tick (a real `setTimeout`, not just a microtask) instead of settling
+ * as soon as any caller happens to await it — the same way the real sinks
+ * resolve only after a round trip to the desktop main process or the
+ * backend. That is what makes a concurrent-callers test meaningful rather
+ * than incidental: without a real delay, two `ensure()` calls racing ahead
+ * of `RunScopedCaptureSession`'s fix would still *usually* both lose the
+ * race to the same synchronous tick and the bug would reproduce anyway, but
+ * the test would not be exercising the same "genuinely still in flight when
+ * the second caller arrives" window the field bug depends on.
  */
-function fakeSink(options: { approveShouldFail?: boolean } = {}) {
+function fakeSink(
+  options: { approveShouldFail?: boolean; startSessionDelayMs?: number } = {}
+) {
   let nextId = 0;
+  let startSessionCalls = 0;
   const calls: string[] = [];
 
   const sink: CaptureSink = {
     async startSession() {
+      startSessionCalls += 1;
+      if (options.startSessionDelayMs) {
+        await new Promise((resolve) => setTimeout(resolve, options.startSessionDelayMs));
+      }
       calls.push('startSession');
       nextId += 1;
       return `session_${nextId}`;
@@ -31,7 +63,13 @@ function fakeSink(options: { approveShouldFail?: boolean } = {}) {
     },
   };
 
-  return { sink, calls };
+  return {
+    sink,
+    calls,
+    get startSessionCalls() {
+      return startSessionCalls;
+    },
+  };
 }
 
 test('photos captured within one run share the same session id', async () => {
@@ -154,6 +192,102 @@ test('approve() uses the run\'s current session id without clearing it', async (
   ]);
 });
 
+test('two savePhoto calls fired in the same tick share one startSession call, not two', async () => {
+  // Regression test for the field bug: simultaneous capture (one shutter
+  // press feeding every physical camera at once — see
+  // WorkflowEngine.recordExternalCapture) fires this screen's CENTER
+  // storePhoto and every side frame's recordExternalCapture -> capture-
+  // trigger -> storePhoto synchronously, in the same tick, from
+  // FaceCaptureApp's shared 'capture-trigger' handler — see that handler
+  // and RunScopedCaptureSession's own doc comment. Before ensure() memoised
+  // the in-flight promise, both callers observed sessionId === null before
+  // either had awaited startSession, so each opened its own session: a
+  // FRONT photo under one id and a LEFT photo under another, with approve()
+  // only ever able to release the one it cached last.
+  // Not destructured: `startSessionCalls` is a live getter, and destructuring
+  // it here would snapshot its value (0) before either savePhoto call runs.
+  const fake = fakeSink({ startSessionDelayMs: 5 });
+  const { sink, calls } = fake;
+  const run = new RunScopedCaptureSession(sink);
+
+  await Promise.all([
+    run.savePhoto({ stepId: 'step-front', attempt: 1, dataUrl: 'data:image/jpeg;base64,aaaa' }),
+    run.savePhoto({ stepId: 'step-left', attempt: 1, dataUrl: 'data:image/jpeg;base64,bbbb' }),
+  ]);
+
+  assert.equal(
+    fake.startSessionCalls,
+    1,
+    'startSession must be called exactly once for two concurrent savePhoto calls'
+  );
+
+  const savePhotoCalls = calls.filter((c) => c.startsWith('savePhoto:'));
+  assert.equal(savePhotoCalls.length, 2);
+  // Both photos must land under the SAME session id — the id startSession
+  // actually returned, not two different ones.
+  assert.deepEqual(new Set(savePhotoCalls), new Set([
+    'savePhoto:session_1:step-front:1',
+    'savePhoto:session_1:step-left:1',
+  ]));
+
+  // approve() afterwards must release that same shared session — not
+  // silently fail to find one, and not release only one of the two photos'
+  // session while leaving the other's forever staged.
+  await run.approve();
+  assert.equal(calls[calls.length - 1], 'approveUpload:session_1');
+});
+
+test('sequential savePhoto calls still share one session id (guards existing behaviour)', async () => {
+  // The concurrent case above must not come at the cost of the ordinary,
+  // one-photo-at-a-time flow: a session opened by the first capture must
+  // still be reused by every capture that awaits it before starting its
+  // own, exactly as before this fix.
+  const fake = fakeSink({ startSessionDelayMs: 5 });
+  const { sink, calls } = fake;
+  const run = new RunScopedCaptureSession(sink);
+
+  await run.savePhoto({ stepId: 'step-front', attempt: 1, dataUrl: 'data:image/jpeg;base64,aaaa' });
+  await run.savePhoto({ stepId: 'step-left', attempt: 1, dataUrl: 'data:image/jpeg;base64,bbbb' });
+
+  assert.equal(fake.startSessionCalls, 1);
+  assert.deepEqual(calls, [
+    'startSession',
+    'savePhoto:session_1:step-front:1',
+    'savePhoto:session_1:step-left:1',
+  ]);
+});
+
+test('a failed startSession does not stay memoised — the next ensure() retries', async () => {
+  // Without clearing the cached promise on failure, every subsequent
+  // savePhoto in the same run would keep awaiting the same rejection
+  // forever, even after whatever made the sink fail (e.g. a dropped IPC
+  // call) has passed.
+  let attempt = 0;
+  const calls: string[] = [];
+  const sink: CaptureSink = {
+    async startSession() {
+      attempt += 1;
+      if (attempt === 1) throw new Error('transient failure');
+      return `session_${attempt}`;
+    },
+    async savePhoto(input) {
+      calls.push(`savePhoto:${input.sessionId}:${input.stepId}:${input.attempt}`);
+    },
+    async completeSession() {},
+    async approveUpload() {},
+  };
+  const run = new RunScopedCaptureSession(sink);
+
+  await assert.rejects(
+    () => run.savePhoto({ stepId: 'step-front', attempt: 1, dataUrl: 'data:image/jpeg;base64,aaaa' }),
+    /transient failure/
+  );
+  await run.savePhoto({ stepId: 'step-front', attempt: 1, dataUrl: 'data:image/jpeg;base64,aaaa' });
+
+  assert.equal(attempt, 2);
+  assert.deepEqual(calls, ['savePhoto:session_2:step-front:1']);
+});
+
 test('a failed approve() leaves the session id intact so the caller can retry', async () => {
   // The captures are never lost either way (they simply stay staged), so
   // losing the ability to approve on a transient failure would be strictly
@@ -173,3 +307,60 @@ test('a failed approve() leaves the session id intact so the caller can retry', 
     'approveUpload:session_1',
   ]);
 });
+
+// ── ElectronCaptureSink.approveUpload ───────────────────────────────────────
+//
+// Regression coverage for the 2026-09-05 field bug: three-frame simultaneous
+// sessions where the operator pressed "Xác nhận & Lưu hồ sơ", the modal
+// closed normally, no error ever appeared, yet the desktop SQLite
+// `upload_outbox` rows stayed PENDING/`approved_at` NULL forever and nothing
+// uploaded. `RunScopedCaptureSession.approve()` (tested above with a fake
+// sink) was already correct — it forwards whatever the sink resolves with, or
+// throws if the sink throws. The real, unexercised gap was one layer down:
+// `ElectronCaptureSink.approveUpload` only checked `result.ok`, and the main
+// process's `session:approveUpload` handler deliberately reports
+// `{ ok: true, approved: 0 }` — not an error — for a sessionId that matches
+// no still-staged rows (see that handler's own doc comment). `ok: true` alone
+// used to read as success no matter what `approved` said, so a genuine no-op
+// approve resolved exactly like a real one: no exception, review screen
+// closes, SESSION_COMPLETED gets reported — with the actual photos never
+// released.
+
+test('ElectronCaptureSink.approveUpload rejects when the main process approved 0 rows', () =>
+  withFakeWindow(
+    { approveSessionUpload: async () => ({ ok: true, approved: 0 }) },
+    async () => {
+      const sink = new ElectronCaptureSink();
+      await assert.rejects(
+        () => sink.approveUpload('session_stuck'),
+        /Không tìm thấy ảnh nào của phiên này để duyệt/
+      );
+    }
+  ));
+
+test('ElectronCaptureSink.approveUpload rejects when approved is missing from the response', () =>
+  // Defends against a future main-process change that drops the field
+  // entirely rather than sending 0 — `undefined > 0` is false in JS, so this
+  // must reject exactly like the explicit-zero case above, not silently pass.
+  withFakeWindow({ approveSessionUpload: async () => ({ ok: true }) }, async () => {
+    const sink = new ElectronCaptureSink();
+    await assert.rejects(() => sink.approveUpload('session_stuck'));
+  }));
+
+test('ElectronCaptureSink.approveUpload resolves when the main process actually released rows', () =>
+  withFakeWindow(
+    { approveSessionUpload: async () => ({ ok: true, approved: 3 }) },
+    async () => {
+      const sink = new ElectronCaptureSink();
+      await assert.doesNotReject(() => sink.approveUpload('session_ok'));
+    }
+  ));
+
+test('ElectronCaptureSink.approveUpload still rejects on an explicit ok:false, same as before', () =>
+  withFakeWindow(
+    { approveSessionUpload: async () => ({ ok: false, error: 'boom' }) },
+    async () => {
+      const sink = new ElectronCaptureSink();
+      await assert.rejects(() => sink.approveUpload('session_x'), /boom/);
+    }
+  ));

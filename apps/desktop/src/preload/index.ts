@@ -74,22 +74,38 @@ export interface ApproveSessionUploadResult {
 export type CameraRole = 'CENTER' | 'LEFT' | 'RIGHT';
 export type CameraRoleMapping = Partial<Record<CameraRole, string>>;
 
-export interface CbHelpStep {
-  id: string;
-  type: string;
-  instruction: string;
-}
+/**
+ * The CB Help extended-display window's capture-frames snapshot (§3.5,
+ * 2026-09-05 product decision — the window shows only the capture frames,
+ * not a mirror of the app; see cbHelpWindow.ts's own doc comment). Mirrors
+ * `packages/ui/src/components/screens/FaceCaptureApp.tsx`'s own copy of this
+ * same shape — duplicated rather than imported, same as every other
+ * `faceAPI` payload type here (this file never imports from `@face/ui`).
+ */
+export type CbHelpFrameStatus = 'PENDING' | 'CURRENT' | 'COMPLETED' | 'FAILED';
 
-export interface CbHelpCapture {
+export interface CbHelpFrame {
   stepId: string;
+  stepType: string;
+  role: string;
+  label: string;
+  deviceId: string | null;
+  status: CbHelpFrameStatus;
+  capturedDataUrl?: string;
   attempt: number;
-  dataUrl: string;
-  capturedAt: number;
 }
 
-export interface CbHelpState {
-  steps: CbHelpStep[];
-  captures: Record<string, CbHelpCapture>;
+export interface CbHelpPublishState {
+  running: boolean;
+  /**
+   * The window's own presentation mode (§3.5, 2026-09-05 second product
+   * decision — captured photos stay visible after the shot); see
+   * `packages/ui`'s copy of this type for what each value means.
+   */
+  phase: 'idle' | 'live' | 'review' | 'done';
+  simultaneous: boolean;
+  currentStepId: string | null;
+  frames: CbHelpFrame[];
 }
 
 export interface CampaignConfig {
@@ -104,6 +120,8 @@ export interface CampaignConfig {
   autoHoldMs: number | null;
   /** Whether this campaign expects every frame captured with every mapped camera at once, rather than one at a time. */
   simultaneousCapture: boolean;
+  /** Campaign-level switch for local video "stream" recording (§3.1) — off by default. */
+  recordVideo: boolean;
 }
 
 /**
@@ -208,25 +226,40 @@ export interface FaceAPIBridge {
   getDeviceAccessStatus: () => Promise<DeviceAccessStatus>;
 
   /**
-   * Report the workflow this session just started with, so the CB Help
-   * display (§3.5) — if a second one is open — resets to show this run.
-   * A harmless no-op call when no such window exists.
+   * Opens the CB Help window if closed, closes it if open — the same
+   * action `Ctrl/Cmd+Shift+H` triggers. Used by the kiosk UI's "Màn hình mở
+   * rộng" button; see cbHelpWindow.ts's own doc comment for what that
+   * window now shows (only the capture frames, live + captured — not a
+   * mirror of this main window).
    */
-  notifyCbHelpSessionStarted: (steps: CbHelpStep[]) => Promise<boolean>;
+  toggleCbHelpWindow: () => Promise<{ open: boolean }>;
+
+  /** Whether the CB Help window is currently open — used to sync the toggle button's state on mount. */
+  isCbHelpWindowOpen: () => Promise<boolean>;
+
+  /**
+   * Publishes a fresh capture-frames snapshot for the CB Help window (§3.5)
+   * — called from `FaceCaptureApp.tsx`'s `publishCbHelpState` on session
+   * start, step change, every capture/retake, and on complete/cancel/
+   * restart. A no-op-safe fire-and-forget from the caller's point of view;
+   * the main process caches the latest snapshot regardless of whether a CB
+   * Help window is currently open to receive it.
+   */
+  publishCbHelpState: (state: CbHelpPublishState) => Promise<boolean>;
 
   /**
    * Only meaningful from inside the CB Help window itself: hydrates on open
-   * (or after a reload) with whatever the main kiosk window has reported so
-   * far, before the next push arrives.
+   * (or after a reload) with whatever the main kiosk window last published,
+   * before the next `onCbHelpUpdate` push arrives.
    */
-  getCbHelpState: () => Promise<CbHelpState>;
+  getCbHelpState: () => Promise<CbHelpPublishState>;
 
   /**
    * Only meaningful from inside the CB Help window: subscribes to every
-   * state push from the main process (a new session, or one more capture).
-   * Returns an unsubscribe function.
+   * snapshot the main kiosk window publishes. Returns an unsubscribe
+   * function.
    */
-  onCbHelpUpdate: (callback: (state: CbHelpState) => void) => () => void;
+  onCbHelpUpdate: (callback: (state: CbHelpPublishState) => void) => () => void;
 
   /**
    * Local video recording (§3.1) — registers a row before any bytes exist.
@@ -307,12 +340,14 @@ const faceAPI: FaceAPIBridge = {
   getSecretsStatus: () => ipcRenderer.invoke('secrets:status'),
   getDeviceAccessStatus: () => ipcRenderer.invoke('device:getAccessStatus'),
 
-  notifyCbHelpSessionStarted: (steps) => ipcRenderer.invoke('cbhelp:sessionStarted', steps),
+  toggleCbHelpWindow: () => ipcRenderer.invoke('cbhelp:toggle'),
+  isCbHelpWindowOpen: () => ipcRenderer.invoke('cbhelp:isOpen'),
+  publishCbHelpState: (state) => ipcRenderer.invoke('cbhelp:publish', state),
   getCbHelpState: () => ipcRenderer.invoke('cbhelp:getState'),
   onCbHelpUpdate: (callback) => {
-    const listener = (_: unknown, state: CbHelpState) => callback(state);
-    ipcRenderer.on('cbhelp:state', listener);
-    return () => ipcRenderer.removeListener('cbhelp:state', listener);
+    const listener = (_: unknown, state: CbHelpPublishState) => callback(state);
+    ipcRenderer.on('cbhelp:update', listener);
+    return () => ipcRenderer.removeListener('cbhelp:update', listener);
   },
 
   startVideoStream: (payload) => ipcRenderer.invoke('stream:start', payload),

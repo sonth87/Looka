@@ -1,7 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
-import CbHelpMonitor from './CbHelpMonitor';
+import CbHelpFrames from './CbHelpFrames';
 import CameraSetupScreen from './CameraSetupScreen';
 import './index.css';
 
@@ -12,7 +12,7 @@ import './index.css';
 function pickRoot() {
   switch (window.location.hash) {
     case '#cb-help':
-      return <CbHelpMonitor />;
+      return <CbHelpFrames />;
     case '#camera-setup':
       return <CameraSetupScreen />;
     default:

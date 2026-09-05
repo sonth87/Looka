@@ -117,6 +117,11 @@ export function checkFramesReadiness(
  * round trip through each frame's own capture pipeline. Not mirrored: this
  * is process evidence like the other frame streams, not the print-quality
  * CENTER still.
+ *
+ * Guarded against a near-black/blank frame (2026-09-05 field bug — see
+ * `isFrameLikelyBlank`'s own doc comment): a `null` return here means
+ * "treat as no snapshot", same as the existing `videoWidth === 0` guard —
+ * callers already leave the frame pending for retake in that case.
  */
 export function snapshotVideoFrame(video: HTMLVideoElement, quality = 0.92): string | null {
   if (video.videoWidth === 0) return null;
@@ -128,5 +133,107 @@ export function snapshotVideoFrame(video: HTMLVideoElement, quality = 0.92): str
   if (!ctx) return null;
 
   ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+  if (isCanvasLikelyBlank(canvas)) return null;
+
   return canvas.toDataURL('image/jpeg', quality);
+}
+
+/**
+ * Downscales the already-drawn canvas to a small, cheap-to-read-back sample
+ * and runs the luminance guard (`isFrameLikelyBlank`) over it. Kept
+ * separate from `isFrameLikelyBlank` itself so the actual luminance/variance
+ * math stays a pure function over a plain `Uint8ClampedArray` — unit-tested
+ * directly in `__tests__/multiFrame.test.ts` without needing a real
+ * `<canvas>` (packages/ui's test suite runs under plain `node:test`, with no
+ * DOM/canvas available).
+ */
+function isCanvasLikelyBlank(sourceCanvas: HTMLCanvasElement): boolean {
+  const SAMPLE_SIZE = 32;
+  const sampleCanvas = document.createElement('canvas');
+  sampleCanvas.width = SAMPLE_SIZE;
+  sampleCanvas.height = SAMPLE_SIZE;
+  const sampleCtx = sampleCanvas.getContext('2d');
+  if (!sampleCtx) return false; // no 2D context available — don't block a real capture over it
+
+  sampleCtx.drawImage(sourceCanvas, 0, 0, sourceCanvas.width, sourceCanvas.height, 0, 0, SAMPLE_SIZE, SAMPLE_SIZE);
+  const { data } = sampleCtx.getImageData(0, 0, SAMPLE_SIZE, SAMPLE_SIZE);
+  return isFrameLikelyBlank(data, SAMPLE_SIZE, SAMPLE_SIZE, { stride: 1 });
+}
+
+/**
+ * Coarse near-black / near-uniform rejection for a captured frame's raw
+ * pixel data — the 2026-09-05 field bug this defends against: in a
+ * simultaneous-capture session the RIGHT side camera's offscreen `<video>`
+ * still hadn't rendered a single real frame (still negotiating with the OS
+ * driver — its on-screen tile read "Chờ", not "Sẵn sàng") at the instant the
+ * CENTER shutter fired. `snapshotVideoFrame` had no gate at all before this,
+ * so it drew and returned a fully black canvas, which was then approved and
+ * uploaded to fs-core untouched (`face-step-right-2.jpg`, a flat black
+ * 1280x720 JPEG).
+ *
+ * Samples every `stride`th pixel (cheap and roughly right is the point, not
+ * exact — the caller already downscales to a small canvas before calling
+ * this) and rejects when either:
+ *  - the mean luminance is below `minMeanLuminance` (near-black), or
+ *  - the luminance variance is below `minVariance` (a flat, uniform frame —
+ *    the common case is black, but a stuck driver returning a solid gray
+ *    frame reads the same way and is just as unusable).
+ */
+export function isFrameLikelyBlank(
+  pixels: Uint8ClampedArray,
+  width: number,
+  height: number,
+  options: { minMeanLuminance?: number; minVariance?: number; stride?: number } = {}
+): boolean {
+  const { minMeanLuminance = 12, minVariance = 4, stride = 7 } = options;
+  if (width <= 0 || height <= 0 || pixels.length < 4) return true;
+
+  let sum = 0;
+  let sumSq = 0;
+  let count = 0;
+  for (let i = 0; i < pixels.length; i += 4 * stride) {
+    const r = pixels[i];
+    const g = pixels[i + 1];
+    const b = pixels[i + 2];
+    // Rec. 601 luma — cheap and good enough for a coarse blank check.
+    const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+    sum += luminance;
+    sumSq += luminance * luminance;
+    count++;
+  }
+  if (count === 0) return true;
+
+  const mean = sum / count;
+  const variance = sumSq / count - mean * mean;
+  return mean < minMeanLuminance || variance < minVariance;
+}
+
+/**
+ * Whether every non-CENTER frame has actually rendered a real video frame
+ * yet — CENTER is excluded since it is the CV-analysed camera the engine's
+ * own quality gate (`faceState.quality.accepted`) already covers; only the
+ * side frames (snapshotted with no gate of their own, see
+ * `snapshotVideoFrame`) need this. Backs the shutter-enable state in
+ * simultaneous-capture mode (2026-09-05 field bug — see this file's other
+ * doc comments in this section): a frame whose device is connected and
+ * mapped (`checkFramesReadiness` says OK) can still not yet be delivering
+ * pixels, and the shutter must stay disabled until it is.
+ */
+export function allSideFramesReady(frames: FrameSpec[], frameReadiness: Record<string, boolean>): boolean {
+  return frames.filter((f) => f.role !== 'CENTER').every((f) => frameReadiness[f.stepId] === true);
+}
+
+/**
+ * The first not-yet-ready side frame's camera role, for the "Đang chờ
+ * camera <role>…" shutter hint — `null` once every side frame is ready (or
+ * the workflow has none). Frame order (workflow step order) decides which
+ * one is reported when more than one is still not ready.
+ */
+export function firstNotReadyFrameRole(
+  frames: FrameSpec[],
+  frameReadiness: Record<string, boolean>
+): CameraRole | null {
+  const notReady = frames.filter((f) => f.role !== 'CENTER').find((f) => frameReadiness[f.stepId] !== true);
+  return notReady ? notReady.role : null;
 }

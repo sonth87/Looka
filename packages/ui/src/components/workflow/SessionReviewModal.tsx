@@ -11,6 +11,15 @@ export interface SessionReviewModalProps {
   onRetakeStep: (stepId: string) => void;
   onClose: () => void;
   className?: string;
+  /**
+   * Mirror the reviewed stills horizontally, same source of truth as the
+   * capture view's `CameraPreview`/`mirrored` (product decision 2026-09-05):
+   * the operator/subject posed in front of a mirrored preview, so the review
+   * screen must show the same orientation, display-only — the underlying
+   * file (and anything exported/uploaded from it) stays the raw,
+   * unmirrored sensor image.
+   */
+  mirrored?: boolean;
 }
 
 export const SessionReviewModal: React.FC<SessionReviewModalProps> = ({
@@ -20,6 +29,7 @@ export const SessionReviewModal: React.FC<SessionReviewModalProps> = ({
   onRetakeStep,
   onClose,
   className,
+  mirrored = false,
 }) => {
   const [exportNotice, setExportNotice] = useState<{ path: string; count: number } | null>(null);
 
@@ -129,7 +139,7 @@ export const SessionReviewModal: React.FC<SessionReviewModalProps> = ({
                     <img
                       src={step.capturedImagePath}
                       alt={step.stepType}
-                      className="w-full h-full object-cover"
+                      className={cn('w-full h-full object-cover', mirrored && 'scale-x-[-1]')}
                     />
                     <button
                       onClick={() => onRetakeStep(step.stepId)}

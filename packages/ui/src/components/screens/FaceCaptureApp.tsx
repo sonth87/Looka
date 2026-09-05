@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
-import { SlidersHorizontal, Camera } from 'lucide-react';
+import { SlidersHorizontal, Camera, Monitor } from 'lucide-react';
 import {
   CameraDevice,
   CaptureSession,
@@ -20,13 +20,22 @@ import {
   framesForWorkflow,
   checkFramesReadiness,
   snapshotVideoFrame,
+  allSideFramesReady,
+  firstNotReadyFrameRole,
   CAMERA_ROLE_LABELS_VI,
   FramePreflight,
   FrameSpec,
 } from '../../lib/multiFrame.js';
+import {
+  shouldRecordSingleStream,
+  shouldRecordMultiChannel,
+  isRecordingOverCap,
+  MAX_RECORDING_DURATION_MS,
+} from '../../lib/recordingGate.js';
 import type { MultiFrameViewProps, MultiFrameViewFrame } from './views/types.js';
 import { GuidedCaptureScreen } from './GuidedCaptureScreen.js';
 import { SessionReviewModal } from '../workflow/SessionReviewModal.js';
+import { CAPTURE_MIRRORED } from '../camera/CameraPreview.js';
 import { SimulationSliders, SimulationSettings } from '../debug/SimulationSliders.js';
 import { StepItem } from '../workflow/StepProgress.js';
 import { TooltipProvider, Tooltip, TooltipTrigger, TooltipContent } from '../ui/tooltip.js';
@@ -125,15 +134,25 @@ const defaultWorkflow: CaptureWorkflow = {
  * which is also why this is wrapped in try/catch and always has
  * `defaultWorkflow` to fall back to: the web build, and any error reaching
  * the admin portal, must never block a session from starting.
- *
- * Also reports the resolved steps to the CB Help display (§3.5), if one is
- * open, via `notifyCbHelpSessionStarted` — the one place every session-start
- * call site already passes through, so that screen's "new run" reset never
- * has to be wired in separately at each of them.
  */
 async function resolveActiveWorkflow(): Promise<{
   workflow: CaptureWorkflow;
-  triggerConfig: { mode: CaptureTriggerMode; autoHoldMs: number };
+  triggerConfig: {
+    mode: CaptureTriggerMode;
+    autoHoldMs: number;
+    /**
+     * True when the campaign itself set `captureMode` (`config?.captureMode`
+     * below was non-null/non-undefined) — carried through to
+     * `effectiveTriggerConfig.fromCampaign` in FaceCaptureApp so the settings
+     * UI (DesktopCaptureView's mode picker, OverlayConfigPanel) can show
+     * "Theo cấu hình campaign" and stop the operator from locally picking a
+     * mode the WorkflowEngine was never actually told to honour. See the bug
+     * this field fixes, 2026-09-05: a campaign-forced OFF/MANUAL mode used to
+     * never reach the capture views at all, which kept rendering whatever
+     * this machine's own local settings said instead.
+     */
+    fromCampaign: boolean;
+  };
   /**
    * §3.3's fail-closed verdict — non-null means the caller must refuse to
    * start a session at all, not merely fall back to defaultWorkflow. Distinct
@@ -149,6 +168,15 @@ async function resolveActiveWorkflow(): Promise<{
    * reasoning as every other campaign-config field here.
    */
   simultaneousCapture: boolean;
+  /**
+   * Campaign-level "Quay video trong lúc chụp" switch (§3.1, 2026-09-05) —
+   * true only when the campaign explicitly turns it on. Absent/undefined
+   * (older server, or no campaign at all) is treated as false, same
+   * fallback-is-safe reasoning as `simultaneousCapture` above: no
+   * `capture_streams` row is created and neither recording effect in this
+   * file runs unless this is true.
+   */
+  recordVideo: boolean;
 }> {
   const faceAPI = (window as any).faceAPI;
   let workflow = defaultWorkflow;
@@ -159,6 +187,7 @@ async function resolveActiveWorkflow(): Promise<{
   let campaignAutoHoldMs: number | null | undefined;
   let blockedReason: 'unauthorized' | 'unreachable-too-long' | null = null;
   let simultaneousCapture = false;
+  let recordVideo = false;
   try {
     const status = await faceAPI?.getDeviceAccessStatus?.();
     blockedReason = status?.blocked ? status.reason ?? 'unauthorized' : null;
@@ -169,16 +198,9 @@ async function resolveActiveWorkflow(): Promise<{
     campaignMode = config?.captureMode;
     campaignAutoHoldMs = config?.autoHoldMs;
     simultaneousCapture = config?.simultaneousCapture === true;
+    recordVideo = config?.recordVideo === true;
   } catch (err) {
     console.error('[FaceCaptureApp] resolveActiveWorkflow failed, using defaultWorkflow:', err);
-  }
-
-  try {
-    await faceAPI?.notifyCbHelpSessionStarted?.(
-      workflow.steps.map((s) => ({ id: s.id, type: s.type, instruction: s.instruction }))
-    );
-  } catch {
-    /* no CB Help window open, or not running under the desktop app at all — fine either way */
   }
 
   const settings = getSettings();
@@ -187,9 +209,11 @@ async function resolveActiveWorkflow(): Promise<{
     triggerConfig: {
       mode: campaignMode ?? settings.captureMode ?? 'MANUAL',
       autoHoldMs: campaignAutoHoldMs ?? settings.autoHoldMs ?? 2000,
+      fromCampaign: campaignMode != null,
     },
     blockedReason,
     simultaneousCapture,
+    recordVideo,
   };
 }
 
@@ -208,6 +232,135 @@ function reportStatsEvent(type: StatsEventType, metadata?: Record<string, unknow
   } catch {
     /* no bridge, or not running under the desktop app — fine either way */
   }
+}
+
+/**
+ * The CB Help extended-display window's own capture-frames snapshot (§3.5,
+ * 2026-09-05 product decision — the window shows only the capture frames
+ * live + captured, not a mirror of this whole app; see cbHelpWindow.ts's own
+ * doc comment). Kept local to this file — the desktop app's preload bridge
+ * (`apps/desktop/src/preload/index.ts`) declares its own copy of this same
+ * shape rather than importing it, the same "duplicate the IPC payload shape
+ * on each side" pattern every other `faceAPI` method here already follows.
+ */
+type CbHelpFrameStatus = 'PENDING' | 'CURRENT' | 'COMPLETED' | 'FAILED';
+
+interface CbHelpFrame {
+  stepId: string;
+  stepType: string;
+  role: string;
+  label: string;
+  deviceId: string | null;
+  status: CbHelpFrameStatus;
+  capturedDataUrl?: string;
+  attempt: number;
+}
+
+interface CbHelpPublishState {
+  running: boolean;
+  /**
+   * The CB Help window's own presentation mode (§3.5, 2026-09-05 second
+   * product decision: captured photos must stay visible after the shot).
+   * `running` alone can no longer tell the window what to render, because
+   * "not running" now covers two different things — a finished session
+   * whose photos must stay up (`'review'` while SessionReviewModal is still
+   * open, `'done'` once the operator has accepted it) vs. a genuinely empty
+   * window with nothing to show (`'idle'`: no session yet, cancelled,
+   * restarted, or live mode was left). `'live'` always matches
+   * `running: true`. See `publishCbHelpState` below for how this is chosen.
+   */
+  phase: 'idle' | 'live' | 'review' | 'done';
+  simultaneous: boolean;
+  currentStepId: string | null;
+  frames: CbHelpFrame[];
+}
+
+/**
+ * Builds the CB Help window's per-frame snapshot from the live engine's own
+ * session/state.
+ *
+ * One shape for both capture modes: sequential mode only fills in a
+ * `deviceId` for whichever frame is CURRENT (falling back to the main
+ * camera's own `selectedDeviceId`, since sequential mode already switches
+ * that per step — see the role-mapping effect further down); simultaneous
+ * mode fills in every frame's own mapped device regardless of which one is
+ * "current", since every not-yet-COMPLETED frame is meant to go live at
+ * once there. Deciding which frames actually go live in the CB Help window
+ * itself is `CbHelpFrames.tsx`'s own call (simultaneous: everything not
+ * COMPLETED; sequential: only CURRENT), not encoded in this payload.
+ */
+function buildCbHelpFrames(
+  workflow: CaptureWorkflow,
+  session: CaptureSession | null,
+  currentStepIndex: number,
+  simultaneous: boolean,
+  roleMapping: Record<string, string>,
+  currentDeviceId: string
+): CbHelpFrame[] {
+  return framesForWorkflow(workflow).map((frame, idx) => {
+    const sessionStep = session?.steps.find((st) => st.stepId === frame.stepId);
+    const isCompleted = sessionStep?.status === 'COMPLETED';
+    const isCurrent = !isCompleted && idx === currentStepIndex;
+    const status: CbHelpFrameStatus = isCompleted
+      ? 'COMPLETED'
+      : isCurrent
+      ? 'CURRENT'
+      : sessionStep?.status === 'FAILED'
+      ? 'FAILED'
+      : 'PENDING';
+    const mappedDeviceId = roleMapping[frame.role] ?? null;
+
+    return {
+      stepId: frame.stepId,
+      stepType: frame.type,
+      role: frame.role,
+      label: frame.label,
+      deviceId: mappedDeviceId ?? (!simultaneous && isCurrent ? currentDeviceId || null : null),
+      status,
+      capturedDataUrl: sessionStep?.capturedImagePath,
+      attempt: sessionStep?.attempts ?? 0,
+    };
+  });
+}
+
+/**
+ * Resolves once `video` has genuinely rendered a real frame — not merely
+ * "has a stream attached." 2026-09-05 field bug this defends against: a
+ * side camera's offscreen `<video>` can already report `videoWidth > 0`
+ * while still delivering the driver's placeholder/negotiation buffer, so
+ * checking `videoWidth`/`readyState` alone at the instant the shutter fires
+ * is not enough — see `snapshotVideoFrame`'s own luminance guard in
+ * lib/multiFrame.ts for the second, pixel-level layer of this same fix.
+ *
+ * Prefers `requestVideoFrameCallback` — every Chromium build this app ships
+ * on (Electron) supports it, and it only fires once a decoded frame has
+ * actually been presented to the compositor. Falls back to polling
+ * `readyState`/`videoWidth` where it's unavailable (e.g. a test
+ * environment's stubbed `HTMLVideoElement`).
+ */
+function markFrameReadyWhenPlaying(video: HTMLVideoElement, onReady: () => void): void {
+  let settled = false;
+  const markReady = () => {
+    if (settled) return;
+    settled = true;
+    onReady();
+  };
+
+  const rvfc = (video as any).requestVideoFrameCallback;
+  if (typeof rvfc === 'function') {
+    rvfc.call(video, markReady);
+    return;
+  }
+
+  const poll = () => {
+    if (settled) return;
+    if (video.readyState >= 2 && video.videoWidth > 0) {
+      markReady();
+      return;
+    }
+    requestAnimationFrame(poll);
+  };
+  poll();
 }
 
 export interface FaceCaptureAppProps {
@@ -314,6 +467,29 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   }, [activeWorkflow]);
 
   /**
+   * The capture-trigger config actually in effect for whichever engine
+   * (sim/live) the UI is currently showing — set at every call site that
+   * hands a resolved config to an engine via `setCaptureTriggerConfig`
+   * (`resolveActiveWorkflow`'s init/start/restart/cancel sites below), and by
+   * `handleCaptureModeChange`/`handleAutoHoldMsChange` when the operator
+   * changes it locally. Passed down to DesktopCaptureView/MobileCaptureView
+   * as `captureMode`/`autoHoldMs` instead of letting them (via
+   * GuidedCaptureScreen) fall back to their own copy read straight from the
+   * local settings store — see the bug this fixes, 2026-09-05: a
+   * campaign-forced OFF/MANUAL mode reached the engine (`WorkflowEngine.
+   * setCaptureTriggerConfig`) but never reached the views, so a campaign set
+   * to OFF still rendered the AUTO/MANUAL UI (no shutter button, a
+   * misleading countdown ring) while the engine silently waited for a
+   * shutter press that had no way to happen.
+   */
+  const [effectiveTriggerConfig, setEffectiveTriggerConfig] = useState<{
+    mode: CaptureTriggerMode;
+    autoHoldMs: number;
+    /** True while `mode` came from the campaign, not this machine's local settings. */
+    fromCampaign: boolean;
+  }>({ mode: 'MANUAL', autoHoldMs: 2000, fromCampaign: false });
+
+  /**
    * Multi-frame simultaneous capture (§ desktop kiosk multi-camera capture)
    * — the campaign's own `simultaneousCapture` flag, refreshed at every
    * session start/restart/cancel by `resolveActiveWorkflow()`, same cadence
@@ -327,6 +503,58 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   useEffect(() => {
     simultaneousCaptureRef.current = simultaneousCapture;
   }, [simultaneousCapture]);
+
+  /**
+   * Campaign-level "Quay video trong lúc chụp" switch (§3.1, 2026-09-05) —
+   * the campaign's own `recordVideo` flag, refreshed at every session
+   * start/restart/cancel by `resolveActiveWorkflow()`, same cadence as
+   * `simultaneousCapture` above. Both recording effects further down are
+   * gated on this: false means neither ever opens a `MediaRecorder` or
+   * creates a `capture_streams` row.
+   */
+  const [recordVideo, setRecordVideo] = useState<boolean>(false);
+
+  /**
+   * The engine session actually being recorded, for the two recording
+   * effects further down ONLY — `null` whenever no real (operator-started)
+   * session is open. Deliberately keyed on the session's own id rather than
+   * a plain boolean — see `recordingGate.ts`'s own doc comment for the full
+   * mechanism this replaces and why.
+   *
+   * **2026-09-05 field bug this fixes**: a Windows kiosk running a 3-camera
+   * simultaneous campaign with `recordVideo=true` had a session started,
+   * abandoned by the operator with no cancel/complete ever firing, and its
+   * recorders kept running — two `capture_streams` rows eventually closed at
+   * ~234 MB each, one was left OPEN (`size_bytes=0`, `ended_at=null`). The
+   * *next* real session then created NO recording rows at all. Root cause:
+   * an earlier fix (still visible in ROADMAP.md's §3.1 history) replaced
+   * gating these effects on `isWorkflowStarted` with a dedicated
+   * `isRecordingSession` **boolean** — correctly separating "is a session
+   * running" from "should recording be on" — but a boolean can't tell two
+   * different sessions apart. The abandoned run left it stuck at `true`
+   * (nothing resets it on mere inactivity — there was no idle/runaway cap at
+   * all), so the next session's `setIsRecordingSession(true)` was a no-op
+   * (same value in, no re-render), the effects' dependency arrays never
+   * changed, and they never re-ran: the stale recorder from the abandoned
+   * run just kept going while the new session got no recorder of its own.
+   *
+   * **Fix**: this key is set to the engine's actual `currentSession.id` the
+   * moment a real session starts (`handleStartWorkflow`, the only call site
+   * that ever set the old flag `true`) — a brand-new session always has a
+   * genuinely different id, so the effects' dependency arrays always change
+   * and always restart, even if the previous session's teardown never ran.
+   * Reset to `null` at every real end-of-session point, same set of call
+   * sites the old flag used — the engine's `completed` event (live and
+   * simulation), `handleCancelWorkflow`, `handleRestart`, and leaving live
+   * mode — each of which also causes the effects to clean up (stop every
+   * recorder, finalize via `endVideoStream`) since the key changes away from
+   * a real value. A session with no operator action *at all* (this bug's
+   * exact scenario) is additionally bounded by a runaway cap inside the
+   * effects themselves (`isRecordingOverCap`/`MAX_RECORDING_DURATION_MS` in
+   * recordingGate.ts) — after 10 minutes the recording stops and finalizes
+   * on its own, logged, regardless of whether anything else ever happens.
+   */
+  const [recordingSessionKey, setRecordingSessionKey] = useState<string | null>(null);
 
   /**
    * Latest simultaneous-capture readiness check — non-null once
@@ -351,6 +579,23 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    * to wait on `play()` at the exact instant the shutter fires.
    */
   const frameVideoElsRef = useRef<Record<string, HTMLVideoElement>>({});
+  /**
+   * Whether each non-CENTER frame's offscreen `<video>` (`frameVideoElsRef`)
+   * has actually rendered a real frame yet — 2026-09-05 black-frame fix (see
+   * `allSideFramesReady`/`snapshotVideoFrame` in lib/multiFrame.ts): a
+   * stream being attached (`frameStreamsRef`) is not the same thing as the
+   * camera actually delivering pixels, and the RIGHT camera's tile still
+   * read "not ready" at the exact instant the shutter fired in the field
+   * report this fixes. Absent from the map (not just `false`) also means
+   * "not ready" — see the pure helpers' own doc comments. The ref is read
+   * everywhere gating actually happens (the shutter-enable computation
+   * below reads `frameReadiness` state instead, since that's what needs to
+   * re-render); `frameReadinessRef` exists only so `openFrameStreams`'
+   * readiness callback (which can fire well after the function that started
+   * it has returned) always sees the latest map instead of a stale closure.
+   */
+  const frameReadinessRef = useRef<Record<string, boolean>>({});
+  const [frameReadiness, setFrameReadiness] = useState<Record<string, boolean>>({});
 
   /** Stops and clears every open frame stream — see the call sites below. */
   const closeFrameStreams = () => {
@@ -361,6 +606,8 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     }
     frameStreamsRef.current = {};
     setFrameStreams({});
+    frameReadinessRef.current = {};
+    setFrameReadiness({});
   };
 
   /**
@@ -416,9 +663,22 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
       try {
         const mediaStream = await navigator.mediaDevices.getUserMedia({
           audio: false,
-          video: { deviceId: { exact: frame.deviceId }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+          // 1280x720, not 1920x1080: these are process-evidence frames, not
+          // the printed/matched photo (§2.8's resolution floor is FRONT-only
+          // by product decision 2026-09-05), and three cameras sharing one
+          // USB bus need the FRONT camera to keep the bandwidth for its own
+          // 1080p capture rather than splitting it three ways.
+          video: { deviceId: { exact: frame.deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } },
         });
         frameStreamsRef.current[frame.stepId] = mediaStream;
+
+        // 2026-09-05 black-frame fix: a genuinely new stream starts "not
+        // ready" until it actually renders a frame — see
+        // `frameReadinessRef`'s own doc comment and `markFrameReadyWhenPlaying`
+        // below. Not reset on the idempotent reuse path above (an already-live
+        // stream this function left alone is presumably already ready).
+        frameReadinessRef.current[frame.stepId] = false;
+        setFrameReadiness((prev) => ({ ...prev, [frame.stepId]: false }));
 
         let videoEl = frameVideoElsRef.current[frame.stepId];
         if (!videoEl) {
@@ -432,6 +692,32 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           console.error(
             `[FaceCaptureApp] frame stream failed for ${frame.label}: ${err?.name}: ${err?.message}`
           )
+        );
+        markFrameReadyWhenPlaying(videoEl, () => {
+          frameReadinessRef.current[frame.stepId] = true;
+          setFrameReadiness((prev) => ({ ...prev, [frame.stepId]: true }));
+        });
+
+        // Diagnostic for the field issue "FRONT face < 250px with three
+        // cameras open": records what the OS/driver actually granted this
+        // side camera, so a kiosk with three cameras contending for one USB
+        // bus shows the trade-off in main.log instead of only showing up
+        // later as a downstream quality failure on the FRONT frame.
+        //
+        // Formatted as one string (JSON.stringify), not a message + object:
+        // Electron's `console-message` forwarding to the main process only
+        // carries the renderer console call's first string argument — a
+        // second object argument used to be dropped before reaching
+        // main.log, showing up there as just this bare message with no
+        // resolution at all.
+        const settings = mediaStream.getVideoTracks()[0]?.getSettings();
+        console.warn(
+          `[FaceCaptureApp] frame stream opened ${JSON.stringify({
+            label: frame.label,
+            role: frame.role,
+            width: settings?.width,
+            height: settings?.height,
+          })}`
         );
       } catch (err: any) {
         console.error(`[FaceCaptureApp] frame stream failed for ${frame.label}: ${err?.name}: ${err?.message}`);
@@ -482,6 +768,54 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     return openFrameStreams(preflight);
   };
 
+  /**
+   * Simultaneous capture (§ desktop kiosk multi-camera capture, product
+   * decision 2026-09-05 #3, second pass): while a side frame is being
+   * retaken — `engine.retakingStepId` is set by `handleRetakeStep` below via
+   * `WorkflowEngine.retakeStep(stepId, { externalCapture: true })` — no
+   * trigger mode may complete that step through the engine's own capture
+   * path. `triggerManualCapture`'s snapshot always comes from this engine's
+   * shared snapshot provider, which only ever reads the CENTER-analysed
+   * camera (see `liveEngine.setSnapshotProvider` in the mount effect below);
+   * for a side frame that is simply the wrong physical camera. Every trigger
+   * call site — the shutter button, the gesture loop, and the engine's own
+   * AUTO auto-fire (re-emitted here as `external-capture-ready`, see
+   * WorkflowEngine.processFrame) — routes through this first instead:
+   * snapshot that frame's own `<video>` element and hand it to
+   * `recordExternalCapture` directly, the same mechanism the initial
+   * simultaneous shot's fan-out already uses.
+   *
+   * Returns true when it handled the trigger this way — the caller must not
+   * also run its normal `triggerManualCapture` path — and false for every
+   * other case (not simultaneous, no retake in progress, or retaking CENTER,
+   * which still goes through the normal capture-trigger path unmodified).
+   */
+  const captureRetakingSideFrame = (engine: WorkflowEngine, stepIdOverride?: string): boolean => {
+    if (!simultaneousCaptureRef.current) return false;
+    const stepId = stepIdOverride ?? engine.retakingStepId;
+    if (!stepId) return false;
+
+    const frame = framesForWorkflow(activeWorkflowRef.current).find((f) => f.stepId === stepId);
+    if (!frame || frame.role === 'CENTER') return false;
+
+    const videoEl = frameVideoElsRef.current[stepId];
+    const dataUrl = videoEl ? snapshotVideoFrame(videoEl) : null;
+    if (!dataUrl) {
+      // 2026-09-05 black-frame fix: `snapshotVideoFrame` now also returns
+      // null for a near-black/blank frame (see its own doc comment), not
+      // just "no video element yet" — either way this is "treat as no
+      // snapshot," but the operator needs to actually see it to know a
+      // retake is still needed, not just a line in main.log.
+      console.warn(`[FaceCaptureApp] retake trigger: no snapshot for ${frame.label} (${frame.role})`);
+      setStoreError(
+        `Khung ${frame.label} (${CAMERA_ROLE_LABELS_VI[frame.role]}): camera chưa sẵn sàng, chụp lại góc này.`
+      );
+      return true; // still "handled" — the normal path must not run for this frame either
+    }
+    engine.recordExternalCapture(stepId, dataUrl);
+    return true;
+  };
+
   const handleStartWorkflow = async () => {
     setIsWorkflowStarted(true);
     isWorkflowStartedRef.current = true;
@@ -492,6 +826,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         triggerConfig,
         blockedReason,
         simultaneousCapture: campaignSimultaneous,
+        recordVideo: campaignRecordVideo,
       } = await resolveActiveWorkflow();
       setDeviceBlockedReason(blockedReason);
       if (blockedReason) {
@@ -501,6 +836,9 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
       }
       setActiveWorkflow(workflow);
       activeEngine.setCaptureTriggerConfig(triggerConfig);
+      setEffectiveTriggerConfig(triggerConfig);
+      captureTriggerRef.current.updateConfig({ mode: triggerConfig.mode, autoHoldMs: triggerConfig.autoHoldMs });
+      setRecordVideo(campaignRecordVideo);
 
       const canStart = await runSimultaneousCaptureGate(mode === 'live', campaignSimultaneous, workflow);
       if (!canStart) {
@@ -509,7 +847,13 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         return;
       }
 
-      await activeEngine.startSession(workflow);
+      // Keys both recording effects to THIS session specifically (see
+      // `recordingSessionKey`'s own doc comment) — reading the id off the
+      // engine's return value rather than `activeEngine.currentSession?.id`
+      // read later, so there is no gap where a stale render still sees the
+      // previous session's id.
+      const startedSession = await activeEngine.startSession(workflow);
+      setRecordingSessionKey(startedSession.id);
     }
   };
 
@@ -603,6 +947,14 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    * again rather than losing the chance to approve this run at all.
    */
   const approveUpload = async (): Promise<boolean> => {
+    // Diagnostic only (2026-09-05 field bug — operator confirms, modal
+    // closes, nothing ever gets approved, with no trace anywhere). Logging
+    // the id this run is about to approve, before the call, means a future
+    // mismatch between this id and whatever `session:approveUpload`'s own
+    // warn line reports on the main-process side is visible from the
+    // renderer's console/devtools even if the main-process log is not at
+    // hand.
+    console.warn('[FaceCaptureApp] onAccept: approving sessionId=', runSessionRef.current.cachedSessionId);
     try {
       await runSessionRef.current.approve();
       setStoreError(null);
@@ -697,6 +1049,11 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           if (repoRef.current) void repoRef.current.saveSession(completedSession);
           // finishSession() is NOT called here — see the identical comment on
           // liveEngine's 'completed' handler below for why.
+          // Stop-recording hook (§3.1 fix, 2026-09-05) — see
+          // `recordingSessionKey`'s own doc comment; included here too even
+          // though simulation mode has no physical camera to record, for
+          // symmetry with liveEngine's identical handler.
+          setRecordingSessionKey(null);
         });
 
         const mockCv = new MockCVEngine({ simulatedDelayMs: 10 });
@@ -723,6 +1080,8 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         setDeviceBlockedReason(simBlockedReason);
         setActiveWorkflow(simWorkflow);
         simEngine.setCaptureTriggerConfig(simTriggerConfig);
+        setEffectiveTriggerConfig(simTriggerConfig);
+        captureTriggerRef.current.updateConfig({ mode: simTriggerConfig.mode, autoHoldMs: simTriggerConfig.autoHoldMs });
         if (!simBlockedReason) await simEngine.startSession(simWorkflow);
 
         const liveEngine = new WorkflowEngine();
@@ -741,6 +1100,17 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
 
         liveEngine.on('state-change', (state: GuidanceState) => {
           setLiveGuidance({ ...state });
+
+          // CB Help "step change" (§3.5) — de-duped against this event's
+          // real firing rate (once per processed frame) via
+          // `lastCbHelpKeyRef`; only an actual session start or step change
+          // is worth a `cbhelp:publish` call. See publishCbHelpState's own
+          // doc comment.
+          const cbHelpKey = `${liveEngine.currentSession?.id ?? ''}:${state.currentStepIndex}`;
+          if (cbHelpKey !== lastCbHelpKeyRef.current) {
+            lastCbHelpKeyRef.current = cbHelpKey;
+            publishCbHelpState();
+          }
         });
 
         liveEngine.on('capture-trigger', (data: { stepId: string; imagePath: string }) => {
@@ -773,8 +1143,18 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
                 const videoEl = frameVideoElsRef.current[frame.stepId];
                 const dataUrl = videoEl ? snapshotVideoFrame(videoEl) : null;
                 if (!dataUrl) {
+                  // 2026-09-05 black-frame fix: this is the exact path the
+                  // field bug went through — `snapshotVideoFrame` now rejects
+                  // a near-black/blank frame instead of returning it, so a
+                  // not-yet-ready side camera leaves its frame pending for
+                  // retake (unchanged mechanism) instead of storing/
+                  // uploading a black still. Surfaced to the operator, not
+                  // just main.log, since a retake is actually needed here.
                   console.warn(
                     `[FaceCaptureApp] simultaneous capture: no snapshot for ${frame.label} (${frame.role}) — left pending for retake`
+                  );
+                  setStoreError(
+                    `Khung ${frame.label} (${CAMERA_ROLE_LABELS_VI[frame.role]}): camera chưa sẵn sàng, chụp lại góc này.`
                   );
                   continue;
                 }
@@ -782,12 +1162,39 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
               }
             }
           }
+
+          // CB Help (§3.5): a fresh photo for this frame — refresh the
+          // published snapshot so the extended display swaps that tile's
+          // live video for the captured still. Runs once per real capture,
+          // plus once more per side frame the block above just fanned out to
+          // (each of those is its own re-entrant 'capture-trigger') — a few
+          // redundant IPC calls in a single burst, not a correctness issue.
+          publishCbHelpState();
+        });
+
+        // AUTO mode's auto-fire for a simultaneous-capture side frame being
+        // retaken (§ desktop kiosk multi-camera capture, product decision
+        // 2026-09-05 #3, second pass) — the engine re-emits this instead of
+        // completing the step itself once stability is reached, since its
+        // own snapshot provider only ever reads the CENTER-analysed camera
+        // (see WorkflowEngine's `externalCaptureOnly` doc comment). Routes
+        // through the exact same helper the shutter/gesture call sites use.
+        liveEngine.on('external-capture-ready', (data: { stepId: string }) => {
+          captureRetakingSideFrame(liveEngine, data.stepId);
         });
 
         liveEngine.on('completed', (completedSession: CaptureSession) => {
           setSession(completedSession);
           setShowReviewModal(true);
           if (repoRef.current) void repoRef.current.saveSession(completedSession);
+          // CB Help (§3.5, 2026-09-05 second pass): the finished photos must
+          // STAY on the extended display, not drop to idle — `phase:
+          // 'review'` publishes a running:false snapshot built from this
+          // very session (every step's `capturedImagePath`, already
+          // COMPLETED) while SessionReviewModal is open. It only goes idle
+          // on a genuinely abandoned/replaced run: cancel, "Chụp lại toàn
+          // bộ", or a fresh session starting.
+          publishCbHelpState({ phase: 'review' });
           // Used to call finishSession() right here — wrong once approval was
           // introduced. finishSession() -> runSessionRef.current.complete()
           // clears the cached session id (see RunScopedCaptureSession's own
@@ -800,6 +1207,12 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           // case. finishSession() now runs only from onAccept, after
           // approveUpload() succeeds, which is the one place with the
           // correct ordering.
+          //
+          // Stop-recording hook (§3.1 fix, 2026-09-05) — see
+          // `recordingSessionKey`'s own doc comment: this is the real
+          // end-of-session boundary the recording effects need, which
+          // `isWorkflowStarted` alone never reliably reaches on this path.
+          setRecordingSessionKey(null);
         });
 
         const {
@@ -807,10 +1220,14 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           triggerConfig: liveTriggerConfig,
           blockedReason: liveBlockedReason,
           simultaneousCapture: liveSimultaneous,
+          recordVideo: liveRecordVideo,
         } = await resolveActiveWorkflow();
         setDeviceBlockedReason(liveBlockedReason);
         setActiveWorkflow(liveWorkflow);
         liveEngine.setCaptureTriggerConfig(liveTriggerConfig);
+        setEffectiveTriggerConfig(liveTriggerConfig);
+        captureTriggerRef.current.updateConfig({ mode: liveTriggerConfig.mode, autoHoldMs: liveTriggerConfig.autoHoldMs });
+        setRecordVideo(liveRecordVideo);
         const canStartLive = await runSimultaneousCaptureGate(true, liveSimultaneous, liveWorkflow);
         if (!liveBlockedReason && canStartLive) await liveEngine.startSession(liveWorkflow);
 
@@ -905,15 +1322,22 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
 
               if (decision.capture && liveWorkflowEngineRef.current) {
                 captureTriggerRef.current.reset();
-                const wf = liveWorkflowEngineRef.current as any;
-                // Pass the same frame isFaceReady was just computed from, so
-                // the engine's own quality gate (WorkflowEngine.
-                // triggerManualCapture) has something real to re-check at the
-                // moment the gesture actually fires. Calling this with no
-                // faceState at all used to skip that check silently — this
-                // gesture path had nothing else standing between a smiling
-                // face and a completed capture.
-                if (wf.triggerManualCapture) wf.triggerManualCapture(currentFaceState);
+                const engine = liveWorkflowEngineRef.current;
+                // Simultaneous capture: a side frame being retaken (MANUAL
+                // mode's gesture) must snapshot its own camera, never the
+                // engine's normal (CENTER-only) capture path — see
+                // captureRetakingSideFrame's own doc comment.
+                if (!captureRetakingSideFrame(engine)) {
+                  const wf = engine as any;
+                  // Pass the same frame isFaceReady was just computed from, so
+                  // the engine's own quality gate (WorkflowEngine.
+                  // triggerManualCapture) has something real to re-check at the
+                  // moment the gesture actually fires. Calling this with no
+                  // faceState at all used to skip that check silently — this
+                  // gesture path had nothing else standing between a smiling
+                  // face and a completed capture.
+                  if (wf.triggerManualCapture) wf.triggerManualCapture(currentFaceState);
+                }
               }
             } catch (e) {
               // ignore
@@ -931,8 +1355,18 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   }, [mode]);
 
   const handleShutterCapture = useCallback(() => {
-    if (liveWorkflowEngineRef.current && faceState?.detected) {
-      const wf = liveWorkflowEngineRef.current as any;
+    const engine = liveWorkflowEngineRef.current;
+    if (!engine) return;
+
+    // Simultaneous capture: a side frame being retaken (OFF mode's shutter
+    // button) must snapshot its own camera, never the engine's normal
+    // (CENTER-only) capture path — see captureRetakingSideFrame's own doc
+    // comment. Checked ahead of the `faceState?.detected` gate below: a side
+    // frame's retake does not depend on CENTER seeing a face at all.
+    if (captureRetakingSideFrame(engine)) return;
+
+    if (faceState?.detected) {
+      const wf = engine as any;
       // Same reasoning as the gesture trigger above: pass the faceState this
       // click was actually decided under so the engine's quality gate has
       // real data to re-check, instead of silently accepting whatever the
@@ -951,15 +1385,22 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   }, []);
 
   const handleCaptureModeChange = useCallback((newMode: CaptureTriggerMode) => {
+    // The settings UI disables the mode picker entirely while the campaign
+    // dictates the mode (`effectiveTriggerConfig.fromCampaign`) — this guard
+    // is a second line of defense against the same case, so a local change
+    // can never again silently drift from what the engine actually honours.
+    if (effectiveTriggerConfig.fromCampaign) return;
     captureTriggerRef.current.updateConfig({ mode: newMode });
     simWorkflowEngineRef.current?.setCaptureTriggerConfig({ mode: newMode });
     liveWorkflowEngineRef.current?.setCaptureTriggerConfig({ mode: newMode });
-  }, []);
+    setEffectiveTriggerConfig((prev) => ({ ...prev, mode: newMode, fromCampaign: false }));
+  }, [effectiveTriggerConfig.fromCampaign]);
 
   const handleAutoHoldMsChange = useCallback((newMs: number) => {
     captureTriggerRef.current.updateConfig({ autoHoldMs: newMs });
     simWorkflowEngineRef.current?.setCaptureTriggerConfig({ autoHoldMs: newMs });
     liveWorkflowEngineRef.current?.setCaptureTriggerConfig({ autoHoldMs: newMs });
+    setEffectiveTriggerConfig((prev) => ({ ...prev, autoHoldMs: newMs }));
   }, []);
 
   const handleSimulationChange = async (settings: SimulationSettings) => {
@@ -1174,6 +1615,11 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     setCameraError(null);
     setIsWorkflowStarted(false);
     isWorkflowStartedRef.current = false;
+    // Stop-recording hook (§3.1 fix, 2026-09-05) — see `recordingSessionKey`'s
+    // own doc comment. The single-stream effect's own `!stream` guard would
+    // already cover this (the camera stream is stopped above), but the
+    // multi-channel effect does not depend on `stream`.
+    setRecordingSessionKey(null);
     setMode('simulation');
     updateSettings({ engineMode: 'simulation' });
   };
@@ -1205,11 +1651,40 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   // now always runs at its native 1x framing — see BrowserCameraService's
   // digital-zoom methods, still there but unused unless something calls them.
 
+  /**
+   * Per-frame retake (§ desktop kiosk multi-camera capture, product decision
+   * 2026-09-05 #3, second pass): pressing "Chụp lại" on one frame in the
+   * review modal must return the operator to a LIVE capture screen showing
+   * only that frame — not, as this used to, snapshot a side frame instantly
+   * with no gate and no live view (the operator saw nothing happen, and the
+   * extended display never went live). `engine.retakeStep()` already does
+   * the session bookkeeping (marks the frame CURRENT/PENDING, leaves every
+   * other frame's COMPLETED photo untouched); this function's job is putting
+   * the UI back into a state where a real trigger can land a real photo:
+   * - CENTER: the normal capture-trigger path (shutter/gesture/AUTO) already
+   *   handles it unchanged, and that handler's own not-COMPLETED filter
+   *   guarantees the fan-out will not re-touch the still-COMPLETED side
+   *   frames — see the field regression `SimultaneousRetake.test.ts` covers.
+   * - A side frame: has no capture path of its own inside the engine (its
+   *   photo comes from a different physical camera than the one the
+   *   engine's snapshot provider reads) — `{ externalCapture: true }` tells
+   *   the engine so neither its own AUTO auto-fire nor a stray
+   *   `triggerManualCapture` call can complete it from the wrong camera;
+   *   `captureRetakingSideFrame` is what every trigger mode (shutter,
+   *   gesture, and the engine's re-emitted `external-capture-ready` for
+   *   AUTO) now routes through instead. See both doc comments for the full
+   *   mechanism.
+   */
   const handleRetakeStep = async (stepId: string) => {
     const engine = liveWorkflowEngineRef.current;
     if (!engine) return;
 
-    const started = await engine.retakeStep(stepId);
+    const frame = simultaneousCaptureRef.current
+      ? framesForWorkflow(activeWorkflowRef.current).find((f) => f.stepId === stepId)
+      : null;
+    const isSideFrameRetake = !!frame && frame.role !== 'CENTER';
+
+    const started = await engine.retakeStep(stepId, { externalCapture: isSideFrameRetake });
     if (!started) return;
 
     setShowReviewModal(false);
@@ -1217,25 +1692,25 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     setIsWorkflowStarted(true);
     isWorkflowStartedRef.current = true;
 
-    // Simultaneous capture: a side frame's retake has no shutter/gesture/
-    // AUTO trigger of its own to wait on — engine.retakeStep() above already
-    // put the session back in RUNNING with this step no longer COMPLETED,
-    // so snapshot it right now, ungated. CENTER's retake keeps going through
-    // the normal capture-trigger path above instead, and that handler's own
-    // not-COMPLETED filter guarantees it will not re-snapshot the side
-    // frames this block already (re)captured.
     if (simultaneousCaptureRef.current) {
-      const frame = framesForWorkflow(activeWorkflowRef.current).find((f) => f.stepId === stepId);
-      if (frame && frame.role !== 'CENTER') {
-        const videoEl = frameVideoElsRef.current[stepId];
-        const dataUrl = videoEl ? snapshotVideoFrame(videoEl) : null;
-        if (dataUrl) {
-          engine.recordExternalCapture(stepId, dataUrl);
-        } else {
-          console.warn(`[FaceCaptureApp] simultaneous retake: no snapshot for ${frame.label} (${frame.role})`);
-        }
-      }
+      // Frame streams normally stay open from session start straight through
+      // review (nothing closes them until finishSession/cancel/restart — see
+      // closeFrameStreams' call sites), but re-open defensively in case one
+      // was lost for an unrelated reason: openFrameStreams is idempotent
+      // (see its own doc comment), so this is a harmless no-op in the common
+      // case and the only thing standing between a lost stream and a side
+      // frame that silently never goes live again.
+      const preflight = await runFramePreflight(activeWorkflowRef.current);
+      if (preflight.ok) await openFrameStreams(preflight);
     }
+
+    // CB Help (§3.5): show this frame live on the extended display right
+    // away. `retakeStep()`'s own 'state-change' emit above already triggers
+    // a republish via the live engine's listener, but that dedupes against
+    // the session/step key and could be swallowed if this step already
+    // looked CURRENT from before review opened — publish explicitly rather
+    // than rely on the dedupe not eating it.
+    publishCbHelpState();
   };
 
   const handleRestart = async () => {
@@ -1243,7 +1718,20 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     setLatestCapturedImage(null);
     setIsWorkflowStarted(false);
     isWorkflowStartedRef.current = false;
+    // Stop-recording hook (§3.1 fix, 2026-09-05) — see `recordingSessionKey`'s
+    // own doc comment. Already null here for a run that reached 'completed'
+    // naturally (that handler above already cleared it); a harmless no-op in
+    // that case, and the fix for retaking mid-session before 'completed' ever
+    // fired. The `startSession` call further down (this restart's own
+    // pre-armed session) deliberately does NOT set this key back — same as
+    // before this fix, recording only (re)arms from a real
+    // `handleStartWorkflow`, once the operator presses Start again.
+    setRecordingSessionKey(null);
     reportStatsEvent('RETAKE');
+    // CB Help (§3.5): an abandoned run must not leave its last frame/photo
+    // showing on the extended display — the fresh session started below (if
+    // any) re-publishes for real via the engine's own 'state-change'.
+    publishCbHelpState({ phase: 'idle' });
     // "Chụp lại toàn bộ" reaches here before the session has necessarily
     // completed (SessionReviewModal allows reviewing, and retaking
     // everything, from as little as one captured step). Without this, the
@@ -1260,10 +1748,14 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         triggerConfig,
         blockedReason,
         simultaneousCapture: campaignSimultaneous,
+        recordVideo: campaignRecordVideo,
       } = await resolveActiveWorkflow();
       setDeviceBlockedReason(blockedReason);
       setActiveWorkflow(workflow);
       activeEngine.setCaptureTriggerConfig(triggerConfig);
+      setEffectiveTriggerConfig(triggerConfig);
+      captureTriggerRef.current.updateConfig({ mode: triggerConfig.mode, autoHoldMs: triggerConfig.autoHoldMs });
+      setRecordVideo(campaignRecordVideo);
       if (!blockedReason) {
         const canStart = await runSimultaneousCaptureGate(mode === 'live', campaignSimultaneous, workflow);
         if (canStart) await activeEngine.startSession(workflow);
@@ -1298,6 +1790,127 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   }, []);
 
   /**
+   * The CB Help extended-display window's open/closed state (§3.5) —
+   * reflects the "Màn hình mở rộng" toggle button below. Note the window it
+   * toggles is no longer a mirror of this whole app (that decision was
+   * reversed 2026-09-05): it now shows only the capture frames, live +
+   * captured — see `publishCbHelpState` further down for what feeds it, and
+   * cbHelpWindow.ts's own doc comment. `toggleCbHelpWindow`/
+   * `isCbHelpWindowOpen` only exist under the desktop app's preload bridge,
+   * never on the web build, so this stays `false` there and the button
+   * itself does not render at all (see `cbHelpButton` below) — same
+   * `(window as any).faceAPI` guard pattern as `cameraRoleMapping` above.
+   */
+  const [cbHelpOpen, setCbHelpOpen] = useState(false);
+  useEffect(() => {
+    const faceAPI = (window as any).faceAPI;
+    faceAPI?.isCbHelpWindowOpen?.()
+      .then((open: boolean) => setCbHelpOpen(!!open))
+      .catch(() => {
+        /* no bridge — stay closed */
+      });
+  }, []);
+
+  const handleToggleCbHelp = useCallback(async () => {
+    const faceAPI = (window as any).faceAPI;
+    try {
+      const result = await faceAPI?.toggleCbHelpWindow?.();
+      if (result) setCbHelpOpen(!!result.open);
+    } catch {
+      /* no bridge, or the window failed to open/close — leave state as-is */
+    }
+  }, []);
+
+  /** Ref mirror of `cameraRoleMapping`, read from `publishCbHelpState` below when it is called from inside the mount-only engine-event handlers (stale-closure concern — same reason `activeWorkflowRef` exists). */
+  const cameraRoleMappingRef = useRef<Record<string, string>>({});
+  useEffect(() => {
+    cameraRoleMappingRef.current = cameraRoleMapping;
+  }, [cameraRoleMapping]);
+
+  /** Ref mirror of `selectedDeviceId`, same reason as `cameraRoleMappingRef` above. */
+  const selectedDeviceIdRef = useRef<string>('');
+  useEffect(() => {
+    selectedDeviceIdRef.current = selectedDeviceId;
+  }, [selectedDeviceId]);
+
+  /**
+   * De-dupes the CB Help "step change" publish (see the live engine's
+   * `state-change` handler below) against that event's real firing rate —
+   * once per processed video frame, many times a second — so only an actual
+   * session start or step change reaches the `cbhelp:publish` IPC call, not
+   * every frame `processFrame` evaluates.
+   */
+  const lastCbHelpKeyRef = useRef<string | null>(null);
+
+  /**
+   * Publishes a capture-frames snapshot to the CB Help window over the
+   * `cbhelp:publish` bridge (§3.5, 2026-09-05 product decision — see
+   * cbHelpWindow.ts's own doc comment for what the window shows now: only
+   * the capture frames, live + captured, not a mirror of this whole app).
+   * Live-mode only — simulation mode has no physical cameras/`deviceId`s for
+   * the CB Help window to open a stream against.
+   *
+   * Reads everything through refs (`activeWorkflowRef`,
+   * `simultaneousCaptureRef`, `cameraRoleMappingRef`, `selectedDeviceIdRef`)
+   * plus the live engine's own `currentSession`/`currentState`, rather than
+   * this component's React state directly — the engine instance itself
+   * never goes stale (it is created once and kept in
+   * `liveWorkflowEngineRef`), so this stays correct however it's called:
+   * from a regular event handler here, or from inside the mount-only
+   * effect's engine event listeners below, which would otherwise only ever
+   * see the render they were registered on.
+   *
+   * `opts.phase` picks the CB Help window's presentation mode explicitly —
+   * see `CbHelpPublishState.phase`'s own doc comment for what each value
+   * means. Omitted (the plain per-frame/per-step republish below) derives it
+   * the same way this always has: `'live'` while the engine's own session is
+   * RUNNING, `'idle'` otherwise. `'review'`/`'done'` still build `frames`
+   * from the engine's session exactly like `'live'` does — a session that
+   * just completed (or is COMPLETED and being reviewed/accepted) still holds
+   * every step's `capturedImagePath`, `status: 'COMPLETED'`, on
+   * `currentSession` until the next `startSession()` overwrites it, so the
+   * snapshot is simply "every frame, already completed." Only an explicit
+   * `phase: 'idle'` (cancel, restart, or leaving live mode) forces an empty
+   * `frames` list regardless of what the engine still holds — an abandoned
+   * or restarted run must not leave its last frame/photo showing on the
+   * extended display.
+   */
+  const publishCbHelpState = useCallback((opts?: { phase?: 'idle' | 'review' | 'done' }) => {
+    const faceAPI = (window as any).faceAPI;
+    if (!faceAPI?.publishCbHelpState) return; // web build, or no bridge
+
+    const engine = liveWorkflowEngineRef.current;
+    const session = engine?.currentSession ?? null;
+    const phase: 'idle' | 'live' | 'review' | 'done' =
+      opts?.phase ?? (session?.status === 'RUNNING' ? 'live' : 'idle');
+    const running = phase === 'live';
+    const showFrames = phase !== 'idle';
+
+    const state: CbHelpPublishState = {
+      running,
+      phase,
+      simultaneous: simultaneousCaptureRef.current,
+      currentStepId: running ? engine!.currentState.stepId : null,
+      frames: showFrames
+        ? buildCbHelpFrames(
+            activeWorkflowRef.current,
+            session,
+            engine?.currentState.currentStepIndex ?? 0,
+            simultaneousCaptureRef.current,
+            cameraRoleMappingRef.current,
+            selectedDeviceIdRef.current
+          )
+        : [],
+    };
+    void faceAPI.publishCbHelpState(state);
+  }, []);
+
+  /** Leaving live mode (or never having entered it) must not leave a stale live snapshot on the CB Help window. */
+  useEffect(() => {
+    if (mode !== 'live') publishCbHelpState({ phase: 'idle' });
+  }, [mode, publishCbHelpState]);
+
+  /**
    * Unique, currently-plugged-in physical devices behind the CENTER/LEFT/
    * RIGHT role mapping above — decides which of the two video-recording
    * effects below applies. Two roles can point at the same physical device
@@ -1316,35 +1929,99 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    * Local video recording alongside the session — see
    * docs/plans/multi-camera-device-management-discussion.md §3.1. A
    * self-contained effect, independent of the capture/quality-gate logic
-   * elsewhere in this file: it only watches whether a session is running and
-   * a camera stream exists, and starts/stops a `MediaRecorder` accordingly.
+   * elsewhere in this file: it only watches whether the campaign has
+   * `recordVideo` on, a session is actually running, and a camera stream
+   * exists, and starts/stops a `MediaRecorder` accordingly.
    *
-   * `activeSession?.id` may briefly still name the previous run in the gap
-   * between `setIsWorkflowStarted(true)` and the engine actually creating a
-   * new session — acceptable here, since `capture_streams.session_id` is a
-   * plain grouping tag on the desktop side, not an enforced foreign key
-   * (see CaptureStreamRepository's own doc comment): worst case one
-   * recording is tagged with the wrong session id, nothing is lost or
-   * corrupted.
+   * Gated via `shouldRecordSingleStream` (recordingGate.ts) on `recordVideo`,
+   * `recordingSessionKey`, `stream`, and `multiChannelDeviceIds.length < 2` —
+   * see that state's own doc comment for the 2026-09-05 field bug this fixes
+   * (a stuck boolean meant a new session's recorder never started while an
+   * abandoned session's kept running) and why keying on the session id
+   * itself, not a boolean, is the fix: `recordingSessionKey` changing to a
+   * genuinely new value is what actually makes this effect's dependency
+   * array change and restart, which is the only thing that runs this
+   * effect's cleanup (the only place that calls `recorder.stop()` and
+   * therefore `faceAPI.endVideoStream()`).
+   *
+   * Also bounded by a runaway cap (`isRecordingOverCap`): a session left
+   * abandoned with no operator action at all — this bug's exact field
+   * scenario — still gets its recording stopped, finalized, and logged after
+   * `MAX_RECORDING_DURATION_MS`, instead of running until the kiosk quits.
    *
    * No upload path here on purpose — whether video ever leaves the kiosk is
-   * still an open question (that doc's §4 #3); this only ever writes to
-   * local disk.
+   * still an open question (that doc's §4 #3, and explicitly out of scope
+   * per the 2026-09-05 product decision); this only ever writes to local
+   * disk.
    *
    * Fallback only: once ≥2 physical cameras are mapped to roles, the
    * multi-channel effect below takes over instead, so this skips out to
    * avoid double-recording whichever camera happens to be active.
    */
   useEffect(() => {
-    if (!stream || !isWorkflowStarted || multiChannelDeviceIds.length >= 2) return;
+    if (
+      !shouldRecordSingleStream({
+        recordVideo,
+        recordingSessionKey,
+        hasStream: !!stream,
+        multiChannelDeviceCount: multiChannelDeviceIds.length,
+      })
+    )
+      return;
     const faceAPI = (window as any).faceAPI;
     if (!faceAPI?.startVideoStream) return; // web build, or no bridge to a desktop main process
 
     let cancelled = false;
     let recorder: MediaRecorder | null = null;
     let streamId: string | null = null;
+    let capTimerId: ReturnType<typeof setInterval> | null = null;
     const chunks: BlobPart[] = [];
     const startedAt = Date.now();
+    // Read once, at effect-start: `recordingSessionKey` IS the real session
+    // id already (unlike the old `activeSession?.id` read, which could
+    // briefly still name the previous run in the gap between arming the
+    // flag and the engine actually creating the new session).
+    const sessionIdForLog = recordingSessionKey ?? 'unknown';
+
+    /** Stops the recorder (if still active) and finalizes via `endVideoStream`, logging what happened either way. Idempotent: a recorder already `inactive` (already stopped by the cap, or never started) is a no-op. */
+    const stopAndFinalize = (): Promise<void> => {
+      if (!recorder || (recorder as MediaRecorder).state === 'inactive') return Promise.resolve();
+
+      const finishedRecorder = recorder;
+      const finishedStreamId = streamId;
+      return new Promise<void>((resolve) => {
+        finishedRecorder.onstop = async () => {
+          let files: string[] = [];
+          if (finishedStreamId) {
+            try {
+              const blob = new Blob(chunks, { type: finishedRecorder.mimeType });
+              const data = new Uint8Array(await blob.arrayBuffer());
+              const result = await faceAPI.endVideoStream({
+                streamId: finishedStreamId,
+                data,
+                durationMs: Date.now() - startedAt,
+              });
+              // Previously ignored entirely — a `{ ok: false, error }` reply
+              // (e.g. the main process's Uint8Array validation, or a disk
+              // write failure) used to vanish silently. Surfaced now so a
+              // real save failure at least reaches main.log instead of just
+              // leaving the capture_streams row unfinalized with no trace of
+              // why.
+              if (!result?.ok) {
+                console.error(`[FaceCaptureApp] video recording failed to save: ${result?.error ?? 'unknown error'}`);
+              } else {
+                files = [finishedStreamId];
+              }
+            } catch (err) {
+              console.error('[FaceCaptureApp] video recording failed to save:', err);
+            }
+          }
+          console.warn('[FaceCaptureApp] recording stopped', { sessionId: sessionIdForLog, files });
+          resolve();
+        };
+        finishedRecorder.stop();
+      });
+    };
 
     void (async () => {
       const mimeType =
@@ -1354,18 +2031,35 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
 
       try {
         const result = await faceAPI.startVideoStream({
-          sessionId: activeSession?.id ?? 'unknown',
+          sessionId: sessionIdForLog,
           cameraId: selectedDeviceId || 'default',
           mimeType,
         });
         if (cancelled) return;
         streamId = result.streamId;
 
-        recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+        recorder = new MediaRecorder(stream!, mimeType ? { mimeType } : undefined);
         recorder.ondataavailable = (e) => {
           if (e.data.size > 0) chunks.push(e.data);
         };
         recorder.start();
+
+        // Runaway-recording cap (2026-09-05 fix) — see `recordingSessionKey`'s
+        // own doc comment and recordingGate.ts's `isRecordingOverCap`: a
+        // session abandoned with no cancel/complete/restart ever firing must
+        // not record forever. Checked periodically rather than a single
+        // `setTimeout` so it stays correct even if the tab/process was
+        // suspended (e.g. laptop sleep) for part of the interval.
+        capTimerId = setInterval(() => {
+          if (cancelled || !isRecordingOverCap(startedAt)) return;
+          console.warn('[FaceCaptureApp] recording exceeded max duration, stopping', {
+            sessionId: sessionIdForLog,
+            maxMs: MAX_RECORDING_DURATION_MS,
+          });
+          if (capTimerId) clearInterval(capTimerId);
+          void stopAndFinalize();
+          setRecordingSessionKey((current) => (current === recordingSessionKey ? null : current));
+        }, 30_000);
       } catch (err: any) {
         // DOMException (e.g. from MediaRecorder/faceAPI) stringifies to
         // "[object DOMException]" once console output is captured into the
@@ -1377,28 +2071,11 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
 
     return () => {
       cancelled = true;
-      if (!recorder || (recorder as MediaRecorder).state === 'inactive') return;
-
-      const finishedRecorder = recorder;
-      const finishedStreamId = streamId;
-      finishedRecorder.onstop = async () => {
-        if (!finishedStreamId) return;
-        try {
-          const blob = new Blob(chunks, { type: finishedRecorder.mimeType });
-          const data = new Uint8Array(await blob.arrayBuffer());
-          await faceAPI.endVideoStream({
-            streamId: finishedStreamId,
-            data,
-            durationMs: Date.now() - startedAt,
-          });
-        } catch (err) {
-          console.error('[FaceCaptureApp] video recording failed to save:', err);
-        }
-      };
-      finishedRecorder.stop();
+      if (capTimerId) clearInterval(capTimerId);
+      void stopAndFinalize();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stream, isWorkflowStarted, multiChannelDeviceIds.length]);
+  }, [recordVideo, stream, recordingSessionKey, multiChannelDeviceIds.length]);
 
   /**
    * True simultaneous multi-channel recording — see ROADMAP.md's "what's
@@ -1433,13 +2110,32 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    * when `frameStreams` already has a stream for a device, this reuses it
    * below instead of opening a second one — the risk above still stands for
    * a role mapping configured without that flag.
+   *
+   * Gated via `shouldRecordMultiChannel` (recordingGate.ts) on `recordVideo`,
+   * `recordingSessionKey`, and `multiChannelDeviceIds.length >= 2` — same
+   * 2026-09-05 fix and reasoning as the single-stream effect above:
+   * `recordingSessionKey` changing to a genuinely new session id is what
+   * makes this effect's dependency array change and restart, which is the
+   * only thing that runs this effect's cleanup (the only place that stops
+   * every channel's `MediaRecorder` and calls `faceAPI.endVideoStream()` for
+   * it) — a plain boolean stuck `true` from an abandoned session used to
+   * make that never happen. Also bounded by the same runaway cap
+   * (`isRecordingOverCap`) as the single-stream effect, applied per channel.
    */
   useEffect(() => {
     const faceAPI = (window as any).faceAPI;
-    if (!isWorkflowStarted || multiChannelDeviceIds.length < 2 || !faceAPI?.startVideoStream) return;
+    if (
+      !shouldRecordMultiChannel({
+        recordVideo,
+        recordingSessionKey,
+        multiChannelDeviceCount: multiChannelDeviceIds.length,
+      }) ||
+      !faceAPI?.startVideoStream
+    )
+      return;
 
     let cancelled = false;
-    const sessionId = activeSession?.id ?? 'unknown';
+    const sessionId = recordingSessionKey ?? 'unknown';
     const startedAt = Date.now();
     const channels: Array<{
       mediaStream: MediaStream;
@@ -1449,6 +2145,50 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
       /** Whether this effect opened `mediaStream` itself and must stop its tracks — false for a stream reused from `frameStreamsRef`, which openFrameStreams/closeFrameStreams own instead. */
       ownsStream: boolean;
     }> = [];
+    let capTimerId: ReturnType<typeof setInterval> | null = null;
+
+    /** Stops every channel's recorder (if still active) and finalizes each via `endVideoStream`, then logs the whole session's outcome once. Idempotent per channel. */
+    const stopAndFinalizeAll = (): Promise<void> => {
+      const stopPromises = channels.map(
+        (channel) =>
+          new Promise<string | null>((resolve) => {
+            const { recorder, mediaStream, streamId, chunks, ownsStream } = channel;
+            if (recorder.state === 'inactive') {
+              if (ownsStream) mediaStream.getTracks().forEach((t) => t.stop());
+              resolve(null);
+              return;
+            }
+            recorder.onstop = async () => {
+              if (ownsStream) mediaStream.getTracks().forEach((t) => t.stop());
+              try {
+                const blob = new Blob(chunks, { type: recorder.mimeType });
+                const data = new Uint8Array(await blob.arrayBuffer());
+                const result = await faceAPI.endVideoStream({ streamId, data, durationMs: Date.now() - startedAt });
+                // Same previously-ignored-result fix as the single-stream
+                // recorder above.
+                if (!result?.ok) {
+                  console.error(
+                    `[FaceCaptureApp] multi-channel recording failed to save for ${streamId}: ${result?.error ?? 'unknown error'}`
+                  );
+                  resolve(null);
+                } else {
+                  resolve(streamId);
+                }
+              } catch (err) {
+                console.error(`[FaceCaptureApp] multi-channel recording failed to save for ${streamId}:`, err);
+                resolve(null);
+              }
+            };
+            recorder.stop();
+          })
+      );
+      return Promise.all(stopPromises).then((files) => {
+        console.warn('[FaceCaptureApp] recording stopped', {
+          sessionId,
+          files: files.filter((f): f is string => !!f),
+        });
+      });
+    };
 
     void (async () => {
       const mimeType =
@@ -1495,31 +2235,31 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           console.error(`[FaceCaptureApp] multi-channel recording failed to start for ${deviceId}: ${err?.name}: ${err?.message}`);
         }
       }
+
+      // Runaway-recording cap (2026-09-05 fix), applied once for the whole
+      // multi-channel session — see the single-stream effect's identical
+      // mechanism and recordingGate.ts's `isRecordingOverCap` for why.
+      if (!cancelled && channels.length > 0) {
+        capTimerId = setInterval(() => {
+          if (cancelled || !isRecordingOverCap(startedAt)) return;
+          console.warn('[FaceCaptureApp] recording exceeded max duration, stopping', {
+            sessionId,
+            maxMs: MAX_RECORDING_DURATION_MS,
+          });
+          if (capTimerId) clearInterval(capTimerId);
+          void stopAndFinalizeAll();
+          setRecordingSessionKey((current) => (current === recordingSessionKey ? null : current));
+        }, 30_000);
+      }
     })();
 
     return () => {
       cancelled = true;
-      for (const channel of channels) {
-        const { recorder, mediaStream, streamId, chunks, ownsStream } = channel;
-        if (recorder.state === 'inactive') {
-          if (ownsStream) mediaStream.getTracks().forEach((t) => t.stop());
-          continue;
-        }
-        recorder.onstop = async () => {
-          if (ownsStream) mediaStream.getTracks().forEach((t) => t.stop());
-          try {
-            const blob = new Blob(chunks, { type: recorder.mimeType });
-            const data = new Uint8Array(await blob.arrayBuffer());
-            await faceAPI.endVideoStream({ streamId, data, durationMs: Date.now() - startedAt });
-          } catch (err) {
-            console.error(`[FaceCaptureApp] multi-channel recording failed to save for ${streamId}:`, err);
-          }
-        };
-        recorder.stop();
-      }
+      if (capTimerId) clearInterval(capTimerId);
+      void stopAndFinalizeAll();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isWorkflowStarted, multiChannelDeviceIds.join(','), simultaneousCapture]);
+  }, [recordVideo, recordingSessionKey, multiChannelDeviceIds.join(','), simultaneousCapture]);
 
   /**
    * Switches the active camera to whichever one is mapped to the role the
@@ -1600,6 +2340,12 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
             const deviceId = frame.role === 'CENTER' ? selectedDeviceId : cameraRoleMapping[frame.role];
             const deviceLabel = devices.find((d) => d.id === deviceId)?.label ?? null;
             const frameStream = frame.role === 'CENTER' ? stream : frameStreams[frame.stepId] ?? null;
+            // 2026-09-05 black-frame fix: a side frame whose camera hasn't
+            // actually rendered a real frame yet stays 'PENDING' ("Chờ");
+            // once it has, it becomes 'READY' ("Sẵn sàng") — see
+            // `frameReadiness`'s own doc comment. CENTER never needs this
+            // (its readiness is already covered by the face-quality gate).
+            const isReady = frame.role !== 'CENTER' && frameReadiness[frame.stepId] === true;
 
             return {
               stepId: frame.stepId,
@@ -1621,11 +2367,25 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
                 ? frameStream
                   ? 'UNASSIGNED'
                   : 'MISSING'
+                : isReady
+                ? 'READY'
                 : 'PENDING',
               imagePath: sessionStep?.capturedImagePath,
             };
           }),
           blocked: framePreflight,
+          // 2026-09-05 black-frame fix: the shutter (OFF mode, in
+          // DesktopCaptureView/MobileCaptureView) stays disabled until every
+          // side frame is actually rendering — see `allSideFramesReady`'s
+          // own doc comment in lib/multiFrame.ts for why this can't be
+          // folded into `framePreflight`/`blocked` (that check runs before
+          // any stream is even opened; this one needs the stream to already
+          // be live).
+          allSideFramesReady: allSideFramesReady(framesForWorkflow(activeWorkflow), frameReadiness),
+          notReadyRoleLabel: (() => {
+            const role = firstNotReadyFrameRole(framesForWorkflow(activeWorkflow), frameReadiness);
+            return role ? CAMERA_ROLE_LABELS_VI[role] : null;
+          })(),
           onOpenCameraSetup: () => {
             void (window as any).faceAPI?.openCameraSetup?.();
           },
@@ -1637,44 +2397,103 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
 
   const modeButton = (
     <TooltipProvider>
-      <div className="hidden sm:flex items-center bg-slate-900/90 p-1 rounded-xl border border-slate-800 shadow-inner">
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              onClick={switchToSimulationMode}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
-                mode === 'simulation'
-                  ? 'bg-blue-600 text-white shadow-md'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              <SlidersHorizontal className="w-3.5 h-3.5" />
-              Mô phỏng (Simulation)
-            </button>
-          </TooltipTrigger>
-          <TooltipContent side="bottom" theme={theme}>
-            Chế độ Mô phỏng dữ liệu camera bằng thanh trượt
-          </TooltipContent>
-        </Tooltip>
+      <div className="flex items-center gap-2">
+        <div className="hidden sm:flex items-center bg-slate-900/90 p-1 rounded-xl border border-slate-800 shadow-inner">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                onClick={switchToSimulationMode}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
+                  mode === 'simulation'
+                    ? 'bg-blue-600 text-white shadow-md'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <SlidersHorizontal className="w-3.5 h-3.5" />
+                Mô phỏng (Simulation)
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom" theme={theme}>
+              Chế độ Mô phỏng dữ liệu camera bằng thanh trượt
+            </TooltipContent>
+          </Tooltip>
 
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              onClick={startLiveMode}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
-                mode === 'live'
-                  ? 'bg-blue-600 text-white shadow-md'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              <Camera className="w-3.5 h-3.5" />
-              Live Camera
-            </button>
-          </TooltipTrigger>
-          <TooltipContent side="bottom" theme={theme}>
-            Chế độ Live Camera thực tế
-          </TooltipContent>
-        </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                onClick={startLiveMode}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
+                  mode === 'live'
+                    ? 'bg-blue-600 text-white shadow-md'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <Camera className="w-3.5 h-3.5" />
+                Live Camera
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom" theme={theme}>
+              Chế độ Live Camera thực tế
+            </TooltipContent>
+          </Tooltip>
+        </div>
+
+        {/*
+          Only rendered under the desktop app (this bridge method does not
+          exist on the web build) — see cbHelpOpen's own doc comment above.
+          Same toggle `Ctrl/Cmd+Shift+H` triggers; kept next to the mode
+          toggle group and the Camera Setup affordance (§2.1's
+          onOpenCameraSetup below) since both are kiosk-operator-only
+          controls, never shown to the person being captured on the web
+          build.
+        */}
+        {Boolean((window as any).faceAPI?.toggleCbHelpWindow) && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                onClick={handleToggleCbHelp}
+                className={`hidden sm:flex px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all cursor-pointer items-center gap-1.5 shadow-inner ${
+                  cbHelpOpen
+                    ? 'bg-blue-600 text-white border-blue-600 shadow-md'
+                    : 'bg-slate-900/90 border-slate-800 text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <Monitor className="w-3.5 h-3.5" />
+                Màn hình mở rộng
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom" theme={theme}>
+              {cbHelpOpen
+                ? 'Đóng màn hình mở rộng (Ctrl/Cmd+Shift+H)'
+                : 'Mở màn hình mở rộng — hiển thị các khung hình chụp (Ctrl/Cmd+Shift+H)'}
+            </TooltipContent>
+          </Tooltip>
+        )}
+
+        {/*
+          Same desktop-only gating as the "Màn hình mở rộng" button above —
+          `openCameraSetup` does not exist on the web build. Opens the
+          per-angle Camera Setup window (Ctrl/Cmd+Shift+K's own window,
+          `CameraSetupScreen.tsx`) without the operator needing to know that
+          shortcut — see docs/plans/multi-camera-device-management-discussion.md
+          §3.6's "Gán camera cho các góc" decision.
+        */}
+        {Boolean((window as any).faceAPI?.openCameraSetup) && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                onClick={() => void (window as any).faceAPI?.openCameraSetup?.()}
+                className="hidden sm:flex px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all cursor-pointer items-center gap-1.5 shadow-inner bg-slate-900/90 border-slate-800 text-slate-400 hover:text-slate-200"
+              >
+                <Camera className="w-3.5 h-3.5" />
+                Cài đặt camera
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom" theme={theme}>
+              Gán camera vật lý cho từng góc chụp (Ctrl/Cmd+Shift+K)
+            </TooltipContent>
+          </Tooltip>
+        )}
       </div>
     </TooltipProvider>
   );
@@ -1682,6 +2501,10 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   const handleCancelWorkflow = useCallback(async () => {
     setIsWorkflowStarted(false);
     isWorkflowStartedRef.current = false;
+    // Stop-recording hook (§3.1 fix, 2026-09-05) — see `recordingSessionKey`'s
+    // own doc comment. Same "does not re-arm on this function's own
+    // pre-armed startSession" reasoning as handleRestart above.
+    setRecordingSessionKey(null);
     setLatestCapturedImage(null);
     // Cancelling abandons a run that has not completed, same as "Chụp lại
     // toàn bộ" in handleRestart — see RunScopedCaptureSession's doc comment
@@ -1691,6 +2514,8 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     // above: an abandoned simultaneous-capture run must not leave its side
     // cameras open into whatever comes next.
     closeFrameStreams();
+    // CB Help (§3.5): same reasoning as handleRestart's identical call.
+    publishCbHelpState({ phase: 'idle' });
     const activeEngine = mode === 'live' ? liveWorkflowEngineRef.current : simWorkflowEngineRef.current;
     if (activeEngine) {
       const {
@@ -1698,10 +2523,14 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         triggerConfig,
         blockedReason,
         simultaneousCapture: campaignSimultaneous,
+        recordVideo: campaignRecordVideo,
       } = await resolveActiveWorkflow();
       setDeviceBlockedReason(blockedReason);
       setActiveWorkflow(workflow);
       activeEngine.setCaptureTriggerConfig(triggerConfig);
+      setEffectiveTriggerConfig(triggerConfig);
+      captureTriggerRef.current.updateConfig({ mode: triggerConfig.mode, autoHoldMs: triggerConfig.autoHoldMs });
+      setRecordVideo(campaignRecordVideo);
       if (!blockedReason) {
         const canStart = await runSimultaneousCaptureGate(mode === 'live', campaignSimultaneous, workflow);
         if (canStart) await activeEngine.startSession(workflow);
@@ -1776,6 +2605,9 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         onShutterCapture={handleShutterCapture}
         sensitivity={sensitivity}
         onSensitivityChange={handleSensitivityChange}
+        captureMode={effectiveTriggerConfig.mode}
+        autoHoldMs={effectiveTriggerConfig.autoHoldMs}
+        captureModeFromCampaign={effectiveTriggerConfig.fromCampaign}
         onCaptureModeChange={handleCaptureModeChange}
         onAutoHoldMsChange={handleAutoHoldMsChange}
         latestCapturedImage={latestCapturedImage}
@@ -1796,6 +2628,11 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           // Falling back to `session` keeps this working after a session ends
           // and a new one has not started yet (activeSession would be gone).
           session={activeSession ?? session}
+          // Same source of truth as the capture views' CameraPreview mirror
+          // (product decision 2026-09-05) — the operator posed in front of a
+          // mirrored preview, so the review grid must match; the underlying
+          // files (and anything exported/uploaded from them) stay unmirrored.
+          mirrored={CAPTURE_MIRRORED}
           // Captures are staged (written to disk, queued, but not yet
           // eligible for upload — see queueCapture's own doc comment) the
           // instant each step is shot, long before review. This button is the
@@ -1820,6 +2657,12 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
             // doc comment on why finishSession lives here, not in the
             // engine's 'completed' handler above).
             reportStatsEvent('SESSION_COMPLETED');
+            // CB Help (§3.5, 2026-09-05 second pass): the photos stay on the
+            // extended display past acceptance too — only the header moves
+            // from "awaiting confirmation" to "done" (see CbHelpFrames.tsx).
+            // `finishSession()` above never touches the engine's own
+            // session, so it still holds every capturedImagePath this reads.
+            publishCbHelpState({ phase: 'done' });
             setShowReviewModal(false);
           }}
           onRetake={handleRestart}

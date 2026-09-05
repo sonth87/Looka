@@ -57,11 +57,12 @@ import {
   resetAttendanceSession,
 } from './attendance.js';
 import {
-  maybeOpenCbHelpWindow,
-  cbHelpSessionStarted,
-  cbHelpCaptureAdded,
+  closeCbHelpWindow,
+  toggleCbHelpWindow,
+  isCbHelpWindowOpen,
+  publishCbHelpState,
   getCbHelpState,
-  type CbHelpStep,
+  sanitizeCbHelpState,
 } from './cbHelpWindow.js';
 import { initLogger, installCrashHandlers, closeLogger, logFilePath } from './logger.js';
 
@@ -220,6 +221,9 @@ function attachRendererDiagnostics(win: BrowserWindow): void {
   win.on('closed', () => {
     console.log('[window] closed');
     mainWindow = null;
+    // The extended-display mirror has nothing left to mirror once the main
+    // window is gone — see cbHelpWindow.ts's own doc comment.
+    closeCbHelpWindow();
   });
 
   // A page that loads but paints nothing is exactly the blank-window symptom,
@@ -280,6 +284,18 @@ function safeFileToken(raw: unknown, fallback: string): string {
     .replace(/[^a-zA-Z0-9_-]/g, '_')
     .slice(0, 40);
   return cleaned.length > 0 ? cleaned : fallback;
+}
+
+/**
+ * Which display the main kiosk window currently sits on — computed fresh on
+ * every call (not cached) since the operator could move the window to a
+ * different monitor after startup. Passed to `openCbHelpWindow`/
+ * `toggleCbHelpWindow` so the extended display always lands on the *other*
+ * screen. `undefined` when there is no main window yet (there is then
+ * nothing to exclude, so any connected display is fair game).
+ */
+function currentMainDisplayId(): number | undefined {
+  return mainWindow ? screen.getDisplayMatching(mainWindow.getBounds()).id : undefined;
 }
 
 app.whenReady().then(async () => {
@@ -426,17 +442,33 @@ app.whenReady().then(async () => {
   });
 
   /**
-   * The main kiosk window reports the workflow it just started; the CB Help
-   * window (if one is open) resets to show that run instead of whatever
-   * came before. See cbHelpWindow.ts's own doc comment.
+   * Opens/closes the CB Help extended-display window on demand — the same
+   * action `Ctrl/Cmd+Shift+H` triggers (registered below) and the kiosk
+   * UI's "Màn hình mở rộng" button calls. See cbHelpWindow.ts's own doc
+   * comment for what this window shows now (only the capture frames, live +
+   * captured — not a mirror of this main window) and why it no longer opens
+   * by itself at startup.
    */
-  ipcMain.handle('cbhelp:sessionStarted', (_, steps: unknown) => {
-    const list = Array.isArray(steps) ? (steps as CbHelpStep[]) : [];
-    cbHelpSessionStarted(list);
+  ipcMain.handle('cbhelp:toggle', () => toggleCbHelpWindow(currentMainDisplayId()));
+
+  /** Whether the CB Help window is currently open — used to sync the kiosk UI's toggle button on mount. */
+  ipcMain.handle('cbhelp:isOpen', () => isCbHelpWindowOpen());
+
+  /**
+   * The kiosk publishing a fresh capture-frames snapshot for the CB Help
+   * window (§3.5) — called from `FaceCaptureApp.tsx`'s `publishCbHelpState`
+   * on session start, step change, every capture/retake, and on
+   * complete/cancel/restart. Cached in cbHelpWindow.ts and broadcast to the
+   * CB Help window immediately if one is open; otherwise just a cache
+   * update, read back by a CB Help window that opens later via
+   * `cbhelp:getState`.
+   */
+  ipcMain.handle('cbhelp:publish', (_, payload: unknown) => {
+    publishCbHelpState(sanitizeCbHelpState(payload));
     return true;
   });
 
-  /** Hydration for a CB Help window that just opened or reloaded mid-session. */
+  /** Hydration for a CB Help window that opens (or reloads) mid-session. */
   ipcMain.handle('cbhelp:getState', () => getCbHelpState());
 
   /**
@@ -619,16 +651,6 @@ app.whenReady().then(async () => {
           visibility,
         });
 
-        // View-only feed for whoever is watching the CB Help display, if one
-        // is open — see cbHelpWindow.ts's own doc comment. A no-op when no
-        // such window exists.
-        cbHelpCaptureAdded({
-          stepId: safeFileToken(payload?.stepId, 'step'),
-          attempt: Number(payload?.attempt ?? 1) || 1,
-          dataUrl,
-          capturedAt: Date.now(),
-        });
-
         return { ok: true, jobId };
       } catch (err) {
         // Storage failed: say so. A capture that was not stored must never be
@@ -648,14 +670,27 @@ app.whenReady().then(async () => {
    * the file-service directly. A session with nothing left to approve
    * (already approved, or unknown) is not an error: `approved: 0` reports
    * that plainly so the caller can tell a genuine approval from a no-op.
+   *
+   * The `console.warn` below is deliberate, not incidental logging: the
+   * 2026-09-05 field bug this diagnoses (operator confirms, modal closes,
+   * nothing ever gets approved) left literally no trace anywhere — the
+   * renderer's `ElectronCaptureSink.approveUpload` used to treat `approved: 0`
+   * as success (see that method's own doc comment) and this handler logged
+   * nothing at all either. Every call now lands one line in the kiosk's
+   * main.log with the sessionId the renderer actually sent and how many rows
+   * it matched, so a `approved: 0` for a session that plainly has staged
+   * photos is diagnosable from the log alone instead of requiring a fresh
+   * repro.
    */
   ipcMain.handle('session:approveUpload', (_, payload: { sessionId?: unknown }) => {
     const sessionId = String(payload?.sessionId ?? '');
     if (!sessionId) return { ok: false, error: 'A session id is required.' };
     try {
       const approved = approveSessionUpload(sessionId);
+      console.warn(`[session:approveUpload] sessionId=${sessionId} approved=${approved}`);
       return { ok: true, approved };
     } catch (err) {
+      console.warn(`[session:approveUpload] sessionId=${sessionId} failed: ${(err as Error).message}`);
       return { ok: false, error: (err as Error).message };
     }
   });
@@ -753,21 +788,18 @@ app.whenReady().then(async () => {
   createWindow();
   void ensureMacCameraAccess();
 
-  // Only opens something when a second display is actually connected — see
-  // maybeOpenCbHelpWindow's own doc comment. Deferred one tick past
-  // createWindow() so mainWindow's bounds are settled before asking which
-  // display it is on.
-  if (mainWindow) {
-    const mainDisplay = screen.getDisplayMatching(mainWindow.getBounds());
-    maybeOpenCbHelpWindow(mainDisplay.id);
-  }
-
   // CB Help's entry point into the camera role-assignment screen (§2.1) —
   // see cameraSetupWindow.ts's own doc comment for why this is a separate
   // window rather than something bolted onto the kiosk UI. A global shortcut
   // rather than an on-screen button: this app has no resolved "CB Help mode"
   // surface yet (open question §4 #16) to put a button on.
   globalShortcut.register('CommandOrControl+Shift+K', () => openCameraSetupWindow());
+
+  // Toggles the CB Help extended-display mirror — see cbHelpWindow.ts's own
+  // doc comment. Unlike the camera setup shortcut above, this one *does*
+  // also have an on-screen button (FaceCaptureApp.tsx's "Màn hình mở rộng"),
+  // registered here too so it works even while that button isn't in focus.
+  globalShortcut.register('CommandOrControl+Shift+H', () => toggleCbHelpWindow(currentMainDisplayId()));
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

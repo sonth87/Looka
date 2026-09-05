@@ -48,6 +48,10 @@ export class CampaignDao {
   @Expose()
   simultaneousCapture: boolean;
 
+  @ApiProperty({ description: 'Quay video trong lúc chụp (lưu local, không upload)' })
+  @Expose()
+  recordVideo: boolean;
+
   @ApiProperty()
   @Expose()
   createdAt: Date;

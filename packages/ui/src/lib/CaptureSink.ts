@@ -204,6 +204,20 @@ export class ElectronCaptureSink implements CaptureSink {
    * staged forever, which is the safe, intended outcome, not a bug: nothing
    * uploads behind the operator's back, and nothing captured is ever deleted
    * for want of a click.
+   *
+   * `result.ok` alone is not enough to call this a success: the main process
+   * deliberately reports `{ ok: true, approved: 0 }` for a sessionId that
+   * matches no still-staged rows — already approved, or (the 2026-09-05
+   * field bug this guards against) a sessionId that, for whatever reason,
+   * does not match the `session_id` the rows were actually queued under —
+   * see `session:approveUpload`'s own doc comment in apps/desktop's main
+   * process. Treating that as success used to let SessionReviewModal's "Xác
+   * nhận & Lưu hồ sơ" close normally and report SESSION_COMPLETED while the
+   * operator's photos stayed `PENDING`/unapproved forever, with nothing —
+   * no banner, no log line — ever surfacing the mismatch. Throwing here
+   * instead routes it through `RunScopedCaptureSession.approve()`'s existing
+   * reject path, which `FaceCaptureApp.approveUpload()` already turns into a
+   * visible error banner and a modal that stays open for a retry.
    */
   public async approveUpload(sessionId: string): Promise<void> {
     const faceAPI = (window as any).faceAPI;
@@ -213,6 +227,11 @@ export class ElectronCaptureSink implements CaptureSink {
     const result = await faceAPI.approveSessionUpload({ sessionId });
     if (!result?.ok) {
       throw new Error(result?.error ?? 'approveSessionUpload failed');
+    }
+    if (!(result.approved > 0)) {
+      throw new Error(
+        `Không tìm thấy ảnh nào của phiên này để duyệt — ảnh vẫn được giữ an toàn trên máy, vui lòng thử lại hoặc liên hệ kỹ thuật (session: ${sessionId}).`
+      );
     }
   }
 }
@@ -242,13 +261,60 @@ export class ElectronCaptureSink implements CaptureSink {
 export class RunScopedCaptureSession {
   private sessionId: string | null = null;
 
+  /**
+   * The id cached for the run in progress, or null before any capture has
+   * opened one. Read-only, diagnostic access only — callers store/approve/
+   * complete through the methods below, never by reading this back and
+   * acting on it directly. Exists so call sites (FaceCaptureApp's `onAccept`)
+   * can log which id a given approve actually used, without which a
+   * mismatch between that id and the `session_id` rows were queued under
+   * (the 2026-09-05 field bug — see `approve()`'s own doc comment) leaves no
+   * trace to diagnose from.
+   */
+  public get cachedSessionId(): string | null {
+    return this.sessionId;
+  }
+
+  /**
+   * The in-flight `startSession` call, memoised so concurrent callers share
+   * it instead of each racing their own.
+   *
+   * Simultaneous capture (one shutter press feeding every physical camera at
+   * once — see `WorkflowEngine.recordExternalCapture`) fires this screen's
+   * CENTER `storePhoto` and every side frame's `recordExternalCapture` ->
+   * `capture-trigger` -> `storePhoto` in the same synchronous tick (see
+   * FaceCaptureApp's shared 'capture-trigger' handler). Each of those calls
+   * `ensure()` independently; without memoising the promise here, every one
+   * of them observes `sessionId === null` before any of them has a chance to
+   * resolve `startSession` and write it back, so each awaits its own call and
+   * ends up with a *different* id — the exact field bug this guards against:
+   * a FRONT and a LEFT photo from one shutter press filed under two session
+   * ids, so `approve()` (which only knows the id it cached last) releases
+   * just one of them and the other stays staged forever. Caching the promise
+   * itself, not just its eventual result, closes that window: every
+   * concurrent caller awaits the one in-flight call and all resolve to the
+   * same id.
+   */
+  private sessionPromise: Promise<string> | null = null;
+
   constructor(private readonly sink: CaptureSink | null) {}
 
   /** The id for the current run, opening one with the sink if none is cached yet. */
   public async ensure(): Promise<string | null> {
     if (!this.sink) return null;
     if (this.sessionId) return this.sessionId;
-    this.sessionId = await this.sink.startSession({});
+    if (!this.sessionPromise) {
+      this.sessionPromise = this.sink.startSession({}).catch((err) => {
+        // A failed startSession must not stay memoised forever — the next
+        // ensure() (this run's own retry, or an unrelated later run reusing
+        // this instance) needs to try a fresh call, not keep awaiting this
+        // same rejection. sessionId is never set in this branch, so the
+        // existing "no session yet" path already re-enters ensure() cleanly.
+        this.sessionPromise = null;
+        throw err;
+      });
+    }
+    this.sessionId = await this.sessionPromise;
     return this.sessionId;
   }
 
@@ -298,6 +364,7 @@ export class RunScopedCaptureSession {
     if (!this.sink || !sessionId) return;
     await this.sink.completeSession(sessionId);
     this.sessionId = null;
+    this.sessionPromise = null;
   }
 
   /**
@@ -307,5 +374,6 @@ export class RunScopedCaptureSession {
    */
   public reset(): void {
     this.sessionId = null;
+    this.sessionPromise = null;
   }
 }

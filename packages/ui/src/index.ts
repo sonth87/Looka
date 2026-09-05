@@ -17,7 +17,7 @@ export {
 } from './components/ui/tooltip.js';
 
 // Camera
-export { CameraPreview } from './components/camera/CameraPreview.js';
+export { CameraPreview, CAPTURE_MIRRORED } from './components/camera/CameraPreview.js';
 export { CameraSelector } from './components/camera/CameraSelector.js';
 export { CameraPermission } from './components/camera/CameraPermission.js';
 export { CameraError } from './components/camera/CameraError.js';
@@ -27,6 +27,7 @@ export { MultiFrameGrid } from './components/camera/MultiFrameGrid.js';
 export type { MultiFrameGridFrame, MultiFrameGridProps } from './components/camera/MultiFrameGrid.js';
 export { FramesBlockedPanel } from './components/camera/FramesBlockedPanel.js';
 export type { FramesBlockedPanelProps } from './components/camera/FramesBlockedPanel.js';
+export { CAMERA_ROLE_LABELS_VI } from './lib/multiFrame.js';
 
 // Face
 export { FaceOverlay } from './components/face/FaceOverlay.js';

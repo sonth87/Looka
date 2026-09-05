@@ -1,7 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { CaptureWorkflow } from '@face/core';
-import { checkFramesReadiness, framesForWorkflow } from '../multiFrame.js';
+import {
+  checkFramesReadiness,
+  framesForWorkflow,
+  isFrameLikelyBlank,
+  allSideFramesReady,
+  firstNotReadyFrameRole,
+} from '../multiFrame.js';
 
 function workflow(steps: CaptureWorkflow['steps']): CaptureWorkflow {
   return {
@@ -122,4 +128,97 @@ test('checkFramesReadiness reports a duplicate when two roles share one physical
   assert.equal(preflight.duplicates[0].length, 2);
   const stepIds = preflight.duplicates[0].map((f) => f.stepId).sort();
   assert.deepEqual(stepIds, ['s-front', 's-left']);
+});
+
+// --- isFrameLikelyBlank (2026-09-05 black-frame field bug) --------------
+
+/** Builds a flat-color Uint8ClampedArray the size of `width * height` RGBA pixels. */
+function solidPixels(width: number, height: number, r: number, g: number, b: number): Uint8ClampedArray {
+  const pixels = new Uint8ClampedArray(width * height * 4);
+  for (let i = 0; i < pixels.length; i += 4) {
+    pixels[i] = r;
+    pixels[i + 1] = g;
+    pixels[i + 2] = b;
+    pixels[i + 3] = 255;
+  }
+  return pixels;
+}
+
+/** Builds a high-contrast checkerboard so mean AND variance both land far from every rejection threshold — a stand-in for a real, varied captured frame. */
+function checkerboardPixels(size: number): Uint8ClampedArray {
+  const pixels = new Uint8ClampedArray(size * size * 4);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const i = (y * size + x) * 4;
+      const on = (x + y) % 2 === 0;
+      const v = on ? 235 : 20;
+      pixels[i] = v;
+      pixels[i + 1] = v;
+      pixels[i + 2] = v;
+      pixels[i + 3] = 255;
+    }
+  }
+  return pixels;
+}
+
+test('isFrameLikelyBlank rejects a fully black frame — the exact field bug (face-step-right-2.jpg)', () => {
+  const pixels = solidPixels(32, 32, 0, 0, 0);
+  assert.equal(isFrameLikelyBlank(pixels, 32, 32), true);
+});
+
+test('isFrameLikelyBlank rejects a solid mid-gray frame (zero variance) even though its mean is not near-black', () => {
+  const pixels = solidPixels(32, 32, 128, 128, 128);
+  assert.equal(isFrameLikelyBlank(pixels, 32, 32), true);
+});
+
+test('isFrameLikelyBlank rejects a solid white frame (zero variance) — a stuck driver output is just as unusable as black', () => {
+  const pixels = solidPixels(32, 32, 255, 255, 255);
+  assert.equal(isFrameLikelyBlank(pixels, 32, 32), true);
+});
+
+test('isFrameLikelyBlank accepts a real, varied frame', () => {
+  const pixels = checkerboardPixels(32);
+  assert.equal(isFrameLikelyBlank(pixels, 32, 32), false);
+});
+
+test('isFrameLikelyBlank treats empty/zero-size input as blank rather than throwing', () => {
+  assert.equal(isFrameLikelyBlank(new Uint8ClampedArray(0), 0, 0), true);
+});
+
+// --- allSideFramesReady / firstNotReadyFrameRole (shutter-enable gate) --
+
+function sideFrames(): ReturnType<typeof framesForWorkflow> {
+  return framesForWorkflow(
+    workflow([
+      { id: 's-front', type: 'FRONT', instruction: 'a', capture: { enabled: true } },
+      { id: 's-left', type: 'LEFT', instruction: 'b', capture: { enabled: true } },
+      { id: 's-right', type: 'RIGHT', instruction: 'c', capture: { enabled: true } },
+    ])
+  );
+}
+
+test('allSideFramesReady ignores CENTER and requires every side frame ready', () => {
+  const frames = sideFrames();
+  assert.equal(allSideFramesReady(frames, {}), false);
+  assert.equal(allSideFramesReady(frames, { 's-left': true }), false);
+  assert.equal(allSideFramesReady(frames, { 's-left': true, 's-right': true }), true);
+  // CENTER's own readiness (if ever present in the map) must not matter.
+  assert.equal(
+    allSideFramesReady(frames, { 's-front': false, 's-left': true, 's-right': true }),
+    true
+  );
+});
+
+test('firstNotReadyFrameRole reports the first not-ready side frame in step order, null once all are ready', () => {
+  const frames = sideFrames();
+  assert.equal(firstNotReadyFrameRole(frames, {}), 'LEFT');
+  assert.equal(firstNotReadyFrameRole(frames, { 's-left': true }), 'RIGHT');
+  assert.equal(firstNotReadyFrameRole(frames, { 's-left': true, 's-right': true }), null);
+});
+
+test('firstNotReadyFrameRole is null when the workflow has no side frames at all', () => {
+  const frames = framesForWorkflow(
+    workflow([{ id: 's-front', type: 'FRONT', instruction: 'a', capture: { enabled: true } }])
+  );
+  assert.equal(firstNotReadyFrameRole(frames, {}), null);
 });

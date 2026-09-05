@@ -1,7 +1,7 @@
 import React from "react";
 import { Play, Camera, Images, Sun, Moon, XCircle } from "lucide-react";
 import { SharedCaptureViewProps } from "./types.js";
-import { CameraPreview } from "../../camera/CameraPreview.js";
+import { CameraPreview, CAPTURE_MIRRORED } from "../../camera/CameraPreview.js";
 import { CameraSelector } from "../../camera/CameraSelector.js";
 import { FaceOverlay } from "../../face/FaceOverlay.js";
 import { GestureOverlay } from "../../face/GestureOverlay.js";
@@ -57,6 +57,22 @@ export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
     autoHoldMs,
     multiFrame,
   } = props;
+
+  // WorkflowEngine tracks pose stability (guidance.status can read
+  // STABILIZING/CAPTURING) regardless of captureMode, but only AUTO mode
+  // ever turns that into an actual capture — MANUAL waits for a held
+  // gesture, OFF waits for the shutter button. Showing the raw status (and
+  // the step's pose instruction) in those modes told the operator a photo
+  // was about to be taken automatically when it never would be — see the
+  // identical fix in DesktopCaptureView for the same reasoning.
+  const isAutoOnlyReadyStatus = guidance.status === "STABILIZING" || guidance.status === "CAPTURING";
+  const showsAutoOnlyReady = captureMode !== "AUTO" && isAutoOnlyReadyStatus;
+  const displayStatus = showsAutoOnlyReady ? "READY" : guidance.status;
+  const displayInstruction = showsAutoOnlyReady
+    ? captureMode === "OFF"
+      ? "Bấm nút chụp"
+      : "Giơ cử chỉ tay để chụp"
+    : guidance.primaryInstruction;
 
   return (
     <div
@@ -142,6 +158,10 @@ export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
         >
           <CameraPreview
             stream={stream}
+            // Product decision 2026-09-05: the capture preview behaves like a
+            // mirror again for self-positioning. The saved still stays
+            // unmirrored regardless (BrowserCameraService.mirrorStills).
+            mirrored={CAPTURE_MIRRORED}
             zoomScale={zoomScale}
             zoomOrigin={zoomOrigin}
             aspectRatio="auto"
@@ -159,8 +179,12 @@ export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                 landmarkSize={landmarkSize}
                 visible={overlayVisible}
                 opacity={overlayOpacity}
+                mirrored={CAPTURE_MIRRORED}
                 variant="capture"
-                stabilityProgress={stabilityProgress}
+                // See DesktopCaptureView's identical comment: only AUTO ever
+                // acts on stability, so the countdown ring must not appear
+                // in MANUAL/OFF.
+                stabilityProgress={captureMode === "AUTO" ? stabilityProgress : 0}
                 autoHoldMs={autoHoldMs}
               />
             )}
@@ -169,7 +193,10 @@ export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
               <img
                 src={freezeSnapshot}
                 alt="Snapshot Freeze"
-                className="absolute inset-0 w-full h-full object-cover z-25 pointer-events-none transition-opacity duration-150 animate-in fade-in"
+                className={cn(
+                  "absolute inset-0 w-full h-full object-cover z-25 pointer-events-none transition-opacity duration-150 animate-in fade-in",
+                  CAPTURE_MIRRORED && "scale-x-[-1]"
+                )}
               />
             )}
             <ShutterFlashOverlay
@@ -180,6 +207,7 @@ export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
               imageSrc={flyingState.imageSrc}
               startRect={flyingState.startRect}
               targetRect={flyingState.targetRect}
+              mirrored={CAPTURE_MIRRORED}
               onAnimationEnd={() =>
                 setFlyingState({
                   imageSrc: null,
@@ -227,7 +255,15 @@ export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                 enabled={
                   faceState?.detected === true &&
                   faceState?.presence === "SINGLE_FACE" &&
-                  faceState?.quality?.accepted === true
+                  faceState?.quality?.accepted === true &&
+                  // 2026-09-05 black-frame fix — see the identical gate in
+                  // DesktopCaptureView for the full reasoning.
+                  (!multiFrame || multiFrame.allSideFramesReady)
+                }
+                disabledHint={
+                  multiFrame && !multiFrame.allSideFramesReady && multiFrame.notReadyRoleLabel
+                    ? `Đang chờ camera ${multiFrame.notReadyRoleLabel}…`
+                    : undefined
                 }
                 onCapture={onShutterCapture}
               />
@@ -284,14 +320,14 @@ export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                       <div className="flex items-center gap-2 overflow-hidden">
                         <span className={cn(
                           "px-2 py-0.5 rounded-full border text-[9px] font-extrabold uppercase shrink-0",
-                          guidance.status === 'READY' || guidance.status === 'CAPTURING'
+                          displayStatus === 'READY' || displayStatus === 'CAPTURING'
                             ? "bg-emerald-500/20 text-emerald-500 border-emerald-500/30"
                             : "bg-blue-500/20 text-blue-500 border-blue-500/30"
                         )}>
-                          {guidance.status}
+                          {displayStatus}
                         </span>
                         <span className="text-xs font-semibold truncate">
-                          {guidance.primaryInstruction}
+                          {displayInstruction}
                         </span>
                       </div>
                       {onCancel && (

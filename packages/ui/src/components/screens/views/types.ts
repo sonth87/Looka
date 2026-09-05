@@ -26,8 +26,13 @@ export interface MultiFrameViewFrame {
    * mirroring the main preview) but no camera device is actually mapped or
    * connected to this role yet. Distinct from 'MISSING' (no stream at all) so
    * the badge doesn't read as a broken camera when the video is clearly live.
+   * 'READY': a side (non-CENTER) frame whose camera has actually rendered a
+   * real frame (see `allSideFramesReady` in lib/multiFrame.ts) but has not
+   * yet been captured — 2026-09-05 fix distinguishing this from 'PENDING'
+   * (stream attached but not yet confirmed playing), the state a black-frame
+   * side capture slipped through in.
    */
-  status: "PENDING" | "CURRENT" | "COMPLETED" | "FAILED" | "MISSING" | "UNASSIGNED";
+  status: "PENDING" | "READY" | "CURRENT" | "COMPLETED" | "FAILED" | "MISSING" | "UNASSIGNED";
   imagePath?: string | null;
 }
 
@@ -43,6 +48,20 @@ export interface MultiFrameViewProps {
   blocked: FramePreflight | null;
   onOpenCameraSetup: () => void;
   onRecheck: () => void;
+  /**
+   * 2026-09-05 black-frame fix: whether every side (non-CENTER) frame has
+   * actually rendered a real video frame yet — see `allSideFramesReady` in
+   * lib/multiFrame.ts. The shutter (OFF mode) must stay disabled while this
+   * is false, on top of its existing face-quality gate, so a not-yet-ready
+   * side camera can never have its black initial frame captured and stored.
+   */
+  allSideFramesReady: boolean;
+  /**
+   * The first not-yet-ready side frame's camera-role label (Vietnamese, see
+   * CAMERA_ROLE_LABELS_VI), for the "Đang chờ camera <role>…" shutter hint.
+   * `null` once `allSideFramesReady` is true.
+   */
+  notReadyRoleLabel: string | null;
 }
 
 export interface SharedCaptureViewProps {
@@ -105,6 +124,15 @@ export interface SharedCaptureViewProps {
   renderFaceDiagnostics: () => React.ReactNode;
   captureMode: CaptureTriggerMode;
   autoHoldMs: number;
+  /**
+   * True while `captureMode` is dictated by the campaign rather than this
+   * machine's own local settings — see FaceCaptureApp's
+   * `effectiveTriggerConfig.fromCampaign`. The mode selector (DesktopCaptureView's
+   * telemetry drawer, OverlayConfigPanel) shows a "Theo cấu hình campaign"
+   * hint and disables itself while this is true, so an operator can no
+   * longer pick a mode the WorkflowEngine was never told to honour.
+   */
+  captureModeFromCampaign?: boolean;
   allowedGestures: GestureType[];
   handleToggleOverlayVisible: () => void;
   handleOpacityChange: (val: number) => void;

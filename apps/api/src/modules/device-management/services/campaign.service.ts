@@ -39,6 +39,7 @@ export class CampaignService extends CommonService<Campaign> {
       captureMode: dto.captureMode ?? null,
       autoHoldMs: dto.autoHoldMs ?? null,
       simultaneousCapture,
+      recordVideo: dto.recordVideo ?? false,
     });
 
     return toDao(CampaignDao, campaign);
@@ -103,6 +104,9 @@ export class CampaignService extends CommonService<Campaign> {
     if (dto.autoHoldMs !== undefined) campaign.autoHoldMs = dto.autoHoldMs;
     if (dto.simultaneousCapture !== undefined) {
       campaign.simultaneousCapture = dto.simultaneousCapture;
+    }
+    if (dto.recordVideo !== undefined) {
+      campaign.recordVideo = dto.recordVideo;
     }
 
     // Bump only on an actual change — a no-op PATCH (or one that only

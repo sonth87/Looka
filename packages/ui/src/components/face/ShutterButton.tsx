@@ -5,12 +5,21 @@ export interface ShutterButtonProps {
   enabled: boolean;
   onCapture: () => void;
   className?: string;
+  /**
+   * Overrides the default "Canh khuôn mặt..." hint shown while `!enabled` —
+   * e.g. simultaneous-capture mode's "Đang chờ camera <role>…" (2026-09-05
+   * black-frame fix), so the operator knows a side camera isn't ready yet
+   * rather than assuming their own pose is the problem. Ignored while
+   * `enabled` is true.
+   */
+  disabledHint?: string;
 }
 
 export const ShutterButton: React.FC<ShutterButtonProps> = ({
   enabled,
   onCapture,
   className,
+  disabledHint,
 }) => {
   return (
     <div
@@ -47,7 +56,7 @@ export const ShutterButton: React.FC<ShutterButtonProps> = ({
           enabled ? "text-white/90" : "text-slate-500",
         )}
       >
-        {enabled ? "Nhấn để chụp" : "Canh khuôn mặt..."}
+        {enabled ? "Nhấn để chụp" : disabledHint ?? "Canh khuôn mặt..."}
       </span>
     </div>
   );
