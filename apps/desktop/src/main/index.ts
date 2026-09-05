@@ -1,4 +1,14 @@
-import { app, BrowserWindow, dialog, globalShortcut, ipcMain, screen, shell } from 'electron';
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  globalShortcut,
+  ipcMain,
+  screen,
+  session,
+  shell,
+  systemPreferences,
+} from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
 import type { Visibility } from '@face/core';
@@ -33,13 +43,19 @@ import {
   findAndImportActivationFileIfPresent,
   getCameraRoleMapping,
   setCameraRoleMapping,
-  type CameraRoleMapping,
+  sanitizeCameraRoleMapping,
 } from './secrets.js';
 import { openCameraSetupWindow } from './cameraSetupWindow.js';
 import { getDeviceAccessStatus } from './deviceApi.js';
 import { startVideoStream, endVideoStream } from './streams.js';
 import { recordStatsEvent, startStatsEventPush, stopStatsEventPush } from './statsEvents.js';
 import type { StatsEventType } from '@face/database';
+import {
+  enrollAttendancePerson,
+  listAttendancePersons,
+  processAttendanceFrame,
+  resetAttendanceSession,
+} from './attendance.js';
 import {
   maybeOpenCbHelpWindow,
   cbHelpSessionStarted,
@@ -120,6 +136,41 @@ function createWindow() {
 }
 
 /**
+ * macOS: resolve the camera permission without blocking the kiosk window.
+ *
+ * Root cause of the kiosk's black-camera-preview-with-no-error bug: on
+ * macOS, `getUserMedia()` called from an app that has never triggered the
+ * OS's TCC ("Privacy & Security") camera prompt resolves with a black
+ * video stream instead of throwing — Chromium does not surface a
+ * permission error, so there is nothing for the renderer to catch or
+ * display. Calling `askForMediaAccess('camera')` here — before the capture
+ * UI is actually used — forces that OS prompt to show (or reads back a
+ * status the operator already decided), so a real system dialog is what's
+ * seen instead of a silent black rectangle. This never blocks or fails
+ * startup: an error here just means the black-preview symptom can still
+ * occur, not that the kiosk shouldn't launch. Runs after the window exists
+ * and is never awaited, so a pending or missing TCC dialog can only delay
+ * camera frames, never the kiosk window.
+ */
+async function ensureMacCameraAccess(): Promise<void> {
+  if (process.platform === 'darwin') {
+    try {
+      const cameraAccessStatus = systemPreferences.getMediaAccessStatus('camera');
+      console.log(`[camera] macOS media access status: ${cameraAccessStatus}`);
+      if (cameraAccessStatus !== 'granted') {
+        const granted = await systemPreferences.askForMediaAccess('camera');
+        console.log(`[camera] macOS askForMediaAccess('camera') result: ${granted}`);
+        console.log(
+          `[camera] macOS media access status after prompt: ${systemPreferences.getMediaAccessStatus('camera')}`
+        );
+      }
+    } catch (err) {
+      console.error('[camera] failed to check/request macOS camera access:', err);
+    }
+  }
+}
+
+/**
  * Surface renderer failures in the main-process log.
  *
  * A blank window is the worst thing to debug because nothing reports it: the
@@ -131,10 +182,26 @@ function attachRendererDiagnostics(win: BrowserWindow): void {
     console.error(`[renderer] failed to load ${validatedURL}: ${errorDescription} (${errorCode})`);
   });
 
-  win.webContents.on('console-message', (_e, level, message, line, sourceId) => {
+  win.webContents.on('console-message', (details, level, message, line, sourceId) => {
+    // Electron 37's WebContents `console-message` event carries level/message/
+    // lineNumber/sourceId as properties on `details` itself (level here is a
+    // string: 'info' | 'warning' | 'error' | 'debug'). The positional level/
+    // message/line/sourceId arguments still exist but are @deprecated and use
+    // the old numeric 0-3 level. Read whichever shape is actually populated so
+    // renderer diagnostics keep landing in the log across the deprecation.
+    const resolvedLevel = details.level ?? level;
+    const resolvedMessage = details.message ?? message;
+    const resolvedLine = details.lineNumber ?? line;
+    const resolvedSourceId = details.sourceId ?? sourceId;
+
+    const isWarningOrError =
+      typeof resolvedLevel === 'string'
+        ? resolvedLevel === 'warning' || resolvedLevel === 'error'
+        : typeof resolvedLevel === 'number' && resolvedLevel >= 2;
+
     // Only errors and warnings; ordinary logs would drown the operator log.
-    if (level >= 2) {
-      console.error(`[renderer] ${message} (${sourceId}:${line})`);
+    if (isWarningOrError) {
+      console.error(`[renderer] ${resolvedMessage} (${resolvedSourceId}:${resolvedLine})`);
     }
   });
 
@@ -342,6 +409,23 @@ app.whenReady().then(async () => {
   });
 
   /**
+   * Pillar B wiring — see attendance.ts's own doc comment for why this is
+   * demo mode: the gallery `processFrame` compares against is always empty
+   * by construction while the embedding model is still the mock one.
+   */
+  ipcMain.handle('attendance:enroll', (_, payload: { displayName?: unknown }) => {
+    const displayName = String(payload?.displayName ?? '').trim();
+    if (!displayName) throw new Error('displayName is required');
+    return enrollAttendancePerson({ displayName });
+  });
+  ipcMain.handle('attendance:listPersons', () => listAttendancePersons());
+  ipcMain.handle('attendance:processFrame', () => processAttendanceFrame());
+  ipcMain.handle('attendance:resetSession', () => {
+    resetAttendanceSession();
+    return true;
+  });
+
+  /**
    * The main kiosk window reports the workflow it just started; the CB Help
    * window (if one is open) resets to show that run instead of whatever
    * came before. See cbHelpWindow.ts's own doc comment.
@@ -356,14 +440,18 @@ app.whenReady().then(async () => {
   ipcMain.handle('cbhelp:getState', () => getCbHelpState());
 
   /**
-   * Runtime camera role mapping (§2.1) — which physical camera plays
-   * CENTER/LEFT/RIGHT. Set from the camera setup screen
-   * (`Ctrl/Cmd+Shift+K`), read by the main kiosk window to know which
+   * Runtime camera role mapping (§2.1) — which physical camera plays each of
+   * `CAMERA_ROLES` (CENTER/LEFT/RIGHT/UP/DOWN). Set from the camera setup
+   * screen (`Ctrl/Cmd+Shift+K`), read by the main kiosk window to know which
    * `enumerateDevices()` id corresponds to which logical role.
    */
   ipcMain.handle('camera:getRoleMapping', () => getCameraRoleMapping());
   ipcMain.handle('camera:setRoleMapping', (_, mapping: unknown) => {
-    setCameraRoleMapping((mapping ?? {}) as CameraRoleMapping);
+    setCameraRoleMapping(sanitizeCameraRoleMapping(mapping));
+    return true;
+  });
+  ipcMain.handle('camera:openSetup', () => {
+    openCameraSetupWindow();
     return true;
   });
 
@@ -649,7 +737,21 @@ app.whenReady().then(async () => {
     if (mainWindow) mainWindow.close();
   });
 
+  /**
+   * Log every permission request the renderer triggers (camera/microphone via
+   * getUserMedia chief among them) so a denial is visible in main.log rather
+   * than silently failing inside the renderer. Electron's own default with no
+   * handler registered is already to grant every request, so granting
+   * everything here is behaviour-preserving — this handler exists purely for
+   * the diagnostics, not to change what is allowed.
+   */
+  session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback, _details) => {
+    console.log(`[permission] request: ${permission}`);
+    callback(true);
+  });
+
   createWindow();
+  void ensureMacCameraAccess();
 
   // Only opens something when a second display is actually connected — see
   // maybeOpenCbHelpWindow's own doc comment. Deferred one tick past

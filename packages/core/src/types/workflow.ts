@@ -38,6 +38,34 @@ export interface QualityRequirement {
 
 export type StepType = 'FRONT' | 'LEFT' | 'RIGHT' | 'UP' | 'DOWN' | 'CUSTOM';
 
+/**
+ * A logical camera slot on the kiosk. The desktop app maps each role to one
+ * physical camera in its Camera Setup screen. CENTER is mandatory.
+ */
+export type CameraRole = 'CENTER' | 'LEFT' | 'RIGHT' | 'UP' | 'DOWN';
+
+export const CAMERA_ROLES: readonly CameraRole[] = ['CENTER', 'LEFT', 'RIGHT', 'UP', 'DOWN'];
+
+/**
+ * Used when a `CaptureStep` does not set `cameraRole` explicitly.
+ */
+export function defaultCameraRoleForStepType(type: StepType): CameraRole {
+  switch (type) {
+    case 'FRONT':
+      return 'CENTER';
+    case 'LEFT':
+      return 'LEFT';
+    case 'RIGHT':
+      return 'RIGHT';
+    case 'UP':
+      return 'UP';
+    case 'DOWN':
+      return 'DOWN';
+    default:
+      return 'CENTER';
+  }
+}
+
 export interface CaptureStep {
   id: string;
   type: StepType;
@@ -64,6 +92,13 @@ export interface CaptureStep {
    * those steps should set this to false.
    */
   postureCheck?: boolean;
+  /**
+   * Which logical camera captures this frame. Defaults per
+   * `defaultCameraRoleForStepType(type)`. In a campaign with
+   * `simultaneousCapture` every step must resolve to a distinct role that
+   * has a physical camera mapped on the kiosk.
+   */
+  cameraRole?: CameraRole;
 }
 
 export interface CaptureWorkflow {

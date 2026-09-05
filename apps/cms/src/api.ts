@@ -22,6 +22,7 @@ export interface Campaign {
   captureAngles?: Record<string, unknown>[] | null;
   captureMode?: CaptureTriggerMode | null;
   autoHoldMs?: number | null;
+  simultaneousCapture: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -43,8 +44,10 @@ export interface CreateCampaignInput {
   purpose?: CampaignPurpose;
   expiresAt?: string;
   consentContent?: string;
+  captureAngles?: Record<string, unknown>[];
   captureMode?: CaptureTriggerMode;
   autoHoldMs?: number;
+  simultaneousCapture?: boolean;
 }
 
 export interface UpdateCampaignInput {
@@ -52,13 +55,18 @@ export interface UpdateCampaignInput {
   description?: string;
   expiresAt?: string | null;
   consentContent?: string;
+  captureAngles?: Record<string, unknown>[];
   captureMode?: CaptureTriggerMode;
   autoHoldMs?: number;
+  simultaneousCapture?: boolean;
 }
+
+export type DesktopOs = 'mac' | 'win';
 
 export interface CreateDeviceInput {
   name: string;
   authApiEndpoint?: string;
+  os?: DesktopOs;
 }
 
 export interface CampaignStats {

@@ -45,6 +45,13 @@ export interface WorkflowEngine {
   /** Re-enter an already visited step to replace its photo. Resolves false if the step is not retakable. */
   retakeStep(stepId: string): Promise<boolean>;
   skipStep(): Promise<void>;
+  /**
+   * Record a photo captured by another camera for `stepId` (simultaneous
+   * capture mode), bypassing that step's own pose/quality gate. Returns
+   * false if there is no active session, `stepId` isn't part of the current
+   * workflow, or the step is already COMPLETED.
+   */
+  recordExternalCapture(stepId: string, imagePath: string): boolean;
 
   on(
     event: 'state-change' | 'capture-trigger' | 'completed' | 'failed' | 'step-retaken',

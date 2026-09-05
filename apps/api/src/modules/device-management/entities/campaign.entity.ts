@@ -75,6 +75,19 @@ export class Campaign extends BaseEntity {
   @ApiPropertyOptional({ description: 'Thời gian giữ tư thế khi ở chế độ AUTO (ms)' })
   autoHoldMs?: number | null;
 
+  /**
+   * When true, the kiosk must map every capture step to its own physical
+   * camera before it can start a session — one mapped camera per frame, no
+   * step sharing a camera with another. Fed straight to the kiosk via
+   * `GET /v1/devices/config` alongside `captureAngles`; the kiosk refuses to
+   * start a session if the current camera mapping cannot satisfy it (i.e.
+   * some step's effective role — explicit `cameraRole` or the type default —
+   * has no camera assigned, or two steps resolve to the same role).
+   */
+  @Column('boolean', { default: false, name: 'simultaneous_capture' })
+  @ApiProperty({ description: 'Chụp đồng thời — mỗi khung cần 1 camera vật lý riêng' })
+  simultaneousCapture: boolean;
+
   @OneToMany(() => Device, (device) => device.campaign)
   devices?: Device[];
 }

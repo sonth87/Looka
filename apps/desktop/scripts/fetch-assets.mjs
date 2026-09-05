@@ -1,11 +1,14 @@
 /**
- * Collect the MediaPipe runtime into public/ so the app carries it.
+ * Collect the runtimes the desktop app needs into public/ so it carries them.
  *
- * Both the WASM runtime and the model files are otherwise fetched from a CDN at
- * startup, which makes an "offline-first" kiosk fail the moment it has no
- * network — the exact situation it exists to survive. The WASM ships inside the
- * npm package; the .task models do not, so they are downloaded once here and
- * committed to the build, never at run time.
+ * Both the MediaPipe WASM runtime and the model files are otherwise fetched
+ * from a CDN at startup, which makes an "offline-first" kiosk fail the moment
+ * it has no network — the exact situation it exists to survive. sql.js's own
+ * .wasm is the same story: unpackaged, it's requested from wherever
+ * SQLiteStorageAdapter's wasmBaseUrl points, and under the packaged app's
+ * file:// origin there is no server to fall back to. All three ship inside
+ * their npm packages; the .task models do not, so those are downloaded once
+ * here and committed to the build, never at run time.
  *
  * Run: pnpm --filter @face/desktop fetch:assets
  */
@@ -70,6 +73,47 @@ function copyWasm() {
   console.log(`wasm: copied ${copied} files -> public/wasm/`);
 }
 
+/**
+ * Locate the installed sql.js package directory.
+ *
+ * Same restricted-"exports" situation as mediapipeDir() above: resolve a file
+ * the package does export and walk up to find its dist/ folder.
+ */
+function sqlJsDir() {
+  const entry = require.resolve('sql.js');
+  let dir = path.dirname(entry);
+  for (let i = 0; i < 5; i++) {
+    if (fs.existsSync(path.join(dir, 'dist'))) return dir;
+    dir = path.dirname(dir);
+  }
+  throw new Error(`Could not find the dist folder near ${entry}`);
+}
+
+function copySqlJsWasm() {
+  const srcDir = path.join(sqlJsDir(), 'dist');
+  const destDir = path.join(publicDir, 'wasm');
+  fs.mkdirSync(destDir, { recursive: true });
+
+  // Both non-debug variants, because which one is requested depends on the
+  // glue file the bundler resolves: sql.js publishes a browser build that
+  // asks for sql-wasm-browser.wasm and a generic one that asks for
+  // sql-wasm.wasm, and locateFile only rewrites the directory, never the
+  // filename. Shipping only one means the other 404s at runtime with no
+  // useful error, same class of failure copyWasm() above exists to avoid.
+  const names = ['sql-wasm.wasm', 'sql-wasm-browser.wasm'];
+  const copied = [];
+  for (const name of names) {
+    const src = path.join(srcDir, name);
+    if (!fs.existsSync(src)) continue;
+    fs.copyFileSync(src, path.join(destDir, name));
+    copied.push(name);
+  }
+  if (copied.length === 0) {
+    throw new Error(`none of ${names.join(', ')} found in ${srcDir}`);
+  }
+  console.log(`sql.js: copied ${copied.join(', ')} -> public/wasm/`);
+}
+
 async function fetchModels() {
   const destDir = path.join(publicDir, 'models');
   fs.mkdirSync(destDir, { recursive: true });
@@ -90,6 +134,7 @@ async function fetchModels() {
 
 try {
   copyWasm();
+  copySqlJsWasm();
   await fetchModels();
   console.log('\nAssets ready. The app no longer reaches the network to start its face engine.');
 } catch (err) {

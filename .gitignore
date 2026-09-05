@@ -4,6 +4,8 @@ release
 .turbo
 .next
 build
+# electron-builder signing inputs (entitlements) live here on purpose and must be tracked.
+!apps/desktop/build/
 out
 coverage
 *.log

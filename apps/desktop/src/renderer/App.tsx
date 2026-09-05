@@ -1,5 +1,6 @@
 import { DeviceLayout, AppConfig, AppContentProps } from '@sonth87/device-layout';
-import { ElectronCaptureSink, FaceCaptureApp, LookaIcon } from '@face/ui';
+// import { UserCheck } from 'lucide-react'; // only used by the commented-out attendance app entry below
+import { ElectronCaptureSink, FaceCaptureApp, /* KioskAttendanceApp, */ LookaIcon } from '@face/ui';
 
 const electronCaptureSink = new ElectronCaptureSink();
 
@@ -32,6 +33,23 @@ const appsConfig: AppConfig[] = [
     defaultMaximized: true,
     category: 'utilities',
   },
+  // Attendance (Pillar B demo) deliberately deferred — parked, not deleted:
+  // main/preload/IPC wiring (attendance.ts, index.ts's attendance:* handlers,
+  // preload's attendanceEnroll/ProcessFrame/etc.) and the renderer
+  // KioskAttendanceApp component all still exist and still build/test clean.
+  // Uncomment this entry (and the two imports above) to bring the "Chấm
+  // công (Demo)" icon back.
+  // {
+  //   id: 'looka-attendance-demo',
+  //   name: 'Chấm công (Demo)',
+  //   icon: UserCheck,
+  //   iconColor: ['#10b981', '#065f46'],
+  //   render: () => <KioskAttendanceApp />,
+  //   defaultSize: { width: 900, height: 700 },
+  //   minSize: { width: 480, height: 480 },
+  //   defaultMaximized: true,
+  //   category: 'utilities',
+  // },
 ];
 
 export default function App() {

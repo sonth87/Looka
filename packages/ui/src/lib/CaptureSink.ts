@@ -52,7 +52,12 @@ export class HttpCaptureSink implements CaptureSink {
   constructor(
     private readonly baseUrl: string,
     private readonly apiKey?: string,
-    private readonly fetchImpl: typeof fetch = globalThis.fetch
+    // A bare `globalThis.fetch` reference, called later as `this.fetchImpl(...)`,
+    // invokes the native function with the HttpCaptureSink instance as `this`
+    // instead of `window` — browsers reject that receiver with "Failed to
+    // execute 'fetch' on 'Window': Illegal invocation". Binding it here keeps
+    // the call always going out with the right receiver.
+    private readonly fetchImpl: typeof fetch = globalThis.fetch.bind(globalThis)
   ) {}
 
   private async post<T>(path: string, body: unknown): Promise<T> {

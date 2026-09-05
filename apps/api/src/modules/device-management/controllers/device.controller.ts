@@ -29,7 +29,8 @@ export class DeviceController {
   /**
    * Registers a device under a campaign and returns the single downloadable
    * package for it in the same call — a zip containing the shared installer
-   * (if `DESKTOP_INSTALLER_PATH` is configured) plus this device's own
+   * for `dto.os` (mac/win, if the matching `DESKTOP_INSTALLER_PATH_MAC`/
+   * `DESKTOP_INSTALLER_PATH_WIN` is configured) plus this device's own
    * `activation.json`. See docs/plans/multi-camera-device-management-discussion.md
    * §3.2. There is no separate "fetch the secret later" endpoint: the
    * plaintext secret exists only for the duration of this request.
@@ -43,7 +44,7 @@ export class DeviceController {
   ): Promise<StreamableFile> {
     const campaign = await this.campaignService.findCampaignEntityOrFail(campaignId);
     const { device, plainSecret } = await this.deviceService.registerDevice(campaignId, dto);
-    const zip = await this.activationPackageService.buildActivationZip(device, campaign, plainSecret);
+    const zip = await this.activationPackageService.buildActivationZip(device, campaign, plainSecret, dto.os);
 
     return new StreamableFile(zip, {
       disposition: `attachment; filename="looka-kiosk-${device.id}.zip"`,

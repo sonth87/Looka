@@ -3,12 +3,15 @@ import {
   ApiError,
   Campaign,
   CaptureTriggerMode,
+  DesktopOs,
   Device,
   getCampaign,
   listDevices,
   registerDevice,
   updateCampaign,
 } from '../api';
+import { CAPTURE_STEP_DEFS, StepType, enabledAnglesFromCampaign } from '../captureAngles';
+import { CaptureFramesEditor } from './CaptureFramesEditor';
 import { StatsPanel } from './StatsPanel';
 
 /** Triggers a real browser save — `<a download>` on an object URL, revoked right after. */
@@ -47,7 +50,14 @@ export function CampaignDetail({ campaignId, onBack }: { campaignId: string; onB
       <button onClick={onBack} className="text-gray-500 hover:text-gray-700 mb-4 text-sm">
         ← Danh sách campaign
       </button>
-      <h1 className="text-2xl font-bold mb-6 text-gray-900">{campaign.name}</h1>
+      <div className="flex items-center gap-2 mb-6">
+        <h1 className="text-2xl font-bold text-gray-900">{campaign.name}</h1>
+        {campaign.simultaneousCapture && (
+          <span className="px-2 py-0.5 rounded-full bg-indigo-50 border border-indigo-200 text-indigo-700 text-xs font-medium">
+            Đồng thời
+          </span>
+        )}
+      </div>
 
       <div className="mb-6">
         <StatsPanel campaignId={campaignId} />
@@ -65,12 +75,27 @@ function CampaignSettingsForm({ campaign, onSaved }: { campaign: Campaign; onSav
   const [expiresAt, setExpiresAt] = useState(campaign.expiresAt ? campaign.expiresAt.slice(0, 10) : '');
   const [consentContent, setConsentContent] = useState(campaign.consentContent ?? '');
   const [captureMode, setCaptureMode] = useState<CaptureTriggerMode | ''>(campaign.captureMode ?? '');
+  const [enabledAngles, setEnabledAngles] = useState<Set<StepType>>(() => enabledAnglesFromCampaign(campaign));
+  const [simultaneous, setSimultaneous] = useState(campaign.simultaneousCapture ?? false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
+  const toggleAngle = (type: StepType) => {
+    if (type === 'FRONT') return; // always on — see CaptureFramesEditor's own note below
+    setEnabledAngles((prev) => {
+      const next = new Set(prev);
+      if (next.has(type)) next.delete(type);
+      else next.add(type);
+      return next;
+    });
+  };
+
+  const tooFewFrames = enabledAngles.size < 3;
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (tooFewFrames) return;
     setSaving(true);
     setError(null);
     setSaved(false);
@@ -78,7 +103,11 @@ function CampaignSettingsForm({ campaign, onSaved }: { campaign: Campaign; onSav
       await updateCampaign(campaign.id, {
         expiresAt: expiresAt ? new Date(expiresAt).toISOString() : null,
         consentContent: consentContent || undefined,
+        captureAngles: (Object.keys(CAPTURE_STEP_DEFS) as StepType[])
+          .filter((type) => enabledAngles.has(type))
+          .map((type) => CAPTURE_STEP_DEFS[type]),
         captureMode: captureMode || undefined,
+        simultaneousCapture: simultaneous,
       });
       setSaved(true);
       onSaved();
@@ -130,11 +159,18 @@ function CampaignSettingsForm({ campaign, onSaved }: { campaign: Campaign; onSav
         </select>
       </div>
 
+      <CaptureFramesEditor
+        enabled={enabledAngles}
+        onToggle={toggleAngle}
+        simultaneous={simultaneous}
+        onSimultaneousChange={setSimultaneous}
+      />
+
       {error && <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">{error}</div>}
       <div className="flex items-center gap-3">
         <button
           type="submit"
-          disabled={saving}
+          disabled={saving || tooFewFrames}
           className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold text-sm disabled:opacity-50"
         >
           {saving ? 'Đang lưu...' : 'Lưu'}
@@ -156,6 +192,7 @@ function DevicesPanel({
 }) {
   const [name, setName] = useState('');
   const [authApiEndpoint, setAuthApiEndpoint] = useState('');
+  const [os, setOs] = useState<DesktopOs>('mac');
   const [registering, setRegistering] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -168,6 +205,7 @@ function DevicesPanel({
       const { blob, filename } = await registerDevice(campaignId, {
         name: name.trim(),
         authApiEndpoint: authApiEndpoint.trim() || undefined,
+        os,
       });
       saveBlob(blob, filename);
       setName('');
@@ -237,6 +275,17 @@ function DevicesPanel({
           placeholder="API endpoint lấy thông tin xác thực (tuỳ chọn)"
           className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900"
         />
+        <div>
+          <label className="block text-xs text-gray-500 mb-1">Hệ điều hành kiosk</label>
+          <select
+            value={os}
+            onChange={(e) => setOs(e.target.value as DesktopOs)}
+            className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900"
+          >
+            <option value="mac">macOS</option>
+            <option value="win">Windows</option>
+          </select>
+        </div>
         {error && <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">{error}</div>}
         <button
           type="submit"

@@ -11,6 +11,7 @@ import { FlyingThumbnail } from "../../face/FlyingThumbnail.js";
 import { StepProgress } from "../../workflow/StepProgress.js";
 import { StabilityProgress } from "../../workflow/StabilityProgress.js";
 import { CountdownTimer } from "../../workflow/CountdownTimer.js";
+import { FramesBlockedPanel } from "../../camera/FramesBlockedPanel.js";
 import { cn } from "../../../lib/utils.js";
 
 export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
@@ -28,6 +29,7 @@ export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
     countdownValue,
     theme = "dark",
     onToggleTheme,
+    modeButton,
     onCancel,
     onStartLive,
     isWorkflowStarted,
@@ -53,6 +55,7 @@ export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
     renderFaceDiagnostics,
     captureMode,
     autoHoldMs,
+    multiFrame,
   } = props;
 
   return (
@@ -95,6 +98,14 @@ export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
               onSelectDevice={onSelectDevice}
             />
           )}
+
+          {/*
+            Same dead-prop bug as DesktopCaptureView had — `modeButton`
+            reached this component via GuidedCaptureScreen's sharedProps but
+            was never destructured or rendered, so the Mô phỏng/Live Camera
+            toggle was unreachable on narrow (<768px) viewports too.
+          */}
+          {modeButton}
 
           {onToggleTheme && (
             <button
@@ -148,7 +159,6 @@ export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                 landmarkSize={landmarkSize}
                 visible={overlayVisible}
                 opacity={overlayOpacity}
-                mirrored={true}
                 variant="capture"
                 stabilityProgress={stabilityProgress}
                 autoHoldMs={autoHoldMs}
@@ -227,6 +237,23 @@ export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
               <div className="absolute bottom-16 left-1/2 -translate-x-1/2 w-48 z-20">
                 <StabilityProgress progress={stabilityProgress} text="Giữ nguyên tư thế..." />
               </div>
+            )}
+
+            {/*
+              Multi-frame simultaneous capture (§ desktop kiosk multi-camera
+              capture) — mobile renders only the blocked panel, never the
+              grid (no room for it on a phone screen); `multiFrame` is only
+              ever passed while the campaign's `simultaneousCapture` flag is
+              on and the kiosk is in live mode.
+            */}
+            {multiFrame?.blocked && !multiFrame.blocked.ok && (
+              <FramesBlockedPanel
+                className="pointer-events-auto"
+                preflight={multiFrame.blocked}
+                onOpenCameraSetup={multiFrame.onOpenCameraSetup}
+                onRecheck={multiFrame.onRecheck}
+                theme={theme}
+              />
             )}
 
             {/* Mobile Overlayed Controller Strip */}

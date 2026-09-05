@@ -17,11 +17,12 @@ export interface ActivationPayload {
 
 /**
  * Builds the single downloadable zip described in
- * docs/plans/multi-camera-device-management-discussion.md §3.2: the one
- * shared installer (a static file, copied in as-is — never rebuilt per
- * device) plus this device's own `activation.json`. An operator downloads
- * one file per registration and gets everything needed to bring up that
- * kiosk, instead of having to combine two separate downloads themselves.
+ * docs/plans/multi-camera-device-management-discussion.md §3.2: the shared
+ * installer for whichever OS the registering admin picked (a static file,
+ * copied in as-is — never rebuilt per device) plus this device's own
+ * `activation.json`. An operator downloads one file per registration and
+ * gets everything needed to bring up that kiosk, instead of having to
+ * combine two separate downloads themselves.
  */
 @Injectable()
 export class ActivationPackageService {
@@ -33,6 +34,7 @@ export class ActivationPackageService {
     device: Device,
     campaign: Campaign,
     plainSecret: string,
+    os: 'mac' | 'win' = 'mac',
   ): Promise<Buffer> {
     const payload: ActivationPayload = {
       deviceId: device.id,
@@ -57,12 +59,14 @@ export class ActivationPackageService {
     // Not configured/found is not an error here — see this class's own doc
     // comment. The registration itself must still succeed so the CMS flow
     // is testable before an ops decision about where builds live is made.
-    const installerPath = this.configService.get<string>('desktopInstaller.path');
+    const installerPath = this.configService.get<string>(
+      os === 'win' ? 'desktopInstaller.pathWin' : 'desktopInstaller.pathMac',
+    );
     if (installerPath && existsSync(installerPath)) {
       archive.file(installerPath, { name: basename(installerPath) });
     } else {
       this.logger.warn(
-        'DESKTOP_INSTALLER_PATH not set or not found on disk — activation zip will contain activation.json only, no installer.',
+        `DESKTOP_INSTALLER_PATH_${os.toUpperCase()} not set or not found on disk — activation zip will contain activation.json only, no installer.`,
       );
     }
 

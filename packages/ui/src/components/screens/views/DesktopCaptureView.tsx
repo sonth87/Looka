@@ -38,6 +38,8 @@ import { FlyingThumbnail } from "../../face/FlyingThumbnail.js";
 import { StepProgress } from "../../workflow/StepProgress.js";
 import { StabilityProgress } from "../../workflow/StabilityProgress.js";
 import { CountdownTimer } from "../../workflow/CountdownTimer.js";
+import { MultiFrameGrid } from "../../camera/MultiFrameGrid.js";
+import { FramesBlockedPanel } from "../../camera/FramesBlockedPanel.js";
 import {
   TooltipProvider,
   Tooltip,
@@ -65,6 +67,7 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
     mode = "simulation",
     theme = "dark",
     onToggleTheme,
+    modeButton,
     onCancel,
     onStartLive,
     isCameraLoading = false,
@@ -107,12 +110,19 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
     handleAllowedGesturesChange,
     activeSensitivity,
     handleSensitivityChange,
+    multiFrame,
   } = props;
 
   const [showTelemetryDrawer, setShowTelemetryDrawer] = useState(false);
   const [activeSidebarTab, setActiveSidebarTab] = useState<"debug" | "overlay">(
     "debug",
   );
+
+  // Multi-frame simultaneous capture (§ desktop kiosk multi-camera capture) —
+  // `multiFrame` is only ever passed while the campaign's `simultaneousCapture`
+  // flag is on and the kiosk is in live mode; undefined otherwise, which
+  // keeps every branch below a no-op for the sequential single-camera path.
+  const framesBlocked = !!(multiFrame?.blocked && !multiFrame.blocked.ok);
 
   return (
     <div
@@ -193,6 +203,16 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                 onSelectDevice={onSelectDevice}
               />
             )}
+
+            {/*
+              Was a prop nobody rendered — `modeButton` (Mô phỏng/Live Camera
+              toggle) reached this component via GuidedCaptureScreen's
+              sharedProps but neither this view nor MobileCaptureView ever
+              placed it in the tree, so the feature existed in code with no
+              way to reach it from the UI. See FaceCaptureApp.tsx's own
+              `modeButton` JSX for what this renders.
+            */}
+            {modeButton}
 
             {/* Theme Toggle Button (Identical w-8 h-8 size) */}
             {onToggleTheme && (
@@ -320,7 +340,10 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
           <div
             ref={viewportRef}
             className={cn(
-              "relative flex-1 transition-all duration-300 flex items-center justify-center h-full max-h-[85vh]",
+              "relative flex-1 transition-all duration-300 flex items-center h-full max-h-[85vh]",
+              multiFrame && multiFrame.frames.length > 0
+                ? "flex-col justify-start gap-3 overflow-y-auto"
+                : "justify-center",
               isFullscreen ? "w-full h-full rounded-none" : cameraWidthClass,
             )}
           >
@@ -503,7 +526,6 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                   landmarkSize={landmarkSize}
                   visible={overlayVisible}
                   opacity={overlayOpacity}
-                  mirrored={true}
                   variant="capture"
                   stabilityProgress={stabilityProgress}
                   autoHoldMs={autoHoldMs}
@@ -736,7 +758,25 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                   />
                 </div>
               )}
+
+              {framesBlocked && multiFrame?.blocked && (
+                <FramesBlockedPanel
+                  className="pointer-events-auto"
+                  preflight={multiFrame.blocked}
+                  onOpenCameraSetup={multiFrame.onOpenCameraSetup}
+                  onRecheck={multiFrame.onRecheck}
+                  theme={theme}
+                />
+              )}
             </CameraPreview>
+
+            {multiFrame && multiFrame.frames.length > 0 && (
+              <MultiFrameGrid
+                className="w-full shrink-0 px-1 pb-1"
+                frames={multiFrame.frames}
+                theme={theme}
+              />
+            )}
           </div>
 
           {/* Right Side: Sleek 2-Tab Glass Slide-Over Drawer (Never Clipped, Fits All Window Sizes) */}
@@ -1486,7 +1526,14 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                 </div>
                 <button
                   onClick={onStartWorkflow}
-                  className="px-5 py-1.5 rounded-full bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-md shadow-blue-500/30 active:scale-95 transition-all flex items-center gap-1.5 cursor-pointer shrink-0"
+                  disabled={framesBlocked}
+                  title={framesBlocked ? "Chưa đủ camera cho chế độ chụp đồng thời" : undefined}
+                  className={cn(
+                    "px-5 py-1.5 rounded-full text-white font-bold text-xs shadow-md shadow-blue-500/30 active:scale-95 transition-all flex items-center gap-1.5 shrink-0",
+                    framesBlocked
+                      ? "bg-slate-600 opacity-60 cursor-not-allowed"
+                      : "bg-blue-600 hover:bg-blue-500 cursor-pointer",
+                  )}
                 >
                   <Play className="w-3.5 h-3.5 fill-white" />
                   Bắt đầu

@@ -6,6 +6,14 @@ export interface FaceOverlayProps {
   faceState?: FaceState | null;
   showLandmarks?: boolean;
   landmarkSize?: number; // in pixels (default 1.5)
+  /**
+   * Whether the box/landmarks should be flipped to match a mirrored preview.
+   * Landmark coordinates always come from the raw, unmirrored camera frame
+   * (MediaPipe reads pixels, not the CSS transform), so this must match
+   * whatever `mirrored` value the underlying `CameraPreview` is using.
+   * Default false, matching `CameraPreview`'s own default (product decision
+   * 2026-09-04: no mirroring anywhere).
+   */
   mirrored?: boolean;
   visible?: boolean;
   opacity?: number; // 0..1 (1.0 = 100% full original opacity)
@@ -31,7 +39,7 @@ export const FaceOverlay: React.FC<FaceOverlayProps> = ({
   faceState,
   showLandmarks = false,
   landmarkSize = 1.5,
-  mirrored = true,
+  mirrored = false,
   visible = true,
   opacity = 1.0,
   variant = 'capture',

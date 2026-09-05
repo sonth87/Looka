@@ -99,6 +99,8 @@ only.
 | 3.1 | ✅ | Local video "stream" recording, incl. true simultaneous multi-channel | Done: `capture_streams` table + `CaptureStreamRepository` (migration 006, real in-memory-SQLite-tested) mirror `upload_outbox`'s shape but with no upload/status/retry columns — recording never leaves the kiosk today (open question #3 is still open; this only implements the "local-only" half). `streams.ts` + `stream:start`/`stream:end` IPC write the file and close out the row (already generic — a new row per call, keyed by whatever `cameraId` is passed — so this needed zero changes for the multi-channel work below). **2026-08-31**: `FaceCaptureApp.tsx` now has two recording effects instead of one. The original single-stream effect (starts a `MediaRecorder` on whichever camera is currently active, independent of the capture/quality-gate logic) is now the **fallback**, used only when fewer than 2 physical cameras are mapped to roles — unchanged behavior for every single-camera site. A **new** effect takes over once ≥2 unique physical devices are mapped (CENTER/LEFT/RIGHT via §2.1's role mapping): it opens one dedicated `MediaStream` (raw `getUserMedia`, independent of `cameraServiceRef.current`) + `MediaRecorder` per physical camera at session start and keeps all of them rolling for the whole session, regardless of which one the CV pipeline has "active" for capture at any given step — this is the actual "true simultaneous 3-channel recording" gap this file previously listed as the top item still unbuilt. **Known, unmitigated risk**: when a mapped role's device is also the CV pipeline's currently-active device, that physical camera gets opened twice concurrently — the same kind of USB/driver contention §2.1 already documented hitting with even a single camera; not solved here, deliberately, to avoid touching the CV/capture pipeline. **Verification caveat (unchanged from before)**: no display/simulator was available to exercise either recording effect's real-browser `MediaRecorder`/multi-`getUserMedia` behavior live — both are verified only by static review and (for the DB layer) real passing tests. Needs a real ≥2-camera hardware test pass before either is trusted in production. | Camera role mapping (done) |
 | 2.3 | ❌ | Student-info lookup API (`GET /v1/identify/lookup`) in `apps/api` | Not built. Would take `code` (+ optional disambiguation fields), call out to the external Admin system to resolve it, map the result to `FOUND`/`NOT_FOUND`/`AMBIGUOUS` (the `DUPLICATE` branch is a separate local check against Looka's own captured sessions, not this API). **Blocked**, same shape as §2.9/3.7: the Admin system's actual API/protocol isn't available yet. | Blocked on external protocol |
 
+| 3.6b | ✅ | Campaign-configured 3–5 frames + simultaneous multi-camera capture (2026-09-04, `b4aa392`) | **Decided with the product owner**: frames are the campaign's `captureAngles` (3–5, FRONT always present), `simultaneousCapture` is a campaign flag set in the CMS, the kiosk shows the frames as a live grid on the capture screen, camera assignment stays in the kiosk's Camera Setup (now 5 roles: CENTER/LEFT/RIGHT/UP/DOWN), and a session **refuses to start** when any frame lacks a connected, distinct camera (`FramesBlockedPanel` lists what is missing and opens Camera Setup via the new `camera:openSetup` IPC). **Backend**: `campaigns.simultaneous_capture` (migration 1787700000000), `validateCaptureAngles` on create/update (count, exactly one FRONT, allowed roles, distinct effective roles when simultaneous — Vietnamese messages), field on campaign responses and `GET /v1/devices/config`. **Engine**: `WorkflowEngine.recordExternalCapture(stepId, imagePath)` marks a step COMPLETED through the normal bookkeeping and emits the same `capture-trigger`, so the existing store → review → approve → upload pipeline is unchanged; `advanceToNextStep` skips steps completed out of order. **Kiosk**: `packages/ui/src/lib/multiFrame.ts` (`framesForWorkflow`, `checkFramesReadiness`, `snapshotVideoFrame`), one raw stream per side frame, the CENTER frame stays the analysed camera; when the CENTER step captures, every other pending frame is snapshotted at that instant and recorded via `recordExternalCapture`; side-frame retakes snapshot immediately (no pose gate); multi-channel recording reuses the frame streams (no double-open in this mode). **Verified 2026-09-04**: API validation + device registration + device config round-trip against local Postgres (curl); 27/27 test tasks; and end to end from the *downloaded* activation zip on the Intel test Mac — installed from the dmg inside the zip, `activation.json` dropped next to the executable, device flipped to ACTIVATED on first config fetch, and the operator confirmed the "Chưa đủ camera cho chế độ chụp đồng thời" panel on session start (one camera, none mapped). **Not verifiable here**: the actual simultaneous shot needs ≥3 physical cameras. **Noted while testing**: each ad-hoc build is a new identity to TCC, so macOS asks for camera permission again per build (a Developer ID signature would persist the grant); on macOS the activation file must live inside `Looka.app/Contents/MacOS/`, which is awkward for an operator — consider also probing next to the `.app`; registration takes 47–85 s because the zip embeds the 240 MB installer. Resolves open questions #13 (toggle within the fixed 5, FRONT mandatory) and #14 (config applies next session). | 3.6, camera role mapping |
+
 **What's actually left, in order:** KYC enrollment (3.7) — still blocked on
 an external protocol, not a Looka-side task until that arrives. True
 simultaneous multi-channel recording (3.1) is now implemented, closing what
@@ -136,6 +138,50 @@ secondary display (§3.5) is view-only.
   `StepEvaluator`'s real capture gate — not just a cosmetic debug reading.
   Applies to the current single-camera 5-angle flow too, not only the
   multi-camera design.
+- **macOS kiosk: black camera preview, no error** — ✅ fixed 2026-09-04
+  (commits `04a475b`, `a40a0bb`, `34c6533`). Root cause: the packaged x64
+  app was completely unsigned (`codesign`: "not signed at all"), carried no
+  camera entitlement, and main never called
+  `systemPreferences.askForMediaAccess('camera')`, so macOS never showed the
+  TCC prompt and `getUserMedia` resolved with a stream that delivers no
+  frames ("Live Camera Ready", 30 FPS, 0 CV). Reproduced with an isolated
+  page in the signed dev Electron binary: gUM resolved at 1280x720,
+  `video.play()` never resolved, access status stayed `not-determined`.
+  Fix: ad-hoc signing (`mac.identity: "-"`, hardened runtime,
+  `apps/desktop/build/entitlements.mac.plist` with
+  `com.apple.security.device.camera`), Vietnamese
+  `NSCameraUsageDescription`, `ensureMacCameraAccess()` fired after
+  `createWindow()` (never awaited — a pending dialog must not hide the
+  kiosk window), every permission request logged to `main.log`, and
+  `startLiveMode` now starts the camera before MediaPipe init (20s timeout,
+  mock fallback). Also bundled sql.js wasm into the desktop build (was
+  fetched from `file:///wasm/` and aborted on every launch) and stopped
+  `prepackage` from wiping `release/`, which used to delete the other OS's
+  installer that `apps/api/.env` points at. **Verified 2026-09-04** on the
+  Intel test Mac: the rebuilt x64 app launched via `open` showed the macOS
+  camera prompt, the operator accepted it, and the live preview rendered
+  frames. Launching the binary directly from a shell does NOT reproduce
+  this (TCC attributes the request to the parent process), so always test
+  with `open <app>` or from Finder. Diagnostics to check in `main.log`:
+  `[camera] macOS media access status` / `askForMediaAccess ... result`
+  and the absence of `[BrowserCameraService] getFrame(): video not ready`.
+- **Stills were mirrored** — ✅ fixed 2026-09-04. `BrowserCameraService`
+  defaulted `mirrorStills = true` to match the mirrored selfie-style preview,
+  so every saved FRONT photo was a mirror image (wrong for an ID photo).
+  **Product decision**: nothing is mirrored anywhere — stills are the raw
+  sensor orientation, and `CameraPreview`/`FaceOverlay`/`GestureOverlay`
+  default to unmirrored. The pose pipeline (`PoseEstimator`, yaw sign) and
+  guidance text were already defined in unmirrored image space, so they
+  needed no change and are now consistent with what the screen shows.
+  Multi-frame tiles and their snapshots were unmirrored from the start.
+- **24h fail-closed trap on activation** (§3.3): the CMS "API endpoint"
+  field at device registration is optional. When left empty,
+  `activation.json` carries no `authApiEndpoint`, `DeviceApiClient` reports
+  `unreachable` forever, and exactly 24h after first launch the kiosk shows
+  the full-screen "Thiết bị đã bị khoá" overlay with no recovery short of
+  re-activation. Either make the field mandatory in the CMS, or treat "no
+  endpoint configured" as "not participating" (fail open) in
+  `getDeviceAccessStatus()`. Not decided yet.
 - **AI Vision server integration protocol** (discussion doc §2.9): external
   dependency — needs the API/protocol docs from whichever team owns that
   system before client-side preprocessing can be designed.

@@ -2,6 +2,7 @@ import { ApiPropertyOptional } from '@nestjs/swagger';
 import type { CaptureTriggerMode } from '@face/core';
 import {
   IsArray,
+  IsBoolean,
   IsDateString,
   IsInt,
   IsOptional,
@@ -62,4 +63,11 @@ export class UpdateCampaignDto {
   @IsInt()
   @Min(0)
   autoHoldMs?: number;
+
+  @ApiPropertyOptional({
+    description: 'Chụp đồng thời — mỗi khung cần 1 camera vật lý riêng',
+  })
+  @IsOptional()
+  @IsBoolean()
+  simultaneousCapture?: boolean;
 }

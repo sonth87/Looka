@@ -269,7 +269,6 @@ export const KioskAttendanceScreen: React.FC<KioskAttendanceScreenProps> = ({
                 landmarkSize={landmarkSize}
                 visible={overlayVisible}
                 opacity={overlayOpacity}
-                mirrored={true}
                 variant="recognition"
                 personLabel={personLabel}
               />

@@ -16,12 +16,30 @@ export interface CampaignConfig {
   captureAngles: CaptureStep[] | null;
   captureMode: CaptureTriggerMode | null;
   autoHoldMs: number | null;
+  /**
+   * Whether this campaign expects every frame captured with every mapped
+   * camera at once, rather than one at a time. Added by an older-server
+   * migration, so a config from a server that predates this field is
+   * normalized to `false` wherever it is read (see `fetchCampaignConfigResult`
+   * and `getDeviceAccessStatus`'s disk-cache fallback below).
+   */
+  simultaneousCapture: boolean;
 }
 
 export type ConfigFetchResult =
   | { status: 'ok'; config: CampaignConfig }
   | { status: 'unauthorized' }
   | { status: 'unreachable' };
+
+/**
+ * Fills in fields a server predating them may have omitted, so callers never
+ * see `undefined` where the type promises `boolean` — applies to both a
+ * fresh `/v1/devices/config` response and a config read back from the disk
+ * cache written by an older build of this app.
+ */
+function normalizeCampaignConfig(config: CampaignConfig): CampaignConfig {
+  return { ...config, simultaneousCapture: config.simultaneousCapture ?? false };
+}
 
 /**
  * The kiosk's own read of `GET /v1/devices/config` on the admin portal — see
@@ -86,7 +104,7 @@ export class DeviceApiClient {
         return { status: 'unreachable' };
       }
       const envelope = (await res.json()) as { data: CampaignConfig };
-      return { status: 'ok', config: envelope.data };
+      return { status: 'ok', config: normalizeCampaignConfig(envelope.data) };
     } catch (err) {
       console.error('[deviceApi] campaign config fetch failed:', (err as Error).message);
       return { status: 'unreachable' };
@@ -189,7 +207,7 @@ export async function getDeviceAccessStatus(client = new DeviceApiClient()): Pro
 
   // Unreachable — fall back to the last confirmed-good state on disk and its age.
   const last = getLastVerifiedDeviceState();
-  const lastConfig = (last?.config as CampaignConfig | null) ?? null;
+  const lastConfig = last?.config ? normalizeCampaignConfig(last.config as CampaignConfig) : null;
   if (!last || Date.now() - last.verifiedAt >= FAIL_CLOSED_AFTER_MS) {
     return { blocked: true, reason: 'unreachable-too-long', config: lastConfig };
   }

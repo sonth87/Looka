@@ -21,6 +21,12 @@ export { CameraPreview } from './components/camera/CameraPreview.js';
 export { CameraSelector } from './components/camera/CameraSelector.js';
 export { CameraPermission } from './components/camera/CameraPermission.js';
 export { CameraError } from './components/camera/CameraError.js';
+export { FrameTile } from './components/camera/FrameTile.js';
+export type { FrameTileProps, FrameTileStatus } from './components/camera/FrameTile.js';
+export { MultiFrameGrid } from './components/camera/MultiFrameGrid.js';
+export type { MultiFrameGridFrame, MultiFrameGridProps } from './components/camera/MultiFrameGrid.js';
+export { FramesBlockedPanel } from './components/camera/FramesBlockedPanel.js';
+export type { FramesBlockedPanelProps } from './components/camera/FramesBlockedPanel.js';
 
 // Face
 export { FaceOverlay } from './components/face/FaceOverlay.js';
@@ -58,6 +64,7 @@ export { LookaIcon } from './components/theme/LookaIcon.js';
 // Screens
 export { GuidedCaptureScreen } from './components/screens/GuidedCaptureScreen.js';
 export { KioskAttendanceScreen } from './components/screens/KioskAttendanceScreen.js';
+export { KioskAttendanceApp } from './components/screens/KioskAttendanceApp.js';
 export { FaceCaptureApp } from './components/screens/FaceCaptureApp.js';
 
 export * from './lib/CaptureSink.js';

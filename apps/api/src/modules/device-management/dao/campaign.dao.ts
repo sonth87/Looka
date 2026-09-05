@@ -44,6 +44,10 @@ export class CampaignDao {
   @Expose()
   autoHoldMs?: number | null;
 
+  @ApiProperty({ description: 'Chụp đồng thời — mỗi khung cần 1 camera vật lý riêng' })
+  @Expose()
+  simultaneousCapture: boolean;
+
   @ApiProperty()
   @Expose()
   createdAt: Date;

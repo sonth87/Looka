@@ -22,16 +22,20 @@ export class BrowserCameraService implements CameraService {
   private canvasElement: HTMLCanvasElement | OffscreenCanvas | null = null;
   private canvasContext: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null = null;
   private isPaused = false;
+  /** Throttles the getFrame() "video never became ready" diagnostic to once per ~2s instead of once per animation frame. */
+  private lastNotReadyWarnAt = 0;
   /**
-   * Whether stills are written mirrored, matching a mirrored preview.
+   * Whether stills are written mirrored.
    *
-   * The preview is mirrored so people can position themselves as they would in
-   * a mirror, but drawImage copies the raw sensor frame — a CSS transform never
-   * reaches the pixels. Left alone, the photo therefore appears to flip the
-   * instant it is taken. This flag exists so the preview and the saved frame
-   * cannot drift apart: whatever the preview shows, the still matches.
+   * Stills default to the raw sensor orientation, unmirrored: these are ID
+   * photos, and they must be true-to-life — text on clothing reads correctly,
+   * hair parting and asymmetric features stay on the side they are really on.
+   * The preview is not mirrored either (product decision 2026-09-04), so there
+   * is no drift between what the operator sees and what gets saved to prevent.
+   * `setMirrorStills(true)` remains available for a selfie-style consumer that
+   * still wants the mirror convention.
    */
-  private mirrorStills = true;
+  private mirrorStills = false;
   /**
    * Software crop+scale, for cameras `getZoomCapability()` reports as having
    * no hardware zoom at all. Scale 1 = no zoom; centre defaults to the frame
@@ -261,6 +265,14 @@ export class BrowserCameraService implements CameraService {
 
     const video = this.videoElement;
     if (video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) {
+      const now = Date.now();
+      if (now - this.lastNotReadyWarnAt > 2000) {
+        this.lastNotReadyWarnAt = now;
+        const track = this.activeStream.getVideoTracks()[0];
+        console.warn(
+          `[BrowserCameraService] getFrame(): video not ready — readyState=${video.readyState} videoWidth=${video.videoWidth} videoHeight=${video.videoHeight} trackReadyState=${track?.readyState} trackMuted=${track?.muted} trackEnabled=${track?.enabled}`
+        );
+      }
       return null;
     }
 
@@ -347,11 +359,13 @@ export class BrowserCameraService implements CameraService {
   }
 
   /**
-   * Match saved stills to the preview orientation.
+   * Override the still's mirroring (default: unmirrored — see `mirrorStills`).
    *
-   * Pass false when the stored image must be the true, unmirrored view — text
-   * on a badge reads correctly and asymmetric features stay on the side they
-   * are really on, which matters if the photo is later compared against another
+   * Pass true only for a selfie-style consumer that wants the mirror
+   * convention on its saved image. ID-photo capture must never call this with
+   * true: the stored image needs to be the true, unmirrored view — text on a
+   * badge reads correctly and asymmetric features stay on the side they
+   * really are, which matters if the photo is later compared against another
    * source. Note that face embeddings are not mirror-invariant, so enrolment
    * and matching must agree on this.
    */
@@ -497,7 +511,17 @@ export class BrowserCameraService implements CameraService {
     this.videoElement.playsInline = true;
     this.videoElement.muted = true;
     this.videoElement.srcObject = this.activeStream;
-    this.videoElement.play().catch(() => {});
+    // Was a silent catch. This is the offscreen, never-attached-to-the-DOM
+    // video element getFrame() reads for CV analysis — separate from
+    // whatever <video> a consumer renders for preview — so a play()
+    // rejection here shows up only as "CV fps stuck at 0", nothing else.
+    this.videoElement
+      .play()
+      .catch((err) =>
+        console.error(
+          `[BrowserCameraService] internal frame-extractor video.play() failed: name=${err?.name} message=${err?.message}`
+        )
+      );
 
     this.canvasElement = document.createElement('canvas');
     // getFrame reads this canvas back every frame. Without the hint the browser

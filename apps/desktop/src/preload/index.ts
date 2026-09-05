@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import type { AttendanceResult, Person } from '@face/core';
 
 export interface ExportResult {
   success: boolean;
@@ -101,6 +102,8 @@ export interface CampaignConfig {
   captureAngles: unknown[] | null;
   captureMode: 'AUTO' | 'MANUAL' | 'OFF' | null;
   autoHoldMs: number | null;
+  /** Whether this campaign expects every frame captured with every mapped camera at once, rather than one at a time. */
+  simultaneousCapture: boolean;
 }
 
 /**
@@ -116,7 +119,22 @@ export interface DeviceAccessStatus {
 export interface FaceAPIBridge {
   getAppVersion: () => Promise<string>;
   getSystemStatus: () => Promise<SystemStatus>;
-  recordAttendance: (params: any) => Promise<any>;
+
+  /**
+   * Pillar B (recognition + attendance) wired for real — see
+   * apps/desktop/src/main/attendance.ts's own doc comment for why this is
+   * demo mode: `processAttendanceFrame` compares against a gallery that's
+   * always empty while the embedding model is still the mock one.
+   */
+  attendanceEnroll: (payload: { displayName: string }) => Promise<{
+    personId: string;
+    profileId: string;
+    profileStatus: string;
+    modelFamily: string;
+  }>;
+  attendanceListPersons: () => Promise<Person[]>;
+  attendanceProcessFrame: () => Promise<AttendanceResult>;
+  attendanceResetSession: () => Promise<boolean>;
 
   /**
    * Store a capture and queue it for upload.
@@ -232,6 +250,15 @@ export interface FaceAPIBridge {
   setCameraRoleMapping: (mapping: CameraRoleMapping) => Promise<boolean>;
 
   /**
+   * Opens the CB-Help camera setup window on demand — the same window
+   * `Ctrl/Cmd+Shift+K` opens. Used by the capture UI when a
+   * simultaneous-capture campaign (`CampaignConfig.simultaneousCapture`) has
+   * frames without a mapped camera, so an operator can assign one without
+   * knowing the shortcut.
+   */
+  openCameraSetup: () => Promise<boolean>;
+
+  /**
    * Reports a stats-worthy moment (§3.4) — queued locally and pushed to the
    * admin portal on its own schedule. Never rejects; a failed/impossible
    * report must not interrupt the capture flow that triggered it.
@@ -260,7 +287,11 @@ export interface FaceAPIBridge {
 const faceAPI: FaceAPIBridge = {
   getAppVersion: () => ipcRenderer.invoke('app:getVersion'),
   getSystemStatus: () => ipcRenderer.invoke('app:getStatus'),
-  recordAttendance: (params: any) => ipcRenderer.invoke('attendance:record', params),
+
+  attendanceEnroll: (payload) => ipcRenderer.invoke('attendance:enroll', payload),
+  attendanceListPersons: () => ipcRenderer.invoke('attendance:listPersons'),
+  attendanceProcessFrame: () => ipcRenderer.invoke('attendance:processFrame'),
+  attendanceResetSession: () => ipcRenderer.invoke('attendance:resetSession'),
 
   queueCapture: (payload) => ipcRenderer.invoke('capture:queue', payload),
   approveSessionUpload: (payload) => ipcRenderer.invoke('session:approveUpload', payload),
@@ -289,6 +320,7 @@ const faceAPI: FaceAPIBridge = {
 
   getCameraRoleMapping: () => ipcRenderer.invoke('camera:getRoleMapping'),
   setCameraRoleMapping: (mapping) => ipcRenderer.invoke('camera:setRoleMapping', mapping),
+  openCameraSetup: () => ipcRenderer.invoke('camera:openSetup'),
 
   recordStatsEvent: (payload) => ipcRenderer.invoke('stats:recordEvent', payload),
   setFileServiceCredentials: (payload) => ipcRenderer.invoke('secrets:setFileService', payload),

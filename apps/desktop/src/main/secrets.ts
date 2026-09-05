@@ -1,6 +1,7 @@
 import { app, safeStorage } from 'electron';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { CAMERA_ROLES, type CameraRole } from '@face/core';
 import { FsClient } from '@face/fs-client';
 import { SecretStore, CryptoProvider } from './SecretStore.js';
 
@@ -309,7 +310,7 @@ export function secretsStatus(): SecretsStatus {
   };
 }
 
-export type CameraRole = 'CENTER' | 'LEFT' | 'RIGHT';
+export type { CameraRole };
 
 /** Which physical camera (by `enumerateDevices()` id) plays each logical role. */
 export type CameraRoleMapping = Partial<Record<CameraRole, string>>;
@@ -331,6 +332,24 @@ export function getCameraRoleMapping(): CameraRoleMapping {
   } catch {
     return {};
   }
+}
+
+/**
+ * Filters an untrusted payload (e.g. the `camera:setRoleMapping` IPC
+ * argument, which crosses the renderer/main boundary as `unknown`) down to
+ * known roles with a string device id. `CameraRole` itself only constrains
+ * this at compile time — a renderer bug or a stale build could otherwise
+ * hand back an unrecognized role name, so this is the actual runtime check
+ * against the current `CAMERA_ROLES` list.
+ */
+export function sanitizeCameraRoleMapping(input: unknown): CameraRoleMapping {
+  const sanitized: CameraRoleMapping = {};
+  if (!input || typeof input !== 'object') return sanitized;
+  for (const role of CAMERA_ROLES) {
+    const value = (input as Record<string, unknown>)[role];
+    if (typeof value === 'string') sanitized[role] = value;
+  }
+  return sanitized;
 }
 
 export function setCameraRoleMapping(mapping: CameraRoleMapping): void {
