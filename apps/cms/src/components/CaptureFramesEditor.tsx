@@ -1,7 +1,7 @@
 import { CAMERA_ROLE_LABELS, CAPTURE_STEP_DEFS, STEP_LABELS, StepType, cameraRoleForStep } from '../captureAngles';
 
 const ALL_STEP_TYPES = Object.keys(CAPTURE_STEP_DEFS) as StepType[];
-const MIN_FRAMES = 3;
+const MIN_FRAMES = 2;
 
 /**
  * Shared by `CreateCampaignForm` (CampaignList.tsx) and `CampaignSettingsForm`

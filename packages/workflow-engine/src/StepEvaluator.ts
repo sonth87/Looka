@@ -4,8 +4,9 @@ import {
   FaceState,
   StepEvaluationResult,
   StepEvaluator as IStepEvaluator,
+  defaultCameraRoleForStepType,
 } from '@face/core';
-import { QualityEvaluator } from '@face/face-quality';
+import { MAX_FRONT_SMILE_SCORE, QualityEvaluator } from '@face/face-quality';
 
 const POSE_TOLERANCE_MULTIPLIERS: Record<CaptureSensitivity, number> = {
   VERY_LOW: 1.5,
@@ -89,6 +90,28 @@ export class StepEvaluator implements IStepEvaluator {
       ...step.quality,
     };
 
+    // §2.8's absolute resolution floor (FACE_RESOLUTION_TOO_LOW) is a proxy
+    // for whether the FRONT/CENTER capture — the printed/matched photo —
+    // resolved enough real pixels. Product decision (2026-09-05): "Chỉ cần
+    // cam chính diện >= 250px là được, các cam khác không cần" — LEFT/RIGHT/
+    // UP/DOWN steps are process evidence, not the printed photo, and must not
+    // be blocked by a side camera's lower resolution. Resolved via the same
+    // role a step actually captures on (explicit `cameraRole`, else the
+    // type's default — see `defaultCameraRoleForStepType`), not `step.type`
+    // directly, so a CUSTOM step mapped onto CENTER still gets the floor.
+    const cameraRole = step.cameraRole ?? defaultCameraRoleForStepType(step.type);
+    const enforceFaceResolution = cameraRole === 'CENTER';
+
+    // Product decision (2026-09-05, field report "cười vẫn cho chụp"): an ID
+    // photo must be neutral, so the FRONT/CENTER step's smile ceiling is
+    // capped at MAX_FRONT_SMILE_SCORE (0.30) regardless of sensitivity level
+    // — a moderate smile was passing under LOW/MEDIUM's own, looser ceiling.
+    // Same role resolution as `enforceFaceResolution` above: side-angle
+    // steps are process evidence, not the printed/matched photo, and keep
+    // the level's own ceiling (omit the override rather than pass Infinity,
+    // so evaluateQuality's "never loosens" contract stays honest).
+    const maxSmileScoreOverride = cameraRole === 'CENTER' ? MAX_FRONT_SMILE_SCORE : undefined;
+
     // No pixels (or blendshapes) reach this far — only a FaceState — but the
     // CV engine already measured all four from the same frame. Passing them
     // through lets the step apply its own thresholds to real figures; without
@@ -116,7 +139,8 @@ export class StepEvaluator implements IStepEvaluator {
       // default.
       faceState.captureFrameWidth && faceState.captureFrameHeight
         ? { width: faceState.captureFrameWidth, height: faceState.captureFrameHeight }
-        : undefined
+        : undefined,
+      { enforceFaceResolution, maxSmileScoreOverride }
     );
 
     const qualityValid = qualityResult.accepted;

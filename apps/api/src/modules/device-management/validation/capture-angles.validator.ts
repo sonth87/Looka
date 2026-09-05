@@ -1,8 +1,9 @@
 /**
  * Validates a campaign's `captureAngles` (jsonb `CaptureStep[]`, may be
  * `null` = app default) against the contract in
- * docs/plans/multi-camera-device-management-discussion.md: 3 to 5 steps,
- * exactly one `FRONT`, only known step types, and — when the campaign has
+ * docs/plans/multi-camera-device-management-discussion.md: 2 to 5 steps
+ * (2026-09-05: lowered from 3, so a 2-camera kiosk can run simultaneous
+ * capture), exactly one `FRONT`, only known step types, and — when the campaign has
  * `simultaneousCapture` on — every step resolving to its own physical
  * camera.
  *
@@ -21,7 +22,7 @@ type AllowedStepType = (typeof ALLOWED_STEP_TYPES)[number];
 const ALLOWED_CAMERA_ROLES = ['CENTER', 'LEFT', 'RIGHT', 'UP', 'DOWN'] as const;
 type AllowedCameraRole = (typeof ALLOWED_CAMERA_ROLES)[number];
 
-const MIN_STEPS = 3;
+const MIN_STEPS = 2;
 const MAX_STEPS = 5;
 
 export type CaptureAnglesValidationResult = { ok: true } | { ok: false; reason: string };
@@ -64,7 +65,7 @@ export function validateCaptureAngles(
   }
 
   if (angles.length < MIN_STEPS || angles.length > MAX_STEPS) {
-    return { ok: false, reason: 'Cần từ 3 đến 5 khung hình' };
+    return { ok: false, reason: 'Cần từ 2 đến 5 khung hình' };
   }
 
   let frontCount = 0;

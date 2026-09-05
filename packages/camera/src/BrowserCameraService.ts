@@ -25,15 +25,27 @@ export class BrowserCameraService implements CameraService {
   /** Throttles the getFrame() "video never became ready" diagnostic to once per ~2s instead of once per animation frame. */
   private lastNotReadyWarnAt = 0;
   /**
+   * Throttles captureBase64Snapshot()'s own rejection diagnostics to once per
+   * ~2s, same pattern as `lastNotReadyWarnAt` above but tracked separately:
+   * this is called far less often (only on an actual capture attempt, not
+   * every animation frame) but a stuck MANUAL/OFF-mode retry loop can still
+   * call it fast enough to flood the console without its own throttle.
+   */
+  private lastSnapshotRejectWarnAt = 0;
+  /**
    * Whether stills are written mirrored.
    *
    * Stills default to the raw sensor orientation, unmirrored: these are ID
    * photos, and they must be true-to-life — text on clothing reads correctly,
    * hair parting and asymmetric features stay on the side they are really on.
-   * The preview is not mirrored either (product decision 2026-09-04), so there
-   * is no drift between what the operator sees and what gets saved to prevent.
-   * `setMirrorStills(true)` remains available for a selfie-style consumer that
-   * still wants the mirror convention.
+   * The capture views' live preview (CameraPreview + overlays) IS mirrored
+   * again as of product decision 2026-09-05, for self-positioning — this
+   * class has no say in that, it is a CSS transform applied purely on the
+   * consumer's `<video>` element. This still deliberately does not follow it:
+   * the drift between what the operator sees (a mirror image) and what gets
+   * saved (the true, unmirrored view) is intentional here, not a bug.
+   * `setMirrorStills(true)` remains available for a selfie-style consumer
+   * that wants its saved image to match the mirror convention too.
    */
   private mirrorStills = false;
   /**
@@ -181,6 +193,40 @@ export class BrowserCameraService implements CameraService {
       // Initialize frame capture elements
       this.setupFrameExtractor();
 
+      // Diagnostic for the field issue "FRONT face < 250px with three
+      // cameras open": logs the resolution the OS/driver actually granted
+      // once the video element's metadata is loaded, both on the initial
+      // start() and on every device switch (start() always re-enters here,
+      // since it calls stop() first when a stream is already active) — so a
+      // request for 1920x1080 that got silently downgraded (e.g. three
+      // cameras sharing one USB bus) shows up in main.log instead of only
+      // surfacing later as a downstream FACE_RESOLUTION_TOO_LOW.
+      //
+      // Formatted as one string (JSON.stringify), not a message + object:
+      // Electron's `console-message` forwarding to the main process only
+      // ever carries the renderer console call's first string argument —
+      // a second object argument is dropped before it reaches main.log,
+      // which used to show up there as a bare "[BrowserCameraService] stream
+      // started" with no resolution at all (reported as "[object Object]"
+      // once something did try to print it).
+      if (this.videoElement) {
+        const label = this.selectedDevice?.label || track?.label || 'unknown';
+        const video = this.videoElement;
+        video.addEventListener(
+          'loadedmetadata',
+          () => {
+            console.warn(
+              `[BrowserCameraService] stream started ${JSON.stringify({
+                label,
+                width: video.videoWidth,
+                height: video.videoHeight,
+              })}`
+            );
+          },
+          { once: true }
+        );
+      }
+
       return stream;
     } catch (err: any) {
       this.emit('error', err);
@@ -327,16 +373,25 @@ export class BrowserCameraService implements CameraService {
         video = document.querySelector('video');
       }
     }
-    if (!video || video.readyState < 2) return null;
+    if (!video || video.readyState < 2) {
+      this.warnSnapshotRejected(video ? 'video not ready' : 'no video element found', video);
+      return null;
+    }
     const width = video.videoWidth;
     const height = video.videoHeight;
-    if (!width || !height) return null;
+    if (!width || !height) {
+      this.warnSnapshotRejected('zero-size video frame', video);
+      return null;
+    }
 
     const canvas = document.createElement('canvas');
     canvas.width = width;
     canvas.height = height;
     const ctx = canvas.getContext('2d');
-    if (!ctx) return null;
+    if (!ctx) {
+      this.warnSnapshotRejected('failed to acquire 2d canvas context', video);
+      return null;
+    }
 
     if (this.mirrorStills) {
       ctx.translate(width, 0);
@@ -356,6 +411,23 @@ export class BrowserCameraService implements CameraService {
       ctx.drawImage(video, 0, 0, width, height);
     }
     return canvas.toDataURL('image/jpeg', 0.85);
+  }
+
+  /**
+   * Diagnostic for captureBase64Snapshot()'s null-return branches — a kiosk
+   * in the field showed the capture step "flash" repeatedly and never
+   * advance, with no photo written and nothing in the logs explaining why.
+   * Throttled via `lastSnapshotRejectWarnAt`; see its field doc comment.
+   */
+  private warnSnapshotRejected(which: string, video: HTMLVideoElement | null): void {
+    const now = Date.now();
+    if (now - this.lastSnapshotRejectWarnAt <= 2000) return;
+    this.lastSnapshotRejectWarnAt = now;
+    console.warn(`[BrowserCameraService] captureBase64Snapshot(): ${which}`, {
+      readyState: video?.readyState,
+      videoWidth: video?.videoWidth,
+      videoHeight: video?.videoHeight,
+    });
   }
 
   /**

@@ -1,16 +1,36 @@
 import React, { useEffect, useRef } from 'react';
 import { cn } from '../../lib/utils.js';
 
+/**
+ * Single source of truth for "is the capture flow mirrored" (product
+ * decision 2026-09-05). The capture views (DesktopCaptureView,
+ * MobileCaptureView) pass this to `CameraPreview`'s own `mirrored` prop, and
+ * every other on-screen rendering of a captured still in those views
+ * (FrameTile, FlyingThumbnail, SessionReviewModal, the freeze-frame `<img>`)
+ * reuses this same constant rather than a second, independently-set flag —
+ * see each of those components' own `mirrored` prop doc comment. Only the
+ * live/still preview is ever mirrored; saved/exported/uploaded bytes stay
+ * the raw, unmirrored sensor image (BrowserCameraService.mirrorStills).
+ */
+export const CAPTURE_MIRRORED = true;
+
 export interface CameraPreviewProps {
   stream: MediaStream | null;
   /**
-   * Whether the preview is flipped horizontally. Default false: these are ID
-   * photos, and the operator-facing preview must show the subject as they
-   * truly appear — not mirror-image, selfie-style (product decision
-   * 2026-09-04). Pass true only for a selfie-style consumer that wants the
-   * mirror convention; if you do, keep any face-tracking overlay drawn on top
-   * of this preview (FaceOverlay, GestureOverlay, …) in sync by mirroring it
-   * too, or the overlay will sit off the face.
+   * Whether the preview is flipped horizontally.
+   *
+   * Default false, but the capture views (DesktopCaptureView,
+   * MobileCaptureView) pass `mirrored={true}` explicitly: product decision
+   * 2026-09-05 is that the live preview should behave like a mirror for
+   * self-positioning (raising your right hand appears on the screen's right
+   * side, as in a mirror), while the saved still stays the raw, unmirrored
+   * sensor image regardless (see BrowserCameraService.mirrorStills — never
+   * flipped by this). The component default stays false for any other
+   * consumer (e.g. KioskAttendanceScreen) that hasn't opted in.
+   *
+   * If you pass true, keep any face-tracking overlay drawn on top of this
+   * preview (FaceOverlay, GestureOverlay, …) in sync by mirroring it too, or
+   * the overlay will sit off the face.
    */
   mirrored?: boolean;
   aspectRatio?: '16/9' | '4/3' | '3/4' | '1/1' | 'auto';

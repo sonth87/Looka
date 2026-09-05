@@ -70,4 +70,11 @@ export class UpdateCampaignDto {
   @IsOptional()
   @IsBoolean()
   simultaneousCapture?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Quay video trong lúc chụp (lưu local, không upload)',
+  })
+  @IsOptional()
+  @IsBoolean()
+  recordVideo?: boolean;
 }

@@ -27,7 +27,7 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { SharedCaptureViewProps } from "./types.js";
-import { CameraPreview } from "../../camera/CameraPreview.js";
+import { CameraPreview, CAPTURE_MIRRORED } from "../../camera/CameraPreview.js";
 import { LookaIcon } from "../../theme/LookaIcon.js";
 import { CameraSelector } from "../../camera/CameraSelector.js";
 import { FaceOverlay } from "../../face/FaceOverlay.js";
@@ -100,6 +100,7 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
     setFlyingState,
     captureMode,
     autoHoldMs,
+    captureModeFromCampaign = false,
     allowedGestures,
     handleToggleOverlayVisible,
     handleOpacityChange,
@@ -123,6 +124,23 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
   // flag is on and the kiosk is in live mode; undefined otherwise, which
   // keeps every branch below a no-op for the sequential single-camera path.
   const framesBlocked = !!(multiFrame?.blocked && !multiFrame.blocked.ok);
+
+  // WorkflowEngine tracks pose stability (guidance.status can read
+  // STABILIZING/CAPTURING) regardless of captureMode, but only AUTO mode
+  // ever turns that into an actual capture — MANUAL waits for a held
+  // gesture, OFF waits for the shutter button. The footer pill below used to
+  // show that raw status (and the step's pose instruction) even in those
+  // modes, so an operator watched the badge say "CAPTURING" while nothing
+  // was ever going to fire. Substitute the real next action instead,
+  // whenever the pose itself is fine and only the trigger is still pending.
+  const isAutoOnlyReadyStatus = guidance.status === "STABILIZING" || guidance.status === "CAPTURING";
+  const showsAutoOnlyReady = captureMode !== "AUTO" && isAutoOnlyReadyStatus;
+  const displayStatus = showsAutoOnlyReady ? "READY" : guidance.status;
+  const displayInstruction = showsAutoOnlyReady
+    ? captureMode === "OFF"
+      ? "Bấm nút chụp"
+      : "Giơ cử chỉ tay để chụp"
+    : guidance.primaryInstruction;
 
   return (
     <div
@@ -286,7 +304,7 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                   )}
                 >
                   <Sparkles className="w-3.5 h-3.5 text-blue-500" />
-                  Ảnh 5 Hướng
+                  Ảnh {steps.length} Hướng
                 </span>
               </div>
 
@@ -507,6 +525,10 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
             {/* Camera Preview Canvas */}
             <CameraPreview
               stream={stream}
+              // Product decision 2026-09-05: the capture preview behaves like
+              // a mirror again for self-positioning. The saved still stays
+              // unmirrored regardless (BrowserCameraService.mirrorStills).
+              mirrored={CAPTURE_MIRRORED}
               zoomScale={zoomScale}
               zoomOrigin={zoomOrigin}
               aspectRatio={isFullscreen ? "auto" : "16/9"}
@@ -526,8 +548,15 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                   landmarkSize={landmarkSize}
                   visible={overlayVisible}
                   opacity={overlayOpacity}
+                  mirrored={CAPTURE_MIRRORED}
                   variant="capture"
-                  stabilityProgress={stabilityProgress}
+                  // The engine tracks pose stability (and can report
+                  // STABILIZING/CAPTURING) regardless of captureMode, but only
+                  // AUTO ever acts on it — MANUAL waits for a held gesture,
+                  // OFF waits for the shutter button. Showing the countdown
+                  // ring outside AUTO told the operator a photo was about to
+                  // be taken automatically when it never would be.
+                  stabilityProgress={captureMode === "AUTO" ? stabilityProgress : 0}
                   autoHoldMs={autoHoldMs}
                 />
               )}
@@ -538,7 +567,10 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                 <img
                   src={freezeSnapshot}
                   alt="Snapshot Freeze"
-                  className="absolute inset-0 w-full h-full object-cover z-25 pointer-events-none transition-opacity duration-150 animate-in fade-in"
+                  className={cn(
+                    "absolute inset-0 w-full h-full object-cover z-25 pointer-events-none transition-opacity duration-150 animate-in fade-in",
+                    CAPTURE_MIRRORED && "scale-x-[-1]"
+                  )}
                 />
               )}
 
@@ -551,6 +583,7 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                 imageSrc={flyingState.imageSrc}
                 startRect={flyingState.startRect}
                 targetRect={flyingState.targetRect}
+                mirrored={CAPTURE_MIRRORED}
                 onAnimationEnd={() =>
                   setFlyingState({
                     imageSrc: null,
@@ -744,7 +777,19 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                   enabled={
                     faceState?.detected === true &&
                     faceState?.presence === "SINGLE_FACE" &&
-                    faceState?.quality?.accepted === true
+                    faceState?.quality?.accepted === true &&
+                    // 2026-09-05 black-frame fix: in simultaneous-capture mode,
+                    // every side frame must have actually rendered a real
+                    // video frame before the shutter fires — see
+                    // `allSideFramesReady` in lib/multiFrame.ts. Absent
+                    // (`multiFrame` undefined, the sequential single-camera
+                    // path) this is simply not checked, unchanged from before.
+                    (!multiFrame || multiFrame.allSideFramesReady)
+                  }
+                  disabledHint={
+                    multiFrame && !multiFrame.allSideFramesReady && multiFrame.notReadyRoleLabel
+                      ? `Đang chờ camera ${multiFrame.notReadyRoleLabel}…`
+                      : undefined
                   }
                   onCapture={onShutterCapture}
                 />
@@ -1232,19 +1277,35 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                               Chế độ chụp sinh trắc
                             </span>
                             <span className="text-[10px] text-slate-400">
-                              Chọn cách thức chụp tự động hoặc thủ công
+                              {captureModeFromCampaign
+                                ? "Theo cấu hình campaign"
+                                : "Chọn cách thức chụp tự động hoặc thủ công"}
                             </span>
                           </div>
                         </div>
 
-                        {/* Segmented Mode Picker */}
+                        {/*
+                          Segmented Mode Picker — disabled while the campaign
+                          dictates the mode (captureModeFromCampaign), not just
+                          hinted: a local override here used to silently
+                          desync from what setCaptureTriggerConfig actually
+                          told the engine (see FaceCaptureApp's
+                          effectiveTriggerConfig doc comment), so the simplest
+                          fix that can't drift again is to not offer the
+                          choice at all for this session.
+                        */}
                         <div className="grid grid-cols-3 gap-1 p-1 rounded-xl bg-slate-950/40 border border-slate-800/60">
                           {(["AUTO", "MANUAL", "OFF"] as const).map((m) => (
                             <button
                               key={m}
                               onClick={() => handleCaptureModeChange(m)}
+                              disabled={captureModeFromCampaign}
+                              title={captureModeFromCampaign ? "Theo cấu hình campaign" : undefined}
                               className={cn(
-                                "py-1.5 rounded-lg text-xs font-black transition-all cursor-pointer active:scale-95 text-center",
+                                "py-1.5 rounded-lg text-xs font-black transition-all active:scale-95 text-center",
+                                captureModeFromCampaign
+                                  ? "cursor-not-allowed opacity-50"
+                                  : "cursor-pointer",
                                 captureMode === m
                                   ? "bg-violet-600 text-white shadow-md shadow-violet-600/30 border border-violet-500"
                                   : theme === "dark"
@@ -1521,7 +1582,7 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                       theme === "dark" ? "text-slate-200" : "text-slate-800",
                     )}
                   >
-                    Camera sẵn sàng. Bấm Bắt đầu chụp 5 bước.
+                    Camera sẵn sàng. Bấm Bắt đầu chụp {steps.length} bước.
                   </span>
                 </div>
                 <button
@@ -1545,13 +1606,13 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                   <span
                     className={cn(
                       "px-2.5 py-0.5 rounded-full border text-[10px] font-extrabold uppercase shrink-0",
-                      guidance.status === "READY" ||
-                        guidance.status === "CAPTURING"
+                      displayStatus === "READY" ||
+                        displayStatus === "CAPTURING"
                         ? "bg-emerald-500/20 text-emerald-600 border-emerald-500/30"
                         : "bg-blue-500/20 text-blue-600 border-blue-500/30",
                     )}
                   >
-                    {guidance.status}
+                    {displayStatus}
                   </span>
                   <span
                     className={cn(
@@ -1559,7 +1620,7 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                       theme === "dark" ? "text-slate-100" : "text-slate-900",
                     )}
                   >
-                    {guidance.primaryInstruction}
+                    {displayInstruction}
                   </span>
                 </div>
 

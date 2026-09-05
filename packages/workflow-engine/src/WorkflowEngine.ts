@@ -30,6 +30,23 @@ export class WorkflowEngine implements IWorkflowEngine {
   private guidanceEngine = new GuidanceEngine();
   private captureController = new CaptureController();
 
+  /**
+   * True while the step currently being retaken must be completed by the
+   * caller's own `recordExternalCapture(...)` rather than this engine's own
+   * capture path — set only by `retakeStep(stepId, { externalCapture: true })`,
+   * which `FaceCaptureApp.handleRetakeStep` uses for a simultaneous-capture
+   * side frame (§ desktop kiosk multi-camera capture, product decision
+   * 2026-09-05 #3). A side frame's photo comes from its own physical camera,
+   * never the one this engine's snapshot provider reads (see
+   * `recordExternalCapture`'s own doc comment) — so neither
+   * `triggerManualCapture` nor `processFrame`'s own AUTO-mode auto-fire may
+   * complete that step themselves; see both for what this actually gates.
+   * Always false for a normal (sequential, or simultaneous-CENTER) retake,
+   * and cleared the moment capture moves past the step it was set for
+   * (`advanceToNextStep`), so it can never leak into a later, unrelated step.
+   */
+  private externalCaptureOnly = false;
+
   private listeners: Map<string, Set<(...args: any[]) => void>> = new Map();
 
   constructor() {
@@ -70,6 +87,7 @@ export class WorkflowEngine implements IWorkflowEngine {
     this.activeWorkflow = workflow;
     this.currentStepIdx = 0;
     this.retakeReturnIdx = null;
+    this.externalCaptureOnly = false;
     this.stepStartTime = Date.now();
     this.sensitivity = workflow.sensitivity || this.sensitivity || 'MEDIUM';
     this.stabilityTracker.reset();
@@ -185,7 +203,20 @@ export class WorkflowEngine implements IWorkflowEngine {
 
     // 4. Trigger Auto-Capture if in AUTO mode and Stable
     if (this.captureMode === 'AUTO' && stability.isStable && currentStep.capture.enabled) {
-      await this.triggerManualCapture(faceState);
+      if (this.externalCaptureOnly) {
+        // This step's photo must come from the caller's own
+        // recordExternalCapture (see `externalCaptureOnly`'s own doc
+        // comment) — triggerManualCapture only ever knows how to snapshot
+        // this engine's own snapshot provider, the wrong physical camera for
+        // a simultaneous-capture side frame. Reset stability so a hold that
+        // did not actually land a photo (the caller found no live frame to
+        // snapshot) can be retried on the next hold instead of firing this
+        // event every processed frame indefinitely.
+        this.stabilityTracker.reset();
+        this.emit('external-capture-ready', { stepId: currentStep.id });
+      } else {
+        await this.triggerManualCapture(faceState);
+      }
     }
 
     this.emit('state-change', this._currentState);
@@ -194,6 +225,12 @@ export class WorkflowEngine implements IWorkflowEngine {
 
   public async triggerManualCapture(faceState?: FaceState | null): Promise<boolean> {
     if (this.isCapturing || !this.activeWorkflow || !this._currentSession) return false;
+    // Defence in depth: the real gate is FaceCaptureApp's shutter/gesture
+    // handlers routing to recordExternalCapture instead of calling this in
+    // the first place (see `externalCaptureOnly`'s own doc comment) — this
+    // refusal just means a call site that forgot to check never snapshots
+    // the wrong physical camera even if it tries.
+    if (this.externalCaptureOnly) return false;
     const currentStep = this.activeWorkflow.steps[this.currentStepIdx];
     if (!currentStep || !currentStep.capture?.enabled) return false;
 
@@ -230,11 +267,13 @@ export class WorkflowEngine implements IWorkflowEngine {
     try {
       // 1. Chụp ảnh TRƯỚC KHI nháy flash (Real Base64 Snapshot)
       const captureResult = await this.captureController.captureCurrentFrame();
-      const valid =
-        captureResult !== null &&
-        (await this.captureController.validateCapturedImage(captureResult.imagePath, {
-          quality: qualitySnapshot,
-        }));
+      const detailedValidation =
+        captureResult !== null
+          ? await this.captureController.validateCapturedImageDetailed(captureResult.imagePath, {
+              quality: qualitySnapshot,
+            })
+          : null;
+      const valid = captureResult !== null && (detailedValidation?.valid ?? false);
 
       if (valid && captureResult) {
         // advanceToNextStep clears the retake, so the flag is read while it still stands.
@@ -267,6 +306,23 @@ export class WorkflowEngine implements IWorkflowEngine {
       } else {
         const stepResult = this._currentSession.steps.find((s) => s.stepId === currentStep.id);
         if (stepResult) stepResult.attempts++;
+
+        // Diagnostics only — kiosks in the field showed a capture that
+        // silently never advanced, with nothing in the logs to say why. This
+        // is the first point where "no snapshot" vs. "image validation
+        // failed" vs. "quality rejected, and here's which checks" is known,
+        // so it's the one place that can report all three distinctly.
+        const rejectionPayload = {
+          stepId: currentStep.id,
+          stepType: currentStep.type,
+          reason: captureResult === null ? ('NO_SNAPSHOT' as const) : detailedValidation!.reason,
+          qualityReasons: detailedValidation?.qualityReasons,
+          captureMode: this.captureMode,
+          attempts: stepResult?.attempts ?? 0,
+        };
+        console.warn('[WorkflowEngine] capture rejected', rejectionPayload);
+        this.emit('capture-rejected', rejectionPayload);
+
         return false;
       }
     } finally {
@@ -281,6 +337,7 @@ export class WorkflowEngine implements IWorkflowEngine {
     }
     this.activeWorkflow = null;
     this.retakeReturnIdx = null;
+    this.externalCaptureOnly = false;
     this.stabilityTracker.reset();
     this._currentState.status = 'ERROR';
     this._currentState.primaryInstruction = 'Đã hủy quy trình';
@@ -304,14 +361,35 @@ export class WorkflowEngine implements IWorkflowEngine {
   /**
    * Re-enter an already visited step so its photo can be replaced.
    *
-   * Nothing on the session is thrown away up front: the previous image, the
-   * step statuses and the position the workflow had reached all stay put, so
-   * abandoning a retake leaves the session exactly as it was, and only a
-   * successful capture overwrites the one image being replaced. A session that
-   * had already finished is reopened for the duration of the retake and closes
-   * itself again as soon as the replacement lands.
+   * The previous image (`capturedImagePath`) and the position ordered capture
+   * had reached both stay put, so abandoning a retake leaves the session
+   * exactly as it was, and only a successful capture overwrites the one image
+   * being replaced. A session that had already finished is reopened for the
+   * duration of the retake and closes itself again as soon as the replacement
+   * lands.
+   *
+   * The retaken step's own `status` is the one thing this resets, back to
+   * `PENDING` — a normal (shutter/gesture/AUTO-driven) retake never actually
+   * depended on that (`triggerManualCapture`'s success path overwrites status
+   * unconditionally, whatever it was), but `recordExternalCapture` — the
+   * simultaneous-capture path a side-frame retake uses instead, since it has
+   * no shutter/gesture/AUTO trigger of its own to wait on — refuses to touch
+   * a step whose status is already `COMPLETED`. Leaving it COMPLETED here
+   * silently broke every simultaneous-capture retake: `retakeStep` would
+   * report success, but the `recordExternalCapture` call right after it
+   * (FaceCaptureApp.tsx's `handleRetakeStep`) would be rejected and the old
+   * photo would never actually be replaced, with nothing surfacing the
+   * failure (that call site does not check `recordExternalCapture`'s return
+   * value, since a normal CENTER retake never needed to).
+   *
+   * `options.externalCapture` (§ desktop kiosk multi-camera capture, product
+   * decision 2026-09-05 #3): set for a simultaneous-capture side frame,
+   * whose photo comes from its own physical camera rather than the one this
+   * engine's snapshot provider reads — see `externalCaptureOnly`'s own doc
+   * comment for what it gates. Omitted/false (every existing call site)
+   * leaves this exactly as it always was.
    */
-  public async retakeStep(stepId: string): Promise<boolean> {
+  public async retakeStep(stepId: string, options?: { externalCapture?: boolean }): Promise<boolean> {
     // A cancelled session has no active workflow, so it is turned away here too.
     if (this.isCapturing || !this.activeWorkflow || !this._currentSession) return false;
 
@@ -325,14 +403,22 @@ export class WorkflowEngine implements IWorkflowEngine {
     this.currentStepIdx = idx;
     this.stepStartTime = Date.now();
     this.stabilityTracker.reset();
+    this.externalCaptureOnly = !!options?.externalCapture;
 
     this._currentSession.status = 'RUNNING';
     this._currentSession.completedAt = undefined;
 
     const stepResult = this._currentSession.steps.find((s) => s.stepId === stepId);
-    // Counted before the shot is taken, so the replacement is stored under an
-    // attempt of its own instead of colliding with the photo it replaces.
-    if (stepResult) stepResult.attempts++;
+    if (stepResult) {
+      // See this method's own doc comment for why: unblocks a subsequent
+      // recordExternalCapture() for this same step. capturedImagePath is
+      // deliberately left alone — the old photo stays visible until the
+      // replacement actually lands.
+      stepResult.status = 'PENDING';
+      // Counted before the shot is taken, so the replacement is stored under
+      // an attempt of its own instead of colliding with the photo it replaces.
+      stepResult.attempts++;
+    }
 
     this._currentState = {
       status: 'POSITIONING',
@@ -429,6 +515,14 @@ export class WorkflowEngine implements IWorkflowEngine {
 
   private async advanceToNextStep(): Promise<void> {
     if (!this.activeWorkflow || !this._currentSession) return;
+
+    // The retake this flag (if any) was set for has just been completed —
+    // whatever step capture moves to next defaults back to this engine's own
+    // capture path unless a later retakeStep() call says otherwise. Without
+    // this, a simultaneous-capture side-frame retake's flag would otherwise
+    // stay stuck true and silently suppress a completely unrelated later
+    // step's normal AUTO/triggerManualCapture path.
+    this.externalCaptureOnly = false;
 
     // A retake re-entered a step the workflow had already passed, so ordered
     // capture picks up at the step it interrupted, not after the retaken one.

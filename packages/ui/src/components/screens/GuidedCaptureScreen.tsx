@@ -59,6 +59,20 @@ export interface GuidedCaptureScreenProps {
   onShutterCapture?: () => void;
   sensitivity?: CaptureSensitivity;
   onSensitivityChange?: (sensitivity: CaptureSensitivity) => void;
+  /**
+   * The trigger mode/hold time actually in effect on the engine — passed by
+   * FaceCaptureApp's `effectiveTriggerConfig` so this screen renders exactly
+   * what the WorkflowEngine will accept, instead of falling back to its own
+   * internal state read straight from the local settings store (see this
+   * component's `captureMode`/`autoHoldMs` state below, and the bug that
+   * fallback caused, 2026-09-05: a campaign-forced OFF/MANUAL mode reached
+   * the engine but never reached these views). Undefined (e.g. no caller
+   * passes one) falls back to that internal state, unchanged from before.
+   */
+  captureMode?: CaptureTriggerMode;
+  autoHoldMs?: number;
+  /** True while `captureMode` is dictated by the campaign, not local settings — see FaceCaptureApp's `effectiveTriggerConfig.fromCampaign`. */
+  captureModeFromCampaign?: boolean;
   onCaptureModeChange?: (mode: CaptureTriggerMode) => void;
   onAutoHoldMsChange?: (ms: number) => void;
   latestCapturedImage?: { stepId: string; imagePath: string } | null;
@@ -104,6 +118,9 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (
     onShutterCapture,
     sensitivity: externalSensitivity,
     onSensitivityChange,
+    captureMode: externalCaptureMode,
+    autoHoldMs: externalAutoHoldMs,
+    captureModeFromCampaign = false,
     onCaptureModeChange: externalOnCaptureModeChange,
     onAutoHoldMsChange: externalOnAutoHoldMsChange,
     latestCapturedImage,
@@ -215,6 +232,12 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (
     useState<CaptureSensitivity>(initialSettings.sensitivity || "MEDIUM");
 
   const activeSensitivity = externalSensitivity ?? internalSensitivity;
+  // Same override pattern as activeSensitivity above — when a caller (only
+  // FaceCaptureApp today) passes its own resolved mode/hold-time, that value
+  // wins over this component's own local-settings-backed state, so the
+  // views below always render whatever the engine will actually accept.
+  const activeCaptureMode = externalCaptureMode ?? captureMode;
+  const activeAutoHoldMs = externalAutoHoldMs ?? autoHoldMs;
 
   const handleSensitivityChange = (sens: CaptureSensitivity) => {
     setInternalSensitivity(sens);
@@ -223,6 +246,9 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (
   };
 
   const handleCaptureModeChange = (newMode: CaptureTriggerMode) => {
+    // Selector is disabled in the UI while the campaign dictates the mode;
+    // guarded here too so no caller can bypass it.
+    if (captureModeFromCampaign) return;
     setCaptureMode(newMode);
     updateSettings({ captureMode: newMode });
     if (externalOnCaptureModeChange) externalOnCaptureModeChange(newMode);
@@ -447,8 +473,9 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (
     setFlyingState,
     renderTopLeftDebugOverlay,
     renderFaceDiagnostics,
-    captureMode,
-    autoHoldMs,
+    captureMode: activeCaptureMode,
+    autoHoldMs: activeAutoHoldMs,
+    captureModeFromCampaign,
     allowedGestures,
     handleToggleOverlayVisible,
     handleOpacityChange,

@@ -88,6 +88,18 @@ export class Campaign extends BaseEntity {
   @ApiProperty({ description: 'Chụp đồng thời — mỗi khung cần 1 camera vật lý riêng' })
   simultaneousCapture: boolean;
 
+  /**
+   * Campaign-level switch for local video "stream" recording alongside a
+   * capture session (§3.1) — off by default, so no `capture_streams` row is
+   * created at all unless a campaign explicitly opts in. Fed straight to the
+   * kiosk via `GET /v1/devices/config` alongside `simultaneousCapture`; video
+   * upload to fs-core is explicitly out of scope (2026-09-05 product
+   * decision) — this only ever gates local recording.
+   */
+  @Column('boolean', { default: false, name: 'record_video' })
+  @ApiProperty({ description: 'Quay video trong lúc chụp (lưu local, không upload)' })
+  recordVideo: boolean;
+
   @OneToMany(() => Device, (device) => device.campaign)
   devices?: Device[];
 }

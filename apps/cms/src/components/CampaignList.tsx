@@ -73,11 +73,18 @@ export function CampaignList({ onOpenCampaign }: { onOpenCampaign: (id: string) 
                 <td className="py-2.5 px-4 text-gray-500">{formatExpiry(c)}</td>
                 <td className="py-2.5 px-4 text-gray-500">{c.consentVersion}</td>
                 <td className="py-2.5 px-4">
-                  {c.simultaneousCapture && (
-                    <span className="px-2 py-0.5 rounded-full bg-indigo-50 border border-indigo-200 text-indigo-700 text-xs font-medium">
-                      Đồng thời
-                    </span>
-                  )}
+                  <div className="flex flex-wrap gap-1">
+                    {c.simultaneousCapture && (
+                      <span className="px-2 py-0.5 rounded-full bg-indigo-50 border border-indigo-200 text-indigo-700 text-xs font-medium">
+                        Đồng thời
+                      </span>
+                    )}
+                    {c.recordVideo && (
+                      <span className="px-2 py-0.5 rounded-full bg-rose-50 border border-rose-200 text-rose-700 text-xs font-medium">
+                        Quay video
+                      </span>
+                    )}
+                  </div>
                 </td>
                 <td className="py-2.5 px-4 text-right">
                   <button onClick={() => onOpenCampaign(c.id)} className="text-blue-600 hover:text-blue-800 font-medium">
@@ -102,6 +109,7 @@ function CreateCampaignForm({ onCreated }: { onCreated: () => void }) {
     () => new Set(Object.keys(CAPTURE_STEP_DEFS) as StepType[])
   );
   const [simultaneous, setSimultaneous] = useState(false);
+  const [recordVideo, setRecordVideo] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -115,7 +123,7 @@ function CreateCampaignForm({ onCreated }: { onCreated: () => void }) {
     });
   };
 
-  const tooFewFrames = enabledAngles.size < 3;
+  const tooFewFrames = enabledAngles.size < 2;
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -132,6 +140,7 @@ function CreateCampaignForm({ onCreated }: { onCreated: () => void }) {
           .filter((type) => enabledAngles.has(type))
           .map((type) => CAPTURE_STEP_DEFS[type]),
         simultaneousCapture: simultaneous,
+        recordVideo,
       });
       onCreated();
     } catch (err) {
@@ -192,6 +201,21 @@ function CreateCampaignForm({ onCreated }: { onCreated: () => void }) {
         simultaneous={simultaneous}
         onSimultaneousChange={setSimultaneous}
       />
+
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={recordVideo}
+          onChange={(e) => setRecordVideo(e.target.checked)}
+          className="rounded border-gray-300 mt-0.5"
+        />
+        <span>
+          <span className="block font-medium text-gray-700">Quay video trong lúc chụp</span>
+          <span className="block text-xs text-gray-500">
+            Ghi lại video local trên kiosk trong suốt phiên chụp (không upload lên máy chủ).
+          </span>
+        </span>
+      </label>
 
       {error && <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">{error}</div>}
       <button

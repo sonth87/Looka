@@ -1,7 +1,12 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { BoundingBox, CaptureSensitivity } from '@face/core';
-import { QualityEvaluator, SENSITIVITY_PRESETS, MIN_FACE_RESOLUTION_PX } from '../QualityEvaluator.js';
+import {
+  QualityEvaluator,
+  SENSITIVITY_PRESETS,
+  MIN_FACE_RESOLUTION_PX,
+  MAX_FRONT_SMILE_SCORE,
+} from '../QualityEvaluator.js';
 
 /** The resolution BrowserCameraService asks the camera for. */
 const FRAME_W = 1280;
@@ -348,6 +353,75 @@ describe('QualityEvaluator', () => {
       const result = evaluator.evaluateQuality({ x: -10, y: -10, width: 300, height: 300 }, FRAME_W, FRAME_H);
       assert.equal(result.faceWidthPx, 300);
       assert.equal(result.faceHeightPx, 300);
+    });
+  });
+
+  describe('maxSmileScoreOverride — strict FRONT/CENTER ceiling (product decision 2026-09-05, field report "cười vẫn cho chụp")', () => {
+    // ratio 0.5 clears every sensitivity band used below and the §2.8
+    // absolute floor (0.5 * 1280 = 640px), so SMILING is the only reason
+    // that can fire in these cases.
+    const box = boxOfRatio(0.5);
+
+    test("MEDIUM alone accepts smileScore 0.35 (under its own 0.40 ceiling) — the bug the override fixes", () => {
+      assert.equal(SENSITIVITY_PRESETS.MEDIUM.maxSmileScore, 0.40);
+
+      const result = evaluator.evaluateQuality(box, FRAME_W, FRAME_H, undefined, { sensitivity: 'MEDIUM' }, {
+        smileScore: 0.35,
+      });
+
+      assert.equal(result.accepted, true, result.reasons.join(','));
+      assert.ok(!result.reasons.includes('SMILING'));
+    });
+
+    test('maxSmileScoreOverride tightens MEDIUM to reject that same 0.35 smile', () => {
+      const result = evaluator.evaluateQuality(
+        box,
+        FRAME_W,
+        FRAME_H,
+        undefined,
+        { sensitivity: 'MEDIUM' },
+        { smileScore: 0.35 },
+        undefined,
+        { maxSmileScoreOverride: MAX_FRONT_SMILE_SCORE }
+      );
+
+      assert.equal(result.accepted, false);
+      assert.ok(result.reasons.includes('SMILING'));
+      assert.equal(result.neutralExpression, false);
+    });
+
+    test('a smile just under the override (0.15) still passes, with neutralExpression true', () => {
+      const result = evaluator.evaluateQuality(
+        box,
+        FRAME_W,
+        FRAME_H,
+        undefined,
+        { sensitivity: 'MEDIUM' },
+        { smileScore: 0.15 },
+        undefined,
+        { maxSmileScoreOverride: MAX_FRONT_SMILE_SCORE }
+      );
+
+      assert.ok(!result.reasons.includes('SMILING'), result.reasons.join(','));
+      assert.equal(result.neutralExpression, true);
+    });
+
+    test("the override only ever tightens, never loosens: HIGH's own stricter ceiling (0.30) still wins over a looser override", () => {
+      assert.equal(SENSITIVITY_PRESETS.HIGH.maxSmileScore, 0.30);
+      const highBox = boxOfRatio(0.30); // inside HIGH's [0.25, 0.40] band
+
+      const result = evaluator.evaluateQuality(
+        highBox,
+        FRAME_W,
+        FRAME_H,
+        undefined,
+        { sensitivity: 'HIGH' },
+        { smileScore: 0.35 },
+        undefined,
+        { maxSmileScoreOverride: 0.60 } // looser than HIGH's own ceiling
+      );
+
+      assert.ok(result.reasons.includes('SMILING'), result.reasons.join(','));
     });
   });
 

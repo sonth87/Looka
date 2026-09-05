@@ -105,6 +105,19 @@ describeDb('device management persistence', () => {
     expect(reloaded.simultaneousCapture).toBe(true);
   });
 
+  test('recordVideo defaults to false and round-trips through create/update', async () => {
+    const campaign = await campaignService.createCampaign({ name: 'Record video default' });
+    expect(campaign.recordVideo).toBe(false);
+
+    const updated = await campaignService.updateCampaign(campaign.id, {
+      recordVideo: true,
+    });
+    expect(updated.recordVideo).toBe(true);
+
+    const reloaded = await campaignService.findCampaignOrFail(campaign.id);
+    expect(reloaded.recordVideo).toBe(true);
+  });
+
   test('setting expiresAt to null on an expiring campaign makes it permanent again', async () => {
     const campaign = await campaignService.createCampaign({
       name: 'Renewable',

@@ -65,6 +65,12 @@ export interface EndVideoStreamInput {
   durationMs: number;
 }
 
+/** The subset of `CaptureStreamRepository` `endVideoStream` actually needs — lets a test inject a fake without a real Electron `app`/database (see the test's own doc comment). */
+export interface EndVideoStreamRepo {
+  getById: CaptureStreamRepository['getById'];
+  endStream: CaptureStreamRepository['endStream'];
+}
+
 /**
  * Writes the recorded bytes to the path decided at `startVideoStream` time
  * and closes out that row. The renderer holds the whole recording in memory
@@ -72,9 +78,19 @@ export interface EndVideoStreamInput {
  * streaming partial writes to this process — simplest correct thing for a
  * first version, at the cost of the full recording living in the
  * renderer's memory until the step (or session) ends.
+ *
+ * `repo` defaults to the module's real, Electron-backed singleton — every
+ * production call site (`stream:end` in index.ts) calls this with one
+ * argument, unchanged. The parameter exists so a test can pass a fake
+ * `{ getById, endStream }` instead: `getRepo()` needs both a real `app`
+ * (for `getDatabase()`'s callers) and an initialized database, neither of
+ * which exists under plain `node --test` (see streams.test.ts).
  */
-export function endVideoStream(input: EndVideoStreamInput): { ok: true } | { ok: false; error: string } {
-  const item = getRepo().getById(input.streamId);
+export function endVideoStream(
+  input: EndVideoStreamInput,
+  repo: EndVideoStreamRepo = getRepo()
+): { ok: true } | { ok: false; error: string } {
+  const item = repo.getById(input.streamId);
   if (!item) return { ok: false, error: `Unknown stream id ${input.streamId}` };
 
   try {
@@ -83,7 +99,7 @@ export function endVideoStream(input: EndVideoStreamInput): { ok: true } | { ok:
     return { ok: false, error: (err as Error).message };
   }
 
-  getRepo().endStream({
+  repo.endStream({
     id: input.streamId,
     sizeBytes: input.data.byteLength,
     durationMs: input.durationMs,

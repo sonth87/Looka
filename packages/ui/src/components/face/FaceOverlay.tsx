@@ -11,8 +11,9 @@ export interface FaceOverlayProps {
    * Landmark coordinates always come from the raw, unmirrored camera frame
    * (MediaPipe reads pixels, not the CSS transform), so this must match
    * whatever `mirrored` value the underlying `CameraPreview` is using.
-   * Default false, matching `CameraPreview`'s own default (product decision
-   * 2026-09-04: no mirroring anywhere).
+   * Default false, matching `CameraPreview`'s own default — but the capture
+   * views pass `mirrored={true}` explicitly, alongside `CameraPreview`, per
+   * product decision 2026-09-05. See `CameraPreview`'s doc comment for why.
    */
   mirrored?: boolean;
   visible?: boolean;

@@ -1,7 +1,18 @@
 import React, { useEffect, useRef } from 'react';
 import { cn } from '../../lib/utils.js';
 
-export type FrameTileStatus = 'PENDING' | 'CURRENT' | 'COMPLETED' | 'FAILED' | 'MISSING' | 'UNASSIGNED';
+/**
+ * 'READY': a side frame (non-CENTER) whose camera has actually rendered a
+ * real video frame — not just "has a stream attached" — but has not yet
+ * been captured. Distinct from 'PENDING', which now means "not yet
+ * confirmed playing" (2026-09-05 field bug: a tile read as ready-looking
+ * "Chờ"/generic-pending while its camera was still negotiating with the OS
+ * driver, and the shutter fired a black frame from it — see
+ * `snapshotVideoFrame`/`allSideFramesReady` in lib/multiFrame.ts). CENTER's
+ * own tile never needs this state — its readiness is already covered by the
+ * normal face-quality gate — so it stays 'PENDING' until captured.
+ */
+export type FrameTileStatus = 'PENDING' | 'READY' | 'CURRENT' | 'COMPLETED' | 'FAILED' | 'MISSING' | 'UNASSIGNED';
 
 export interface FrameTileProps {
   /** The step's label — same value shown on the sequential path's step chips (its type, e.g. "LEFT"). */
@@ -14,10 +25,37 @@ export interface FrameTileProps {
   imagePath?: string | null;
   theme?: 'dark' | 'light';
   className?: string;
+  /**
+   * Whether this tile is flipped horizontally to match a mirrored capture.
+   * Default true: every tile here is a live preview for self-positioning
+   * during simultaneous capture, same as the main `CameraPreview` (product
+   * decision 2026-09-05 — mirror the preview). The saved still (shown once
+   * COMPLETED) is display-mirrored too, so the frozen thumbnail matches the
+   * live preview the subject just posed in — the underlying file stays the
+   * raw, unmirrored sensor image (BrowserCameraService.mirrorStills is never
+   * touched by this).
+   */
+  mirrored?: boolean;
+  /**
+   * Visual scale for this tile. `'default'` (the kiosk's own multi-frame
+   * strip in `DesktopCaptureView.tsx`): unchanged from before — small
+   * label/badge text, a fixed 16:9 `aspect-video` box, and the captured
+   * photo shown as a centered thumbnail over a dimmed backdrop. `'large'`
+   * (the CB Help extended-display window): bigger label/role text and
+   * status badge, and no fixed aspect ratio — the tile stretches to fill
+   * whatever box its parent gives it (an equal-width, full-height column
+   * per frame — product decision 2026-09-05, fourth pass: "để thành các
+   * thanh dọc, grid chia đều cho các khung"), with both the live video and
+   * the captured photo covering that box edge-to-edge via `object-cover`
+   * instead of a shrunk centered thumbnail — cropping a 16:9 feed's sides
+   * into a tall column is expected and fine.
+   */
+  size?: 'default' | 'large';
 }
 
 const STATUS_LABEL_VI: Record<FrameTileStatus, string> = {
   PENDING: 'Chờ',
+  READY: 'Sẵn sàng',
   CURRENT: 'Đang chụp',
   COMPLETED: 'Đã chụp',
   FAILED: 'Thất bại',
@@ -44,7 +82,10 @@ export const FrameTile: React.FC<FrameTileProps> = ({
   imagePath,
   theme = 'dark',
   className,
+  mirrored = true,
+  size = 'default',
 }) => {
+  const isLarge = size === 'large';
   const videoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
@@ -72,6 +113,8 @@ export const FrameTile: React.FC<FrameTileProps> = ({
       ? 'ring-rose-500'
       : status === 'MISSING' || status === 'UNASSIGNED'
       ? 'ring-amber-500'
+      : status === 'READY'
+      ? 'ring-emerald-700'
       : 'ring-slate-700';
 
   const badgeClass =
@@ -83,21 +126,35 @@ export const FrameTile: React.FC<FrameTileProps> = ({
       ? 'bg-rose-500/90 text-white'
       : status === 'MISSING' || status === 'UNASSIGNED'
       ? 'bg-amber-500/90 text-slate-950'
+      : status === 'READY'
+      ? 'bg-emerald-700/90 text-white'
       : 'bg-slate-700/90 text-slate-200';
 
   return (
     <div
       className={cn(
-        'relative aspect-video overflow-hidden rounded-xl ring-2 transition-colors',
+        'relative overflow-hidden rounded-xl ring-2 transition-colors',
+        !isLarge && 'aspect-video',
         ringClass,
         theme === 'dark' ? 'bg-slate-950' : 'bg-slate-900',
         className
       )}
       data-frame-step-label={label}
     >
-      <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted
+        className={cn('w-full h-full object-cover', mirrored && 'scale-x-[-1]')}
+      />
 
-      <div className="absolute inset-x-0 top-0 z-10 flex items-center justify-between gap-1 px-2 py-1 bg-gradient-to-b from-black/70 to-transparent text-[10px] font-semibold text-white">
+      <div
+        className={cn(
+          'absolute inset-x-0 top-0 z-10 flex items-center justify-between gap-1 bg-gradient-to-b from-black/70 to-transparent font-semibold text-white',
+          isLarge ? 'px-4 py-2 text-base sm:text-lg gap-3' : 'px-2 py-1 text-[10px]'
+        )}
+      >
         <span className="truncate">
           {label} · {roleLabel}
         </span>
@@ -106,7 +163,8 @@ export const FrameTile: React.FC<FrameTileProps> = ({
 
       <div
         className={cn(
-          'absolute top-1 right-1 z-10 px-1.5 py-0.5 rounded-full text-[9px] font-bold uppercase',
+          'absolute z-10 rounded-full font-bold uppercase',
+          isLarge ? 'top-2 right-2 px-3 py-1 text-sm sm:text-base' : 'top-1 right-1 px-1.5 py-0.5 text-[9px]',
           badgeClass
         )}
       >
@@ -114,16 +172,31 @@ export const FrameTile: React.FC<FrameTileProps> = ({
       </div>
 
       {status === 'COMPLETED' && imagePath && (
-        <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-1 bg-slate-950/80">
+        isLarge ? (
+          // Fill the tile edge-to-edge, same footprint as the live video,
+          // so the frozen shot reads just as large from a distance — the
+          // top-left/top-right badges above stay legible since they sit at
+          // a higher z-index than this plain (non-dimmed) image.
           <img
             src={imagePath}
             alt={label}
-            className="max-h-[70%] max-w-[85%] rounded-lg object-cover shadow-lg"
+            className={cn('absolute inset-0 w-full h-full object-cover', mirrored && 'scale-x-[-1]')}
           />
-          <span className="px-2 py-0.5 rounded-full bg-emerald-500 text-white text-[10px] font-bold">
-            Đã chụp
-          </span>
-        </div>
+        ) : (
+          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-1 bg-slate-950/80">
+            <img
+              src={imagePath}
+              alt={label}
+              className={cn(
+                'max-h-[70%] max-w-[85%] rounded-lg object-cover shadow-lg',
+                mirrored && 'scale-x-[-1]'
+              )}
+            />
+            <span className="px-2 py-0.5 rounded-full bg-emerald-500 text-white text-[10px] font-bold">
+              Đã chụp
+            </span>
+          </div>
+        )
       )}
     </div>
   );

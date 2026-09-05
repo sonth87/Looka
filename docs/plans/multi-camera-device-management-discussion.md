@@ -378,6 +378,21 @@ Looka nữa):
   `upload_outbox` (khác lifecycle: ảnh cần approve-rồi-upload, video theo mục
   2.5 có thể có lifecycle khác hẳn).
 
+**Cập nhật 2026-09-05**: campaign giờ có công tắc riêng `recordVideo`
+("Quay video trong lúc chụp", CMS + `GET /v1/devices/config`) — mặc định tắt,
+kiosk chỉ mở `MediaRecorder`/tạo dòng `capture_streams` khi campaign bật.
+Đồng thời sửa xong lỗi ghi hình local không bao giờ "chốt" xong: mọi dòng
+`capture_streams` trước đây đều dừng ở `size_bytes=0`/`duration_ms=0`/
+`ended_at=null` vì hai effect ghi hình trong `FaceCaptureApp.tsx` chỉ dừng
+`MediaRecorder` (và gọi `endVideoStream`) khi `isWorkflowStarted` đổi giá trị
+— mà luồng hoàn tất bình thường ("chụp xong → xem lại → Xác nhận & Lưu hồ
+sơ") không bao giờ đổi cờ đó về `false`, nên recorder chạy tới khi cả app
+tắt hẳn mới dừng. Đã tách một cờ `isRecordingSession` riêng, tắt tường minh
+ở đúng 3 điểm kết thúc phiên thật (event `completed` của engine,
+`handleCancelWorkflow`, `handleRestart`) thay vì dựa vào `isWorkflowStarted`.
+Upload video lên fs-core vẫn để sau (vẫn ngoài phạm vi, theo quyết định sản
+phẩm 2026-09-05) — phần này chỉ sửa việc ghi/local hoá.
+
 ### 3.2. Đăng ký thiết bị — mỗi kiosk vật lý = 1 thiết bị
 
 **Mô hình triển khai:** `apps/desktop` trong repo này **là 1 bản build duy
@@ -671,11 +686,66 @@ ngoài — chỉ ghi nhận hướng đi, chưa triển khai):
   này người ngoài cũng nhìn thấy được?) — điểm này nối với mục 2.4 (consent),
   cần cân nhắc thêm khi thiết kế chi tiết.
 
+**Cập nhật 2026-09-05 (quyết định từ product owner — thay đổi so với bản chốt
+ở trên):** màn phụ **không** còn tự mở khi khởi động nữa — chỉ mở khi thao
+tác viên chủ động bật, qua `Ctrl/Cmd+Shift+H` hoặc 1 nút trong giao diện kiosk
+("Màn hình mở rộng"), và tắt cũng bằng chính 2 cách đó (toggle). Nội dung màn
+phụ cũng đổi khác với phần "Nội dung màn phụ" đã mô tả ở trên: thay vì 1 màn
+hình theo dõi riêng (ảnh vừa chụp + trạng thái từng bước), giờ là **nhân bản
+chính xác** những gì thao tác viên đang thấy ở màn kiosk chính (camera trực
+tiếp, hướng dẫn, review — toàn bộ giao diện), qua
+`session.defaultSession.setDisplayMediaRequestHandler` của Electron cấp
+`webContents.mainFrame` của cửa sổ chính cho `getDisplayMedia()` gọi từ cửa sổ
+CB Help. Xem chi tiết hiện thực ở `apps/desktop/src/main/cbHelpWindow.ts` và
+`apps/desktop/src/renderer/CbHelpMirror.tsx` (đổi tên từ `CbHelpMonitor.tsx`).
+
+**Cập nhật 2026-09-05 (quyết định từ product owner — đổi lại lần nữa, ngay
+trong cùng ngày):** màn phụ **không** nhân bản nguyên màn hình chính nữa —
+quay lại hướng chỉ hiển thị các khung hình chụp (live + ảnh đã chụp), không
+phải toàn bộ giao diện. Chế độ chụp đồng thời: mỗi khung hình một ô, tất cả
+đang live cùng lúc, ô nào chụp xong thì đổi sang ảnh vừa chụp. Chế độ tuần tự
+(từng bước): mỗi bước một ô, ô của bước hiện tại thì live, bước đã xong hiện
+ảnh, bước chưa tới hiện placeholder. Vẫn mở/đóng theo yêu cầu qua
+`Ctrl/Cmd+Shift+H` hoặc nút "Màn hình mở rộng" như quyết định phía trên, chỉ
+đổi phần nội dung hiển thị bên trong. Hiện thực ở
+`apps/desktop/src/renderer/CbHelpFrames.tsx` (thay `CbHelpMirror.tsx`), IPC
+mới `cbhelp:publish`/`cbhelp:getState`/`cbhelp:update` (kiosk chính đẩy một
+snapshot gọn — trạng thái + `deviceId` từng khung — mỗi khi có thay đổi, màn
+phụ tự mở `getUserMedia` riêng cho từng camera cần live). Xem chi tiết đầy đủ
+ở docs/ROADMAP.md mục 3.5 (đã cập nhật theo quyết định này).
+
 ### 3.6. Số góc chụp cấu hình được theo từng thiết bị — ĐÃ CHỐT
 
 **Đã chốt (qua trao đổi):** số lượng và loại góc chụp — hiện tại luôn là 5
 góc cố định (FRONT/LEFT/RIGHT/UP/DOWN) — sẽ **cấu hình được riêng theo từng
 thiết bị**, thay vì cố định giống nhau cho mọi kiosk.
+
+**Cập nhật 2026-09-05 (quyết định từ product owner):** số khung chụp tối
+thiểu hạ từ 3 xuống **2** (vẫn tối đa 5, FRONT vẫn bắt buộc) — lý do: 1 kiosk
+chỉ có 2 camera vật lý cũng cần chạy được chế độ chụp đồng thời
+(`simultaneousCapture`), mà chế độ đó cần tối thiểu 2 khung/vai trò riêng biệt
+nên ngưỡng tối thiểu 3 khung trước đây chặn đúng trường hợp này. Đã sửa
+`MIN_STEPS` trong `capture-angles.validator.ts` (và spec), `MIN_FRAMES` trong
+`CaptureFramesEditor.tsx`, cùng ngưỡng `tooFewFrames` ở `CampaignList.tsx`/
+`CampaignDetail.tsx`. Xem thêm docs/ROADMAP.md mục 3.6b.
+
+**Cập nhật 2026-09-05 (quyết định UX từ product owner — "Gán camera cho các
+góc, chứ không phải các góc cho camera"):** màn Camera Setup
+(`CameraSetupScreen.tsx`) giờ đọc `captureAngles` của chiến dịch (qua
+`getDeviceAccessStatus()`) để suy ra danh sách vai trò camera *cần* gán và
+hiển thị mỗi vai trò một dòng (preview trực tiếp + dropdown chọn camera) —
+thay vì liệt kê camera trước rồi hỏi gán vai trò nào như bản cũ, chiều ngược
+dễ bỏ sót một góc bắt buộc. Không có chiến dịch (web/dev chưa kích hoạt) vẫn
+hiển thị đủ 5 vai trò như trước. Vai trò chiến dịch không cần được gộp vào
+mục thu gọn "Góc khác" để CB Help vẫn gán trước được nếu muốn; chọn một
+camera đã dùng cho vai trò khác sẽ *chuyển* nó sang vai trò mới (kèm ghi chú
+ngắn), và màn hình cảnh báo khi còn vai trò cần thiết chưa gán hoặc hai vai
+trò cần thiết dùng chung một camera — đúng hai điều kiện `checkFramesReadiness`
+(packages/ui/src/lib/multiFrame.ts) dùng để chặn phiên chụp. Danh sách camera
+cũng cập nhật theo sự kiện `devicechange` (cắm/rút khi cửa sổ đang mở) thay vì
+chỉ dò một lần lúc mở như trước. Định dạng lưu
+(`Record<CameraRole, deviceId>` qua `camera:getRoleMapping`/
+`camera:setRoleMapping`) không đổi.
 
 **Hiện trạng trong code (khoảng trống thật, không chỉ là thiết kế tương
 lai):** danh sách 5 bước này là 1 hằng số hardcode —
@@ -829,7 +899,11 @@ chưa cấu hình gì.
     để in/hiển thị — cần xác nhận đây có đúng là mức ưu tiên mong muốn không.
 13. **(Mới, phát sinh từ mục 3.6)** Số góc chụp cấu hình được ở mức nào — chỉ
     bật/tắt trong 5 góc có sẵn, hay tự định nghĩa góc hoàn toàn mới? FRONT có
-    bắt buộc, không được tắt, hay tuỳ chọn như các góc khác?
+    bắt buộc, không được tắt, hay tuỳ chọn như các góc khác? — **ĐÃ CHỐT
+    2026-09-04 (`b4aa392`)**: bật/tắt trong 5 góc có sẵn, FRONT bắt buộc.
+    Ban đầu số khung cho phép là 3–5; **cập nhật 2026-09-05 (product owner)**:
+    hạ xuống **2–5** để 1 kiosk 2 camera cũng chạy được `simultaneousCapture`
+    — chi tiết ở mục 3.6.
 14. **(Mới, phát sinh từ mục 3.6)** Đổi cấu hình số góc chụp cho 1 thiết bị đã
     đăng ký — áp dụng ngay phiên tiếp theo, hay cần khởi động lại app?
 15. **(Mới, phát sinh từ mục 3.4 — thống kê thời gian trung bình)** Ghi log

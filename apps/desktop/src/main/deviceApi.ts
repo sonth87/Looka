@@ -24,6 +24,12 @@ export interface CampaignConfig {
    * and `getDeviceAccessStatus`'s disk-cache fallback below).
    */
   simultaneousCapture: boolean;
+  /**
+   * Campaign-level switch for local video "stream" recording (§3.1) — off by
+   * default, same normalize-on-read treatment as `simultaneousCapture` above
+   * for a server/cache predating this field.
+   */
+  recordVideo: boolean;
 }
 
 export type ConfigFetchResult =
@@ -38,7 +44,11 @@ export type ConfigFetchResult =
  * cache written by an older build of this app.
  */
 function normalizeCampaignConfig(config: CampaignConfig): CampaignConfig {
-  return { ...config, simultaneousCapture: config.simultaneousCapture ?? false };
+  return {
+    ...config,
+    simultaneousCapture: config.simultaneousCapture ?? false,
+    recordVideo: config.recordVideo ?? false,
+  };
 }
 
 /**

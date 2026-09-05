@@ -144,6 +144,22 @@ export const SENSITIVITY_PRESETS: Record<CaptureSensitivity, Required<QualityReq
  */
 export const MIN_FACE_RESOLUTION_PX = 250;
 
+/**
+ * Strict `maxSmileScore` ceiling for the FRONT/CENTER step, independent of
+ * sensitivity level.
+ *
+ * Field report (2026-09-05, "cười vẫn cho chụp"): a visibly smiling subject
+ * was still captured on FRONT. The per-level ceiling (SENSITIVITY_PRESETS
+ * above) is a general "how strict is this kiosk" dial, and at the kiosk's
+ * default sensitivity (LOW 0.60 / MEDIUM 0.50-ish before this change) a
+ * moderate smile stayed under it. An ID photo must be neutral regardless of
+ * that dial, so StepEvaluator passes `min(levelCeiling, this)` as
+ * `options.maxSmileScoreOverride` for CENTER-role steps only — see
+ * `evaluateQuality`'s own doc comment. Side-angle steps are process
+ * evidence, not the printed/matched photo, and keep the level's ceiling.
+ */
+export const MAX_FRONT_SMILE_SCORE = 0.30;
+
 export class QualityEvaluator {
   private lastLogAt = 0;
 
@@ -329,7 +345,29 @@ export class QualityEvaluator {
      * `frameWidth`/`frameHeight` when omitted, i.e. "assume the frame given
      * here is the save resolution too."
      */
-    saveFrameSize?: { width: number; height: number }
+    saveFrameSize?: { width: number; height: number },
+    options?: {
+      /**
+       * Gates `FACE_RESOLUTION_TOO_LOW` (§2.8's absolute pixel floor below).
+       * Defaults to true, since every caller that existed before this option
+       * did relied on the floor always applying.
+       *
+       * Product decision (2026-09-05): "Chỉ cần cam chính diện >= 250px là
+       * được, các cam khác không cần" — only the FRONT/CENTER step's capture
+       * is the printed/matched photo; LEFT/RIGHT/UP/DOWN are process evidence
+       * and must not be blocked by a side camera's lower resolution. See
+       * StepEvaluator, which passes `false` for non-FRONT steps.
+       */
+      enforceFaceResolution?: boolean;
+      /**
+       * Tightens `maxSmileScore` to `min(req.maxSmileScore, this)` for this
+       * call only — never loosens it. StepEvaluator passes
+       * `MAX_FRONT_SMILE_SCORE` (0.30) here for CENTER-role steps (product
+       * decision 2026-09-05, "cười vẫn cho chụp"); omitted for other roles,
+       * which keep the sensitivity level's own ceiling.
+       */
+      maxSmileScoreOverride?: number;
+    }
   ): FaceQualityResult {
     const sensitivity = requirement?.sensitivity || 'MEDIUM';
     const basePreset = SENSITIVITY_PRESETS[sensitivity] || SENSITIVITY_PRESETS.MEDIUM;
@@ -356,7 +394,11 @@ export class QualityEvaluator {
     const saveHeight = saveFrameSize?.height ?? frameHeight;
     const faceWidthPx = faceSizeRatio * saveWidth;
     const faceHeightPx = (boundingBox.height / frameHeight) * saveHeight;
-    if (faceWidthPx < MIN_FACE_RESOLUTION_PX || faceHeightPx < MIN_FACE_RESOLUTION_PX) {
+    const enforceFaceResolution = options?.enforceFaceResolution ?? true;
+    if (
+      enforceFaceResolution &&
+      (faceWidthPx < MIN_FACE_RESOLUTION_PX || faceHeightPx < MIN_FACE_RESOLUTION_PX)
+    ) {
       reasons.push('FACE_RESOLUTION_TOO_LOW');
     }
 
@@ -400,10 +442,17 @@ export class QualityEvaluator {
     const eyeOpenScore: number | null = measured?.eyeOpenScore ?? null;
     const smileScore: number | null = measured?.smileScore ?? null;
 
+    // See `options.maxSmileScoreOverride`'s own doc comment: only ever
+    // tightens the level's ceiling, never loosens it.
+    const effectiveMaxSmileScore =
+      options?.maxSmileScoreOverride !== undefined
+        ? Math.min(req.maxSmileScore, options.maxSmileScoreOverride)
+        : req.maxSmileScore;
+
     if (eyeOpenScore !== null && eyeOpenScore < req.minEyeOpenScore) {
       reasons.push('EYES_CLOSED');
     }
-    if (smileScore !== null && smileScore > req.maxSmileScore) {
+    if (smileScore !== null && smileScore > effectiveMaxSmileScore) {
       reasons.push('SMILING');
     }
 
@@ -439,7 +488,7 @@ export class QualityEvaluator {
       scoreFactors.push(eyeOpenScore >= req.minEyeOpenScore ? 1 : 0.4);
     }
     if (smileScore !== null) {
-      scoreFactors.push(smileScore <= req.maxSmileScore ? 1 : 0.4);
+      scoreFactors.push(smileScore <= effectiveMaxSmileScore ? 1 : 0.4);
     }
 
     const overallScore = scoreFactors.reduce((a, b) => a + b, 0) / scoreFactors.length;
@@ -455,7 +504,7 @@ export class QualityEvaluator {
       eyeOpenScore: eyeOpenScore === null ? null : Number(eyeOpenScore.toFixed(2)),
       smileScore: smileScore === null ? null : Number(smileScore.toFixed(2)),
       eyesVisible: eyeOpenScore === null ? null : eyeOpenScore >= req.minEyeOpenScore,
-      neutralExpression: smileScore === null ? null : smileScore <= req.maxSmileScore,
+      neutralExpression: smileScore === null ? null : smileScore <= effectiveMaxSmileScore,
       // Nothing here inspects covered mouths or other occlusion. Reporting
       // "not occluded" was a claim the pipeline had never checked, and it
       // stayed true for a face hidden behind a mask.

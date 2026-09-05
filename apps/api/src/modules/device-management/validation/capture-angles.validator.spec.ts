@@ -3,8 +3,9 @@ import { validateCaptureAngles } from './capture-angles.validator';
 /**
  * Pure-function checks, no database - see
  * docs/plans/multi-camera-device-management-discussion.md for the contract:
- * 3-5 steps, exactly one FRONT, known types/roles, and (when
- * simultaneousCapture) every step resolving to a distinct camera role.
+ * 2-5 steps (2026-09-05: lowered from 3), exactly one FRONT, known
+ * types/roles, and (when simultaneousCapture) every step resolving to a
+ * distinct camera role.
  */
 function step(type: string, extra: Record<string, unknown> = {}) {
   return { id: type.toLowerCase(), type, instruction: '', capture: { enabled: true }, ...extra };
@@ -16,10 +17,10 @@ describe('validateCaptureAngles', () => {
     expect(validateCaptureAngles(undefined, true)).toEqual({ ok: true });
   });
 
-  test('rejects fewer than 3 steps', () => {
-    const angles = [step('FRONT'), step('LEFT')];
+  test('rejects fewer than 2 steps', () => {
+    const angles = [step('FRONT')];
     const result = validateCaptureAngles(angles, false);
-    expect(result).toEqual({ ok: false, reason: 'Cần từ 3 đến 5 khung hình' });
+    expect(result).toEqual({ ok: false, reason: 'Cần từ 2 đến 5 khung hình' });
   });
 
   test('rejects more than 5 steps', () => {
@@ -32,7 +33,12 @@ describe('validateCaptureAngles', () => {
       step('CUSTOM'),
     ];
     const result = validateCaptureAngles(angles, false);
-    expect(result).toEqual({ ok: false, reason: 'Cần từ 3 đến 5 khung hình' });
+    expect(result).toEqual({ ok: false, reason: 'Cần từ 2 đến 5 khung hình' });
+  });
+
+  test('accepts exactly 2 valid steps with one FRONT', () => {
+    const angles = [step('FRONT'), step('LEFT')];
+    expect(validateCaptureAngles(angles, false)).toEqual({ ok: true });
   });
 
   test('accepts exactly 3 valid steps with one FRONT', () => {

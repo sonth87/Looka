@@ -21,6 +21,21 @@ export interface CaptureValidationPolicy {
 const DATA_URL_PATTERN = /^data:image\/[a-z+]+;base64,([A-Za-z0-9+/=]+)$/i;
 
 /**
+ * The detailed outcome of `validateCapturedImageDetailed`, distinguishing
+ * *why* a captured frame was rejected — the boolean `validateCapturedImage`
+ * collapses this into a single true/false, which is exactly what silently
+ * swallowed the reason at the call site in WorkflowEngine.triggerManualCapture
+ * before this existed.
+ */
+export interface CaptureValidationResult {
+  valid: boolean;
+  /** Present only when `valid` is false. */
+  reason?: 'INVALID_IMAGE_DATA' | 'QUALITY_REJECTED';
+  /** Present only when `reason` is 'QUALITY_REJECTED' — the evaluator's own reasons for rejecting. */
+  qualityReasons?: string[];
+}
+
+/**
  * CaptureController handles the actual frame capture and image validation.
  *
  * Both steps exist to be a hard gate, not a formality: a snapshot the
@@ -51,7 +66,9 @@ export class CaptureController {
 
   /**
    * Rejects anything that is not a plausible image data URL, and anything
-   * the caller's own quality measurement already marked unacceptable.
+   * the caller's own quality measurement already marked unacceptable —
+   * distinguishing which of the two happened, unlike the boolean
+   * `validateCapturedImage` below.
    *
    * The length floor is a sanity check, not a real size validation — an
    * empty or near-empty payload (a blank canvas, a failed encode) still
@@ -59,15 +76,31 @@ export class CaptureController {
    * decoding and measuring the image, which this deliberately does not do —
    * see the doc comment on CaptureValidationPolicy.quality for why.
    */
+  async validateCapturedImageDetailed(
+    imagePath: string,
+    policy: CaptureValidationPolicy
+  ): Promise<CaptureValidationResult> {
+    const match = DATA_URL_PATTERN.exec(imagePath);
+    if (!match || match[1].length < 100) {
+      return { valid: false, reason: 'INVALID_IMAGE_DATA' };
+    }
+
+    if (policy.quality && !policy.quality.accepted) {
+      return { valid: false, reason: 'QUALITY_REJECTED', qualityReasons: policy.quality.reasons };
+    }
+
+    return { valid: true };
+  }
+
+  /**
+   * Boolean convenience wrapper over `validateCapturedImageDetailed`, kept
+   * for existing callers/tests that only ever needed a yes/no answer. Prefer
+   * the detailed form for anything that needs to explain a rejection.
+   */
   async validateCapturedImage(
     imagePath: string,
     policy: CaptureValidationPolicy
   ): Promise<boolean> {
-    const match = DATA_URL_PATTERN.exec(imagePath);
-    if (!match || match[1].length < 100) return false;
-
-    if (policy.quality && !policy.quality.accepted) return false;
-
-    return true;
+    return (await this.validateCapturedImageDetailed(imagePath, policy)).valid;
   }
 }
