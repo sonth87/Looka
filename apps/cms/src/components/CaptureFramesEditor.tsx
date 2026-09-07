@@ -4,9 +4,11 @@ const ALL_STEP_TYPES = Object.keys(CAPTURE_STEP_DEFS) as StepType[];
 const MIN_FRAMES = 2;
 
 /**
- * Shared by `CreateCampaignForm` (CampaignList.tsx) and `CampaignSettingsForm`
- * (CampaignDetail.tsx): the 5-angle toggle editor plus the `simultaneousCapture`
- * switch and a read-only preview of what the kiosk screen will show.
+ * Shared by `CreateCampaignPage` and `EditCampaignPage`'s `CampaignSettingsForm`
+ * (moved out of `CampaignList.tsx`/`CampaignDetail.tsx` respectively on
+ * 2026-09-07, see docs/ROADMAP.md): the 5-angle toggle editor plus the
+ * `simultaneousCapture` switch and a read-only preview of what the kiosk
+ * screen will show.
  */
 export function CaptureFramesEditor({
   enabled,

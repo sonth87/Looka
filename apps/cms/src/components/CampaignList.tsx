@@ -1,50 +1,74 @@
 import { useEffect, useState } from 'react';
-import { ApiError, Campaign, CampaignPurpose, createCampaign, listCampaigns } from '../api';
-import { CAPTURE_STEP_DEFS, StepType } from '../captureAngles';
-import { CaptureFramesEditor } from './CaptureFramesEditor';
+import { Link } from 'react-router-dom';
+import { AllCampaignsStats, ApiError, Campaign, getAllCampaignsStats, listCampaigns } from '../api';
+import { StatTile } from './StatsPanel';
+import { CampaignDangerActions } from './CampaignDangerActions';
+import { PURPOSE_LABEL, formatExpiry, isExpired, isExpiringSoon } from '../campaignFormat';
 
-const PURPOSE_LABEL: Record<CampaignPurpose, string> = {
-  STUDENT_CARD: 'Chụp thẻ SV',
-  KYC_ENROLLMENT: 'Đăng ký KYC/FaceID',
-};
-
-function formatExpiry(campaign: Campaign): string {
-  if (!campaign.expiresAt) return 'Vĩnh viễn';
-  return new Date(campaign.expiresAt).toLocaleDateString('vi-VN');
-}
-
-export function CampaignList({ onOpenCampaign }: { onOpenCampaign: (id: string) => void }) {
+/**
+ * Campaign list (`/campaigns`) — Part 3 of the 2026-09-07 redesign (product
+ * request: campaign list + campaign-level stats + create button + per-row
+ * view/edit/extend/delete). The inline toggle-shown create form is gone;
+ * "+ Tạo campaign" now links to its own page (`/campaigns/new`, Part 4).
+ */
+export function CampaignList() {
   const [campaigns, setCampaigns] = useState<Campaign[] | null>(null);
+  // Only used for its totalDevices figure in the stats strip below — the
+  // rest of AllCampaignsStats (sessions/uploads/etc.) is Overview's job, not
+  // this page's; a failure here just means that one tile doesn't render.
+  const [allStats, setAllStats] = useState<AllCampaignsStats | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [showCreate, setShowCreate] = useState(false);
 
   const reload = () => {
     listCampaigns()
       .then(setCampaigns)
       .catch((err) => setError(err instanceof ApiError ? err.message : String(err)));
+    getAllCampaignsStats()
+      .then(setAllStats)
+      .catch(() => {
+        /* non-fatal to this page - the "Tổng thiết bị" tile just won't show */
+      });
   };
 
   useEffect(reload, []);
+
+  const updateRow = (updated: Campaign) => {
+    setCampaigns((prev) => prev?.map((c) => (c.id === updated.id ? updated : c)) ?? prev);
+  };
+  const removeRow = (id: string) => {
+    setCampaigns((prev) => prev?.filter((c) => c.id !== id) ?? prev);
+  };
+
+  // Expiry-window counts are computed client-side from the campaigns list
+  // already fetched above (per-campaign `expiresAt`) — no new backend
+  // endpoint needed for this, distinct from Overview's cross-campaign usage
+  // stats (sessions/uploads/etc.) which stay on GET /v1/campaigns/stats/summary.
+  const summary = campaigns && {
+    total: campaigns.length,
+    expired: campaigns.filter((c) => isExpired(c)).length,
+    expiringSoon: campaigns.filter((c) => isExpiringSoon(c)).length,
+  };
 
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold text-gray-900">Campaigns</h1>
-        <button
-          onClick={() => setShowCreate((v) => !v)}
+        <Link
+          to="/campaigns/new"
           className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold text-sm"
         >
-          {showCreate ? 'Đóng' : '+ Tạo campaign'}
-        </button>
+          + Tạo campaign
+        </Link>
       </div>
 
-      {showCreate && (
-        <CreateCampaignForm
-          onCreated={() => {
-            setShowCreate(false);
-            reload();
-          }}
-        />
+      {summary && (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-8">
+          <StatTile label="Tổng campaign" value={summary.total} />
+          <StatTile label="Đang hoạt động" value={summary.total - summary.expired} />
+          <StatTile label="Đã hết hạn" value={summary.expired} />
+          <StatTile label="Sắp hết hạn (7 ngày)" value={summary.expiringSoon} />
+          {allStats && <StatTile label="Tổng thiết bị" value={allStats.totalDevices} />}
+        </div>
       )}
 
       {error && <div className="p-4 rounded-xl bg-red-50 border border-red-200 text-red-700 mb-4">{error}</div>}
@@ -70,7 +94,19 @@ export function CampaignList({ onOpenCampaign }: { onOpenCampaign: (id: string) 
               <tr key={c.id} className="border-b border-gray-100 last:border-0 hover:bg-gray-50">
                 <td className="py-2.5 px-4 font-medium text-gray-900">{c.name}</td>
                 <td className="py-2.5 px-4 text-gray-500">{PURPOSE_LABEL[c.purpose]}</td>
-                <td className="py-2.5 px-4 text-gray-500">{formatExpiry(c)}</td>
+                <td className="py-2.5 px-4 text-gray-500">
+                  <span className="whitespace-nowrap">{formatExpiry(c)}</span>
+                  {isExpired(c) && (
+                    <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-red-50 border border-red-200 text-red-700 text-xs font-medium">
+                      Hết hạn
+                    </span>
+                  )}
+                  {!isExpired(c) && isExpiringSoon(c) && (
+                    <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-700 text-xs font-medium">
+                      Sắp hết hạn
+                    </span>
+                  )}
+                </td>
                 <td className="py-2.5 px-4 text-gray-500">{c.consentVersion}</td>
                 <td className="py-2.5 px-4">
                   <div className="flex flex-wrap gap-1">
@@ -86,10 +122,16 @@ export function CampaignList({ onOpenCampaign }: { onOpenCampaign: (id: string) 
                     )}
                   </div>
                 </td>
-                <td className="py-2.5 px-4 text-right">
-                  <button onClick={() => onOpenCampaign(c.id)} className="text-blue-600 hover:text-blue-800 font-medium">
-                    Xem →
-                  </button>
+                <td className="py-2.5 px-4">
+                  <div className="flex items-center justify-end gap-3 whitespace-nowrap">
+                    <Link to={`/campaigns/${c.id}`} className="text-blue-600 hover:text-blue-800 font-medium">
+                      Xem
+                    </Link>
+                    <Link to={`/campaigns/${c.id}/edit`} className="text-gray-600 hover:text-gray-800 font-medium">
+                      Sửa
+                    </Link>
+                    <CampaignDangerActions campaign={c} compact onExtended={updateRow} onDeleted={() => removeRow(c.id)} />
+                  </div>
                 </td>
               </tr>
             ))}
@@ -97,134 +139,5 @@ export function CampaignList({ onOpenCampaign }: { onOpenCampaign: (id: string) 
         </table>
       )}
     </div>
-  );
-}
-
-function CreateCampaignForm({ onCreated }: { onCreated: () => void }) {
-  const [name, setName] = useState('');
-  const [description, setDescription] = useState('');
-  const [purpose, setPurpose] = useState<CampaignPurpose>('STUDENT_CARD');
-  const [expiresAt, setExpiresAt] = useState('');
-  const [enabledAngles, setEnabledAngles] = useState<Set<StepType>>(
-    () => new Set(Object.keys(CAPTURE_STEP_DEFS) as StepType[])
-  );
-  const [simultaneous, setSimultaneous] = useState(false);
-  const [recordVideo, setRecordVideo] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-
-  const toggleAngle = (type: StepType) => {
-    if (type === 'FRONT') return; // always on — see CaptureFramesEditor's own note below
-    setEnabledAngles((prev) => {
-      const next = new Set(prev);
-      if (next.has(type)) next.delete(type);
-      else next.add(type);
-      return next;
-    });
-  };
-
-  const tooFewFrames = enabledAngles.size < 2;
-
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!name.trim() || tooFewFrames) return;
-    setSaving(true);
-    setError(null);
-    try {
-      await createCampaign({
-        name: name.trim(),
-        description: description.trim() || undefined,
-        purpose,
-        expiresAt: expiresAt ? new Date(expiresAt).toISOString() : undefined,
-        captureAngles: (Object.keys(CAPTURE_STEP_DEFS) as StepType[])
-          .filter((type) => enabledAngles.has(type))
-          .map((type) => CAPTURE_STEP_DEFS[type]),
-        simultaneousCapture: simultaneous,
-        recordVideo,
-      });
-      onCreated();
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : String(err));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <form onSubmit={submit} className="mb-6 p-5 rounded-2xl border border-gray-200 bg-white shadow-sm space-y-3">
-      <div>
-        <label className="block text-sm text-gray-500 mb-1">Tên campaign</label>
-        <input
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          required
-          className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
-        />
-      </div>
-      <div>
-        <label className="block text-sm text-gray-500 mb-1">Mô tả</label>
-        <input
-          value={description}
-          onChange={(e) => setDescription(e.target.value)}
-          className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
-        />
-      </div>
-      <div className="grid grid-cols-2 gap-3">
-        <div>
-          <label className="block text-sm text-gray-500 mb-1">Mục đích</label>
-          <select
-            value={purpose}
-            onChange={(e) => setPurpose(e.target.value as CampaignPurpose)}
-            className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
-          >
-            {Object.entries(PURPOSE_LABEL).map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div>
-          <label className="block text-sm text-gray-500 mb-1">Hạn dùng (để trống = vĩnh viễn)</label>
-          <input
-            type="date"
-            value={expiresAt}
-            onChange={(e) => setExpiresAt(e.target.value)}
-            className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
-          />
-        </div>
-      </div>
-
-      <CaptureFramesEditor
-        enabled={enabledAngles}
-        onToggle={toggleAngle}
-        simultaneous={simultaneous}
-        onSimultaneousChange={setSimultaneous}
-      />
-
-      <label className="flex items-start gap-2 text-sm">
-        <input
-          type="checkbox"
-          checked={recordVideo}
-          onChange={(e) => setRecordVideo(e.target.checked)}
-          className="rounded border-gray-300 mt-0.5"
-        />
-        <span>
-          <span className="block font-medium text-gray-700">Quay video trong lúc chụp</span>
-          <span className="block text-xs text-gray-500">
-            Ghi lại video local trên kiosk trong suốt phiên chụp (không upload lên máy chủ).
-          </span>
-        </span>
-      </label>
-
-      {error && <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">{error}</div>}
-      <button
-        type="submit"
-        disabled={saving || tooFewFrames}
-        className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-sm disabled:opacity-50"
-      >
-        {saving ? 'Đang tạo...' : 'Tạo campaign'}
-      </button>
-    </form>
   );
 }

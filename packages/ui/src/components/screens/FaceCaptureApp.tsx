@@ -297,6 +297,17 @@ interface CbHelpPublishState {
  * once there. Deciding which frames actually go live in the CB Help window
  * itself is `CbHelpFrames.tsx`'s own call (simultaneous: everything not
  * COMPLETED; sequential: only CURRENT), not encoded in this payload.
+ *
+ * CENTER is special-cased to `currentDeviceId` in both modes, same as the
+ * main window's own multi-frame grid does (`frame.role === 'CENTER' ?
+ * selectedDeviceId : cameraRoleMapping[frame.role]` a bit further down) —
+ * CENTER is deliberately never a key in `roleMapping` (it stays the one
+ * analysed/active camera, not something the camera-setup screen assigns),
+ * so reading `roleMapping['CENTER']` alone always misses and, in
+ * simultaneous mode, fell through to `null` (the sequential-only fallback
+ * below it never applied) — the CB Help window's CENTER tile then never
+ * qualified as "live" and stayed blank even though the same camera was
+ * clearly showing in the main window.
  */
 function buildCbHelpFrames(
   workflow: CaptureWorkflow,
@@ -317,7 +328,8 @@ function buildCbHelpFrames(
       : sessionStep?.status === 'FAILED'
       ? 'FAILED'
       : 'PENDING';
-    const mappedDeviceId = roleMapping[frame.role] ?? null;
+    const mappedDeviceId =
+      frame.role === 'CENTER' ? currentDeviceId || null : roleMapping[frame.role] ?? null;
 
     return {
       stepId: frame.stepId,

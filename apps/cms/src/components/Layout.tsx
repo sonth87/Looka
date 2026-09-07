@@ -1,5 +1,32 @@
 import type { ReactNode } from 'react';
-import { getApiKey, setApiKey } from '../api';
+import { NavLink } from 'react-router-dom';
+import { useAuth } from '../auth/AuthContext';
+import { isSsoConfigured } from '../auth/env';
+
+/**
+ * SSO session logout (docs/LOGIN.md §6) — the only sign-out control in this
+ * sidebar since the old "Xoá API key" button was removed (2026-09-07, api-key
+ * retired from the CMS entirely). Only rendered when SSO is actually
+ * configured: `useAuth()` requires an `<AuthProvider>` ancestor, which
+ * `AuthGate` only mounts when `isSsoConfigured` is true (see App.tsx/
+ * AuthGate.tsx) — `isSsoConfigured` is a static env-derived constant, so this
+ * condition never flips mid-session.
+ */
+function SsoLogoutButton() {
+  const { logout, profile } = useAuth();
+  const email = profile?.user?.email;
+
+  return (
+    <button
+      onClick={() => {
+        void logout();
+      }}
+      className="text-xs text-gray-400 hover:text-gray-600"
+    >
+      Đăng xuất tài khoản{email ? ` (${email})` : ''}
+    </button>
+  );
+}
 
 /**
  * Standard admin-CMS shell: a fixed sidebar (branding + nav) and a scrolling
@@ -11,19 +38,19 @@ import { getApiKey, setApiKey } from '../api';
  * Light theme, deliberately: this is an office/daytime admin tool, distinct
  * from the dark kiosk-facing capture screen elsewhere in this monorepo — the
  * two run in different contexts and don't need to share a palette.
+ *
+ * Nav highlighting moved from an `activeNav`/`onNavigate` prop pair to plain
+ * `NavLink` (2026-09-07, alongside `react-router-dom` being added — see
+ * App.tsx's own doc comment): the URL is now the single source of truth for
+ * "which page is open" instead of a piece of state this component had to be
+ * told about. "Campaigns" stays highlighted for every `/campaigns/*` route
+ * (new/:id/:id/edit included) since `NavLink` matches by path prefix here —
+ * only "Tổng quan" needs `end` so `/` doesn't also match every other route.
  */
-export function Layout({
-  children,
-  activeNav,
-  onNavigate,
-}: {
-  children: ReactNode;
-  activeNav: 'overview' | 'campaigns';
-  onNavigate: (nav: 'overview' | 'campaigns') => void;
-}) {
-  const navItemClass = (nav: 'overview' | 'campaigns') =>
-    `w-full text-left px-2 py-2 rounded-lg text-sm font-medium ${
-      activeNav === nav ? 'bg-blue-50 text-blue-700' : 'text-gray-600 hover:bg-gray-100'
+export function Layout({ children }: { children: ReactNode }) {
+  const navItemClass = ({ isActive }: { isActive: boolean }) =>
+    `block px-2 py-2 rounded-lg text-sm font-medium ${
+      isActive ? 'bg-blue-50 text-blue-700' : 'text-gray-600 hover:bg-gray-100'
     }`;
 
   return (
@@ -35,26 +62,16 @@ export function Layout({
         </div>
 
         <nav className="flex-1 px-3 py-4 space-y-1">
-          <button onClick={() => onNavigate('overview')} className={navItemClass('overview')}>
+          <NavLink to="/" end className={navItemClass}>
             Tổng quan
-          </button>
-          <button onClick={() => onNavigate('campaigns')} className={navItemClass('campaigns')}>
+          </NavLink>
+          <NavLink to="/campaigns" className={navItemClass}>
             Campaigns
-          </button>
+          </NavLink>
         </nav>
 
-        <div className="px-4 py-4 border-t border-gray-200">
-          <button
-            onClick={() => {
-              if (confirm('Xoá API key đã lưu và đăng xuất?')) {
-                setApiKey('');
-                window.location.reload();
-              }
-            }}
-            className="text-xs text-gray-400 hover:text-gray-600"
-          >
-            Đăng xuất ({getApiKey().slice(0, 4)}••••)
-          </button>
+        <div className="px-4 py-4 border-t border-gray-200 space-y-2">
+          {isSsoConfigured && <SsoLogoutButton />}
         </div>
       </aside>
 

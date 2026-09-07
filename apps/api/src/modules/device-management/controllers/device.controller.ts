@@ -1,24 +1,39 @@
 import { ApiResponseArrayDecorator, ApiResponseDecorator } from '@app/common/decorators';
-import { Controller, Get, Header, Param, Post, Body, StreamableFile } from '@nestjs/common';
-import { ApiOperation, ApiSecurity, ApiTags } from '@nestjs/swagger';
+import { SsoAuthGuard } from '@app/common/guards';
+import { Controller, Get, Header, Param, Post, Body, Req, StreamableFile, UseGuards } from '@nestjs/common';
+import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import type { Request } from 'express';
 import { DeviceDao } from '../dao';
-import { CreateDeviceDto } from '../dto';
+import { CreateDeviceDto, ReissueDeviceDto } from '../dto';
 import { ActivationPackageService } from '../services/activation-package.service';
 import { CampaignService } from '../services/campaign.service';
 import { DeviceService } from '../services/device.service';
 
 /**
- * Admin/CMS-facing routes only — protected by the shared `x-api-key`
- * (`ApiKeyMiddleware`), same as capture's SessionController/PhotoController.
- * The kiosk's own self-service config read lives in `DeviceSelfController`
- * instead, on a separate class specifically so it is never swept into this
- * one's `ApiKeyMiddleware.forRoutes()` registration in AppModule — a kiosk
- * authenticates with its device secret, never the admin key that manages
- * every campaign.
+ * Best-guess kiosk-facing API address, derived from the very request the
+ * admin's own browser is already making — see `DeviceService.registerDevice`'s
+ * doc comment for why this replaced asking the admin to type it into the
+ * CMS form (2026-09-07). `req.get('host')` includes the port already, so
+ * this needs no separate port config.
+ */
+function deriveApiBaseUrl(req: Request): string {
+  return `${req.protocol}://${req.get('host')}`;
+}
+
+/**
+ * Admin/CMS-facing routes only — protected by `SsoAuthGuard` (bearer token
+ * forwarded to the external SSO backend, docs/LOGIN.md §12) as of
+ * 2026-09-07, replacing the shared `x-api-key` it used to share with
+ * capture's SessionController/PhotoController. The kiosk's own self-service
+ * config read lives in `DeviceSelfController` instead, on a separate class
+ * specifically so it is never swept into this one's guard/middleware
+ * registration in AppModule — a kiosk authenticates with its device secret,
+ * never the admin credential that manages every campaign.
  */
 @Controller({ version: '1' })
 @ApiTags('device-management')
-@ApiSecurity('apiKey')
+@UseGuards(SsoAuthGuard)
+@ApiBearerAuth('sso')
 export class DeviceController {
   constructor(
     private readonly deviceService: DeviceService,
@@ -41,14 +56,77 @@ export class DeviceController {
   async registerDevice(
     @Param('campaignId') campaignId: string,
     @Body() dto: CreateDeviceDto,
+    @Req() req: Request,
   ): Promise<StreamableFile> {
     const campaign = await this.campaignService.findCampaignEntityOrFail(campaignId);
-    const { device, plainSecret } = await this.deviceService.registerDevice(campaignId, dto);
+    const { device, plainSecret } = await this.deviceService.registerDevice(campaignId, dto, deriveApiBaseUrl(req));
     const zip = await this.activationPackageService.buildActivationZip(device, campaign, plainSecret, dto.os);
 
     return new StreamableFile(zip, {
       disposition: `attachment; filename="looka-kiosk-${device.id}.zip"`,
     });
+  }
+
+  /**
+   * Rotates a device's secret and hands back a fresh activation zip — the
+   * only way to get a device a usable activation package again once the
+   * original is gone (tab closed, download failed, etc.), since the
+   * plaintext secret is never stored and so cannot simply be re-sent (see
+   * `DeviceService.registerDevice`'s own doc comment). Same device row
+   * throughout: id/name/history are untouched, only the secret (and,
+   * optionally, `authApiEndpoint`) change. `dto.os`/`dto.authApiEndpoint` are
+   * resuppliable in case the admin wants to correct either while reissuing —
+   * an omitted `authApiEndpoint` keeps the device's current value, an
+   * omitted `os` falls back to `buildActivationZip`'s own default (there is
+   * no stored per-device `os`).
+   *
+   * Works for a device in ANY status, including already ACTIVATED — a real
+   * kiosk still running on the old secret will stop authenticating the
+   * moment this call succeeds. That is the intended behavior for "revoke
+   * this kiosk's credentials," not a bug to prevent: this endpoint
+   * deliberately does not block or silently no-op on an already-activated
+   * device. The CMS requires an explicit operator confirmation before
+   * calling this for an ACTIVATED device for exactly that reason.
+   *
+   * An already-ACTIVATED device's status is left as ACTIVATED across the
+   * reissue (2026-09-07 — see `DeviceService.reissueDevice`'s own doc
+   * comment) even though the *new* secret hasn't been confirmed by a kiosk
+   * yet — a deliberate trade so "I just need the file again" doesn't read
+   * as "starting over."
+   */
+  @Post('devices/:id/reissue')
+  @Header('Content-Type', 'application/zip')
+  @ApiOperation({
+    summary: "Reissue a device's activation package, rotating its secret (works even if the device is already ACTIVATED)",
+  })
+  async reissueDevice(
+    @Param('id') id: string,
+    @Body() dto: ReissueDeviceDto,
+    @Req() req: Request,
+  ): Promise<StreamableFile> {
+    const { device, plainSecret } = await this.deviceService.reissueDevice(id, dto, deriveApiBaseUrl(req));
+    const campaign = await this.campaignService.findCampaignEntityOrFail(device.campaignId);
+    const zip = await this.activationPackageService.buildActivationZip(device, campaign, plainSecret, dto.os);
+
+    return new StreamableFile(zip, {
+      disposition: `attachment; filename="looka-kiosk-${device.id}.zip"`,
+    });
+  }
+
+  /**
+   * Manually flips a device to ACTIVATED from the CMS — see
+   * `DeviceService.activateDevice`'s own doc comment for why this exists
+   * alongside the normal "first real kiosk call activates it" path. Never
+   * touches the device secret, so it can't be used to grant access to a
+   * device you don't already have the credentials for — this only changes
+   * how the CMS displays a device that already has a valid activation zip
+   * out there.
+   */
+  @Post('devices/:id/activate')
+  @ApiOperation({ summary: 'Manually mark a device as ACTIVATED' })
+  @ApiResponseDecorator(DeviceDao)
+  activateDevice(@Param('id') id: string): Promise<DeviceDao> {
+    return this.deviceService.activateDevice(id);
   }
 
   @Get('campaigns/:campaignId/devices')

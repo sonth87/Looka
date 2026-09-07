@@ -3,7 +3,14 @@
   "compilerOptions": {
     "rootDir": "src",
     "outDir": "dist",
-    "jsx": "react-jsx"
+    "jsx": "react-jsx",
+    // Override the base NodeNext module setup (tuned for the backend apps)
+    // for this Vite frontend: Vite/esbuild does the real bundling and
+    // supports `import.meta.env` (src/auth/env.ts) regardless of tsc's
+    // module setting, but tsc itself only allows `import.meta` when the
+    // configured module target isn't CommonJS.
+    "module": "ESNext",
+    "moduleResolution": "bundler"
   },
   "include": ["src/**/*"]
 }

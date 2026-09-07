@@ -8,6 +8,8 @@ import {
   CampaignDayStatsDao,
   CampaignDeviceStatsDao,
   CampaignPhotoStatsDao,
+  CampaignsTimeseriesDao,
+  CampaignsTimeseriesPointDao,
   CampaignStatsDao,
   CampaignStatsSummaryItemDao,
 } from '../dao';
@@ -238,6 +240,94 @@ export class DeviceEventService extends CommonService<DeviceEvent> {
     });
 
     return summary;
+  }
+
+  /** Fixed Asia/Ho_Chi_Minh offset (no DST) — lets `campaignsTimeseries` compute "today" in kiosk-local terms without a timezone-parsing library. */
+  private static readonly VN_OFFSET_MS = 7 * 60 * 60 * 1000;
+
+  /**
+   * Day-bucketed sessions-completed / uploads-success/failed / retake series
+   * across every campaign, for the Overview page's trend charts (2026-09-07
+   * dashboard redesign — see `CampaignsTimeseriesDao`'s own doc comment).
+   * Reuses the exact event types already summed into `allCampaignsStats()`'s
+   * `total*` fields, just grouped by day instead of by campaign, so every
+   * trend line agrees with the KPI totals and per-campaign charts shown
+   * alongside it. `UPLOAD_FAILED`/`RETAKE` were folded into this same query
+   * (rather than a separate endpoint) on 2026-09-07 once the product owner
+   * asked for those two metrics to stop being "just a number" — it's the
+   * same grouped query with two more types in the `IN` list, not new
+   * aggregation logic.
+   */
+  async campaignsTimeseries(days: number): Promise<CampaignsTimeseriesDao> {
+    const rows = await this.dataSource.query<
+      Array<{ date: string; type: DeviceEventType; count: number }>
+    >(
+      `SELECT
+          to_char(date_trunc('day', occurred_at AT TIME ZONE 'Asia/Ho_Chi_Minh'), 'YYYY-MM-DD') AS date,
+          type,
+          COUNT(*)::int AS count
+         FROM device_events
+        WHERE type IN ('SESSION_COMPLETED', 'UPLOAD_SUCCESS', 'UPLOAD_FAILED', 'RETAKE')
+          AND occurred_at >= now() - make_interval(days => $1::int)
+        GROUP BY 1, 2
+        ORDER BY 1`,
+      [days],
+    );
+
+    const byDate = new Map<
+      string,
+      {
+        sessionsCompleted: number;
+        uploadsSuccess: number;
+        uploadsFailed: number;
+        retakes: number;
+      }
+    >();
+    for (const row of rows) {
+      const entry = byDate.get(row.date) ?? {
+        sessionsCompleted: 0,
+        uploadsSuccess: 0,
+        uploadsFailed: 0,
+        retakes: 0,
+      };
+      if (row.type === DeviceEventType.SESSION_COMPLETED) {
+        entry.sessionsCompleted = Number(row.count);
+      } else if (row.type === DeviceEventType.UPLOAD_SUCCESS) {
+        entry.uploadsSuccess = Number(row.count);
+      } else if (row.type === DeviceEventType.UPLOAD_FAILED) {
+        entry.uploadsFailed = Number(row.count);
+      } else if (row.type === DeviceEventType.RETAKE) {
+        entry.retakes = Number(row.count);
+      }
+      byDate.set(row.date, entry);
+    }
+
+    // Fill every day in the window, even ones with zero events, so the line
+    // chart never shows a gap. "+7h then read the UTC date parts" reproduces
+    // the Asia/Ho_Chi_Minh calendar date without a timezone library, mirroring
+    // the SQL bucketing above (VN has no DST, so this fixed offset is exact).
+    const dao = new CampaignsTimeseriesDao();
+    dao.points = [];
+    const nowVn = new Date(Date.now() + DeviceEventService.VN_OFFSET_MS);
+    for (let i = days - 1; i >= 0; i--) {
+      const d = new Date(nowVn);
+      d.setUTCDate(d.getUTCDate() - i);
+      const date = d.toISOString().slice(0, 10);
+      const entry = byDate.get(date) ?? {
+        sessionsCompleted: 0,
+        uploadsSuccess: 0,
+        uploadsFailed: 0,
+        retakes: 0,
+      };
+      const point = new CampaignsTimeseriesPointDao();
+      point.date = date;
+      point.sessionsCompleted = entry.sessionsCompleted;
+      point.uploadsSuccess = entry.uploadsSuccess;
+      point.uploadsFailed = entry.uploadsFailed;
+      point.retakes = entry.retakes;
+      dao.points.push(point);
+    }
+    return dao;
   }
 
   private async campaignPhotoStats(

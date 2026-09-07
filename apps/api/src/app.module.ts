@@ -6,8 +6,6 @@ import { PhotoController } from '@app/modules/capture/controllers/photo.controll
 import { SessionController } from '@app/modules/capture/controllers/session.controller';
 import { SharedModule } from '@app/modules/shared/shared.module';
 import { DeviceManagementModule } from '@app/modules/device-management/device-management.module';
-import { CampaignController } from '@app/modules/device-management/controllers/campaign.controller';
-import { DeviceController } from '@app/modules/device-management/controllers/device.controller';
 import { DeviceExpiryMiddleware } from '@app/modules/device-management/middlewares/device-expiry.middleware';
 import { MiddlewareConsumer, Module, NestModule, RequestMethod } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
@@ -35,29 +33,41 @@ export class AppModule implements NestModule {
     // The health check stays open - an uptime probe or load balancer should
     // not need a key, and it exposes nothing sensitive.
     //
-    // CampaignController/DeviceController are the CMS/admin surface (create
-    // campaigns, register devices) - gated by the same shared key as capture.
+    // As of 2026-09-07, CampaignController/DeviceController/PhotoController
+    // moved off this shared key entirely onto SsoAuthGuard (bearer token
+    // forwarded to the external SSO backend, see docs/LOGIN.md §12 and each
+    // controller's own doc comment) - they are CMS/admin surfaces a human
+    // operator drives, and api-key was retired from that surface per that
+    // date's product decision. They are gone from forRoutes() below entirely
+    // rather than merely excluded, since every route on each of those
+    // controllers moved (this is also why the historical `devices/config`/
+    // `devices/events` excludes below were removed - DeviceController isn't
+    // in forRoutes() any more for them to matter against). SessionController
+    // stays here because most of its routes are still the genuine capture
+    // pipeline (apps/web's unattended kiosk) - only its two CMS-facing GET
+    // routes (`listSessions`/`getSessionDetail`, added later for the CMS's
+    // SessionsPanel/SessionDetailDrawer) moved to SsoAuthGuard, hence the two
+    // excludes below rather than dropping the whole controller. Each exclude
+    // matches an exact route shape SessionController only has once (`GET
+    // sessions`, `GET sessions/:id`), so nothing else on it is caught by
+    // them - see session.controller.ts's own doc comment.
+    //
     // DeviceSelfController is deliberately absent here: a kiosk reading its
     // own config authenticates via DeviceCredentialsGuard's device secret
     // instead, never this admin key (see that controller's own doc comment).
-    //
-    // The explicit exclude is load-bearing, not defensive: DeviceController's
-    // `GET devices/:id` is an unconstrained path segment, so it also matches
-    // the literal strings `config`/`events` — DeviceSelfController's own
-    // routes. Middleware path-matching happens ahead of (and independently
-    // of) which controller ultimately resolves the request, so without this
-    // exclude, every kiosk's device-credentialed config/events call was
-    // silently rejected demanding an admin API key instead of ever reaching
-    // DeviceCredentialsGuard. Found only via a live round-trip test against a
-    // real Postgres — no unit test exercises this controller/middleware
-    // composition together.
+    // Its routes (`GET devices/config`, `POST devices/events`) used to need
+    // an explicit exclude here because DeviceController's `GET devices/:id`
+    // is an unconstrained path segment that also matches those literal
+    // strings - see git history on this file for that incident. That hazard
+    // no longer applies now that DeviceController isn't gated by this
+    // middleware at all.
     consumer
       .apply(ApiKeyMiddleware)
       .exclude(
-        { path: 'devices/config', method: RequestMethod.GET, version: '1' },
-        { path: 'devices/events', method: RequestMethod.POST, version: '1' },
+        { path: 'sessions', method: RequestMethod.GET, version: '1' },
+        { path: 'sessions/:id', method: RequestMethod.GET, version: '1' },
       )
-      .forRoutes(SessionController, PhotoController, CampaignController, DeviceController);
+      .forRoutes(SessionController);
 
     // Pass-through when no device headers are sent — see the middleware's
     // own doc comment for why this is safe to attach now, ahead of any web

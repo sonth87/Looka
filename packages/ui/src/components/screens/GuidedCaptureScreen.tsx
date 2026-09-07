@@ -181,22 +181,61 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (
     return () => clearTimeout(freezeTimer);
   }, [latestCapturedImage]);
 
-  const checkIsMobileOrTablet = (): boolean => {
-    if (typeof window === "undefined") return false;
-    const isMobileUA =
-      /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
-        navigator.userAgent,
-      );
-    const isNarrowWidth = window.innerWidth < 768; // Under 768px (Mobile & Portrait Tablet)
-    return isNarrowWidth || isMobileUA;
-  };
+  const isMobileUA = (): boolean =>
+    typeof navigator !== "undefined" &&
+    /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
+      navigator.userAgent,
+    );
 
-  const [isMobile, setIsMobile] = useState<boolean>(checkIsMobileOrTablet);
+  /**
+   * The Desktop/Mobile split point (Under 768px = Mobile & Portrait Tablet).
+   * Kept a plain constant (rather than only a magic number inline) since both
+   * the ResizeObserver callback below and the initial-render fallback need
+   * the exact same threshold.
+   */
+  const MOBILE_BREAKPOINT_PX = 768;
+
+  /**
+   * This screen renders inside `@sonth87/device-layout`'s own resizable
+   * "app window" shell (apps/desktop's `defaultSize`/`minSize` for
+   * 'looka-face-capture', down to 640x480) — a window the user drags smaller
+   * *within* the outer Electron/browser viewport, which itself normally stays
+   * at whatever size the kiosk was launched at (e.g. maximized/fullscreen).
+   * `window.innerWidth`/the global `resize` event only change when that outer
+   * viewport changes, never when just the inner app window is resized, so the
+   * old width check here never saw the kiosk window shrink and DesktopCaptureView
+   * (built for full desktop width) kept rendering all the way down to the
+   * 640px minimum — exactly the "not responsive" symptom being fixed.
+   * A ResizeObserver on this component's own root instead measures the
+   * container device-layout actually gave it, so the Desktop/Mobile switch
+   * tracks the real available width regardless of which element resized.
+   */
+  const rootRef = React.useRef<HTMLDivElement>(null);
+
+  const [isMobile, setIsMobile] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return window.innerWidth < MOBILE_BREAKPOINT_PX || isMobileUA();
+  });
 
   React.useEffect(() => {
-    const handleResize = () => setIsMobile(checkIsMobileOrTablet());
-    window.addEventListener("resize", handleResize);
-    return () => window.removeEventListener("resize", handleResize);
+    const node = rootRef.current;
+    if (!node || typeof ResizeObserver === "undefined") return;
+
+    const applyWidth = (width: number) =>
+      setIsMobile(width < MOBILE_BREAKPOINT_PX || isMobileUA());
+
+    // Seed with the current size immediately — ResizeObserver's own initial
+    // callback is async (queued for the next frame), which would otherwise
+    // render one frame with the initial-render fallback above.
+    applyWidth(node.getBoundingClientRect().width);
+
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      applyWidth(entry.contentRect.width);
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
   }, []);
 
   const initialSettings = getSettings();
@@ -489,9 +528,13 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (
     multiFrame,
   };
 
-  if (isMobile) {
-    return <MobileCaptureView {...sharedProps} />;
-  }
-
-  return <DesktopCaptureView {...sharedProps} />;
+  return (
+    <div ref={rootRef} className="w-full h-full min-w-0 min-h-0">
+      {isMobile ? (
+        <MobileCaptureView {...sharedProps} />
+      ) : (
+        <DesktopCaptureView {...sharedProps} />
+      )}
+    </div>
+  );
 };

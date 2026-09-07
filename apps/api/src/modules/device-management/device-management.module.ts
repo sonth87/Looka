@@ -1,3 +1,4 @@
+import { SsoAuthGuard } from '@app/common/guards';
 import { CaptureModule } from '@app/modules/capture/capture.module';
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
@@ -36,6 +37,9 @@ import { DeviceEventService } from './services/device-event.service';
     DeviceEventService,
     ActivationPackageService,
     DeviceCredentialsGuard,
+    // `@UseGuards()` on CampaignController/DeviceController - see those
+    // controllers' own doc comments.
+    SsoAuthGuard,
   ],
   exports: [CampaignService, DeviceService, DeviceEventService],
 })

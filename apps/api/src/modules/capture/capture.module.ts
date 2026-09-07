@@ -1,3 +1,4 @@
+import { SsoAuthGuard } from '@app/common/guards';
 import { FileStorageModule } from '@app/modules/file-storage/file-storage.module';
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
@@ -22,6 +23,10 @@ import { UploadWorkerService } from './services/upload-worker.service';
     PhotoService,
     UploadWorkerService,
     CaptureReportService,
+    // Guards `@UseGuards()` on SessionController's two CMS-facing GET routes,
+    // and PhotoController's view-link route - see those controllers' own doc
+    // comments.
+    SsoAuthGuard,
   ],
   exports: [SessionService, PhotoService, CaptureReportService],
 })

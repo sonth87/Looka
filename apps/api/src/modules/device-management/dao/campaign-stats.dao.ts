@@ -101,6 +101,49 @@ export class CampaignStatsSummaryItemDao extends CampaignStatsDao {
 }
 
 /**
+ * One day's row inside `CampaignsTimeseriesDao.points` — sessions-completed,
+ * uploads-success/failed, and retake device-event counts, bucketed by day,
+ * summed across every campaign (not per-campaign like `CampaignDayStatsDao`).
+ * Reuses the same event types already summed into `AllCampaignsStatsDao.total*`
+ * fields, so every line tells the same story as the KPI totals above it.
+ * (2026-09-07: extended with `uploadsFailed`/`retakes` alongside the original
+ * two fields — same query shape, no new aggregation logic, so the Overview
+ * page's "operational health" trend panel and KPI sparklines could be backed
+ * by real data instead of only a flat total.)
+ */
+export class CampaignsTimeseriesPointDao {
+  @ApiProperty({ example: '2026-09-06' })
+  date: string;
+
+  @ApiProperty({ description: 'Số sự kiện SESSION_COMPLETED trong ngày, cộng dồn mọi campaign' })
+  sessionsCompleted: number;
+
+  @ApiProperty({ description: 'Số sự kiện UPLOAD_SUCCESS trong ngày, cộng dồn mọi campaign' })
+  uploadsSuccess: number;
+
+  @ApiProperty({ description: 'Số sự kiện UPLOAD_FAILED trong ngày, cộng dồn mọi campaign' })
+  uploadsFailed: number;
+
+  @ApiProperty({ description: 'Số sự kiện RETAKE (chụp lại) trong ngày, cộng dồn mọi campaign' })
+  retakes: number;
+}
+
+/**
+ * Day-bucketed trend for the CMS Overview page's trend charts (2026-09-07
+ * dashboard redesign) — backs `GET /v1/campaigns/stats/timeseries`. Bucketed
+ * in the kiosks' own timezone (Asia/Ho_Chi_Minh), same reasoning as
+ * `CampaignDayStatsDao` (A.8). Every day in the requested window is present
+ * and zero-filled when empty, so no chart ever shows a gap.
+ */
+export class CampaignsTimeseriesDao {
+  @ApiProperty({
+    type: [CampaignsTimeseriesPointDao],
+    description: 'Một điểm mỗi ngày, theo thứ tự tăng dần, không có ngày nào bị thiếu',
+  })
+  points: CampaignsTimeseriesPointDao[];
+}
+
+/**
  * Sum of every campaign's `CampaignStatsDao`, plus the per-campaign
  * breakdown it was summed from — so a dashboard can show one grand total
  * without forcing a separate `GET :id/stats` call per campaign to build a

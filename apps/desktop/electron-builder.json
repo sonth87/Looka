@@ -40,5 +40,6 @@
     "allowToChangeInstallationDirectory": true,
     "createDesktopShortcut": true,
     "createStartMenuShortcut": true
-  }
+  },
+  "electronLanguages": ["en-US", "vi"]
 }

@@ -5,7 +5,14 @@
  * boundary (a different app, a different build), not internal duplication
  * to avoid — the server is free to change its DAO shape without this file
  * needing a workspace dependency on a NestJS app.
+ *
+ * Auth: every call here is CMS/admin traffic - as of 2026-09-07 the backend
+ * checks a Bearer token via SsoAuthGuard (docs/LOGIN.md §12) instead of the
+ * old shared x-api-key, so `request()`/`registerDevice()` below attach
+ * `Authorization`/`x-refresh-token` read from `auth/authCookies.ts` rather
+ * than an api-key header.
  */
+import { getAccessToken, getRefreshToken } from './auth/authCookies';
 
 export type CampaignPurpose = 'STUDENT_CARD' | 'KYC_ENROLLMENT';
 export type CaptureTriggerMode = 'AUTO' | 'MANUAL' | 'OFF';
@@ -93,6 +100,25 @@ export interface CampaignStats {
 
 export interface CampaignStatsSummaryItem extends CampaignStats {
   campaignName: string;
+}
+
+/**
+ * One day's point in the Overview page's trend charts — sessions-completed /
+ * uploads-success/failed / retake device-event counts, summed across every
+ * campaign. Mirrors `CampaignsTimeseriesPointDao` server-side; every day in
+ * the requested window is present (zero-filled), so callers never need to
+ * handle gaps.
+ */
+export interface CampaignsTimeseriesPoint {
+  date: string;
+  sessionsCompleted: number;
+  uploadsSuccess: number;
+  uploadsFailed: number;
+  retakes: number;
+}
+
+export interface CampaignsTimeseries {
+  points: CampaignsTimeseriesPoint[];
 }
 
 export interface AllCampaignsStats {
@@ -219,14 +245,20 @@ export interface PhotoViewLink {
   expiresAt: string;
 }
 
-const API_KEY_STORAGE = 'looka-cms-api-key';
-
-export function getApiKey(): string {
-  return localStorage.getItem(API_KEY_STORAGE) ?? '';
-}
-
-export function setApiKey(key: string): void {
-  localStorage.setItem(API_KEY_STORAGE, key);
+/**
+ * `Authorization`/`x-refresh-token` for every apps/api call - read fresh on
+ * each request rather than cached, same reasoning as authApi.ts's own
+ * authHeaders(): the cookies can change between calls (refresh, logout).
+ * Only `Authorization` is required by SsoAuthGuard; `x-refresh-token` is
+ * included whenever available, matching docs/LOGIN.md §12's header pair.
+ */
+function authHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {};
+  const accessToken = getAccessToken();
+  const refreshToken = getRefreshToken();
+  if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
+  if (refreshToken) headers['x-refresh-token'] = refreshToken;
+  return headers;
 }
 
 function baseUrl(): string {
@@ -255,7 +287,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
     headers: {
       'Content-Type': 'application/json',
-      'x-api-key': getApiKey(),
+      ...authHeaders(),
       ...init?.headers,
     },
   });
@@ -285,8 +317,24 @@ export const createCampaign = (input: CreateCampaignInput) =>
 export const updateCampaign = (id: string, input: UpdateCampaignInput) =>
   request<Campaign>(`/v1/campaigns/${id}`, { method: 'PATCH', body: JSON.stringify(input) });
 
+/**
+ * Hard-deletes a campaign — refused with a 409 `ApiError` (see
+ * `CampaignController`/`CampaignService` server-side) when it still has any
+ * devices or capture sessions attached, since `devices.campaign_id` cascades
+ * on delete (a physical kiosk's registration would be destroyed silently)
+ * while `sessions.campaign_id` merely goes NULL (capture history would be
+ * orphaned). Callers should surface that 409's message as-is rather than
+ * retrying — the fix is to remove the campaign's devices first, not to
+ * resend the request.
+ */
+export const deleteCampaign = (id: string) => request<{ id: string }>(`/v1/campaigns/${id}`, { method: 'DELETE' });
+
 export const getCampaignStats = (campaignId: string) => request<CampaignStats>(`/v1/campaigns/${campaignId}/stats`);
 export const getAllCampaignsStats = () => request<AllCampaignsStats>('/v1/campaigns/stats/summary');
+
+/** Backs the Overview page's trend chart — `days` defaults to 14 both here and server-side. */
+export const getCampaignsTimeseries = (days = 14) =>
+  request<CampaignsTimeseries>(`/v1/campaigns/stats/timeseries?days=${days}`);
 
 export const listDevices = (campaignId: string) => request<Device[]>(`/v1/campaigns/${campaignId}/devices`);
 export const getDevice = (id: string) => request<Device>(`/v1/devices/${id}`);
@@ -314,9 +362,10 @@ export function listSessions(params: ListSessionsParams = {}): Promise<Paginated
 export const getSession = (id: string) => request<SessionDetail>(`/v1/sessions/${id}`);
 
 /**
- * Every admin-key holder may open full-size photos (product decision 3 in
- * the Phase 11 plan) — there is no per-admin identity in this CMS to pass
- * instead, so `viewerId` defaults to one fixed identity for every caller.
+ * Every signed-in SSO operator may open full-size photos (product decision 3
+ * in the Phase 11 plan) — there is no per-admin identity plumbed through to
+ * this call yet (the SSO profile isn't threaded into it), so `viewerId`
+ * defaults to one fixed identity for every caller.
  */
 export const issuePhotoViewLink = (photoId: string, viewerId = 'cms-admin') =>
   request<PhotoViewLink>(`/v1/photos/${photoId}/view-link`, {
@@ -325,21 +374,19 @@ export const issuePhotoViewLink = (photoId: string, viewerId = 'cms-admin') =>
   });
 
 /**
- * Registers a device and returns its activation zip — the one response on
- * this client that is not the JSON envelope (see DeviceController's own doc
- * comment: it's a `StreamableFile`, deliberately excluded from that
- * wrapping). The filename comes from the server's `Content-Disposition`
- * header rather than being reconstructed here, so it stays correct if that
- * naming ever changes server-side.
+ * Shared response handling for the two endpoints that hand back an
+ * activation zip instead of the JSON envelope (see DeviceController's own
+ * doc comments: both are `StreamableFile`, deliberately excluded from that
+ * wrapping) — `registerDevice()` and `reissueDevice()` below are otherwise
+ * identical POST-body-in, zip-out calls. The filename comes from the
+ * server's `Content-Disposition` header rather than being reconstructed
+ * here, so it stays correct if that naming ever changes server-side.
  */
-export async function registerDevice(
-  campaignId: string,
-  input: CreateDeviceInput
-): Promise<{ blob: Blob; filename: string }> {
-  const res = await fetch(`${baseUrl()}/v1/campaigns/${campaignId}/devices`, {
+async function fetchActivationZip(path: string, body: unknown): Promise<{ blob: Blob; filename: string }> {
+  const res = await fetch(`${baseUrl()}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-api-key': getApiKey() },
-    body: JSON.stringify(input),
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(body),
   });
 
   if (!res.ok) {
@@ -353,3 +400,41 @@ export async function registerDevice(
 
   return { blob: await res.blob(), filename };
 }
+
+/** Registers a device and returns its activation zip — see `fetchActivationZip`'s own doc comment for the response shape. */
+export function registerDevice(
+  campaignId: string,
+  input: CreateDeviceInput
+): Promise<{ blob: Blob; filename: string }> {
+  return fetchActivationZip(`/v1/campaigns/${campaignId}/devices`, input);
+}
+
+export interface ReissueDeviceInput {
+  authApiEndpoint?: string;
+  os?: DesktopOs;
+}
+
+/**
+ * Rotates an existing device's secret and returns a fresh activation zip —
+ * see `DeviceController.reissueDevice`'s own doc comment server-side: this
+ * works for a device in any status, including ACTIVATED, and an already-
+ * running kiosk's old secret stops authenticating the moment this call
+ * succeeds. Callers are responsible for confirming that consequence with the
+ * operator before calling this for an ACTIVATED device — see
+ * `DevicesPanel.tsx`.
+ */
+export function reissueDevice(
+  deviceId: string,
+  input: ReissueDeviceInput = {}
+): Promise<{ blob: Blob; filename: string }> {
+  return fetchActivationZip(`/v1/devices/${deviceId}/reissue`, input);
+}
+
+/**
+ * Manually marks a device ACTIVATED — see `DeviceController.activateDevice`'s
+ * doc comment server-side: for testing/ops, when an admin wants the device
+ * to read as activated without waiting for a real kiosk to call in. Never
+ * touches the device secret.
+ */
+export const activateDevice = (deviceId: string) =>
+  request<Device>(`/v1/devices/${deviceId}/activate`, { method: 'POST' });
