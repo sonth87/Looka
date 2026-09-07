@@ -1,3 +1,4 @@
+import { Pagination } from '@app/modules/shared/common/pagination';
 import { applyDecorators, Type } from '@nestjs/common';
 import {
   ApiExtraModels,
@@ -69,6 +70,48 @@ export const ApiResponseArrayDecorator = <TModel extends Type<any>>(
           {
             properties: {
               data: { type: 'array', items: { $ref: getSchemaPath(model) } },
+            },
+          },
+        ],
+      },
+      ...options,
+    }),
+  );
+};
+
+/**
+ * Documents a handler that returns `{ statusCode, message, data: Pagination<model> }`
+ * - the `items`/`meta` shape from `modules/shared/common/pagination.ts`,
+ * with `items` typed to the given model. A bare `Pagination<T>` return type
+ * loses that at the Swagger level since TS generics do not survive to
+ * runtime, so the item model has to be threaded through explicitly here,
+ * the same reason `ApiResponseArrayDecorator` above takes one.
+ */
+export const ApiResponsePaginatedDecorator = <TModel extends Type<any>>(
+  model: TModel,
+  options?: ApiResponseOptions,
+) => {
+  return applyDecorators(
+    ApiExtraModels(ApiObjectResponseEnvelope, Pagination, model),
+    ApiOkResponse({
+      schema: {
+        allOf: [
+          { $ref: getSchemaPath(ApiObjectResponseEnvelope) },
+          {
+            properties: {
+              data: {
+                allOf: [
+                  { $ref: getSchemaPath(Pagination) },
+                  {
+                    properties: {
+                      items: {
+                        type: 'array',
+                        items: { $ref: getSchemaPath(model) },
+                      },
+                    },
+                  },
+                ],
+              },
             },
           },
         ],

@@ -25,6 +25,11 @@ export interface PhotoViewLink {
 export class FileStorageService implements OnModuleInit {
   private readonly logger = new Logger(FileStorageService.name);
   private client!: FsClient;
+  // Per-tenant clients for kiosk photos (A.7) - lazily provisioned and kept
+  // for the life of the process. FsClient.provision() is idempotent per
+  // tenant name, so re-provisioning would just return the same key at the
+  // cost of a round trip; caching avoids that on every view-link/delete.
+  private readonly tenantClients = new Map<string, FsClient>();
 
   constructor(private readonly configService: ConfigService) {}
 
@@ -44,8 +49,12 @@ export class FileStorageService implements OnModuleInit {
     // time, so asking at startup is safe and saves an operator copying a
     // secret by hand.
     const tenant = this.configService.get<string>('fileService.tenant')!;
-    const contactEmail = this.configService.get<string>('fileService.contactEmail');
-    const provisioned = await FsClient.provision(baseUrl, tenant, { contactEmail });
+    const contactEmail = this.configService.get<string>(
+      'fileService.contactEmail',
+    );
+    const provisioned = await FsClient.provision(baseUrl, tenant, {
+      contactEmail,
+    });
     this.logger.log(
       `provisioned key for "${tenant}" in ${provisioned.namespace ?? 'unknown namespace'}`,
     );
@@ -78,28 +87,71 @@ export class FileStorageService implements OnModuleInit {
   }
 
   /**
+   * Lazily provisions (and caches) an `FsClient` scoped to one tenant - used
+   * for kiosk photos, whose tenant name is the device id (A.7, plan D4).
+   * This is the same idempotent self-service call the kiosk itself makes at
+   * first boot, so a device that has already provisioned its own key just
+   * gets that key back here; nothing is provisioned twice.
+   */
+  async clientForTenant(tenantName: string): Promise<FsClient> {
+    const cached = this.tenantClients.get(tenantName);
+    if (cached) return cached;
+
+    const baseUrl = this.configService.get<string>('fileService.baseUrl')!;
+    const contactEmail = this.configService.get<string>(
+      'fileService.contactEmail',
+    );
+
+    try {
+      const provisioned = await FsClient.provision(baseUrl, tenantName, {
+        contactEmail,
+      });
+      const client = new FsClient({ baseUrl, apiKey: provisioned.apiKey });
+      this.tenantClients.set(tenantName, client);
+      return client;
+    } catch (error) {
+      // Most likely cause in practice: this API host is outside
+      // FS_PROVISION_ALLOW_CIDR (403) - a network placement problem, not
+      // something worth retrying on its own. The tenant name is logged so
+      // an operator can tell which device tripped it.
+      const message =
+        error instanceof FsError ? error.message : (error as Error).message;
+      this.logger.warn(
+        `clientForTenant failed for tenant "${tenantName}": ${message}`,
+      );
+      throw new CustomException(
+        message,
+        ERROR_CODE.FILE_STORAGE_UPSTREAM_ERROR,
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
+    }
+  }
+
+  /**
    * A URL the browser can load, without the API key going with it.
    *
    * The key covers the whole namespace: anyone holding it can read and write
    * every file this service owns, not only the photo they asked for.
    * Permission is checked when the link is opened, against `viewerId` rather
    * than against this process.
+   *
+   * `tenantName` selects a per-device client for a kiosk photo (A.7);
+   * omitted, this uses the default tenant every web-path photo lives under.
    */
   async issueViewLink(
     fileId: string,
     viewerId: string,
+    tenantName?: string,
   ): Promise<PhotoViewLink> {
+    const client = tenantName
+      ? await this.clientForTenant(tenantName)
+      : this.client;
     try {
-      await this.client.waitUntilReady(fileId, {
+      await client.waitUntilReady(fileId, {
         timeoutMs: 30_000,
         pollMs: 2_000,
       });
-      const link = await this.client.issueDownloadLink(
-        fileId,
-        viewerId,
-        600,
-        true,
-      );
+      const link = await client.issueDownloadLink(fileId, viewerId, 600, true);
       return {
         url: link.url,
         viewUrl: link.viewUrl,
@@ -116,5 +168,19 @@ export class FileStorageService implements OnModuleInit {
       }
       throw error;
     }
+  }
+
+  /**
+   * Removes a file from the file-service. Used by
+   * `SessionService.completeSession` for a superseded attempt that already
+   * reached the file-service before the operator approved a different one
+   * (A.4). Best-effort — the caller decides whether a failure here should
+   * stop anything else, same as `cancelUpload`.
+   */
+  async deleteFile(fileId: string, tenantName?: string): Promise<void> {
+    const client = tenantName
+      ? await this.clientForTenant(tenantName)
+      : this.client;
+    await client.deleteFile(fileId);
   }
 }

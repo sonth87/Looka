@@ -10,6 +10,7 @@ import {
   FrameInput,
   GestureState,
   GuidanceState,
+  defaultCameraRoleForStepType,
 } from '@face/core';
 import { BrowserCameraService } from '@face/camera';
 import { MockCVEngine, FramePipeline } from '@face/cv-engine';
@@ -41,6 +42,7 @@ import { StepItem } from '../workflow/StepProgress.js';
 import { TooltipProvider, Tooltip, TooltipTrigger, TooltipContent } from '../ui/tooltip.js';
 import { getSettings, updateSettings } from '../../lib/settingsStore.js';
 import { CaptureSink, RunScopedCaptureSession } from '../../lib/CaptureSink.js';
+import type { ApprovalStepInfo } from '../../lib/CaptureSink.js';
 import { SQLiteStorageAdapter, SessionRepository } from '@face/database';
 
 const defaultWorkflow: CaptureWorkflow = {
@@ -217,7 +219,14 @@ async function resolveActiveWorkflow(): Promise<{
   };
 }
 
-type StatsEventType = 'SESSION_COMPLETED' | 'UPLOAD_SUCCESS' | 'UPLOAD_FAILED' | 'RETAKE' | 'CB_HELP_INTERVENTION';
+type StatsEventType =
+  | 'SESSION_COMPLETED'
+  | 'UPLOAD_SUCCESS'
+  | 'UPLOAD_FAILED'
+  | 'RETAKE'
+  | 'CB_HELP_INTERVENTION'
+  | 'SESSION_REPORT'
+  | 'PHOTO_STATUS';
 
 /**
  * Reports a stats-worthy moment (§3.4) to the desktop main process, if this
@@ -945,8 +954,13 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    * (they simply remain staged, exactly as an abandoned run would), so the
    * modal is left open and the operator can retry by pressing the same button
    * again rather than losing the chance to approve this run at all.
+   *
+   * `steps` (built by onAccept from the completed session) carries per-step
+   * stepType/cameraRole/capturedAt through to the main process — see
+   * `ApprovalStepInfo`'s own doc comment for why the outbox row alone cannot
+   * supply those.
    */
-  const approveUpload = async (): Promise<boolean> => {
+  const approveUpload = async (steps?: ApprovalStepInfo[]): Promise<boolean> => {
     // Diagnostic only (2026-09-05 field bug — operator confirms, modal
     // closes, nothing ever gets approved, with no trace anywhere). Logging
     // the id this run is about to approve, before the call, means a future
@@ -956,7 +970,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     // hand.
     console.warn('[FaceCaptureApp] onAccept: approving sessionId=', runSessionRef.current.cachedSessionId);
     try {
-      await runSessionRef.current.approve();
+      await runSessionRef.current.approve(steps);
       setStoreError(null);
       return true;
     } catch (err) {
@@ -2648,7 +2662,28 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
             if (completedSession && repoRef.current) {
               void repoRef.current.saveSession(completedSession);
             }
-            const approved = await approveUpload();
+            // Per-step context the outbox row itself cannot supply — see
+            // ApprovalStepInfo's own doc comment. framesForWorkflow() already
+            // resolves the same cameraRole fallback a plain
+            // defaultCameraRoleForStepType(step.type) call would, keyed by
+            // stepId, so it is reused here rather than duplicated; a step
+            // absent from the current workflow (should not happen) still
+            // gets a role from the same default function directly.
+            const steps: ApprovalStepInfo[] | undefined = completedSession
+              ? completedSession.steps.map((s) => {
+                  const frame = framesForWorkflow(activeWorkflowRef.current).find(
+                    (f) => f.stepId === s.stepId
+                  );
+                  return {
+                    stepId: s.stepId,
+                    stepType: s.stepType,
+                    cameraRole: frame?.role ?? defaultCameraRoleForStepType(s.stepType),
+                    attempt: s.attempts,
+                    capturedAt: s.timestamp ? new Date(s.timestamp).toISOString() : undefined,
+                  };
+                })
+              : undefined;
+            const approved = await approveUpload(steps);
             if (!approved) return;
             await finishSession();
             // The one true "this session is done" moment — the operator

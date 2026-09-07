@@ -68,7 +68,25 @@ export interface ApproveSessionUploadResult {
   ok: boolean;
   /** Rows this call actually released; 0 for an already-approved session. */
   approved?: number;
+  /** Rows this call deleted because a later attempt at the same step superseded them. */
+  superseded?: number;
   error?: string;
+}
+
+/**
+ * Per-step context sent alongside approveSessionUpload so the main process
+ * can enrich the SESSION_REPORT stats event (§5 of phase-11's plan) with
+ * facts the local outbox row alone does not have. Mirrors
+ * `packages/ui/src/lib/CaptureSink.ts`'s `ApprovalStepInfo` — duplicated
+ * rather than imported, the same pattern every other faceAPI payload shape
+ * here already follows (see CbHelpFrame's own doc comment).
+ */
+export interface ApprovalStepInfo {
+  stepId: string;
+  stepType: string;
+  cameraRole: string;
+  attempt: number;
+  capturedAt?: string;
 }
 
 export type CameraRole = 'CENTER' | 'LEFT' | 'RIGHT';
@@ -176,10 +194,20 @@ export interface FaceAPIBridge {
    * Until this is called, that session's rows sit on disk and in the local
    * queue but are invisible to the background uploader — see queueCapture's
    * own doc comment and `session:approveUpload`'s handler in the main
-   * process. Safe to call more than once for the same session; a repeat call
-   * finds nothing left to approve and reports `approved: 0`.
+   * process. Only the highest-attempt row per step survives approval; the
+   * rest are deleted as superseded (an earlier, retaken shot), not uploaded.
+   * `steps` — stepType/cameraRole/capturedAt per stepId — lets the main
+   * process enrich the SESSION_REPORT stats event this triggers; omit it and
+   * the report still goes out with whatever the outbox itself knows. Safe to
+   * call more than once for the same session; a repeat call finds nothing
+   * left to approve and reports `approved: 0`.
    */
-  approveSessionUpload: (payload: { sessionId: string }) => Promise<ApproveSessionUploadResult>;
+  approveSessionUpload: (payload: {
+    sessionId: string;
+    steps?: ApprovalStepInfo[];
+    workflowId?: string;
+    startedAt?: string;
+  }) => Promise<ApproveSessionUploadResult>;
 
   getUploadStatus: () => Promise<UploadStatus>;
   pingFileService: () => Promise<boolean>;
@@ -297,7 +325,14 @@ export interface FaceAPIBridge {
    * report must not interrupt the capture flow that triggered it.
    */
   recordStatsEvent: (payload: {
-    type: 'SESSION_COMPLETED' | 'UPLOAD_SUCCESS' | 'UPLOAD_FAILED' | 'RETAKE' | 'CB_HELP_INTERVENTION';
+    type:
+      | 'SESSION_COMPLETED'
+      | 'UPLOAD_SUCCESS'
+      | 'UPLOAD_FAILED'
+      | 'RETAKE'
+      | 'CB_HELP_INTERVENTION'
+      | 'SESSION_REPORT'
+      | 'PHOTO_STATUS';
     metadata?: Record<string, unknown>;
   }) => Promise<boolean>;
 

@@ -9,6 +9,23 @@
  * Splitting it out is what lets the screen stop reaching for a database of its
  * own, which it could only ever have in the one place it should not.
  */
+/**
+ * Per-step context available once a run's steps are all captured — stepType
+ * and cameraRole live on the workflow/step result, not in anything a
+ * CaptureSink stores, so approveUpload() takes them as input rather than
+ * trying to look them up itself. Used to enrich the desktop kiosk's
+ * SESSION_REPORT stats event (§5 of docs/plans/04-device-management/
+ * phase-11-capture-sessions-and-stats/implementation-plan.md); ignored by
+ * sinks with nothing to enrich.
+ */
+export interface ApprovalStepInfo {
+  stepId: string;
+  stepType: string;
+  cameraRole: string;
+  attempt: number;
+  capturedAt?: string;
+}
+
 export interface CaptureSink {
   /** Open a record for this run. The returned id identifies it from here on. */
   startSession(input: { subjectCode?: string; subjectName?: string }): Promise<string>;
@@ -38,7 +55,7 @@ export interface CaptureSink {
    * `ElectronCaptureSink` is the implementation this matters for — see its own
    * doc comment. `HttpCaptureSink` implements it as a no-op; see there for why.
    */
-  approveUpload(sessionId: string): Promise<void>;
+  approveUpload(sessionId: string, steps?: ApprovalStepInfo[]): Promise<void>;
 }
 
 /**
@@ -134,8 +151,8 @@ export class HttpCaptureSink implements CaptureSink {
    * FaceCaptureApp's review screen can call it unconditionally regardless of
    * which sink is active.
    */
-  public async approveUpload(): Promise<void> {
-    // Intentionally does nothing — see method doc comment.
+  public async approveUpload(_sessionId?: string, _steps?: ApprovalStepInfo[]): Promise<void> {
+    // Intentionally does nothing, including with `_steps` — see method doc comment.
   }
 }
 
@@ -219,12 +236,12 @@ export class ElectronCaptureSink implements CaptureSink {
    * reject path, which `FaceCaptureApp.approveUpload()` already turns into a
    * visible error banner and a modal that stays open for a retry.
    */
-  public async approveUpload(sessionId: string): Promise<void> {
+  public async approveUpload(sessionId: string, steps?: ApprovalStepInfo[]): Promise<void> {
     const faceAPI = (window as any).faceAPI;
     if (!faceAPI?.approveSessionUpload) {
       throw new Error('faceAPI.approveSessionUpload is not available — not running inside the desktop app');
     }
-    const result = await faceAPI.approveSessionUpload({ sessionId });
+    const result = await faceAPI.approveSessionUpload({ sessionId, steps });
     if (!result?.ok) {
       throw new Error(result?.error ?? 'approveSessionUpload failed');
     }
@@ -347,7 +364,7 @@ export class RunScopedCaptureSession {
    * component mid-run; surfacing that as a real, visible error is what lets
    * an operator notice instead of walking away thinking the upload went out.
    */
-  public async approve(): Promise<void> {
+  public async approve(steps?: ApprovalStepInfo[]): Promise<void> {
     if (!this.sink) throw new Error('No CaptureSink configured.');
     const sessionId = this.sessionId;
     if (!sessionId) {
@@ -355,7 +372,7 @@ export class RunScopedCaptureSession {
         'No active capture session to approve — the app may have hot-reloaded mid-session. Please fully reload and recapture.'
       );
     }
-    await this.sink.approveUpload(sessionId);
+    await this.sink.approveUpload(sessionId, steps);
   }
 
   /** The run finished naturally: tell the sink, then drop the cached id. */

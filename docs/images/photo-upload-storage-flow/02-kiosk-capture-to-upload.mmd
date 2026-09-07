@@ -1,0 +1,49 @@
+sequenceDiagram
+  autonumber
+  participant UI as Renderer<br/>FaceCaptureApp
+  participant MAIN as Main process<br/>capture:queue / UploadWorker
+  participant DISK as captures/ dir +<br/>SQLite upload_outbox
+  participant FS as fs-core :8080
+  participant WK as fs-worker<br/>av-scan
+
+  rect rgb(235,245,235)
+    Note over UI,DISK: STAGE — a frame is captured (per photo, not per session)
+    UI->>MAIN: capture:queue {sessionId, kind: face, stepId, attempt, dataUrl}
+    MAIN->>MAIN: decode base64 · visibility = private<br/>idem_key = sessionId:stepId:attempt:face<br/>jobId = uploadId = uuid5(idem_key)
+    MAIN->>DISK: write captures/{sessionId}/face-{stepId}-{attempt}.jpg<br/>INSERT upload_outbox (PENDING, approved_at NULL) — same SQLite tx
+    MAIN-->>UI: {ok, jobId}
+  end
+
+  rect rgb(255,245,230)
+    Note over UI,DISK: APPROVE — operator reviews every frame, presses "Xác nhận & Lưu hồ sơ"
+    UI->>MAIN: session:approveUpload {sessionId}
+    MAIN->>DISK: UPDATE upload_outbox SET approved_at = now WHERE session_id = ? AND approved_at IS NULL
+    MAIN-->>UI: {ok, approved: N} — N = 0 is now turned into a visible error (fix 2026-09-05)
+  end
+
+  rect rgb(235,240,255)
+    Note over MAIN,FS: SEND — UploadWorker tick every 5 s
+    loop claimDue: PENDING AND approved_at set AND due AND depends_on done (batch 2)
+      MAIN->>DISK: markSending · read local JPEG
+      MAIN->>FS: POST /api/v1/files (direct, photo ≪ 10 MiB)<br/>X-Virtual-Path face/2026/{sessionId}/{stepId}-{attempt}.jpg<br/>X-Content-SHA256 · Idempotency-Key · X-Visibility private
+      FS-->>MAIN: 201 {file_id, status SCANNING|READY, etag, version 1, dedup_hit}
+      MAIN->>DISK: markUploaded(fs_file_id, fs_status) → status UPLOADED
+      Note over MAIN,DISK: failure → retry with backoff (5 s × 2^n, max 10 min, 20 attempts)<br/>non-retryable → FAILED_PERMANENT + cancelUpload
+    end
+  end
+
+  rect rgb(245,235,245)
+    Note over MAIN,WK: CONFIRM — pollScans on every tick
+    WK->>FS: (server side) SCANNING → READY after ClamAV, see diagram 06
+    MAIN->>FS: GET /api/v1/files/{file_id}
+    FS-->>MAIN: {status}
+    alt READY
+      MAIN->>DISK: status DONE · stats event UPLOAD_SUCCESS already sent on 'uploaded'
+    else QUARANTINED or FAILED
+      MAIN->>DISK: FAILED_PERMANENT · stats event UPLOAD_FAILED
+    else still SCANNING / SCAN_PENDING
+      MAIN->>DISK: updateFsStatus — try again next tick
+    end
+  end
+
+  Note over DISK: The local JPEG is never deleted — no cleanup job exists in apps/desktop today.

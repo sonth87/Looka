@@ -4,6 +4,29 @@ export enum SessionStatus {
   CANCELLED = 'CANCELLED',
 }
 
+/**
+ * Which path produced a session — see
+ * docs/plans/04-device-management/phase-11-capture-sessions-and-stats/implementation-plan.md
+ * §3 D1. WEB is the default (matches the DB column default) since every row
+ * created before this enum existed came from `apps/web`.
+ */
+export enum SessionSource {
+  WEB = 'WEB',
+  KIOSK = 'KIOSK',
+}
+
+/**
+ * Upload-state filter for `GET /v1/sessions?state=`, derived from a
+ * session's photos rather than stored — see `SessionService`'s list query
+ * for the exact "ready/pending/failed" definitions (session-list.dao.ts).
+ */
+export enum SessionListState {
+  ALL = 'all',
+  COMPLETED = 'completed',
+  PENDING = 'pending',
+  FAILED = 'failed',
+}
+
 export enum OutboxStatus {
   PENDING = 'PENDING',
   SENDING = 'SENDING',

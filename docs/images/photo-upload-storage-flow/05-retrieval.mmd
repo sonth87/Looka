@@ -1,0 +1,33 @@
+sequenceDiagram
+  autonumber
+  participant OP as Kiosk renderer<br/>or web page
+  participant MAIN as Kiosk main (photos:view / photos:download)<br/>or apps/api POST /v1/photos/{id}/view-link
+  participant FS as fs-core :8080
+  participant PG as Postgres<br/>file_server
+  participant SW as SeaweedFS<br/>(+ standby fallback)
+  participant WK as fs-worker<br/>thaw jobs
+
+  OP->>MAIN: show / save photo {jobId or photoId, viewerId}
+  alt kiosk still has captures/{session}/….jpg on disk
+    MAIN-->>OP: data: URL built from the local file — no network
+  else fetch from the file-server
+    MAIN->>FS: GET /api/v1/files/{file_id} — poll every 2 s, up to 30 s
+    FS-->>MAIN: {status: READY, size, etag, storage_tier}
+    MAIN->>FS: POST /api/v1/files/{file_id}/download-link?ttl_seconds=300 (kiosk) | 600 (api)&allow_download=true<br/>X-Viewer-ID: viewerId
+    FS->>FS: share token → Redis claim (TTL ≤ 1 h) — ACL is checked when the link is OPENED, not issued
+    FS-->>MAIN: 201 {url: /api/v1/files/{id}/download?token=…, view_url (when FS_FILE_SERVER_BASE_URL is set), expires_at}
+    MAIN-->>OP: url (+ viewUrl)
+    OP->>FS: GET /api/v1/files/{id}/download?token=…<br/>(kiosk "save as" uses X-API-Key + downloadWhenWarm instead)
+    FS->>PG: LoadFileForAction(read): tenant/app boundary → ACL<br/>status must be READY (423 while SCANNING / QUARANTINED)<br/>version = caller's user_file.current_version unless ?version
+    FS->>PG: file_version → blob + blob_key → unwrap: master key → tenant key → blob key
+    FS->>SW: GetRange /{tier}/blobs/ab/cd/{sha256}.{uuid}.enc (HTTP Range honoured)
+    alt blob.tier = cold
+      FS-->>OP: 202 THAWING {retry_after} · MarkThawRequested(file)
+      WK->>SW: thaw-request-bridge / thaw-queue-process (30 s): copy cold → cool, kept 72 h
+      OP->>FS: retry after retry_after seconds
+    else hot or cool
+      SW-->>FS: encrypted 64 KiB frames (from standby dir if the primary object is missing)
+      FS-->>OP: 200 decrypted stream · ETag · Content-Disposition inline · Cache-Control private, no-store
+    end
+    FS->>PG: file_access_stat (view/download counts) · download_stat — async, after the bytes
+  end

@@ -9,6 +9,7 @@ import { DataSource, Repository } from 'typeorm';
 import {
   ALLOWED_PHOTO_MIME_TYPES,
   MAX_PHOTO_BYTES,
+  SessionSource,
 } from '../capture.constants';
 import { PhotoDao } from '../dao';
 import { AddPhotoDto } from '../dto';
@@ -198,5 +199,41 @@ export class PhotoService extends CommonService<Photo> {
       );
     }
     return photo.fsFileId;
+  }
+
+  /**
+   * Which file-service client should serve this photo's view-link (A.7).
+   * A kiosk photo lives under its device's own tenant namespace (see
+   * `FileStorageService.clientForTenant` - the tenant name is the device
+   * id, the same self-service provisioning the kiosk itself used); a web
+   * photo stays on this API's own default tenant, so `tenantName` is
+   * `undefined` for it.
+   */
+  async resolveViewContext(
+    photoId: string,
+  ): Promise<{ fsFileId: string; tenantName?: string }> {
+    const photo = await this.findById(photoId);
+    if (!photo) {
+      throw new CustomException(
+        'Photo not found',
+        ERROR_CODE.PHOTO_NOT_FOUND,
+        HttpStatus.NOT_FOUND,
+      );
+    }
+    if (!photo.fsFileId) {
+      throw new CustomException(
+        'This photo has not reached the file-service yet',
+        ERROR_CODE.FILE_STORAGE_NOT_READY,
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
+    }
+
+    const session = await this.sessionService.findById(photo.sessionId);
+    const tenantName =
+      session?.source === SessionSource.KIOSK && session.deviceId
+        ? session.deviceId
+        : undefined;
+
+    return { fsFileId: photo.fsFileId, tenantName };
   }
 }

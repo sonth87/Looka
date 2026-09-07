@@ -1,11 +1,14 @@
+import { FileStorageService } from '@app/modules/file-storage/services/file-storage.service';
 import { Test, TestingModule } from '@nestjs/testing';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { DataSource } from 'typeorm';
 import { SnakeNamingStrategy } from 'typeorm-naming-strategies';
 import { Photo } from './entities/photo.entity';
 import { Session } from './entities/session.entity';
 import { UploadOutboxEntry } from './entities/upload-outbox.entity';
 import { PhotoService } from './services/photo.service';
 import { SessionService } from './services/session.service';
+import { UploadWorkerService } from './services/upload-worker.service';
 
 /**
  * Runs against a real Postgres, because what is being checked is what the
@@ -23,9 +26,14 @@ const describeDb = url ? describe : describe.skip;
 describeDb('capture persistence', () => {
   let sessionService: SessionService;
   let photoService: PhotoService;
+  let uploadWorkerService: UploadWorkerService;
+  let dataSource: DataSource;
+  let fileStorage: { deleteFile: jest.Mock };
   let moduleRef: TestingModule;
 
   beforeAll(async () => {
+    fileStorage = { deleteFile: jest.fn().mockResolvedValue(undefined) };
+
     const built = await Test.createTestingModule({
       imports: [
         TypeOrmModule.forRoot({
@@ -37,16 +45,31 @@ describeDb('capture persistence', () => {
         }),
         TypeOrmModule.forFeature([Session, Photo, UploadOutboxEntry]),
       ],
-      providers: [SessionService, PhotoService],
+      providers: [
+        SessionService,
+        PhotoService,
+        UploadWorkerService,
+        // A real FileStorageService would try to provision/reach fs-core at
+        // onModuleInit - irrelevant to what these tests check (Postgres
+        // behaviour) and not reachable in this environment anyway. Only the
+        // method SessionService.completeSession actually calls is stubbed.
+        { provide: FileStorageService, useValue: fileStorage },
+      ],
     }).compile();
 
     moduleRef = built;
     sessionService = built.get(SessionService);
     photoService = built.get(PhotoService);
+    uploadWorkerService = built.get(UploadWorkerService);
+    dataSource = built.get(DataSource);
   });
 
   afterAll(async () => {
     await moduleRef?.close();
+  });
+
+  beforeEach(() => {
+    fileStorage.deleteFile.mockClear();
   });
 
   const jpegDataUrl = (byte: number) =>
@@ -133,5 +156,93 @@ describeDb('capture persistence', () => {
     expect(first.status).toBe('COMPLETED');
     expect(second.status).toBe('COMPLETED');
     expect(first.completedAt).toEqual(second.completedAt);
+  });
+
+  test('completeSession approves only the highest attempt per step, stamps approved_at, and deletes the rest', async () => {
+    // Web-path alignment with decision 1 (A.4): a retaken step must not
+    // leave the rejected attempt around to be uploaded alongside the final
+    // one.
+    const session = await sessionService.createSession({});
+    await photoService.addPhoto(session.id, {
+      stepId: 'FRONT',
+      attempt: 1,
+      dataUrl: jpegDataUrl(1),
+    });
+    const frontFinal = await photoService.addPhoto(session.id, {
+      stepId: 'FRONT',
+      attempt: 2,
+      dataUrl: jpegDataUrl(2),
+    });
+    const left = await photoService.addPhoto(session.id, {
+      stepId: 'LEFT',
+      attempt: 1,
+      dataUrl: jpegDataUrl(3),
+    });
+
+    await sessionService.completeSession(session.id);
+
+    const photos = await photoService.listBySession(session.id);
+    expect(photos).toHaveLength(2);
+    expect(photos.find((p) => p.stepId === 'FRONT')?.attempt).toBe(2);
+    expect(photos.find((p) => p.stepId === 'LEFT')?.attempt).toBe(1);
+
+    const approvedRows: Array<{ photo_id: string; approved_at: Date | null }> =
+      await dataSource.query(
+        `SELECT photo_id, approved_at FROM upload_outbox WHERE photo_id = ANY($1::uuid[])`,
+        [[frontFinal.photoId, left.photoId]],
+      );
+    expect(approvedRows).toHaveLength(2);
+    for (const row of approvedRows) {
+      expect(row.approved_at).not.toBeNull();
+    }
+  });
+
+  test('completeSession best-effort deletes the file-service copy of a superseded, already-uploaded attempt', async () => {
+    const session = await sessionService.createSession({});
+    const superseded = await photoService.addPhoto(session.id, {
+      stepId: 'RIGHT',
+      attempt: 1,
+      dataUrl: jpegDataUrl(4),
+    });
+    await photoService.addPhoto(session.id, {
+      stepId: 'RIGHT',
+      attempt: 2,
+      dataUrl: jpegDataUrl(5),
+    });
+
+    // Simulate the superseded attempt having already reached the
+    // file-service before the operator retook the shot and approved.
+    await dataSource.query(`UPDATE photos SET fs_file_id = $2 WHERE id = $1`, [
+      superseded.photoId,
+      '11111111-1111-1111-1111-111111111111',
+    ]);
+
+    await sessionService.completeSession(session.id);
+
+    expect(fileStorage.deleteFile).toHaveBeenCalledWith(
+      '11111111-1111-1111-1111-111111111111',
+    );
+  });
+
+  test('claimNext ignores an unapproved row and picks it up once the session is completed', async () => {
+    const session = await sessionService.createSession({});
+    const { photoId } = await photoService.addPhoto(session.id, {
+      stepId: 'FRONT',
+      attempt: 1,
+      dataUrl: jpegDataUrl(7),
+    });
+
+    // Drain every currently-claimable row first, so a row approved by an
+    // earlier test in this file can never be mistaken for this one.
+    // eslint-disable-next-line no-empty
+    while (await (uploadWorkerService as any).claimNext()) {}
+
+    const beforeApproval = await (uploadWorkerService as any).claimNext();
+    expect(beforeApproval).toBeNull();
+
+    await sessionService.completeSession(session.id);
+
+    const claimed = await (uploadWorkerService as any).claimNext();
+    expect(claimed?.photo_id).toBe(photoId);
   });
 });

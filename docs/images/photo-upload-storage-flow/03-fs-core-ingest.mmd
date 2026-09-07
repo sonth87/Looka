@@ -1,0 +1,30 @@
+flowchart TB
+  A["POST /api/v1/files — no Content-Range header ⇒ direct upload<br/>(Content-Range present ⇒ 32 MiB chunked session, same commit path)"]
+  A --> B["AuthMiddleware: X-API-Key fsc_… → app_key.lookup_hash (sha256) + bcrypt compare<br/>then per-user rate limit + concurrency cap (Redis, fail-open)"]
+  B --> C["ResolveUploadTarget: X-Virtual-Path → VFS.Resolve<br/>face/2026/{session}/{step}-{n}.jpg ⇒ /apps/{tenant-slug}/face/2026/{session}/{step}-{n}.jpg"]
+  C --> D["RequirePathPermission(write) · X-Visibility private|public<br/>Content-Length required and ≤ FS_DIRECT_MAX_UPLOAD_MB (default 2048)"]
+  D --> E["Idempotency-Key seen before ⇒ replay the stored 201, no bytes stored twice"]
+  E --> F["① ReserveQuota(tenant, app, declared size) in its own tx — before the first byte (D-06)"]
+  F --> G["② ONE streaming pass over the body:<br/>SHA-256 of PLAINTEXT + AES-256-GCM in 64 KiB frames with a fresh per-blob key<br/>⇒ SeaweedFS PUT /hot/tmp/{uuid}"]
+  G --> H["③ checkDeclaredSize (±10 %) · X-Content-SHA256 must match"]
+  H --> I{"④ FindBlobBySHA256<br/>global, cross-tenant, cross-app"}
+  I -->|"hit — same bytes already stored"| J["delete the temp object<br/>ShareBlobKey: wrap the existing blob key for this tenant"]
+  I -->|"miss"| K["⑤ Move /hot/tmp/{uuid} → /hot/blobs/ab/cd/{sha256}.{uuid}.enc<br/>(rename inside the filer, no re-copy)"]
+  J --> L
+  K --> L["⑥ ONE Postgres transaction:<br/>ensureBlob (INSERT … ON CONFLICT sha256) · blob_key · file (UPLOADING)<br/>file_version v1 · user_file(owner, current_version 1) · ref_count+1<br/>ReleaseHashLease · CommitQuota · event_outbox"]
+  L -->|"blob not new AND it belongs to a live file"| S["co-owner branch (multi-owner model):<br/>no new file/version — UpsertUserFile(current_version = matched version)<br/>result CoOwned = true, quota still charged"]
+  L --> M{"blob already carries an AV verdict?"}
+  M -->|"yes (dedup)"| N["status READY or QUARANTINED immediately<br/>outbox file.created / file.quarantined"]
+  M -->|"no"| O["status SCANNING — not downloadable yet (D-02)<br/>outbox file.uploading_done"]
+  N --> P["201 Created {file_id, virtual_path, status, size, etag, version, dedup_hit, visibility}<br/>headers ETag + Location"]
+  O --> P
+  S --> P
+  P -.-> Q["MirrorAsync (goroutine): decrypt → LocalFS write<br/>{FS_MIRROR_ROOT}/{tenantId}/{appId}/apps/{slug}/face/…jpg + .blobmap pointer<br/>runs only when FS_MIRROR_ROOT is set — no retry, no cleanup"]
+  P -.-> R["upload_stat row (async, every exit path — success or failure)"]
+
+  classDef step fill:#eef6ff,stroke:#1f6feb,color:#000
+  classDef crit fill:#ffe08a,stroke:#b8860b,color:#000
+  classDef side fill:#f0f0f0,stroke:#888,color:#000
+  class F,G,H,K step
+  class L,S crit
+  class Q,R side

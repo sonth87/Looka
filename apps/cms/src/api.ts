@@ -80,6 +80,15 @@ export interface CampaignStats {
   uploadFailed: number;
   retakes: number;
   cbHelpInterventions: number;
+  /**
+   * Completed sessions recorded in `sessions` (Phase 11) — distinct from
+   * `sessionsCompleted` above, which counts SESSION_COMPLETED device events
+   * instead; see `CampaignStatsDao`'s own doc comment server-side.
+   */
+  sessions: number;
+  photos: CampaignPhotoStats;
+  byDevice: CampaignDeviceStats[];
+  byDay: CampaignDayStats[];
 }
 
 export interface CampaignStatsSummaryItem extends CampaignStats {
@@ -94,7 +103,120 @@ export interface AllCampaignsStats {
   totalUploadFailed: number;
   totalRetakes: number;
   totalCbHelpInterventions: number;
+  totalSessions: number;
+  totalPhotos: CampaignPhotoStats;
   campaigns: CampaignStatsSummaryItem[];
+}
+
+// --- Phase 11: capture-session list & extended stats ------------------------
+// See docs/plans/04-device-management/phase-11-capture-sessions-and-stats/implementation-plan.md.
+
+/** Photo counts by file-server status — shared by per-campaign and cross-campaign stats. */
+export interface CampaignPhotoStats {
+  total: number;
+  ready: number;
+  pending: number;
+  failed: number;
+}
+
+/** Per-device row in a campaign's stats. */
+export interface CampaignDeviceStats {
+  deviceId: string;
+  deviceName: string;
+  sessions: number;
+  photosReady: number;
+  photosFailed: number;
+  lastCaptureAt?: string;
+}
+
+/** One day of a campaign's capture history (last 30 days, Vietnam time — computed server-side). */
+export interface CampaignDayStats {
+  date: string;
+  sessions: number;
+  photos: number;
+}
+
+export type SessionSource = 'WEB' | 'KIOSK';
+export type SessionStatus = 'IN_PROGRESS' | 'COMPLETED' | 'CANCELLED';
+/** Upload-state filter for `listSessions` — derived from a session's photos server-side, not stored. */
+export type SessionListState = 'all' | 'completed' | 'pending' | 'failed';
+
+/**
+ * Capture-session list/detail — one row per session regardless of whether it
+ * came from the kiosk or apps/web (only kiosk sessions carry a campaignId
+ * today, per the product decision to scope the CMS list to kiosk captures).
+ */
+export interface SessionListItem {
+  id: string;
+  source: SessionSource;
+  deviceId?: string;
+  deviceName?: string;
+  campaignId?: string;
+  subjectCode?: string;
+  subjectName?: string;
+  status: SessionStatus;
+  capturedAt?: string;
+  completedAt?: string;
+  approvedAt?: string;
+  photoCount: number;
+  photosReady: number;
+  photosPending: number;
+  photosFailed: number;
+}
+
+/** One captured photo — bytes live only on the file server; this is metadata plus the fs-core file id used to request a view link. */
+export interface SessionPhoto {
+  id: string;
+  stepId: string;
+  stepType?: string;
+  cameraRole?: string;
+  attempt: number;
+  mimeType: string;
+  bytes: number;
+  fsFileId?: string;
+  fsStatus?: string;
+  localStatus?: string;
+  virtualPath?: string;
+  capturedAt?: string;
+  uploadedAt?: string;
+  readyAt?: string;
+  uploadError?: string;
+}
+
+export interface SessionDetail extends SessionListItem {
+  photos: SessionPhoto[];
+}
+
+/** Mirrors `PaginationMetaDao` server-side — `totalItems`/`totalPages` are optional there too. */
+export interface PaginationMeta {
+  itemCount: number;
+  totalItems?: number;
+  itemsPerPage: number;
+  totalPages?: number;
+  currentPage: number;
+}
+
+export interface Paginated<T> {
+  items: T[];
+  meta: PaginationMeta;
+}
+
+export interface ListSessionsParams {
+  campaignId?: string;
+  deviceId?: string;
+  source?: SessionSource;
+  from?: string;
+  to?: string;
+  state?: SessionListState;
+  page?: number;
+  limit?: number;
+}
+
+/** `POST /v1/photos/:id/view-link` response — `url` is a tokenised fs-core link usable directly as an `<img src>` for about 10 minutes. */
+export interface PhotoViewLink {
+  url: string;
+  viewUrl?: string;
+  expiresAt: string;
 }
 
 const API_KEY_STORAGE = 'looka-cms-api-key';
@@ -114,7 +236,14 @@ function baseUrl(): string {
 export class ApiError extends Error {
   constructor(
     message: string,
-    public status: number
+    public status: number,
+    /**
+     * Domain error code from the API's error envelope (`{ errorCode, message }`,
+     * see `HttpResponseError` server-side), e.g. FILE_STORAGE_NOT_READY = 3000.
+     * Lets callers branch on the specific failure, not just the HTTP status —
+     * two different problems can both come back as a 503.
+     */
+    public code?: number
   ) {
     super(message);
   }
@@ -134,13 +263,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     let message = text.slice(0, 300) || res.statusText;
+    let code: number | undefined;
     try {
-      const parsed = JSON.parse(text) as { message?: string; error?: string };
+      const parsed = JSON.parse(text) as { message?: string; error?: string; errorCode?: number };
       message = parsed.message || parsed.error || message;
+      code = parsed.errorCode;
     } catch {
       /* not JSON; the raw text is the best available */
     }
-    throw new ApiError(message, res.status);
+    throw new ApiError(message, res.status, code);
   }
 
   const envelope = (await res.json()) as { data: T };
@@ -159,6 +290,39 @@ export const getAllCampaignsStats = () => request<AllCampaignsStats>('/v1/campai
 
 export const listDevices = (campaignId: string) => request<Device[]>(`/v1/campaigns/${campaignId}/devices`);
 export const getDevice = (id: string) => request<Device>(`/v1/devices/${id}`);
+
+/**
+ * List capture sessions (Phase 11), filterable and paginated — mirrors
+ * `ListSessionsQueryDto` server-side. Only params with a value are put on
+ * the query string, so callers can pass a partly-filled filter object as-is.
+ */
+export function listSessions(params: ListSessionsParams = {}): Promise<Paginated<SessionListItem>> {
+  const search = new URLSearchParams();
+  if (params.campaignId) search.set('campaignId', params.campaignId);
+  if (params.deviceId) search.set('deviceId', params.deviceId);
+  if (params.source) search.set('source', params.source);
+  if (params.from) search.set('from', params.from);
+  if (params.to) search.set('to', params.to);
+  if (params.state) search.set('state', params.state);
+  if (params.page) search.set('page', String(params.page));
+  if (params.limit) search.set('limit', String(params.limit));
+  const qs = search.toString();
+  return request<Paginated<SessionListItem>>(`/v1/sessions${qs ? `?${qs}` : ''}`);
+}
+
+/** One session with every one of its photos. */
+export const getSession = (id: string) => request<SessionDetail>(`/v1/sessions/${id}`);
+
+/**
+ * Every admin-key holder may open full-size photos (product decision 3 in
+ * the Phase 11 plan) — there is no per-admin identity in this CMS to pass
+ * instead, so `viewerId` defaults to one fixed identity for every caller.
+ */
+export const issuePhotoViewLink = (photoId: string, viewerId = 'cms-admin') =>
+  request<PhotoViewLink>(`/v1/photos/${photoId}/view-link`, {
+    method: 'POST',
+    body: JSON.stringify({ viewerId }),
+  });
 
 /**
  * Registers a device and returns its activation zip — the one response on

@@ -1,6 +1,13 @@
 import { SqlExecutor } from '../sql/SqlDriver.js';
 
-export type StatsEventType = 'SESSION_COMPLETED' | 'UPLOAD_SUCCESS' | 'UPLOAD_FAILED' | 'RETAKE' | 'CB_HELP_INTERVENTION';
+export type StatsEventType =
+  | 'SESSION_COMPLETED'
+  | 'UPLOAD_SUCCESS'
+  | 'UPLOAD_FAILED'
+  | 'RETAKE'
+  | 'CB_HELP_INTERVENTION'
+  | 'SESSION_REPORT'
+  | 'PHOTO_STATUS';
 
 export interface StatsEventItem {
   id: string;

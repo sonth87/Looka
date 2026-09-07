@@ -13,6 +13,7 @@ import {
 import { CAPTURE_STEP_DEFS, StepType, enabledAnglesFromCampaign } from '../captureAngles';
 import { CaptureFramesEditor } from './CaptureFramesEditor';
 import { StatsPanel } from './StatsPanel';
+import { SessionsPanel } from './SessionsPanel';
 
 /** Triggers a real browser save — `<a download>` on an object URL, revoked right after. */
 function saveBlob(blob: Blob, filename: string) {
@@ -66,6 +67,10 @@ export function CampaignDetail({ campaignId, onBack }: { campaignId: string; onB
 
       <div className="mb-6">
         <StatsPanel campaignId={campaignId} />
+      </div>
+
+      <div className="mb-6">
+        <SessionsPanel campaignId={campaignId} devices={devices} />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

@@ -6,6 +6,7 @@ import { SessionController } from './controllers/session.controller';
 import { Photo } from './entities/photo.entity';
 import { Session } from './entities/session.entity';
 import { UploadOutboxEntry } from './entities/upload-outbox.entity';
+import { CaptureReportService } from './services/capture-report.service';
 import { PhotoService } from './services/photo.service';
 import { SessionService } from './services/session.service';
 import { UploadWorkerService } from './services/upload-worker.service';
@@ -16,7 +17,12 @@ import { UploadWorkerService } from './services/upload-worker.service';
     FileStorageModule,
   ],
   controllers: [SessionController, PhotoController],
-  providers: [SessionService, PhotoService, UploadWorkerService],
-  exports: [SessionService, PhotoService],
+  providers: [
+    SessionService,
+    PhotoService,
+    UploadWorkerService,
+    CaptureReportService,
+  ],
+  exports: [SessionService, PhotoService, CaptureReportService],
 })
 export class CaptureModule {}

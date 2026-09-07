@@ -138,7 +138,7 @@ export class UploadWorkerService implements OnModuleInit {
           SET status = 'SENDING', attempts = attempts + 1
         WHERE id = (
           SELECT id FROM upload_outbox
-           WHERE status = 'PENDING' AND next_retry_at <= now()
+           WHERE status = 'PENDING' AND next_retry_at <= now() AND approved_at IS NOT NULL
            ORDER BY id
            FOR UPDATE SKIP LOCKED
            LIMIT 1

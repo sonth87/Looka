@@ -1,0 +1,22 @@
+flowchart TB
+  U["201 Created — file.status = SCANNING<br/>(READY at once when the blob was scanned before)"]
+  U --> AV["av-scan — every 5 s, leader only, small files first<br/>read blob from SeaweedFS → decrypt → clamd INSTREAM (≤ 100 MB, larger = skipped_too_large → READY)<br/>FS_AV_MODE=disabled (dev only) → READY with av_scan = skipped"]
+  AV -->|"clean"| RDY["READY · outbox file.created<br/>download now allowed"]
+  AV -->|"infected"| Q["QUARANTINED · download blocked (423)<br/>every file sharing the blob is blocked too"]
+  AV -->|"clamd unreachable"| SP["stays SCANNING → SCAN_PENDING after 15 min (scan-pending-watch)<br/>retried every 30 min (scan-pending-retry)"]
+  RDY --> RL["relay — every 2 s: event_outbox → NATS subject files.{tenant}.{event}"]
+  RDY --> CP["content pipeline — 5 s fast lane / 60 s background:<br/>detect → extract (Tika) → ocr (skipped) → nlp → embed (off) → index (Meilisearch)"]
+  RDY --> TS["temp-score — every 6 h:<br/>view/download counts + age → file.temperature_score"]
+  TS --> TM["tier-migrate — every 24 h: hot → cool → cold by temperature<br/>copy → re-read and verify sha256 of the ciphertext → cutover pointer → 30 min grace → delete old object"]
+  RDY --> VT["version-tier-sync — every 5 min (D-89):<br/>blob of a superseded version → cool · updated current version → hot"]
+  RDY --> TMR["tier-move-request — every 5 s:<br/>admin-requested moves from file-fe /admin/tier (table tier_move_request)"]
+  DEL["DELETE /api/v1/files/{id} → user_file.removed_at for the caller<br/>file becomes TRASHED only when the LAST co-owner removes it"] --> GC
+  Q --> GC["gc — mark: ref_count = 0 → gc_candidate → sweep: delete bytes on primary AND standby<br/>the MIRROR copy is never cleaned (known gap)"]
+  J["janitor: session-sweep 5 min (expired chunked sessions release quota)<br/>orphan-blob-sweep 6 h (tmp objects older than 24 h)<br/>stuck-upload-sweep 15 min (UPLOADING > 2 h → FAILED)"]
+
+  classDef ok fill:#d7f5dd,stroke:#1a7f37,color:#000
+  classDef bad fill:#ffd7d5,stroke:#cf222e,color:#000
+  classDef job fill:#eef6ff,stroke:#1f6feb,color:#000
+  class RDY ok
+  class Q,SP bad
+  class AV,RL,CP,TS,TM,VT,TMR,GC,J job
