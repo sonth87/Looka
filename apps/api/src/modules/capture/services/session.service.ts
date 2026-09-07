@@ -48,6 +48,11 @@ export class SessionService extends CommonService<Session> {
     return session;
   }
 
+  /** Used by `CampaignService.deleteCampaign` to refuse deleting a campaign that still has capture history attached — see that method's own doc comment. */
+  async countByCampaign(campaignId: string): Promise<number> {
+    return this.count({ where: { campaignId } });
+  }
+
   /**
    * Mark a run finished. Idempotent: a browser that retries after a dropped
    * response must not turn an already-completed session into an error.

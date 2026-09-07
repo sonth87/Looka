@@ -1,3 +1,4 @@
+import { ERROR_CODE } from '@app/common/errors';
 import { FileStorageService } from '@app/modules/file-storage/services/file-storage.service';
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigModule } from '@nestjs/config';
@@ -273,6 +274,110 @@ describeDb('device management persistence', () => {
     const dao = await deviceService.findDeviceOrFail(device.id);
     expect(dao.status).toBe('ACTIVATED');
     expect(dao.activatedAt).toBeTruthy();
+  });
+
+  test('reissuing a still-REGISTERED device rotates its secret and resets status normally', async () => {
+    const campaignDao = await campaignService.createCampaign({
+      name: 'Reissue test (registered)',
+    });
+    const campaign = await campaignService.findCampaignEntityOrFail(campaignDao.id);
+    const { device, plainSecret: originalSecret } = await deviceService.registerDevice(
+      campaign.id,
+      { name: 'Kiosk Reissue Registered' },
+    );
+
+    const { device: reissued, plainSecret: newSecret } = await deviceService.reissueDevice(
+      device.id,
+      {},
+    );
+    expect(reissued.id).toBe(device.id);
+    expect(newSecret).not.toBe(originalSecret);
+
+    // The old secret is dead - it was never actually used, but reissuing
+    // always rotates regardless.
+    const oldCheck = await deviceService.verifyCredentials(device.id, originalSecret);
+    expect(oldCheck.ok).toBe(false);
+    if (!oldCheck.ok) expect(oldCheck.reason).toBe('INVALID_SECRET');
+
+    // Was already REGISTERED, so this is a no-op reset - still REGISTERED.
+    const afterReissue = await deviceService.findDeviceOrFail(device.id);
+    expect(afterReissue.status).toBe('REGISTERED');
+    expect(afterReissue.activatedAt).toBeFalsy();
+
+    // The new secret works and activates the device for the first time.
+    const newCheck = await deviceService.verifyCredentials(device.id, newSecret);
+    expect(newCheck.ok).toBe(true);
+    const activated = await deviceService.findDeviceOrFail(device.id);
+    expect(activated.status).toBe('ACTIVATED');
+
+    const zip = await activationPackageService.buildActivationZip(reissued, campaign, newSecret);
+    expect(zip.length).toBeGreaterThan(0);
+    expect(zip.subarray(0, 4)).toEqual(Buffer.from([0x50, 0x4b, 0x03, 0x04]));
+  });
+
+  test('reissuing an already-ACTIVATED device rotates its secret but leaves status ACTIVATED (2026-09-07 product request)', async () => {
+    const campaignDao = await campaignService.createCampaign({
+      name: 'Reissue test (activated)',
+    });
+    const campaign = await campaignService.findCampaignEntityOrFail(campaignDao.id);
+    const { device, plainSecret: originalSecret } = await deviceService.registerDevice(
+      campaign.id,
+      { name: 'Kiosk Reissue Activated' },
+    );
+
+    // Activate it first - reissuing an already-ACTIVATED device must still
+    // work (DeviceController.reissueDevice's own doc comment: this is
+    // intended, not blocked).
+    const activated = await deviceService.verifyCredentials(device.id, originalSecret);
+    expect(activated.ok).toBe(true);
+    const beforeReissue = await deviceService.findDeviceOrFail(device.id);
+    expect(beforeReissue.status).toBe('ACTIVATED');
+
+    const { device: reissued, plainSecret: newSecret } = await deviceService.reissueDevice(
+      device.id,
+      {},
+    );
+    expect(newSecret).not.toBe(originalSecret);
+
+    // The old secret is dead - the previously-running kiosk is locked out
+    // immediately, same as the REGISTERED case.
+    const oldCheck = await deviceService.verifyCredentials(device.id, originalSecret);
+    expect(oldCheck.ok).toBe(false);
+    if (!oldCheck.ok) expect(oldCheck.reason).toBe('INVALID_SECRET');
+
+    // Status stays ACTIVATED across the reissue - "chỉ cần tải gói chứ
+    // không cần phải thiết lập lại kích hoạt". Note this means the badge
+    // can say ACTIVATED before the *new* secret has actually been used by
+    // any kiosk - an acknowledged trade, see DeviceService.reissueDevice's
+    // own doc comment.
+    const afterReissue = await deviceService.findDeviceOrFail(device.id);
+    expect(afterReissue.status).toBe('ACTIVATED');
+
+    // The new secret still works.
+    const newCheck = await deviceService.verifyCredentials(device.id, newSecret);
+    expect(newCheck.ok).toBe(true);
+
+    const zip = await activationPackageService.buildActivationZip(reissued, campaign, newSecret);
+    expect(zip.length).toBeGreaterThan(0);
+    expect(zip.subarray(0, 4)).toEqual(Buffer.from([0x50, 0x4b, 0x03, 0x04]));
+  });
+
+  test('reissuing without authApiEndpoint keeps the existing value; supplying one overrides it', async () => {
+    const campaign = await campaignService.createCampaign({
+      name: 'Reissue endpoint test',
+    });
+    const { device } = await deviceService.registerDevice(campaign.id, {
+      name: 'Kiosk Endpoint',
+      authApiEndpoint: 'https://auth.example.com/original',
+    });
+
+    const { device: kept } = await deviceService.reissueDevice(device.id, {});
+    expect(kept.authApiEndpoint).toBe('https://auth.example.com/original');
+
+    const { device: changed } = await deviceService.reissueDevice(device.id, {
+      authApiEndpoint: 'https://auth.example.com/updated',
+    });
+    expect(changed.authApiEndpoint).toBe('https://auth.example.com/updated');
   });
 
   test('a device under an expired campaign fails credential checks even with the right secret', async () => {
@@ -862,5 +967,97 @@ describeDb('device management persistence', () => {
     expect(summaryItem?.sessions).toBe(3);
     expect(summaryItem?.photos.ready).toBe(2);
     expect(summaryItem?.byDevice).toHaveLength(1);
+  });
+
+  test('campaignsTimeseries buckets SESSION_COMPLETED/UPLOAD_SUCCESS/UPLOAD_FAILED/RETAKE events by day across every campaign', async () => {
+    const campaign = await campaignService.createCampaign({
+      name: 'Timeseries campaign',
+    });
+    const { device } = await deviceService.registerDevice(campaign.id, {
+      name: 'Timeseries device',
+    });
+
+    const now = new Date().toISOString();
+    await deviceEventService.recordBatch(device.id, campaign.id, [
+      { type: DeviceEventType.SESSION_COMPLETED, occurredAt: now },
+      { type: DeviceEventType.SESSION_COMPLETED, occurredAt: now },
+      { type: DeviceEventType.UPLOAD_SUCCESS, occurredAt: now },
+      { type: DeviceEventType.UPLOAD_FAILED, occurredAt: now },
+      { type: DeviceEventType.RETAKE, occurredAt: now },
+      { type: DeviceEventType.RETAKE, occurredAt: now },
+      { type: DeviceEventType.RETAKE, occurredAt: now },
+    ]);
+
+    const series = await deviceEventService.campaignsTimeseries(14);
+    // Every requested day is present, even ones with zero events — no gaps.
+    expect(series.points).toHaveLength(14);
+
+    // Other tests in this file also record events "now", for other
+    // campaigns — same reasoning as allCampaignsStats' own assertions above,
+    // this is a global (cross-campaign) aggregate, so today's bucket can only
+    // be checked with a floor, not an exact count.
+    const today = series.points[series.points.length - 1];
+    expect(today.sessionsCompleted).toBeGreaterThanOrEqual(2);
+    expect(today.uploadsSuccess).toBeGreaterThanOrEqual(1);
+    expect(today.uploadsFailed).toBeGreaterThanOrEqual(1);
+    expect(today.retakes).toBeGreaterThanOrEqual(3);
+
+    const dates = series.points.map((p) => p.date);
+    expect(new Set(dates).size).toBe(dates.length);
+    expect(dates).toEqual([...dates].sort());
+  });
+
+  test('deleting a campaign with no devices or sessions succeeds', async () => {
+    const campaign = await campaignService.createCampaign({
+      name: 'Delete me - empty',
+    });
+
+    await campaignService.deleteCampaign(campaign.id);
+
+    await expect(
+      campaignService.findCampaignOrFail(campaign.id),
+    ).rejects.toMatchObject({
+      payload: { code: ERROR_CODE.CAMPAIGN_NOT_FOUND },
+    });
+  });
+
+  test('deleting a campaign that still has a device is refused with CAMPAIGN_HAS_DEPENDENCIES', async () => {
+    const campaign = await campaignService.createCampaign({
+      name: 'Delete me - has device',
+    });
+    await deviceService.registerDevice(campaign.id, { name: 'Kiosk D1' });
+
+    await expect(
+      campaignService.deleteCampaign(campaign.id),
+    ).rejects.toMatchObject({
+      payload: { code: ERROR_CODE.CAMPAIGN_HAS_DEPENDENCIES },
+    });
+
+    // Refused, not partially applied - the campaign must still exist.
+    const stillThere = await campaignService.findCampaignOrFail(campaign.id);
+    expect(stillThere.id).toBe(campaign.id);
+  });
+
+  test('deleting a campaign that still has a capture session (device already gone) is refused too', async () => {
+    const campaign = await campaignService.createCampaign({
+      name: 'Delete me - has session only',
+    });
+    const { device } = await deviceService.registerDevice(campaign.id, {
+      name: 'Kiosk D2',
+    });
+    await reportFinishedSession(device.id, campaign.id, {
+      localStatus: 'DONE',
+      fsStatus: 'READY',
+    });
+
+    // Deleting the device itself isn't exercised here (no device-delete
+    // endpoint exists yet - see deleteCampaign's own doc comment) - this
+    // test only needs a session to exist under the campaign, which
+    // `reportFinishedSession` already guarantees regardless of the device.
+    await expect(
+      campaignService.deleteCampaign(campaign.id),
+    ).rejects.toMatchObject({
+      payload: { code: ERROR_CODE.CAMPAIGN_HAS_DEPENDENCIES },
+    });
   });
 });

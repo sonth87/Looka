@@ -20,8 +20,8 @@ export type CameraRole = 'CENTER' | 'LEFT' | 'RIGHT' | 'UP' | 'DOWN';
  * default role per step type: FRONT→CENTER, LEFT→LEFT, RIGHT→RIGHT,
  * UP→UP, DOWN→DOWN.
  *
- * Shared between `CreateCampaignForm` (CampaignList.tsx) and
- * `CampaignSettingsForm` (CampaignDetail.tsx) via `CaptureFramesEditor`.
+ * Shared between `CreateCampaignPage` and `EditCampaignPage`'s
+ * `CampaignSettingsForm` via `CaptureFramesEditor`.
  */
 export const CAPTURE_STEP_DEFS: Record<StepType, Record<string, unknown>> = {
   FRONT: {

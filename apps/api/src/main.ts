@@ -31,10 +31,17 @@ async function bootstrap() {
   // key is namespace-wide - see FileStorageModule) - CORS is open here
   // because the deployed origin varies by environment (dev localhost, a
   // kiosk on the LAN); tighten to a fixed origin once one is fixed.
+  //
+  // `x-refresh-token` added 2026-09-07 alongside SsoAuthGuard: the CMS now
+  // sends it (with `Authorization`) on every admin call (see apps/cms's
+  // auth/authApi.ts and api.ts). A header missing from this list makes the
+  // browser's own CORS preflight reject the request before it ever reaches
+  // the server - indistinguishable from a server-side CORS misconfiguration
+  // from the browser's console, but the fix is here, not in `origin`.
   app.enableCors({
     origin: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key', 'x-refresh-token'],
     credentials: true,
   });
 

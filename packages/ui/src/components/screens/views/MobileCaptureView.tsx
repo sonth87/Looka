@@ -77,7 +77,14 @@ export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
   return (
     <div
       className={cn(
-        "relative w-full h-[100dvh] flex flex-col justify-between items-center transition-colors duration-300 select-none overflow-hidden p-0 m-0",
+        // Was h-[100dvh] — this view renders inside device-layout's own
+        // resizable kiosk window, not always the full browser viewport (see
+        // GuidedCaptureScreen's rootRef doc comment), so sizing off the raw
+        // dynamic viewport height left dead space or clipped content
+        // whenever that window was shorter than the outer viewport. h-full
+        // fills whatever height the parent container actually has, matching
+        // DesktopCaptureView's own root sizing.
+        "relative w-full h-full flex flex-col justify-between items-center transition-colors duration-300 select-none overflow-hidden p-0 m-0",
         theme === "dark"
           ? "bg-slate-950 text-slate-100"
           : "bg-slate-100 text-slate-900",
@@ -85,8 +92,16 @@ export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
       )}
     >
       {/* ── Top Header with Integrated Step Timeline ── */}
+      {/*
+        flex-wrap (+ gap-y) — same fix as DesktopCaptureView's header: the
+        right-hand cluster (camera selector, modeButton's Mô phỏng/Live
+        Camera toggle, and — desktop-app only — Cài đặt camera/Màn hình mở
+        rộng) is shrink-0 and can outgrow what's left beside the brand mark
+        and step pill at the 640px minimum window width. Wrapping to a
+        second line keeps every control reachable instead of clipping it.
+      */}
       <header className={cn(
-        "w-full px-3 flex items-center justify-between gap-2 py-2 shrink-0 z-30 border-b transition-colors duration-300",
+        "w-full px-3 flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5 py-2 shrink-0 z-30 border-b transition-colors duration-300",
         theme === "dark" ? "border-slate-800/80 bg-slate-950/90 text-slate-100" : "border-slate-200/90 bg-white/90 text-slate-900 shadow-sm"
       )}>
         <div className="flex items-center gap-1.5 shrink-0">

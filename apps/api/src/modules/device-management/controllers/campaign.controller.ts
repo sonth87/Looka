@@ -1,14 +1,22 @@
 import { ApiResponseArrayDecorator, ApiResponseDecorator } from '@app/common/decorators';
-import { Body, Controller, Get, Param, Patch, Post } from '@nestjs/common';
-import { ApiOperation, ApiSecurity, ApiTags } from '@nestjs/swagger';
-import { AllCampaignsStatsDao, CampaignDao, CampaignStatsDao } from '../dao';
-import { CreateCampaignDto, UpdateCampaignDto } from '../dto';
+import { SsoAuthGuard } from '@app/common/guards';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { AllCampaignsStatsDao, CampaignDao, CampaignsTimeseriesDao, CampaignStatsDao } from '../dao';
+import { CreateCampaignDto, GetCampaignsTimeseriesQueryDto, UpdateCampaignDto } from '../dto';
 import { CampaignService } from '../services/campaign.service';
 import { DeviceEventService } from '../services/device-event.service';
 
+/**
+ * CMS/admin surface only - a human operator managing campaigns through the
+ * CMS. Moved from the shared `x-api-key` to `SsoAuthGuard` as part of the
+ * 2026-09-07 decision to retire api-key from CMS/admin surfaces now that the
+ * CMS has real SSO login (docs/LOGIN.md).
+ */
 @Controller({ path: 'campaigns', version: '1' })
 @ApiTags('device-management')
-@ApiSecurity('apiKey')
+@UseGuards(SsoAuthGuard)
+@ApiBearerAuth('sso')
 export class CampaignController {
   constructor(
     private readonly campaignService: CampaignService,
@@ -48,6 +56,21 @@ export class CampaignController {
     return this.deviceEventService.allCampaignsStats(campaigns.map((c) => ({ id: c.id, name: c.name })));
   }
 
+  /**
+   * Trend charts for the CMS Overview page (2026-09-07 dashboard redesign) —
+   * sessions-completed, uploads-success/failed, and retake device-event
+   * counts, bucketed by day across every campaign (see
+   * `CampaignsTimeseriesDao`'s own doc comment). Declared under the same
+   * `stats/...` prefix and for the same route-shadowing reason as
+   * `stats/summary` above.
+   */
+  @Get('stats/timeseries')
+  @ApiOperation({ summary: 'Get daily sessions-completed / uploads-success / uploads-failed / retake series across every campaign' })
+  @ApiResponseDecorator(CampaignsTimeseriesDao)
+  getCampaignsTimeseries(@Query() query: GetCampaignsTimeseriesQueryDto): Promise<CampaignsTimeseriesDao> {
+    return this.deviceEventService.campaignsTimeseries(query.days ?? 14);
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Get one campaign' })
   @ApiResponseDecorator(CampaignDao)
@@ -69,6 +92,22 @@ export class CampaignController {
     @Body() dto: UpdateCampaignDto,
   ): Promise<CampaignDao> {
     return this.campaignService.updateCampaign(id, dto);
+  }
+
+  /**
+   * Hard-deletes a campaign — refused with a 409 (`CAMPAIGN_HAS_DEPENDENCIES`)
+   * when it still has any devices or capture sessions attached; see
+   * `CampaignService.deleteCampaign`'s own doc comment for the full cascade
+   * reasoning (devices cascade-delete, sessions/photos would only be
+   * orphaned — both surprising enough to refuse rather than silently do).
+   */
+  @Delete(':id')
+  @ApiOperation({
+    summary: 'Delete a campaign — refused with 409 if it still has any devices or capture sessions attached',
+  })
+  async deleteCampaign(@Param('id') id: string): Promise<{ id: string }> {
+    await this.campaignService.deleteCampaign(id);
+    return { id };
   }
 
   /**

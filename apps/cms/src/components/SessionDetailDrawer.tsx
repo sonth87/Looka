@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { ApiError, SessionDetail, SessionPhoto, SessionStatus, getSession, issuePhotoViewLink } from '../api';
+import { formatSessionDuration } from '../sessionFormat';
 
 // Mirrors apps/api/src/common/errors/code.constants.error.ts - kept as plain
 // numbers rather than importing across the REST boundary, same rationale as
@@ -163,10 +164,15 @@ export function SessionDetailDrawer({ sessionId, onClose }: { sessionId: string;
           <div className="min-w-0">
             <h2 className="font-semibold text-gray-900">Phiên chụp #{sessionId.slice(0, 8)}</h2>
             {session && (
-              <p className="text-sm text-gray-500 mt-0.5">
-                {session.deviceName ?? '—'} · {formatDateTime(session.capturedAt ?? session.completedAt)} ·{' '}
-                {SESSION_STATUS_LABEL[session.status]}
-              </p>
+              <>
+                <p className="text-sm text-gray-500 mt-0.5">
+                  {session.deviceName ?? '—'} · {formatDateTime(session.capturedAt ?? session.completedAt)} ·{' '}
+                  {SESSION_STATUS_LABEL[session.status]}
+                </p>
+                <p className="text-sm text-gray-500 mt-0.5">
+                  Thời gian chụp: <span className="font-medium text-gray-700">{formatSessionDuration(session.capturedAt, session.completedAt)}</span>
+                </p>
+              </>
             )}
           </div>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl leading-none px-1 shrink-0">

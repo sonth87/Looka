@@ -1,12 +1,14 @@
 import { toDao } from '@app/common/helpers';
 import { CustomException, ERROR_CODE } from '@app/common/errors';
 import { CommonService } from '@app/modules/shared/common/common.service';
+import { SessionService } from '@app/modules/capture/services/session.service';
 import { BadRequestException, HttpStatus, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { CampaignDao } from '../dao';
 import { CreateCampaignDto, UpdateCampaignDto } from '../dto';
 import { Campaign, CampaignPurpose } from '../entities/campaign.entity';
+import { Device } from '../entities/device.entity';
 import { validateCaptureAngles } from '../validation/capture-angles.validator';
 
 @Injectable()
@@ -14,6 +16,9 @@ export class CampaignService extends CommonService<Campaign> {
   constructor(
     @InjectRepository(Campaign)
     repository: Repository<Campaign>,
+    @InjectRepository(Device)
+    private readonly deviceRepository: Repository<Device>,
+    private readonly sessionService: SessionService,
   ) {
     super(repository);
   }
@@ -119,5 +124,46 @@ export class CampaignService extends CommonService<Campaign> {
 
     await this.save(campaign);
     return toDao(CampaignDao, campaign);
+  }
+
+  /**
+   * Hard-deletes a campaign row — refused with a 409 when the campaign
+   * still has devices or capture sessions attached (see docs/ROADMAP.md's
+   * 2026-09-07 entry for the full write-up):
+   *
+   * - `devices.campaign_id` is `ON DELETE CASCADE` (device.entity.ts) — an
+   *   unguarded delete would silently hard-delete every real kiosk
+   *   registration under this campaign (device_secret_hash included), not
+   *   just detach them. That is real, unrecoverable operational data, not
+   *   an incidental row.
+   * - `sessions.campaign_id`/`device_id` are `ON DELETE SET NULL`
+   *   (migration `CaptureRecords1787900000000`) — capture history survives
+   *   a delete, but becomes permanently unattributable to any campaign,
+   *   which is still a surprising silent side effect for an admin who only
+   *   meant to remove an unused campaign row.
+   *
+   * Both are surprising enough to refuse rather than cascade through: an
+   * admin must remove every device under a campaign (there is currently no
+   * device-delete endpoint, so in practice this only ever succeeds for a
+   * campaign that was created but never used to register a kiosk) before
+   * the campaign itself can be deleted.
+   */
+  async deleteCampaign(id: string): Promise<void> {
+    await this.findCampaignEntityOrFail(id);
+
+    const [deviceCount, sessionCount] = await Promise.all([
+      this.deviceRepository.count({ where: { campaignId: id } }),
+      this.sessionService.countByCampaign(id),
+    ]);
+
+    if (deviceCount > 0 || sessionCount > 0) {
+      throw new CustomException(
+        `Cannot delete campaign: it still has ${deviceCount} device(s) and ${sessionCount} session(s) attached. Remove its devices first.`,
+        ERROR_CODE.CAMPAIGN_HAS_DEPENDENCIES,
+        HttpStatus.CONFLICT,
+      );
+    }
+
+    await this.delete(id);
   }
 }

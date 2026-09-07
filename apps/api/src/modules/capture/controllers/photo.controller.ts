@@ -1,5 +1,6 @@
-import { Body, Controller, Param, Post } from '@nestjs/common';
-import { ApiOperation, ApiSecurity, ApiTags } from '@nestjs/swagger';
+import { Body, Controller, Param, Post, UseGuards } from '@nestjs/common';
+import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { SsoAuthGuard } from '@app/common/guards';
 import {
   FileStorageService,
   PhotoViewLink,
@@ -7,9 +8,17 @@ import {
 import { ViewLinkDto } from '../dto';
 import { PhotoService } from '../services/photo.service';
 
+/**
+ * `viewLink` is called directly by the CMS (SessionDetailDrawer, to render a
+ * photo thumbnail) - confirmed apps/web's kiosk flow never calls this route
+ * itself, so unlike SessionController this whole controller moved off the
+ * shared `x-api-key` to `SsoAuthGuard` as part of the 2026-09-07 decision to
+ * retire api-key from CMS/admin surfaces.
+ */
 @Controller({ path: 'photos', version: '1' })
 @ApiTags('capture')
-@ApiSecurity('apiKey')
+@UseGuards(SsoAuthGuard)
+@ApiBearerAuth('sso')
 export class PhotoController {
   constructor(
     private readonly photoService: PhotoService,

@@ -822,6 +822,14 @@ app.whenReady().then(async () => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+}).catch((err) => {
+  // Belt-and-braces on top of installCrashHandlers()'s process-level
+  // 'unhandledRejection' listener (which already logs anything thrown in
+  // here, since nothing else awaits or catches this .then()'s promise):
+  // an explicit .catch() logs the exact same failure without depending on
+  // Node's unhandledRejection timing, so a startup exception is unmistakably
+  // in main.log even if it fires before that listener's next microtask.
+  console.error('[fatal] startup failed inside app.whenReady():', err);
 });
 
 app.on('window-all-closed', () => {

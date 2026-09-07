@@ -156,7 +156,14 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
       {!isFullscreen && (
         <header
           className={cn(
-            "w-full px-3 sm:px-5 py-2 flex items-center justify-between gap-3 shrink-0 border-b z-30 transition-colors duration-300",
+            // flex-wrap (+ gap-y) so the header degrades to a second line
+            // instead of clipping once the right-hand control cluster (mode
+            // toggle, camera setup, telemetry, theme) no longer fits beside
+            // the brand block and step pill — measured to overflow the
+            // window's right edge by 100+px at ~800px window width before
+            // this, since none of these shrink-0 groups could shrink or wrap
+            // on their own.
+            "w-full px-3 sm:px-5 py-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-2 shrink-0 border-b z-30 transition-colors duration-300",
             theme === "dark"
               ? "border-slate-800/80 bg-slate-950/90 text-slate-100 backdrop-blur-md"
               : "border-slate-200/90 bg-white/90 text-slate-900 backdrop-blur-md shadow-sm",
@@ -203,7 +210,15 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
           </div>
 
           {/* Center: Inline Timeline StepProgress Pill (Collapses cleanly on narrow windows) */}
-          <div className="hidden sm:flex items-center max-w-md w-full mx-2 shrink overflow-visible py-1">
+          {/*
+            Was `w-full`, which forces this item to claim 100% of the
+            header's width on every line — with `flex-wrap` above that meant
+            it always pushed the right-hand controls to their own line even
+            when there was room to share one. `flex-1` lets it grow/shrink
+            like a normal flex item instead, so brand + steps + controls can
+            still share a single row whenever the window is wide enough.
+          */}
+          <div className="hidden sm:flex items-center max-w-md flex-1 min-w-[160px] mx-2 shrink overflow-visible py-1">
             <StepProgress
               steps={steps}
               currentStepIndex={guidance.currentStepIndex}
@@ -358,7 +373,17 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
           <div
             ref={viewportRef}
             className={cn(
-              "relative flex-1 transition-all duration-300 flex items-center h-full max-h-[85vh]",
+              // min-w-0 overrides the flex default of min-width:auto. Without
+              // it, CameraPreview's aspect-video + h-full child gave this
+              // flex-1 item a content-based minimum width (derived from its
+              // own max-height via the aspect ratio) well above what
+              // actually fit next to the sidebar at ~800px window width —
+              // measured pushing this element ~140px past the window's right
+              // edge, and the whole centered row (sidebar included) past its
+              // left edge, both silently clipped by the ancestor's
+              // overflow-hidden. min-w-0 lets it shrink to fill whatever
+              // space is actually left, same as any ordinary flexible panel.
+              "relative flex-1 min-w-0 transition-all duration-300 flex items-center h-full max-h-[85vh]",
               multiFrame && multiFrame.frames.length > 0
                 ? "flex-col justify-start gap-3 overflow-y-auto"
                 : "justify-center",

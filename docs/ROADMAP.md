@@ -529,6 +529,440 @@ secondary display (§3.5) is view-only.
   history. Minor doc debt — either restore the file or drop the reference.
 - **Stale schema export**: see the Group 4 note above
   (`packages/database/src/schema.ts`).
+- **CMS: SSO redirect-based login layer added (2026-09-07)** — `apps/cms`
+  gained an identity/session gate adapted from `docs/LOGIN.md`, wrapping the
+  whole app *outside* the existing `ApiKeyGate` (`src/App.tsx`): SSO now
+  decides who may open the CMS at all, while the pre-existing shared admin
+  `x-api-key` (`ApiKeyGate`, `api.ts`) still decides which apps/api calls
+  succeed — neither replaced the other. New code lives under
+  `apps/cms/src/auth/` (`env.ts`, `auth.types.ts`, `authCookies.ts`,
+  `authApi.ts`, `AuthContext.tsx`, `AuthGate.tsx`), adapted rather than
+  copied from LOGIN.md's generic React Router + React Query reference: no
+  router was added (this app already deliberately avoids one for its three
+  views), no react-query (a single one-shot `/auth/profile` fetch on mount
+  doesn't need its cache/refetch machinery — plain `fetch` + `useState`/
+  `useEffect`, matching `api.ts`'s existing style), and `continueUrl` is
+  `pathname + search` rather than a route-table lookup. Implements LOGIN.md's
+  redirect flow (§3), protected-route priority rules (§4), refresh flow
+  (§5), logout (§6, a new "Đăng xuất tài khoản" action in `Layout.tsx`'s
+  sidebar alongside the unrelated API-key button), the cookie shape (§7),
+  and the header-based auth fallback (§12: `Authorization: Bearer` +
+  `x-refresh-token` sent alongside cookies on `/auth/profile`/`/auth/logout`,
+  since this CMS's dev origin differs from the SSO backend's). **Env-gated
+  for local dev**: `VITE_URL_LOGIN_SSO` (+ `VITE_BE_URL_WORKSPACE` fallback,
+  new `apps/cms/.env.example`) unset/empty skips the whole SSO gate with a
+  console warning, so `pnpm --filter @face/cms dev` keeps working without a
+  real SSO backend. `pnpm --filter @face/cms build` verified clean
+  (`tsc -b && vite build`); not yet verified live against a real SSO backend.
+- **API key fully removed from the CMS admin surface (2026-09-07)** —
+  following the SSO login bullet above, the shared admin `x-api-key` was
+  retired from every CMS/admin-facing route: `CampaignController`,
+  `DeviceController`, and the CMS-facing `GET /v1/sessions` / `GET
+  /v1/sessions/:id` (list/detail on `SessionController`, added earlier today
+  for `SessionsPanel`/`SessionDetailDrawer`) and `POST
+  /v1/photos/:id/view-link` (`PhotoController`, confirmed called directly by
+  `SessionDetailDrawer` and never by apps/web's kiosk). All of these now sit
+  behind the new `SsoAuthGuard` (`apps/api/src/common/guards/sso-auth.guard.ts`),
+  which forwards the caller's `Authorization`/`x-refresh-token` headers to
+  `GET <SSO_BASE_URL>/auth/profile` per docs/LOGIN.md §12 and requires
+  `authenticated === true` — stateless, no caching, checked fresh on every
+  request. `ApiKeyMiddleware`/`API_KEY` are unchanged and still gate the
+  genuine capture-pipeline routes apps/web's unattended kiosk browser calls
+  (`POST /v1/sessions`, `POST /v1/sessions/:id/photos`, `GET
+  /v1/sessions/:id/photos`, `POST /v1/sessions/:id/complete`) — those were
+  never CMS/admin traffic and keep their machine credential. `SsoAuthGuard`
+  fails closed when `SSO_BASE_URL` is unset (rejects every request) unless
+  the explicit, loudly-`console.warn`-ed dev flag
+  `ALLOW_UNAUTHENTICATED_ADMIN_DEV=true` is also set — **local development
+  only, must never be set in a deployed environment**. CMS side: `ApiKeyGate`
+  and its "Xoá API key" button are deleted; `AuthGate` (the SSO gate) is now
+  the sole gate in `App.tsx`, and `api.ts`'s shared `request()`/
+  `registerDevice()` attach `Authorization: Bearer`/`x-refresh-token` read
+  from `auth/authCookies.ts` on every call instead.
+- **CMS: Overview & Campaign areas redesigned, routing added (2026-09-07)** —
+  product request: "tổng quan: biểu đồ, danh sách, số liệu" / "campaign cần
+  list, thống kê, nút tạo, view/xóa/gia hạn/sửa" / "tạo, sửa, xem campaign
+  đẩy ra trang riêng". `react-router-dom` (`^7.18.3`) was added to `apps/cms`
+  — the previous "no router, only 3 views" decision (`App.tsx`'s old doc
+  comment) no longer held once dedicated create/edit/view pages pushed the
+  view count past what a hand-rolled `useState` union could carry cleanly.
+  Routes: `/` (Overview), `/campaigns` (list), `/campaigns/new` (create),
+  `/campaigns/:id` (view, read-only), `/campaigns/:id/edit` (edit).
+  `Layout.tsx`'s nav now uses `NavLink`/`useLocation` instead of an
+  `activeNav`/`onNavigate` prop pair. **Overview** (`StatsOverview.tsx`) gained
+  a "Biểu đồ" section between the existing tiles and table: two hand-rolled
+  inline SVG charts (`OverviewCharts.tsx`) — a horizontal grouped bar chart
+  comparing sessions-completed/uploads-success per campaign, and a donut for
+  the ready/pending/failed photo-status breakdown — both built from
+  `GET /v1/campaigns/stats/summary`'s existing response, no new backend
+  aggregation needed (`capture-report.service.ts` was read first per the task
+  brief; it only applies already-reported kiosk events onto `sessions`/
+  `photos`, it doesn't compute any new time-series worth a chart beyond what
+  the summary endpoint already has). Deliberately not a charting library —
+  same reasoning as this app's existing no-axios/no-react-query stance.
+  **Campaign list** (`CampaignList.tsx`) gained a stats strip (total
+  campaigns, active vs. expired, expiring within 7 days — computed
+  client-side from the already-fetched `campaigns[]`'s `expiresAt`; total
+  devices from the existing summary endpoint) and a per-row actions column:
+  Xem/Sửa now link to the new dedicated pages, "Gia hạn" opens a one-field
+  modal (`CampaignDangerActions.tsx`, shared with the view page) calling the
+  existing `PATCH` with just `expiresAt`, "Xóa" opens a typed-confirmation
+  modal (retype the campaign name — no existing destructive-action pattern
+  in this codebase to match, so a stronger-than-`window.confirm` step was
+  designed from scratch). **Create/Edit/View split**: `CreateCampaignPage.tsx`
+  and `EditCampaignPage.tsx` are new, moved out of `CampaignList`'s old
+  inline form and `CampaignDetail`'s old settings form respectively;
+  `CampaignDetail.tsx` is now read-only (header + Sửa/Gia hạn/Xóa +
+  `StatsPanel` + `SessionsPanel` + `DevicesPanel` — device registration stays
+  here, not on the edit page, since it's an operational action done while
+  looking at a campaign). **New backend route**: `DELETE /v1/campaigns/:id`
+  (`CampaignController`, `SsoAuthGuard`, same pattern as its siblings) +
+  `CampaignService.deleteCampaign`. Cascade decision, read from the entities/
+  migrations before implementing: `devices.campaign_id` is `ON DELETE
+  CASCADE` (a campaign delete would silently hard-delete every real kiosk
+  registration under it, secrets included) while `sessions.campaign_id`/
+  `device_id` are `ON DELETE SET NULL` (`CaptureRecords1787900000000` —
+  capture history survives but becomes unattributable). Both silent side
+  effects were judged too surprising to cascade through, so the service
+  **refuses with 409** (`CAMPAIGN_HAS_DEPENDENCIES`, new code 5007) whenever
+  the campaign still has any device or session row attached, rather than
+  deleting anything — an admin must clear a campaign's devices first (there
+  is no device-delete endpoint yet, so today this only succeeds for a
+  campaign that was created but never used to register a kiosk). Covered by
+  three new cases in `device-management-persistence.spec.ts` (empty campaign
+  deletes cleanly; a campaign with a device is refused; a campaign with only
+  a session — no device — is refused too). `pnpm --filter @face/cms build`
+  and `pnpm --filter @face/api build`/`test` verified clean.
+- **CMS: Overview page elevated to a Power BI–style dashboard (2026-09-07,
+  second pass)** — product request: "trang tổng quan cần có biểu đồ thống kê
+  như PowerBI" / "thiết kế lại trang tổng quan theo chuẩn PowerBI dashboard".
+  The `dataviz` skill was read first per the task brief and applied
+  throughout (form choice, the 8-slot categorical + reserved 4-color status
+  palette, mark specs, real hover tooltips). **Structural change**:
+  `StatsOverview.tsx` is now a dashboard grid, not three stacked sections — a
+  KPI row of accent-colored stat cards (`KpiCard.tsx`, new), a full-width
+  trend panel, a 2/3 + 1/3 row (campaign comparison + photo-status), and the
+  per-campaign table as its own panel — every panel sharing one
+  `DashboardPanel` card treatment (`OverviewCharts.tsx`). **Trend chart
+  investigation**: read `session.entity.ts`/`photo.entity.ts` and migration
+  `1787900000000-CaptureRecords.ts` first — real timestamps exist
+  (`sessions.captured_at`/`created_at`, `photos.captured_at`/`uploaded_at`/
+  `ready_at`, `device_events.occurred_at`), and `device-event.service.ts`
+  already had a proven per-campaign day-bucketing precedent
+  (`campaignDayStats`/`bulkDayStats`, `CampaignDayStatsDao`, A.8) to follow —
+  so a new endpoint was added rather than skipped or faked:
+  `GET /v1/campaigns/stats/timeseries?days=14` (`CampaignController`, same
+  `SsoAuthGuard` pattern as its siblings) → new
+  `DeviceEventService.campaignsTimeseries()`, one `GROUP BY
+  date_trunc('day', occurred_at AT TIME ZONE 'Asia/Ho_Chi_Minh'), type` query
+  over `device_events` filtered to `SESSION_COMPLETED`/`UPLOAD_SUCCESS` (the
+  exact two event types already summed into the KPI totals, so the trend
+  line agrees with them), zero-filled for days with no events. New
+  `CampaignsTimeseriesDao`/`CampaignsTimeseriesPointDao`
+  (`campaign-stats.dao.ts`) and `GetCampaignsTimeseriesQueryDto`
+  (`days`, default 14, max 90, same `@Type(() => Number)` + class-validator
+  pattern as `ListSessionsQueryDto.limit`); `getCampaignsTimeseries()` added
+  to `apps/cms/src/api.ts`. Covered by a new case in
+  `device-management-persistence.spec.ts` (buckets by day, zero-fills, dates
+  ascending and unique) — gated behind `TEST_DATABASE_URL` like every other
+  case in that file. **Charting-approach decision: adopted `recharts`
+  (`^3.10.1`)**, replacing the first pass's hand-rolled inline SVG — that
+  approach was the right call for 2 simple charts, but a real crosshair/
+  hover tooltip on a multi-series trend line, a grouped bar, and a stacked
+  status bar, all needing to feel like one system, would have meant building
+  and maintaining that interactivity three times over by hand. `recharts` is
+  tree-shakeable, React-idiomatic, needs no CDN/runtime setup beyond
+  `pnpm add`, and still renders plain SVG, so it drops into the existing
+  Tailwind card chrome unchanged. `PhotoStatusDonut` was replaced with
+  `PhotoStatusBreakdown`, a single 100%-stacked horizontal bar — the skill
+  explicitly deprioritizes donuts for part-to-whole reads in favor of
+  stacked bars, and ready/pending/failed is a genuine status breakdown
+  (good/warning/critical), so it now wears the skill's reserved status
+  palette instead of ad-hoc colors. **Color system**: new `chartTheme.ts` —
+  the skill's validated categorical hues and status scale are adopted
+  verbatim (only the hues; this app's existing Tailwind gray chrome/borders/
+  ink are kept as-is rather than the skill's own warm-gray tokens, to stay
+  visually consistent with every untouched card elsewhere in the CMS), with
+  one fixed color per **metric** (not per chart) so "Session hoàn tất" wears
+  the same blue on its KPI card, the trend line, and the comparison bar
+  everywhere it appears. Two KPI cards (Session hoàn tất, Upload thành công —
+  the two metrics the new endpoint actually backs) carry a real 14-point
+  sparkline; no delta/trend was fabricated for the other totals, which have
+  no stored prior-period value. This app is light-theme only by prior
+  decision (`Layout.tsx`), so no dark-mode variant was needed. Loading state
+  is a shaped skeleton (`DashboardSkeleton`) matching the real grid instead
+  of a bare "Đang tải..." string; the trend panel and its KPI sparklines
+  degrade independently of the main stats fetch. `pnpm --filter @face/cms
+  build` (`tsc -b && vite build`) and `pnpm --filter @face/api build`/`test`
+  verified clean; live visual check was not possible from this pass (the
+  running CMS instance's SSO gate has no dev bypass configured and no test
+  credentials were available), so the redesign was verified by a clean
+  typecheck/build plus manual review rather than a screenshot.
+- **CMS: Overview page — numeric-only sections replaced with charts
+  (2026-09-07, third pass)** — product request: "Trang tổng quan cần nhiều
+  biểu đồ hơn thay vì những [phần] chỉ có tag của những con số." Targeted the
+  three metrics (`totalUploadFailed`, `totalRetakes`,
+  `totalCbHelpInterventions`) that existed only as a flat KPI number and raw
+  table columns, with zero chart anywhere. **New panels** (`OverviewCharts.tsx`,
+  same `DashboardPanel` shell/card treatment, no new visual language):
+  `CampaignQualityChart` — a `CampaignComparisonChart`-style horizontal
+  grouped bar, retakes vs. CB Help interventions per campaign
+  (`METRIC_COLOR.retakes`/`cbHelp`), replacing two of the six "just a number"
+  table columns with a real per-campaign chart; `UploadOutcomeBreakdown` — a
+  two-segment 100%-stacked bar (success vs. failed), matching
+  `PhotoStatusBreakdown`'s existing treatment exactly, giving
+  `totalUploadFailed` its first chart anywhere on the page
+  (`METRIC_COLOR.uploadSuccess`/`uploadFailed`, i.e. the existing aqua/status-
+  critical pair, not new colors). **Trend endpoint investigation**: checked
+  whether `RETAKE`/`UPLOAD_FAILED` are already summed the same way as
+  `SESSION_COMPLETED`/`UPLOAD_SUCCESS` in `allCampaignsStats()` (they are) and
+  whether extending `campaignsTimeseries()` was a small, natural extension of
+  its existing grouped query — it was: two more `DeviceEventType`s added to
+  the same `IN (...)` list and `byDate` map, no new aggregation logic. Backed
+  a second small trend panel, `QualityTrendChart` ("Xu hướng chất lượng"),
+  rather than adding two more lines to `SessionsTrendChart` — sessions/
+  uploads run one to two orders of magnitude higher than retakes/upload
+  failures, so sharing one y-axis would flatten the smaller pair to near-zero
+  (kept each chart on its own single axis instead of a dual-axis chart or a
+  scale mismatch). `CB_HELP_INTERVENTION` was deliberately left out of the
+  trend endpoint — the per-campaign quality chart already covers it, and nor
+  the product ask nor the existing query shape needed a third bucketed type.
+  Also backfilled real sparklines onto the "Upload thất bại"/"Lần chụp lại"
+  KPI cards from the same widened endpoint (previously flat numbers, same as
+  the two metrics that already had one). `CampaignsTimeseriesPointDao`/
+  `CampaignsTimeseriesPoint` gained `uploadsFailed`/`retakes` fields; the
+  `device-management-persistence.spec.ts` timeseries case extended to seed
+  and assert both (still gated behind `TEST_DATABASE_URL`, so it ran skipped
+  in this environment same as the rest of that file). The per-campaign table
+  and the original trend/comparison/photo-status panels are unchanged — the
+  page now reads chart-first with the table as backup detail, not the other
+  way around. `pnpm --filter @face/cms build` and `pnpm --filter @face/api
+  build`/`test` verified clean.
+
+---
+
+## 3b. Device registration decoupled from auto-download; reissue action added (2026-09-07)
+
+Product request (verbatim, with a typo in the original): "Chỉ đăng ký thiết
+bị và có thể tải sau, và thiếu action kích hoạt." Registering a device used
+to trigger a browser download the instant the API call resolved, in the same
+click, with no way to separate the two — and the device table had zero
+per-row actions, so a lost activation zip meant abandoning that device row
+entirely.
+
+**Backend**: new `POST /v1/devices/:id/reissue` (`DeviceController`, same
+`SsoAuthGuard` pattern as its siblings) rotates an existing device's secret
+in place — same id/name/history, only `deviceSecretHash` (and, optionally,
+`authApiEndpoint`) changes — and returns the same activation-zip response
+shape `registerDevice()` does (`ReissueDeviceDto`: `authApiEndpoint`/`os`
+both optional, defaulting to the device's current value / `buildActivationZip`'s
+own default when omitted). **Works for a device in any status, including
+already ACTIVATED, by design**: a real kiosk running on the old secret stops
+authenticating the moment this rotates it — that is the intended "revoke
+this kiosk's credentials" behavior, not a bug the endpoint guards against.
+`DeviceService.reissueDevice()` also resets the device back to
+`REGISTERED`/`activatedAt: null`, since the freshly-issued secret has not
+been used by any kiosk yet regardless of prior activation history. Two new
+cases in `device-management-persistence.spec.ts`: reissuing an ACTIVATED
+device kills the old secret, the new one works, and status resets;
+`authApiEndpoint` is kept when omitted and overridden when supplied.
+
+**CMS**: `DevicesPanel.tsx` (split out of `CampaignDetail.tsx`) no longer
+auto-downloads on register — the returned blob/filename sit in state behind
+a dismissible success banner ("Đã đăng ký thiết bị «tên». Gói kích hoạt đã
+sẵn sàng.") with an explicit "Tải gói kích hoạt" button; the same pattern now
+backs a new "Tạo lại gói kích hoạt" button on every device row, calling the
+new endpoint. Reissuing an ACTIVATED device requires confirmation first — a
+plain confirm/cancel modal reusing `CampaignDangerActions`' `ModalShell` (now
+exported) for the same visual language, deliberately not the
+typed-name-retype pattern that guards campaign delete, since a reissue is
+recoverable (reissue again) and not an irreversible cascade; a still-
+REGISTERED device reissues with no confirmation, since nothing is being
+revoked yet. `api.ts` gained `reissueDevice()`, sharing its blob/filename
+response handling with `registerDevice()` via a new shared
+`fetchActivationZip()` helper instead of duplicating it.
+
+**Follow-up, same day**: product request "tôi cũng có thể xem danh sách chụp
+ảnh của từng thiết bị và có thể xem các ảnh đã được chụp đó" (view each
+device's captured sessions, and view the actual photos). Both already
+existed — `SessionsPanel` already filters by device, `SessionDetailDrawer`
+already shows a session's photos — the only gap was an entry point from the
+device row itself. `SessionsPanel` gained an optional `focusDeviceId` prop
+(re-applies whenever the value changes, not just at mount, so clicking a
+different device row while the panel is already open still works; the admin
+can still freely change the dropdown afterward without it snapping back) and
+an `id="sessions-panel"` anchor. `CampaignDetail.tsx` now holds the selected
+device as state and passes a `viewDeviceCaptures(deviceId)` callback down to
+`DevicesPanel` as `onViewCaptures`, which scrolls `#sessions-panel` into view
+after setting it. `DevicesPanel` gained a "Xem ảnh đã chụp" button per row
+next to "Tạo lại gói kích hoạt". No new component, no duplicated
+session/photo-listing logic. `pnpm --filter @face/cms build` verified clean.
+
+**Bug found and fixed, same day**: "khi tôi tải app xuống cho thiết bị thì
+khi mở lên thì có chuỗi json chứ không có app" — the downloaded activation
+zip contained only `activation.json`, no installer. Root cause was twofold:
+(1) `DESKTOP_INSTALLER_PATH_WIN`/`_MAC` were both empty in this environment's
+`apps/api/.env` — no installer had ever been built here — fixed by building
+one (`pnpm --filter @face/desktop run package:win`, produces
+`apps/desktop/release/Looka-0.1.0-win-x64.exe`, ~121 MB) and pointing
+`DESKTOP_INSTALLER_PATH_WIN` at it. (2) Even with that set, both
+`DevicesPanel.tsx`'s registration-form OS dropdown and
+`ActivationPackageService.buildActivationZip`'s own server-side default
+defaulted to `'mac'` — since no mac installer exists in this environment,
+the *default* path (not selecting an OS explicitly) still produced a
+JSON-only zip. Fixed by changing the CMS form's default to `'win'` and
+having `DevicesPanel`'s reissue call pass `{ os: 'win' }` explicitly instead
+of omitting it (the device row itself doesn't persist which OS it was
+registered for — it's a per-request zip-build parameter, not device state).
+Verified live end-to-end via a direct API register + reissue against the
+running dev instance: the resulting zip now contains both `activation.json`
+and the real `.exe`. **Both defaults will need revisiting together if a mac
+installer is ever built in some other environment** — right now this
+codebase only ever produces a Windows installer where it's actually run.
+`pnpm --filter @face/cms build` verified clean after the fix.
+
+**Verified**: `pnpm --filter @face/api test` and `pnpm --filter @face/api
+build`, and `pnpm --filter @face/cms build`, all clean.
+
+---
+
+## 3c. Bug found and fixed: kiosk permanently stuck on default 5-step workflow (2026-09-07)
+
+User report (with a screenshot of the real running kiosk): campaign "Test aa"
+(`d6c6db5f-...`) was configured with 3 capture angles (FRONT/LEFT/RIGHT) and
+`simultaneousCapture: true`, but the actual kiosk app showed all 5 default
+angles (FRONT/LEFT/RIGHT/UP/DOWN), was not in simultaneous mode — "đang hiển
+thị toàn bộ các góc / không chụp đồng thời và đang là hiển thị thông tin cũ".
+
+**Root cause**: `activation.json`'s `authApiEndpoint` field defaults to
+`null` whenever the admin leaves the CMS's device-registration form's "API
+endpoint" field blank (it was optional, empty by default, with no indication
+it was actually load-bearing). `apps/desktop/src/main/secrets.ts`'s
+`importActivationFile` only calls `setSecret('device.apiBaseUrl', ...)` when
+`authApiEndpoint` is a non-null string — so a blank field means this kiosk's
+`apiBaseUrl` secret is *never set at all*. `deviceApi.ts`'s
+`fetchCampaignConfigResult()` then short-circuits before ever attempting a
+network call (`if (!creds || !creds.apiBaseUrl) return { status:
+'unreachable' }`) — `GET /v1/devices/config` is never reached, not once, for
+the life of that device identity. `resolveActiveWorkflow()`
+(`packages/ui/src/components/screens/FaceCaptureApp.tsx`) then has no config
+to read `captureAngles`/`simultaneousCapture`/`captureMode` from and falls
+back to the hardcoded `defaultWorkflow` (5 steps, MANUAL, non-simultaneous)
+every single session — exactly what the screenshot showed, and *not*
+specific to campaign "Test aa": DB check confirmed the only ever-ACTIVATED
+device ("Kiosk Windows Dev", under the older "Test Windows 2026-09-05"
+campaign) was in exactly the same broken state, and that campaign's own
+`captureAngles` (also 3, also `simultaneousCapture: true`) was equally never
+being read. The new "Kisot 1" device (campaign "Test aa") was still sitting
+in `REGISTERED` status — never actually activated on any kiosk yet, so the
+screenshot was necessarily from the older, equally-broken "Kiosk Windows Dev"
+identity, not from "Test aa" at all.
+
+**Fix** (`apps/cms/src/components/DevicesPanel.tsx`): the "API endpoint"
+field is now required, not optional, and pre-fills with a same-host guess
+(`${location.protocol}//${location.hostname}:3100`) instead of starting
+blank — correct whenever the admin reaches the CMS via the same LAN address
+the kiosk can also reach, wrong (and must be hand-edited to the server's real
+LAN IP) whenever the admin uses `localhost` for a kiosk that is a separate
+physical machine, which `location.hostname` cannot know. The device table
+now shows a "Thiếu API endpoint" warning badge on any device whose
+`authApiEndpoint` is empty. Reissuing a device now automatically backfills
+`authApiEndpoint` with that same default when the device doesn't already
+have one (never overwrites an existing custom value — same omit-keeps-current
+semantics `ReissueDeviceDto` already had), so an admin can fix an
+already-broken device (like "Kiosk Windows Dev" or "Kisot 1" above) just by
+clicking "Tạo lại gói kích hoạt" again, no extra typing required as long as
+the CMS itself is being reached from a kiosk-reachable address.
+`pnpm exec tsc --noEmit` verified clean; not yet verified against a live
+kiosk process (the CMS's own SSO gate blocks headless preview access in this
+environment) — **next step for the user**: reissue "Kisot 1" from the CMS,
+re-download, and re-import `activation.json` on the actual kiosk machine to
+confirm it now picks up "Test aa"'s real 3-angle/simultaneous config.
+
+**Follow-up, same day — the 3c fix above wasn't enough**: even with a
+correct `authApiEndpoint`, the user's kiosk still showed 5 angles /
+non-simultaneous after downloading and running a freshly-reissued package.
+Three more, separate bugs stacked on top of 3c, found across a long live
+debugging session (all on the same physical machine used for both CMS admin
+and kiosk testing):
+
+1. **Zip-view trap**: the user was double-clicking the exe from *inside*
+   Windows Explorer's zip-preview pane, never actually extracting it —
+   Explorer extracts only the double-clicked file to a throwaway temp
+   folder, so `activation.json` never sat next to the running exe. User
+   error, but the UX invites it (nothing distinguishes "you're inside a
+   zip" at a glance for most users). No code fix; documented here as the
+   first thing to check next time.
+2. **Stale device identity already occupying the shared userData store**:
+   `apps/desktop/src/main/secrets.ts`'s `findAndImportActivationFileIfPresent`
+   only imports when `hasDeviceCredentials()` is false — an *earlier*
+   dev-mode test session on this same machine had already activated device
+   `27b5e61f...` ("Kiosk Windows Dev" / "Test Windows 2026-09-05") into
+   `%APPDATA%\FacePlatformKiosk\secrets.dat`, so every later attempt to
+   import a fresh `activation.json` for a *different* device was silently
+   skipped — the kiosk kept running as the old identity forever. Confirmed
+   by decrypting `secrets.dat` directly (a headless Electron script using
+   `safeStorage`, with `app.setPath('userData', ...)` pointed at that exact
+   folder before `app.whenReady()`) and by then calling
+   `GET /v1/devices/config` with the real decrypted credentials — the
+   server correctly returned that device's true 3-angle/simultaneous
+   config, proving the server/DAO were never the problem. No product code
+   bug here (the skip-if-already-activated behavior is intentional — see
+   that function's own doc comment), just a genuinely confusing state to
+   debug from the outside; worked around by clearing the `device.*` keys
+   from `secrets.dat` directly. **There is still no in-app way to
+   deactivate/reset a kiosk's device identity** (`clearDeviceCredentials` in
+   `secrets.ts` exists but is never wired to any IPC handler or UI) — worth
+   adding a real "Cài đặt lại thiết bị" action if this needs to happen more
+   than once during development.
+3. **The big one — installer vs. app confusion**: `apps/desktop/release/Looka-0.1.0-win-x64.exe`
+   (the file the CMS was actually embedding in every activation zip, via
+   `DESKTOP_INSTALLER_PATH_WIN`) is the **NSIS installer wizard**
+   (`electron-builder.json`'s `nsis.oneClick: false`), not the app —
+   confirmed by launching it directly and observing a window titled "Looka
+   Setup" with zero child processes and zero writes to
+   `%APPDATA%\FacePlatformKiosk` (real `app.asar` code never runs until the
+   wizard is clicked through Install → Finish). Even clicked through
+   correctly, `activation.json` would end up next to the *downloaded
+   installer*, not next to wherever the wizard chose to install the real
+   app — so the "just drop activation.json next to the exe" flow was never
+   going to work for an installer-shaped artifact regardless of user care.
+   Verified the actual app code was always healthy by running
+   `release/win-unpacked/Looka.exe` (same `app.asar`, no installer wrapper)
+   directly — logged and rendered correctly immediately.
+
+   **Fix, two parts**:
+   - `apps/desktop/src/main/index.ts`: added an explicit `.catch()` on the
+     `app.whenReady().then(...)` chain (defense-in-depth alongside the
+     existing global `unhandledRejection` handler) and a new
+     `apps/desktop/README.md` documenting the installer-vs-unpacked
+     distinction so this doesn't cost another multi-hour detour.
+   - `apps/api/src/modules/device-management/services/activation-package.service.ts`:
+     activation zips now embed the **unpacked app folder**
+     (`release/win-unpacked/` — a plain, runnable directory, no install
+     step) instead of the NSIS installer, with its contents flattened
+     directly into the zip root (`archive.directory(path, false)`, not
+     nested under a subfolder) so `activation.json` lands in the exact same
+     folder as `Looka.exe` and gets auto-imported on first launch, no copy
+     step. `apps/api/src/config/desktop-installer.ts` and `.env`'s
+     `DESKTOP_INSTALLER_PATH_WIN` doc comments updated to say "point this at
+     the unpacked folder, not an installer." Mac is deliberately NOT
+     flattened (a `.app` bundle must keep its own top-level name to stay a
+     valid bundle) — revisit together with `secrets.ts`'s activation-file
+     lookup before a mac build ever ships. Verified directly with a
+     standalone script using the same `archiver` calls against the real
+     `win-unpacked` folder: `activation.json` and `Looka.exe` now sit at the
+     same top level inside the produced zip. `pnpm exec tsc --noEmit` clean
+     for both `apps/api` and `apps/desktop`; API dev server restarted and
+     confirmed responding (`GET /docs` → 200) with the new code + `.env`
+     picked up.
+
+   Not committed, per the standing project rule (only commit after the user
+   confirms a full end-to-end test pass). **Next step for the user**:
+   register or reissue a device from the CMS, download the new zip, extract
+   it fully (not run from inside the zip view), and run `Looka.exe` directly
+   from the extracted folder — `activation.json` should now be auto-imported
+   and the kiosk should reflect the real campaign config immediately.
 
 ---
 

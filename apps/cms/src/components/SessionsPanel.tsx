@@ -8,6 +8,7 @@ import {
   SessionListState,
   listSessions,
 } from '../api';
+import { formatSessionDuration } from '../sessionFormat';
 import { SessionDetailDrawer } from './SessionDetailDrawer';
 
 const PAGE_SIZE = 20;
@@ -44,8 +45,26 @@ function formatDateTime(iso?: string): string {
  * Per-campaign list of capture sessions (Phase 11) - kiosk sessions only,
  * per the product decision to keep this to one panel on the campaign detail
  * page rather than a global page (web sessions carry no campaignId).
+ *
+ * `focusDeviceId` (2026-09-07, product request: "xem danh sách chụp ảnh của
+ * từng thiết bị") lets a caller (the device row's own "Xem ảnh đã chụp"
+ * action in `DevicesPanel`, via `CampaignDetail`) drive this panel's device
+ * filter from outside rather than requiring the admin to reselect it from
+ * the dropdown - the filter itself already existed, this only wires an
+ * external entry point into it. Re-applies whenever the prop value changes
+ * (not just once at mount), but stays a plain uncontrolled `deviceId` the
+ * rest of the time so the admin can still freely change the dropdown
+ * afterward without it snapping back.
  */
-export function SessionsPanel({ campaignId, devices }: { campaignId: string; devices: Device[] }) {
+export function SessionsPanel({
+  campaignId,
+  devices,
+  focusDeviceId,
+}: {
+  campaignId: string;
+  devices: Device[];
+  focusDeviceId?: string;
+}) {
   const [deviceId, setDeviceId] = useState('');
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
@@ -55,6 +74,12 @@ export function SessionsPanel({ campaignId, devices }: { campaignId: string; dev
   const [result, setResult] = useState<Paginated<SessionListItem> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [openSessionId, setOpenSessionId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!focusDeviceId) return;
+    setDeviceId(focusDeviceId);
+    setPage(1);
+  }, [focusDeviceId]);
 
   useEffect(() => {
     const params: ListSessionsParams = { campaignId, page, limit: PAGE_SIZE };
@@ -75,7 +100,7 @@ export function SessionsPanel({ campaignId, devices }: { campaignId: string; dev
   const isEmpty = result !== null && sessions.length === 0;
 
   return (
-    <div className="p-5 rounded-2xl border border-gray-200 bg-white shadow-sm space-y-4">
+    <div id="sessions-panel" className="p-5 rounded-2xl border border-gray-200 bg-white shadow-sm space-y-4">
       <h2 className="font-semibold text-gray-900">Phiên chụp</h2>
 
       <div className="flex flex-wrap gap-3">
@@ -156,6 +181,7 @@ export function SessionsPanel({ campaignId, devices }: { campaignId: string; dev
             <thead>
               <tr className="text-left text-gray-500 border-b border-gray-200 bg-gray-50">
                 <th className="py-2.5 px-4">Thời gian</th>
+                <th className="py-2.5 px-4">Thời gian chụp</th>
                 <th className="py-2.5 px-4">Thiết bị</th>
                 <th className="py-2.5 px-4">Mã SV / Tên</th>
                 <th className="py-2.5 px-4">Ảnh</th>
@@ -170,6 +196,9 @@ export function SessionsPanel({ campaignId, devices }: { campaignId: string; dev
                   className="border-b border-gray-100 last:border-0 hover:bg-gray-50 cursor-pointer"
                 >
                   <td className="py-2.5 px-4 text-gray-900">{formatDateTime(s.capturedAt ?? s.completedAt)}</td>
+                  <td className="py-2.5 px-4 text-gray-500 tabular-nums">
+                    {formatSessionDuration(s.capturedAt, s.completedAt)}
+                  </td>
                   <td className="py-2.5 px-4 text-gray-500">{s.deviceName ?? '—'}</td>
                   <td className="py-2.5 px-4 text-gray-500">
                     {s.subjectCode || s.subjectName ? `${s.subjectCode ?? ''} ${s.subjectName ?? ''}`.trim() : '—'}
