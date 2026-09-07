@@ -54,12 +54,29 @@ export interface CbHelpFrame {
  */
 export type CbHelpPhase = 'idle' | 'live' | 'review' | 'done';
 
+/**
+ * Pre-session student greeting (2026-09-07) — set only for the brief window
+ * between a `lookupStudent()` FOUND result and the capture session actually
+ * starting (see `FaceCaptureApp.tsx`'s `handleStudentSubmit`). `null`/absent
+ * the rest of the time; the renderer treats its presence as "show the
+ * full-screen greeting," not `phase`, since `phase` continues to mean what
+ * it already means for the frame grid.
+ */
+export interface CbHelpGreeting {
+  code: string;
+  name: string;
+  className: string;
+  major: string;
+  academicYear: string;
+}
+
 export interface CbHelpPublishState {
   running: boolean;
   phase: CbHelpPhase;
   simultaneous: boolean;
   currentStepId: string | null;
   frames: CbHelpFrame[];
+  greeting: CbHelpGreeting | null;
 }
 
 const EMPTY_CBHELP_STATE: CbHelpPublishState = {
@@ -68,6 +85,7 @@ const EMPTY_CBHELP_STATE: CbHelpPublishState = {
   simultaneous: false,
   currentStepId: null,
   frames: [],
+  greeting: null,
 };
 
 let cbHelpState: CbHelpPublishState = EMPTY_CBHELP_STATE;
@@ -104,7 +122,25 @@ export function sanitizeCbHelpState(raw: unknown): CbHelpPublishState {
         capturedDataUrl: typeof f.capturedDataUrl === 'string' ? f.capturedDataUrl : undefined,
         attempt: Number.isFinite(f.attempt) ? Number(f.attempt) : 0,
       })),
+    greeting: sanitizeGreeting(payload?.greeting),
   };
+}
+
+/** Every field is a plain string coming straight from `lookupStudent()`'s test data — reject the whole object if any is missing rather than showing a half-blank greeting. */
+function sanitizeGreeting(raw: unknown): CbHelpGreeting | null {
+  const g = raw as Partial<CbHelpGreeting> | null | undefined;
+  if (
+    g &&
+    typeof g === 'object' &&
+    typeof g.code === 'string' &&
+    typeof g.name === 'string' &&
+    typeof g.className === 'string' &&
+    typeof g.major === 'string' &&
+    typeof g.academicYear === 'string'
+  ) {
+    return { code: g.code, name: g.name, className: g.className, major: g.major, academicYear: g.academicYear };
+  }
+  return null;
 }
 
 /** The kiosk publishing a fresh snapshot — cached here and broadcast to the CB Help window if one is open. */

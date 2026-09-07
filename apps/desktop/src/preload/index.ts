@@ -113,6 +113,19 @@ export interface CbHelpFrame {
   attempt: number;
 }
 
+/**
+ * Pre-session student greeting (2026-09-07) — mirrors
+ * `apps/desktop/src/main/cbHelpWindow.ts`'s own copy; see that file's doc
+ * comment on `CbHelpGreeting`.
+ */
+export interface CbHelpGreeting {
+  code: string;
+  name: string;
+  className: string;
+  major: string;
+  academicYear: string;
+}
+
 export interface CbHelpPublishState {
   running: boolean;
   /**
@@ -124,6 +137,7 @@ export interface CbHelpPublishState {
   simultaneous: boolean;
   currentStepId: string | null;
   frames: CbHelpFrame[];
+  greeting: CbHelpGreeting | null;
 }
 
 export interface CampaignConfig {

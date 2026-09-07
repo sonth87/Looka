@@ -35,6 +35,8 @@ import {
 } from '../../lib/recordingGate.js';
 import type { MultiFrameViewProps, MultiFrameViewFrame } from './views/types.js';
 import { GuidedCaptureScreen } from './GuidedCaptureScreen.js';
+import { StudentIdEntryScreen } from './StudentIdEntryScreen.js';
+import { lookupStudent } from '../../lib/studentLookup.js';
 import { SessionReviewModal } from '../workflow/SessionReviewModal.js';
 import { CAPTURE_MIRRORED } from '../camera/CameraPreview.js';
 import { SimulationSliders, SimulationSettings } from '../debug/SimulationSliders.js';
@@ -254,6 +256,15 @@ function reportStatsEvent(type: StatsEventType, metadata?: Record<string, unknow
  */
 type CbHelpFrameStatus = 'PENDING' | 'CURRENT' | 'COMPLETED' | 'FAILED';
 
+/** Mirrors `apps/desktop/src/main/cbHelpWindow.ts`'s own copy — see `CbHelpPublishState.greeting`'s doc comment below for when this is set. */
+interface CbHelpGreeting {
+  code: string;
+  name: string;
+  className: string;
+  major: string;
+  academicYear: string;
+}
+
 interface CbHelpFrame {
   stepId: string;
   stepType: string;
@@ -282,6 +293,15 @@ interface CbHelpPublishState {
   simultaneous: boolean;
   currentStepId: string | null;
   frames: CbHelpFrame[];
+  /**
+   * Pre-session student greeting (2026-09-07) — set only for the brief
+   * window between a `lookupStudent()` FOUND result and the capture session
+   * actually starting (`handleStudentSubmit` below). Independent of `phase`:
+   * a greeting always publishes with `phase: 'idle'`/no frames (no session
+   * exists yet), so the CB Help renderer treats this field's presence, not
+   * `phase`, as "show the full-screen greeting."
+   */
+  greeting: CbHelpGreeting | null;
 }
 
 /**
@@ -474,6 +494,19 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   const [deviceBlockedReason, setDeviceBlockedReason] = useState<'unauthorized' | 'unreachable-too-long' | null>(
     null
   );
+
+  /**
+   * Pre-session "nhập mã sinh viên" step (2026-09-07 product request) — the
+   * kiosk boots straight into this instead of the old direct "Bắt đầu"
+   * affordance, and falls back to it automatically after every session
+   * finishes (see `SessionReviewModal`'s `onAccept` below), so walking up to
+   * an idle kiosk always starts with entering a code. See
+   * `handleStudentSubmit` for the lookup → greeting → session-start sequence
+   * this gates.
+   */
+  const [awaitingStudent, setAwaitingStudent] = useState(true);
+  const [studentSubmitting, setStudentSubmitting] = useState(false);
+  const [studentLookupError, setStudentLookupError] = useState<string | null>(null);
 
   /**
    * Ref mirror of `activeWorkflow`, readable from inside the live engine's
@@ -835,6 +868,55 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     }
     engine.recordExternalCapture(stepId, dataUrl);
     return true;
+  };
+
+  /** How long the greeting stays on the CB Help window before the capture session (and recording) starts — picked from the requested 2-5s range. */
+  const GREETING_DURATION_MS = 3000;
+
+  /**
+   * Handles a submit from `StudentIdEntryScreen` — the pre-session step
+   * (2026-09-07 product request). `lookupStudent()` is currently simulated
+   * (see that function's own doc comment); everything downstream of it is
+   * real and will not need to change once it calls a real API instead.
+   *
+   * NOT_FOUND: surfaces an on-screen message and leaves `awaitingStudent`
+   * true — the operator/student can retry immediately from the same screen.
+   *
+   * FOUND: publishes the greeting to the CB Help window, waits
+   * `GREETING_DURATION_MS` so it is actually seen before anything else
+   * happens (§ requirement: capture, and recording, must start only after
+   * the greeting — not before), then closes this screen and starts the
+   * session via the existing, unmodified `handleStartWorkflow` — which
+   * already arms recording in the same call (`setRecordVideo` +
+   * `startSession`), so capture and recording start together with no
+   * separate wiring needed here.
+   */
+  const handleStudentSubmit = async (code: string) => {
+    setStudentSubmitting(true);
+    setStudentLookupError(null);
+    try {
+      const result = await lookupStudent(code);
+      if (result.status === 'NOT_FOUND') {
+        setStudentLookupError(
+          'Không tìm thấy mã sinh viên này. Vui lòng liên hệ giáo viên hướng dẫn.'
+        );
+        return;
+      }
+      publishCbHelpState({
+        greeting: {
+          code: result.code,
+          name: result.name,
+          className: result.className,
+          major: result.major,
+          academicYear: result.academicYear,
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, GREETING_DURATION_MS));
+      setAwaitingStudent(false);
+      await handleStartWorkflow();
+    } finally {
+      setStudentSubmitting(false);
+    }
   };
 
   const handleStartWorkflow = async () => {
@@ -1901,35 +1983,39 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    * or restarted run must not leave its last frame/photo showing on the
    * extended display.
    */
-  const publishCbHelpState = useCallback((opts?: { phase?: 'idle' | 'review' | 'done' }) => {
-    const faceAPI = (window as any).faceAPI;
-    if (!faceAPI?.publishCbHelpState) return; // web build, or no bridge
+  const publishCbHelpState = useCallback(
+    (opts?: { phase?: 'idle' | 'review' | 'done'; greeting?: CbHelpGreeting | null }) => {
+      const faceAPI = (window as any).faceAPI;
+      if (!faceAPI?.publishCbHelpState) return; // web build, or no bridge
 
-    const engine = liveWorkflowEngineRef.current;
-    const session = engine?.currentSession ?? null;
-    const phase: 'idle' | 'live' | 'review' | 'done' =
-      opts?.phase ?? (session?.status === 'RUNNING' ? 'live' : 'idle');
-    const running = phase === 'live';
-    const showFrames = phase !== 'idle';
+      const engine = liveWorkflowEngineRef.current;
+      const session = engine?.currentSession ?? null;
+      const phase: 'idle' | 'live' | 'review' | 'done' =
+        opts?.phase ?? (session?.status === 'RUNNING' ? 'live' : 'idle');
+      const running = phase === 'live';
+      const showFrames = phase !== 'idle';
 
-    const state: CbHelpPublishState = {
-      running,
-      phase,
-      simultaneous: simultaneousCaptureRef.current,
-      currentStepId: running ? engine!.currentState.stepId : null,
-      frames: showFrames
-        ? buildCbHelpFrames(
-            activeWorkflowRef.current,
-            session,
-            engine?.currentState.currentStepIndex ?? 0,
-            simultaneousCaptureRef.current,
-            cameraRoleMappingRef.current,
-            selectedDeviceIdRef.current
-          )
-        : [],
-    };
-    void faceAPI.publishCbHelpState(state);
-  }, []);
+      const state: CbHelpPublishState = {
+        running,
+        phase,
+        simultaneous: simultaneousCaptureRef.current,
+        currentStepId: running ? engine!.currentState.stepId : null,
+        frames: showFrames
+          ? buildCbHelpFrames(
+              activeWorkflowRef.current,
+              session,
+              engine?.currentState.currentStepIndex ?? 0,
+              simultaneousCaptureRef.current,
+              cameraRoleMappingRef.current,
+              selectedDeviceIdRef.current
+            )
+          : [],
+        greeting: opts?.greeting ?? null,
+      };
+      void faceAPI.publishCbHelpState(state);
+    },
+    []
+  );
 
   /** Leaving live mode (or never having entered it) must not leave a stale live snapshot on the CB Help window. */
   useEffect(() => {
@@ -2584,6 +2670,22 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         </div>
       )}
       {/*
+        Pre-session "nhập mã sinh viên" step (2026-09-07) — shown whenever no
+        session is in flight, including automatically again after one
+        finishes (see SessionReviewModal's onAccept below). One z-index below
+        the device-blocked overlay above: a blocked device must still win if
+        both were ever true at once, which can't really happen in practice
+        (blockedReason only surfaces once a session actually tries to start)
+        but costs nothing to order correctly.
+      */}
+      {awaitingStudent && !deviceBlockedReason && (
+        <StudentIdEntryScreen
+          onSubmit={(code) => void handleStudentSubmit(code)}
+          submitting={studentSubmitting}
+          error={studentLookupError}
+        />
+      )}
+      {/*
         A capture that was not stored has to be visible while the person is
         still standing there. Discovering it once the session is finished is too
         late to retake anything.
@@ -2711,6 +2813,25 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
             // session, so it still holds every capturedImagePath this reads.
             publishCbHelpState({ phase: 'done' });
             setShowReviewModal(false);
+            // Walk-up-kiosk loop (2026-09-07 product request, requirement
+            // #5): one student's session just finished — fall straight back
+            // to the "nhập mã sinh viên" step for the next one, instead of
+            // leaving the kiosk sitting idle on the closed review screen.
+            // Reset the same session-scoped state `handleRestart` resets
+            // (1781 above), but deliberately do NOT re-call `startSession`
+            // the way that "chụp lại toàn bộ" path does — the next session
+            // must wait for a new student to be identified first.
+            // `publishCbHelpState({ phase: 'done' })` just above is left in
+            // place on purpose: the CB Help window keeps showing this
+            // student's photos until the next greeting overwrites it, same
+            // "stays visible after the shot" behavior CB Help already has
+            // elsewhere in this file.
+            setIsWorkflowStarted(false);
+            isWorkflowStartedRef.current = false;
+            setRecordingSessionKey(null);
+            runSessionRef.current.reset();
+            setStudentLookupError(null);
+            setAwaitingStudent(true);
           }}
           onRetake={handleRestart}
           onRetakeStep={handleRetakeStep}
