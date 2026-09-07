@@ -26,6 +26,22 @@ export interface OutboxItem {
    * with `doneAt`, it answers "was this actually sent, and when."
    */
   approvedAt: number | null;
+  /**
+   * Which workflow step this capture belongs to, e.g. 'step-front'. Backed by
+   * its own column since migration 008, falling back to a parse of
+   * `idemKey` for rows written before that migration — see `toItem()` and
+   * migration 008's own doc comment for why that fallback is exact, not a
+   * guess. Only null if `idemKey` itself does not match the expected shape,
+   * which no code path that writes this table produces.
+   */
+  stepId: string | null;
+  /**
+   * Which attempt at `stepId` this is, numbered from 1 within the session —
+   * see `stepId`'s own doc comment for where this comes from pre- and
+   * post-migration 008. `approveSession()` keeps only the highest of these
+   * per `(kind, stepId)`.
+   */
+  attempt: number | null;
   attempts: number;
   nextRetryAt: number | null;
   lastError: string | null;
@@ -57,6 +73,14 @@ export interface EnqueueInput {
    * this repository never substitutes one on the caller's behalf.
    */
   visibility?: Visibility;
+  /**
+   * Optional explicit values for the columns migration 008 added. Omitted is
+   * perfectly safe — `toItem()` recovers both from `idemKey` on read — but a
+   * caller that already has them on hand (queueCapture() always does) should
+   * pass them through rather than make every future read re-parse a string.
+   */
+  stepId?: string;
+  attempt?: number;
 }
 
 export interface OutboxStats {
@@ -65,6 +89,15 @@ export interface OutboxStats {
   awaitingScan: number;
   failedPermanent: number;
   oldestPendingAt: number | null;
+}
+
+
+/** Result of approveSession() — see that method's own doc comment. */
+export interface ApproveSessionResult {
+  /** Rows newly approved by this call. 0 for an already-approved or nonexistent session — a harmless no-op, not an error. */
+  approved: number;
+  /** Rows this call deleted because a later attempt at the same step superseded them, so the caller can unlink their local files. */
+  superseded: Array<{ id: string; localPath: string }>;
 }
 
 /** Exponential backoff with jitter, capped so a long outage still retries hourly-ish. */
@@ -93,8 +126,9 @@ export class UploadOutboxRepository {
     this.db.run(
       `INSERT INTO upload_outbox (
          id, session_id, kind, local_path, virtual_path, mime_type, sha256, size_bytes,
-         metadata, idem_key, upload_id, depends_on, visibility, status, attempts, next_retry_at, created_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, ?, ?)
+         metadata, idem_key, upload_id, depends_on, visibility, step_id, attempt,
+         status, attempts, next_retry_at, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, ?, ?)
        ON CONFLICT(idem_key) DO NOTHING`,
       [
         input.id,
@@ -110,6 +144,8 @@ export class UploadOutboxRepository {
         input.uploadId,
         input.dependsOn ?? null,
         input.visibility ?? null,
+        input.stepId ?? null,
+        input.attempt ?? null,
         Date.now(),
         Date.now(),
       ]
@@ -167,21 +203,87 @@ export class UploadOutboxRepository {
    * Returns how many rows this call actually moved, so a caller can tell a
    * genuine approval from a no-op repeat.
    */
-  public approveSession(sessionId: string): number {
-    const before = this.db.exec<{ n: number }>(
-      `SELECT COUNT(*) AS n FROM upload_outbox WHERE session_id = ? AND approved_at IS NULL`,
-      [sessionId]
-    );
-    const count = Number(before[0]?.n ?? 0);
-    if (count === 0) return 0;
+  public approveSession(sessionId: string): ApproveSessionResult {
+    return this.db.transaction(() => {
+      const staged = this.db
+        .exec<Record<string, unknown>>(
+          `SELECT * FROM upload_outbox WHERE session_id = ? AND approved_at IS NULL`,
+          [sessionId]
+        )
+        .map(toItem);
 
-    this.db.run(
-      `UPDATE upload_outbox
-          SET approved_at = ?, next_retry_at = NULL
-        WHERE session_id = ? AND approved_at IS NULL`,
-      [Date.now(), sessionId]
-    );
-    return count;
+      if (staged.length === 0) return { approved: 0, superseded: [] };
+
+      // Group by (kind, stepId) — see D5 in the phase-11 plan. A stepId that
+      // somehow fails to resolve (never observed — see toItem()'s fallback)
+      // groups under this row's own id instead of null, so a row this
+      // defensive branch cannot make sense of is always kept on its own,
+      // never merged with an unrelated one.
+      const groups = new Map<string, OutboxItem[]>();
+      for (const item of staged) {
+        const key = `${item.kind} ${item.stepId ?? `row:${item.id}`}`;
+        const list = groups.get(key);
+        if (list) list.push(item);
+        else groups.set(key, [item]);
+      }
+
+      // Highest attempt per group wins; a tie (should not happen — attempt
+      // plus stepId plus kind is exactly what idem_key's uniqueness already
+      // guards) is broken by whichever row was captured most recently.
+      const keep: OutboxItem[] = [];
+      const superseded: Array<{ id: string; localPath: string }> = [];
+      for (const list of groups.values()) {
+        list.sort((a, b) => (b.attempt ?? 0) - (a.attempt ?? 0) || b.createdAt - a.createdAt);
+        const [winner, ...losers] = list;
+        keep.push(winner);
+        for (const loser of losers) superseded.push({ id: loser.id, localPath: loser.localPath });
+      }
+
+      const now = Date.now();
+      const keepPlaceholders = keep.map(() => '?').join(',');
+      this.db.run(
+        `UPDATE upload_outbox
+            SET approved_at = ?, next_retry_at = NULL
+          WHERE id IN (${keepPlaceholders})`,
+        [now, ...keep.map((i) => i.id)]
+      );
+
+      // Superseded rows are still unapproved by construction (the SELECT
+      // above only ever considered approved_at IS NULL rows), so this can
+      // never touch a row already released to the UploadWorker or already
+      // uploaded. See D5 for why deleting — rather than a "superseded"
+      // status — is correct: the status CHECK constraint (migration 003) has
+      // no such value, and a deleted row can never be resurrected by
+      // claimDue().
+      if (superseded.length > 0) {
+        const delPlaceholders = superseded.map(() => '?').join(',');
+        this.db.run(`DELETE FROM upload_outbox WHERE id IN (${delPlaceholders})`, superseded.map((s) => s.id));
+      }
+
+      return { approved: keep.length, superseded };
+    });
+  }
+
+  /**
+   * Every row on file for a session, in capture order — survivors and
+   * terminal (DONE/FAILED_PERMANENT) rows alike.
+   *
+   * Meant to be called right after approveSession() has removed the
+   * superseded rows of a fresh approval: at that point "still here" already
+   * means "final," which is what lets apps/desktop's approveSessionUpload()
+   * build the SESSION_REPORT stats event straight from this list without a
+   * second filter. Unlike listSessionPhotos() (apps/desktop/src/main/
+   * uploads.ts), this returns the full OutboxItem — mimeType, sha256,
+   * virtualPath and friends — because the report needs all of it, not just
+   * what a status panel would show.
+   */
+  public listBySession(sessionId: string): OutboxItem[] {
+    return this.db
+      .exec<Record<string, unknown>>(
+        `SELECT * FROM upload_outbox WHERE session_id = ? ORDER BY created_at ASC`,
+        [sessionId]
+      )
+      .map(toItem);
   }
 
   public markSending(id: string): void {
@@ -311,7 +413,31 @@ export class UploadOutboxRepository {
   }
 }
 
+/**
+ * Recovers the step id encoded in idem_key (`<sessionId>:<stepId>:<attempt>:
+ * <kind>`) for a row written before migration 008 added its own column — see
+ * that migration's own doc comment for why this is an exact recovery, not a
+ * guess: none of the three other parts can contain the ':' this splits on.
+ * Returns null only if idemKey does not have the expected shape at all,
+ * which no code path that writes this table produces.
+ */
+function stepIdFromIdemKey(idemKey: string): string | null {
+  const parts = idemKey.split(':');
+  if (parts.length < 4) return null;
+  const stepId = parts.slice(1, parts.length - 2).join(':');
+  return stepId.length > 0 ? stepId : null;
+}
+
+/** Same recovery as stepIdFromIdemKey(), for the attempt number instead. */
+function attemptFromIdemKey(idemKey: string): number | null {
+  const parts = idemKey.split(':');
+  if (parts.length < 4) return null;
+  const attempt = Number(parts[parts.length - 2]);
+  return Number.isFinite(attempt) ? attempt : null;
+}
+
 function toItem(r: Record<string, unknown>): OutboxItem {
+  const idemKey = String(r.idem_key);
   return {
     id: String(r.id),
     sessionId: String(r.session_id),
@@ -322,12 +448,14 @@ function toItem(r: Record<string, unknown>): OutboxItem {
     sha256: String(r.sha256),
     sizeBytes: Number(r.size_bytes ?? 0),
     metadata: r.metadata ? (JSON.parse(String(r.metadata)) as Record<string, string>) : null,
-    idemKey: String(r.idem_key),
+    idemKey,
     uploadId: String(r.upload_id),
     dependsOn: r.depends_on ? String(r.depends_on) : null,
     visibility: r.visibility === 'public' || r.visibility === 'private' ? r.visibility : null,
     status: String(r.status) as OutboxStatus,
     approvedAt: r.approved_at === null || r.approved_at === undefined ? null : Number(r.approved_at),
+    stepId: r.step_id !== null && r.step_id !== undefined ? String(r.step_id) : stepIdFromIdemKey(idemKey),
+    attempt: r.attempt === null || r.attempt === undefined ? attemptFromIdemKey(idemKey) : Number(r.attempt),
     attempts: Number(r.attempts ?? 0),
     nextRetryAt: r.next_retry_at === null || r.next_retry_at === undefined ? null : Number(r.next_retry_at),
     lastError: r.last_error ? String(r.last_error) : null,

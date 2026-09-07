@@ -94,17 +94,101 @@ describe('UploadOutbox — staging and approval', () => {
     repo.enqueue(job('j2', { idemKey: 'sess_1:j2:1:raw', virtualPath: 'raw/sess_1/j2.jpg' }));
 
     const firstCall = repo.approveSession('sess_1');
-    assert.equal(firstCall, 2, 'both staged rows were released');
+    assert.equal(firstCall.approved, 2, 'both staged rows were released');
+    assert.deepEqual(firstCall.superseded, [], 'distinct steps — nothing superseded');
 
     const secondCall = repo.approveSession('sess_1');
-    assert.equal(secondCall, 0, 'nothing left to approve — a harmless no-op');
+    assert.equal(secondCall.approved, 0, 'nothing left to approve — a harmless no-op');
+    assert.deepEqual(secondCall.superseded, []);
     assert.equal(repo.claimDue(Date.now()).length, 2, 'the earlier approval still holds');
     adapter.close();
   });
 
   test('a session with nothing staged approves harmlessly', async () => {
     const { adapter, repo } = await makeRepo();
-    assert.equal(repo.approveSession('sess_nonexistent'), 0);
+    const result = repo.approveSession('sess_nonexistent');
+    assert.equal(result.approved, 0);
+    assert.deepEqual(result.superseded, []);
+    adapter.close();
+  });
+});
+
+describe('UploadOutbox — attempt de-duplication (phase-11 D5)', () => {
+  test('approveSession keeps only the highest attempt per step and deletes the rest', async () => {
+    const { adapter, repo } = await makeRepo();
+    // Two attempts at the same step (a retake), plus a different step —
+    // only the retaken step's later attempt and the untouched step should
+    // survive.
+    repo.enqueue(
+      job('front-1', { stepId: 'step-front', attempt: 1, idemKey: 'sess_1:step-front:1:face', virtualPath: 'face/sess_1/step-front-1.jpg' })
+    );
+    repo.enqueue(
+      job('front-2', { stepId: 'step-front', attempt: 2, idemKey: 'sess_1:step-front:2:face', virtualPath: 'face/sess_1/step-front-2.jpg' })
+    );
+    repo.enqueue(
+      job('left-1', { stepId: 'step-left', attempt: 1, idemKey: 'sess_1:step-left:1:face', virtualPath: 'face/sess_1/step-left-1.jpg' })
+    );
+
+    const result = repo.approveSession('sess_1');
+
+    assert.equal(result.approved, 2, 'one survivor per step');
+    assert.deepEqual(result.superseded, [{ id: 'front-1', localPath: '/data/front-1.jpg' }]);
+
+    const due = repo.claimDue(Date.now()).map((d) => d.id).sort();
+    assert.deepEqual(due, ['front-2', 'left-1']);
+    assert.equal(repo.getById('front-1'), null, 'the superseded row is gone, not just unapproved');
+    assert.equal(repo.getById('front-2')!.attempt, 2);
+    adapter.close();
+  });
+
+  test('a second approveSession call is a no-op once superseded rows are already gone', async () => {
+    const { adapter, repo } = await makeRepo();
+    repo.enqueue(job('front-1', { stepId: 'step-front', attempt: 1, idemKey: 'sess_1:step-front:1:face' }));
+    repo.enqueue(job('front-2', { stepId: 'step-front', attempt: 2, idemKey: 'sess_1:step-front:2:face' }));
+
+    repo.approveSession('sess_1');
+    const second = repo.approveSession('sess_1');
+
+    assert.deepEqual(second, { approved: 0, superseded: [] });
+    adapter.close();
+  });
+
+  test('never deletes a row that is already approved or uploaded', async () => {
+    // Simulates the report/approval already having happened once (e.g. a
+    // step captured, approved and even uploaded before the operator somehow
+    // triggers another approve for the same session) — a later attempt at
+    // the same step must never delete an already-approved/uploaded row.
+    const { adapter, repo } = await makeRepo();
+    repo.enqueue(job('front-1', { stepId: 'step-front', attempt: 1, idemKey: 'sess_1:step-front:1:face' }));
+    repo.approveSession('sess_1');
+    repo.markSending('front-1');
+    repo.markUploaded('front-1', 'file_1', 'SCANNING');
+
+    // A later attempt at the same step, captured (hypothetically) after the
+    // first was already uploaded, is still just a fresh staged row.
+    repo.enqueue(job('front-2', { stepId: 'step-front', attempt: 2, idemKey: 'sess_1:step-front:2:face' }));
+    const result = repo.approveSession('sess_1');
+
+    assert.equal(result.approved, 1, 'only the newly staged row is newly approved');
+    assert.deepEqual(result.superseded, [], 'the already-uploaded row is never touched, let alone deleted');
+    assert.equal(repo.getById('front-1')!.status, 'UPLOADED', 'untouched');
+    assert.equal(repo.getById('front-2')!.status, 'PENDING');
+    adapter.close();
+  });
+
+  test('a row whose idem_key does not carry a recognisable step is kept, never grouped with an unrelated row', async () => {
+    const { adapter, repo } = await makeRepo();
+    // Deliberately malformed idemKey (too few segments) — stepId/attempt
+    // cannot be recovered, so toItem() falls back to null and approveSession
+    // must fall back to a singleton group keyed by the row's own id rather
+    // than accidentally merging it with another malformed row.
+    repo.enqueue(job('odd-1', { idemKey: 'not-a-valid-key' }));
+    repo.enqueue(job('odd-2', { idemKey: 'also:not:valid' }));
+
+    const result = repo.approveSession('sess_1');
+
+    assert.equal(result.approved, 2, 'both kept — neither could be shown to supersede the other');
+    assert.deepEqual(result.superseded, []);
     adapter.close();
   });
 });

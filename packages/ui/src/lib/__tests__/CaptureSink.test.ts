@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { CaptureSink, ElectronCaptureSink, RunScopedCaptureSession } from '../CaptureSink.js';
+import type { ApprovalStepInfo } from '../CaptureSink.js';
 
 /**
  * Stubs the desktop preload bridge `ElectronCaptureSink` reaches through
@@ -40,6 +41,7 @@ function fakeSink(
   let nextId = 0;
   let startSessionCalls = 0;
   const calls: string[] = [];
+  const approveUploadSteps: Array<ApprovalStepInfo[] | undefined> = [];
 
   const sink: CaptureSink = {
     async startSession() {
@@ -57,8 +59,9 @@ function fakeSink(
     async completeSession(sessionId) {
       calls.push(`completeSession:${sessionId}`);
     },
-    async approveUpload(sessionId) {
+    async approveUpload(sessionId, steps) {
       calls.push(`approveUpload:${sessionId}`);
+      approveUploadSteps.push(steps);
       if (options.approveShouldFail) throw new Error('approve failed');
     },
   };
@@ -66,6 +69,7 @@ function fakeSink(
   return {
     sink,
     calls,
+    approveUploadSteps,
     get startSessionCalls() {
       return startSessionCalls;
     },
@@ -190,6 +194,33 @@ test('approve() uses the run\'s current session id without clearing it', async (
     'approveUpload:session_1',
     'completeSession:session_1',
   ]);
+});
+
+test('approve() forwards per-step context through to the sink unchanged', async () => {
+  // FaceCaptureApp's onAccept builds this from the completed session — see
+  // uploads.ts's SessionApprovalStepInfo doc comment for why the outbox row
+  // alone cannot supply stepType/cameraRole/capturedAt.
+  const { sink, calls, approveUploadSteps } = fakeSink();
+  const run = new RunScopedCaptureSession(sink);
+  const steps = [
+    { stepId: 'step-front', stepType: 'FRONT', cameraRole: 'CENTER', attempt: 1, capturedAt: '2026-09-06T10:00:00.000Z' },
+  ];
+
+  await run.savePhoto({ stepId: 'step-front', attempt: 1, dataUrl: 'data:image/jpeg;base64,aaaa' });
+  await run.approve(steps);
+
+  assert.deepEqual(calls, ['startSession', 'savePhoto:session_1:step-front:1', 'approveUpload:session_1']);
+  assert.deepEqual(approveUploadSteps, [steps]);
+});
+
+test('approve() with no steps argument forwards undefined, not an empty array', async () => {
+  const { sink, approveUploadSteps } = fakeSink();
+  const run = new RunScopedCaptureSession(sink);
+
+  await run.savePhoto({ stepId: 'step-front', attempt: 1, dataUrl: 'data:image/jpeg;base64,aaaa' });
+  await run.approve();
+
+  assert.deepEqual(approveUploadSteps, [undefined]);
 });
 
 test('two savePhoto calls fired in the same tick share one startSession call, not two', async () => {
@@ -364,3 +395,21 @@ test('ElectronCaptureSink.approveUpload still rejects on an explicit ok:false, s
       await assert.rejects(() => sink.approveUpload('session_x'), /boom/);
     }
   ));
+
+test('ElectronCaptureSink.approveUpload forwards sessionId and steps in one payload to faceAPI', async () => {
+  const calls: unknown[] = [];
+  await withFakeWindow(
+    {
+      approveSessionUpload: async (payload: unknown) => {
+        calls.push(payload);
+        return { ok: true, approved: 1 };
+      },
+    },
+    async () => {
+      const sink = new ElectronCaptureSink();
+      const steps = [{ stepId: 'step-front', stepType: 'FRONT', cameraRole: 'CENTER', attempt: 1 }];
+      await sink.approveUpload('session_ok', steps);
+    }
+  );
+  assert.deepEqual(calls, [{ sessionId: 'session_ok', steps: [{ stepId: 'step-front', stepType: 'FRONT', cameraRole: 'CENTER', attempt: 1 }] }]);
+});

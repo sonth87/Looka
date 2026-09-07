@@ -30,7 +30,12 @@ export class PhotoController {
     @Param('id') photoId: string,
     @Body() dto: ViewLinkDto,
   ): Promise<PhotoViewLink> {
-    const fileId = await this.photoService.findFsFileIdOrFail(photoId);
-    return this.fileStorage.issueViewLink(fileId, dto.viewerId ?? 'web-viewer');
+    const { fsFileId, tenantName } =
+      await this.photoService.resolveViewContext(photoId);
+    return this.fileStorage.issueViewLink(
+      fsFileId,
+      dto.viewerId ?? 'web-viewer',
+      tenantName,
+    );
   }
 }

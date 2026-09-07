@@ -25,7 +25,7 @@ export type { SessionStore } from './repositories/SessionRepository.js';
 export { AttendanceRepository, businessDayOf } from './repositories/AttendanceRepository.js';
 export type { AttendanceRecordParams, LastAttendance } from './repositories/AttendanceRepository.js';
 export { UploadOutboxRepository, nextRetryDelayMs } from './repositories/UploadOutboxRepository.js';
-export type { OutboxItem, OutboxStatus, EnqueueInput, OutboxStats } from './repositories/UploadOutboxRepository.js';
+export type { OutboxItem, OutboxStatus, EnqueueInput, OutboxStats, ApproveSessionResult } from './repositories/UploadOutboxRepository.js';
 export { CaptureStreamRepository } from './repositories/CaptureStreamRepository.js';
 export type { CaptureStreamItem, StartStreamInput, EndStreamInput } from './repositories/CaptureStreamRepository.js';
 export { StatsEventRepository } from './repositories/StatsEventRepository.js';

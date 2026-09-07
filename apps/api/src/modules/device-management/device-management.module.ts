@@ -1,3 +1,4 @@
+import { CaptureModule } from '@app/modules/capture/capture.module';
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { CampaignController } from './controllers/campaign.controller';
@@ -13,7 +14,10 @@ import { DeviceService } from './services/device.service';
 import { DeviceEventService } from './services/device-event.service';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Campaign, Device, DeviceEvent])],
+  imports: [
+    TypeOrmModule.forFeature([Campaign, Device, DeviceEvent]),
+    CaptureModule,
+  ],
   // DeviceSelfController MUST come before DeviceController: Nest/Express
   // matches routes in registration order, and DeviceController's `GET
   // devices/:id` is a dynamic segment that matches the literal string
@@ -26,7 +30,13 @@ import { DeviceEventService } from './services/device-event.service';
   // Postgres, not by any unit test — those exercise each controller/guard in
   // isolation and never see the two composed together through Nest's router.
   controllers: [DeviceSelfController, CampaignController, DeviceController],
-  providers: [CampaignService, DeviceService, DeviceEventService, ActivationPackageService, DeviceCredentialsGuard],
+  providers: [
+    CampaignService,
+    DeviceService,
+    DeviceEventService,
+    ActivationPackageService,
+    DeviceCredentialsGuard,
+  ],
   exports: [CampaignService, DeviceService, DeviceEventService],
 })
 export class DeviceManagementModule {}

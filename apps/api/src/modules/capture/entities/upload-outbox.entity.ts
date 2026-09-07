@@ -46,4 +46,12 @@ export class UploadOutboxEntry extends BaseEntity {
 
   @Column('timestamptz', { default: () => 'now()', name: 'next_retry_at' })
   nextRetryAt: Date;
+
+  /**
+   * Set once the operator approves the session (decision 1, A.4) -
+   * `UploadWorkerService.claimNext()` never sends a row until this is set,
+   * aligning the web path with the kiosk's own approval gate.
+   */
+  @Column('timestamptz', { nullable: true, name: 'approved_at' })
+  approvedAt?: Date;
 }

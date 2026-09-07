@@ -35,6 +35,7 @@ import {
   getPhotoViewSource,
   downloadPhoto,
 } from './uploads.js';
+import type { SessionApprovalStepInfo } from './uploads.js';
 import {
   getFileServiceCredentials,
   setFileServiceCredentials,
@@ -667,9 +668,15 @@ app.whenReady().then(async () => {
    * button, after the operator has reviewed every step. Every row queueCapture
    * wrote for this session so far — and only this session — becomes eligible
    * for the existing background UploadWorker from here; nothing here talks to
-   * the file-service directly. A session with nothing left to approve
-   * (already approved, or unknown) is not an error: `approved: 0` reports
-   * that plainly so the caller can tell a genuine approval from a no-op.
+   * the file-service directly. Only the row with the highest attempt per step
+   * survives (a retake's earlier shot is deleted, not uploaded — see
+   * UploadOutboxRepository.approveSession()); the optional `steps` array lets
+   * the renderer attach stepType/cameraRole/capturedAt to those survivors for
+   * the SESSION_REPORT stats event this also enqueues (§5 of phase-11's
+   * plan) — see approveSessionUpload()'s own doc comment. A session with
+   * nothing left to approve (already approved, or unknown) is not an error:
+   * `approved: 0, superseded: 0` reports that plainly so the caller can tell
+   * a genuine approval from a no-op.
    *
    * The `console.warn` below is deliberate, not incidental logging: the
    * 2026-09-05 field bug this diagnoses (operator confirms, modal closes,
@@ -682,18 +689,29 @@ app.whenReady().then(async () => {
    * photos is diagnosable from the log alone instead of requiring a fresh
    * repro.
    */
-  ipcMain.handle('session:approveUpload', (_, payload: { sessionId?: unknown }) => {
-    const sessionId = String(payload?.sessionId ?? '');
-    if (!sessionId) return { ok: false, error: 'A session id is required.' };
-    try {
-      const approved = approveSessionUpload(sessionId);
-      console.warn(`[session:approveUpload] sessionId=${sessionId} approved=${approved}`);
-      return { ok: true, approved };
-    } catch (err) {
-      console.warn(`[session:approveUpload] sessionId=${sessionId} failed: ${(err as Error).message}`);
-      return { ok: false, error: (err as Error).message };
+  ipcMain.handle(
+    'session:approveUpload',
+    (
+      _,
+      payload: { sessionId?: unknown; steps?: unknown; workflowId?: unknown; startedAt?: unknown }
+    ) => {
+      const sessionId = String(payload?.sessionId ?? '');
+      if (!sessionId) return { ok: false, error: 'A session id is required.' };
+      try {
+        const steps = Array.isArray(payload?.steps) ? (payload.steps as SessionApprovalStepInfo[]) : undefined;
+        const workflowId = typeof payload?.workflowId === 'string' ? payload.workflowId : undefined;
+        const startedAt = typeof payload?.startedAt === 'string' ? payload.startedAt : undefined;
+        const { approved, superseded } = approveSessionUpload(sessionId, steps, { workflowId, startedAt });
+        console.warn(
+          `[session:approveUpload] sessionId=${sessionId} approved=${approved} superseded=${superseded}`
+        );
+        return { ok: true, approved, superseded };
+      } catch (err) {
+        console.warn(`[session:approveUpload] sessionId=${sessionId} failed: ${(err as Error).message}`);
+        return { ok: false, error: (err as Error).message };
+      }
     }
-  });
+  );
 
   // Native File Export IPC
   ipcMain.handle(

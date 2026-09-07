@@ -35,7 +35,12 @@ export function recordStatsEvent(type: StatsEventType, metadata?: Record<string,
 }
 
 async function tick(client: DeviceApiClient): Promise<void> {
-  const pending = getRepo().claimPending();
+  // Capped at 50: a batch this size keeps one push request small and fast
+  // even after a long offline stretch fills the local queue, while still
+  // draining it within a handful of ticks once connectivity returns — see
+  // startStatsEventPush's own doc comment for the tick cadence this pairs
+  // with.
+  const pending = getRepo().claimPending(50);
   if (pending.length === 0) return;
 
   const ok = await client.pushEvents(
@@ -52,7 +57,8 @@ async function tick(client: DeviceApiClient): Promise<void> {
 }
 
 /** Starts the periodic push. A no-op to call more than once — `stopStatsEventPush` must be called before restarting. */
-export function startStatsEventPush(client: DeviceApiClient = new DeviceApiClient(), tickMs = 60_000): void {
+/** Starts the periodic push. A no-op to call more than once — `stopStatsEventPush` must be called before restarting. */
+export function startStatsEventPush(client: DeviceApiClient = new DeviceApiClient(), tickMs = 15_000): void {
   if (timer) return;
   timer = setInterval(() => void tick(client), tickMs);
 }

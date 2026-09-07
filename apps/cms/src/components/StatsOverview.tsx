@@ -37,6 +37,10 @@ export function StatsOverview({ onOpenCampaign }: { onOpenCampaign: (id: string)
             <StatTile label="Upload thất bại" value={stats.totalUploadFailed} />
             <StatTile label="Lần chụp lại" value={stats.totalRetakes} />
             <StatTile label="CB Help can thiệp" value={stats.totalCbHelpInterventions} />
+            <StatTile label="Phiên chụp" value={stats.totalSessions} />
+            {/* totalPhotos is a breakdown object ({ total, ready, pending, failed }), not a bare
+                count - see CampaignPhotoStats in api.ts - so the tile shows its .total. */}
+            <StatTile label="Ảnh" value={stats.totalPhotos.total} />
           </div>
 
           <h2 className="font-semibold text-gray-900 mb-3">Theo từng campaign</h2>

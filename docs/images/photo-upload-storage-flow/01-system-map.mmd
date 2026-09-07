@@ -1,0 +1,49 @@
+flowchart LR
+  subgraph KIOSK["Kiosk — apps/desktop (Electron)"]
+    R["Renderer<br/>FaceCaptureApp → ElectronCaptureSink"]
+    M["Main process<br/>capture:queue · session:approveUpload<br/>UploadWorker (5 s tick, batch 2)"]
+    CAP[("userData/captures/{sessionId}/<br/>face-{stepId}-{attempt}.jpg")]
+    SQL[("SQLite face.db<br/>upload_outbox — approved_at gate")]
+    R -->|"IPC: dataUrl"| M
+    M --> CAP
+    M --> SQL
+  end
+
+  subgraph WEB["Web — apps/web + apps/api (NestJS :3100)"]
+    B["Browser<br/>HttpCaptureSink"]
+    API["apps/api<br/>PhotoService · UploadWorkerService (3 s cron)"]
+    PG1[("Postgres looka<br/>photos · upload_outbox (bytea content)")]
+    B -->|"POST /v1/sessions/{id}/photos<br/>x-api-key"| API
+    API --> PG1
+  end
+
+  subgraph FSRV["file-server (Dev-FileServer 192.168.101.32, pm2 + Docker)"]
+    CORE["fs-core :8080<br/>auth · VFS · ACL · ioengine"]
+    SW[("SeaweedFS filer :8888<br/>/hot /cool /cold<br/>blobs/ab/cd/{sha256}.{uuid}.enc")]
+    PG2[("Postgres file_services<br/>schema file_server: file · file_version · blob<br/>blob_key · user_file · quota · event_outbox · upload_stat")]
+    RD[("Redis DB 12<br/>ACL cache · rate limit · share tokens · locks")]
+    STANDBY[("Local disk STANDBY<br/>FS_STORAGE_STANDBY_ROOT<br/>used only when SeaweedFS fails")]
+    MIRROR[("Local disk MIRROR<br/>FS_MIRROR_ROOT → /mnt/file_storage<br/>async plaintext copy — OFF when env is empty")]
+    WORKER["fs-worker (pm2)<br/>pipeline: av-scan 5 s · lifecycle: tiering<br/>gc · relay → NATS"]
+    CLAM["ClamAV clamd :3310"]
+    FE["file-fe (Next.js)<br/>/browse · /view/{id} · /admin/tier"]
+    CORE --> SW
+    CORE --> PG2
+    CORE --> RD
+    CORE -.->|"Put fails → fallback"| STANDBY
+    CORE -.->|"after commit, async"| MIRROR
+    WORKER --> PG2
+    WORKER --> SW
+    WORKER --> CLAM
+    FE -->|"SSO bearer + X-API-Key"| CORE
+  end
+
+  M -->|"POST /api/v1/files<br/>X-API-Key of the per-device tenant"| CORE
+  API -->|"POST /api/v1/files<br/>X-API-Key of tenant looka-face-capture"| CORE
+
+  classDef store fill:#fff7e6,stroke:#b8860b,color:#000
+  classDef proc fill:#eef6ff,stroke:#1f6feb,color:#000
+  classDef disk fill:#f0f0f0,stroke:#888,color:#000
+  class CAP,SQL,PG1,PG2,RD,SW store
+  class R,M,B,API,CORE,WORKER,FE,CLAM proc
+  class STANDBY,MIRROR disk

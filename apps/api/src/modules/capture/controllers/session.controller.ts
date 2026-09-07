@@ -1,11 +1,26 @@
 import {
   ApiResponseArrayDecorator,
   ApiResponseDecorator,
+  ApiResponsePaginatedDecorator,
 } from '@app/common/decorators';
-import { Body, Controller, Get, HttpCode, Param, Post } from '@nestjs/common';
+import { Pagination } from '@app/modules/shared/common/pagination';
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  Param,
+  Post,
+  Query,
+} from '@nestjs/common';
 import { ApiOperation, ApiSecurity, ApiTags } from '@nestjs/swagger';
-import { PhotoDao, SessionDao } from '../dao';
-import { AddPhotoDto, CreateSessionDto } from '../dto';
+import {
+  PhotoDao,
+  SessionDao,
+  SessionDetailDao,
+  SessionListItemDao,
+} from '../dao';
+import { AddPhotoDto, CreateSessionDto, ListSessionsQueryDto } from '../dto';
 import { PhotoService } from '../services/photo.service';
 import { SessionService } from '../services/session.service';
 
@@ -23,6 +38,28 @@ export class SessionController {
   @ApiResponseDecorator(SessionDao, { status: 201 })
   createSession(@Body() dto: CreateSessionDto): Promise<SessionDao> {
     return this.sessionService.createSession(dto);
+  }
+
+  /**
+   * List of capture sessions across both paths (web and kiosk) - A.6.
+   * `state` is derived from each session's own photos, not stored - see
+   * `SessionListItemDao`'s doc comment for the exact definitions.
+   */
+  @Get()
+  @ApiOperation({ summary: 'List capture sessions, filterable and paginated' })
+  @ApiResponsePaginatedDecorator(SessionListItemDao)
+  listSessions(
+    @Query() query: ListSessionsQueryDto,
+  ): Promise<Pagination<SessionListItemDao>> {
+    return this.sessionService.listSessions(query);
+  }
+
+  /** One session with every one of its photos - A.6. */
+  @Get(':id')
+  @ApiOperation({ summary: 'Get one capture session, with its photos' })
+  @ApiResponseDecorator(SessionDetailDao)
+  getSessionDetail(@Param('id') id: string): Promise<SessionDetailDao> {
+    return this.sessionService.getSessionDetail(id);
   }
 
   /**

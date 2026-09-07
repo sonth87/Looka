@@ -8,6 +8,12 @@ export enum DeviceEventType {
   UPLOAD_FAILED = 'UPLOAD_FAILED',
   RETAKE = 'RETAKE',
   CB_HELP_INTERVENTION = 'CB_HELP_INTERVENTION',
+  // Self-sufficient capture records - see CaptureReportService and the
+  // plan's §5 kiosk-server contract. Applied (upserted into sessions/photos)
+  // by DeviceEventService.recordBatch before the raw event row below is
+  // saved, same as every other type here.
+  SESSION_REPORT = 'SESSION_REPORT',
+  PHOTO_STATUS = 'PHOTO_STATUS',
 }
 
 /**
@@ -41,10 +47,16 @@ export class DeviceEvent extends BaseEntity {
   type: DeviceEventType;
 
   @Column('timestamptz', { name: 'occurred_at' })
-  @ApiProperty({ description: "The kiosk's own clock when this happened, not when the server received it" })
+  @ApiProperty({
+    description:
+      "The kiosk's own clock when this happened, not when the server received it",
+  })
   occurredAt: Date;
 
   @Column('jsonb', { nullable: true })
-  @ApiPropertyOptional({ description: 'Free-form detail, e.g. { stepId, attempt } for a RETAKE event' })
+  @ApiPropertyOptional({
+    description:
+      'Free-form detail, e.g. { stepId, attempt } for a RETAKE event',
+  })
   metadata?: Record<string, unknown> | null;
 }

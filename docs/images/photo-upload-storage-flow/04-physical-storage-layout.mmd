@@ -1,0 +1,45 @@
+flowchart LR
+  subgraph K["Kiosk disk — per machine (Electron userData)"]
+    K1["captures/{sessionId}/face-{stepId}-{attempt}.jpg<br/>raw JPEG · never deleted"]
+    K2["streams/{streamId}.webm<br/>local video · not uploaded (decision 2026-09-05)"]
+    K3["face.db · upload_outbox<br/>local_path ↔ fs_file_id ↔ virtual_path"]
+  end
+
+  subgraph S["SeaweedFS — PRIMARY, content-addressed (no tenant / folder tree)"]
+    S1["/hot/tmp/{uploadUuid}<br/>in-flight bytes · janitor sweeps orphans > 24 h"]
+    S2["/hot/blobs/ab/cd/{sha256}.{uuid}.enc<br/>one object per unique content · AES-256-GCM"]
+    S3["/cool/blobs/ab/cd/… and /cold/blobs/ab/cd/…<br/>tier moves keep the same relative path"]
+    S4["bytes live in Docker named volumes<br/>fileserver-core_swdata / filerdata / mdata<br/>(bind-mount to /mnt/seaweedfs planned, NOT executed)"]
+  end
+
+  subgraph P["Postgres file_services.file_server — the ONLY place folders exist"]
+    P1["file.virtual_path<br/>/apps/{tenant-slug}/face/2026/{session}/{step}-{n}.jpg<br/>UNIQUE(app_id, virtual_path)"]
+    P2["file_version.blob_id → blob.physical_path (hash path)<br/>blob.tier · blob.ref_count · blob.av_scan"]
+    P3["user_file(tenant_id, user_id, file_id)<br/>current_version · own virtual_path · requested_tier"]
+    P4["GET /api/v1/folders?path=… lists this tree — nothing reads SeaweedFS to list"]
+  end
+
+  subgraph L["Server local disk / mount — VirtualLayout: a readable folder tree per tenant"]
+    L1["STANDBY {FS_STORAGE_STANDBY_ROOT}/{tenantId}/apps/{slug}/face/…<br/>written ONLY when SeaweedFS Put fails (retry once first)<br/>read fallback when the primary object is missing"]
+    L2["MIRROR {FS_MIRROR_ROOT}/{tenantId}/{appId}/apps/{slug}/face/…<br/>PLAINTEXT copy of every upload and every new version<br/>/opt/fileserver/File → symlink → /mnt/file_storage since 2026-08-20<br/>code since 2026-08-23: empty FS_MIRROR_ROOT = OFF"]
+    L3[".blobmap/blobs/ab/cd/{sha256}…<br/>pointer file → real disk path (self-describing, no DB needed)"]
+  end
+
+  K1 -->|"UploadWorker POST /api/v1/files"| S1
+  S1 -->|"dedup miss → Move"| S2
+  S2 -.->|"tier-migrate · version-tier-sync · admin move"| S3
+  S2 --> P2
+  P1 --- P2
+  P2 --- P3
+  S2 -.->|"MirrorAsync, decrypted"| L2
+  S1 -.->|"only on primary failure"| L1
+  L1 --- L3
+  L2 --- L3
+  K3 -.->|"fs_file_id"| P1
+
+  classDef store fill:#fff7e6,stroke:#b8860b,color:#000
+  classDef disk fill:#f0f0f0,stroke:#888,color:#000
+  classDef kiosk fill:#eef6ff,stroke:#1f6feb,color:#000
+  class S1,S2,S3,S4,P1,P2,P3,P4 store
+  class L1,L2,L3 disk
+  class K1,K2,K3 kiosk
