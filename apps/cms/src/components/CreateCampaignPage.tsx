@@ -1,6 +1,6 @@
 import { useState, type FormEvent, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { ApiError, CampaignPurpose, createCampaign } from '../api';
+import { ApiError, CampaignPurpose, CaptureTriggerMode, createCampaign } from '../api';
 import { CAPTURE_STEP_DEFS, StepType } from '../captureAngles';
 import { CaptureFramesEditor } from './CaptureFramesEditor';
 import { PURPOSE_LABEL } from '../campaignFormat';
@@ -70,12 +70,20 @@ function formatDraftExpiry(expiresAt: string): string {
  * Placed as a sticky sidebar on wide viewports, stacked below the form on
  * narrow ones (see the grid in `CreateCampaignPage` below).
  */
+/** Matches the corrected labels in `CaptureFramesEditor`'s capture-mode select below — see that select's own comment on the 2026-09-05 naming trap this must stay in sync with. */
+const CAPTURE_MODE_LABEL: Record<CaptureTriggerMode, string> = {
+  AUTO: 'Tự động (giữ đúng tư thế)',
+  MANUAL: 'Cử chỉ tay',
+  OFF: 'Bấm nút chụp (thủ công)',
+};
+
 function CampaignSummary({
   name,
   description,
   purpose,
   expiresAt,
   enabledAngles,
+  captureMode,
   simultaneous,
   recordVideo,
 }: {
@@ -84,6 +92,7 @@ function CampaignSummary({
   purpose: CampaignPurpose;
   expiresAt: string;
   enabledAngles: Set<StepType>;
+  captureMode: CaptureTriggerMode | '';
   simultaneous: boolean;
   recordVideo: boolean;
 }) {
@@ -136,6 +145,13 @@ function CampaignSummary({
         </div>
 
         <div className="pt-3 border-t border-gray-100">
+          <dt className="text-xs text-gray-500">Chế độ chụp</dt>
+          <dd className="text-gray-900 mt-0.5">
+            {captureMode ? CAPTURE_MODE_LABEL[captureMode] : 'Mặc định của app (theo cấu hình từng máy)'}
+          </dd>
+        </div>
+
+        <div className="pt-3 border-t border-gray-100">
           <dt className="text-xs text-gray-500 mb-1.5">Tuỳ chọn</dt>
           <dd className="flex flex-wrap gap-1.5">
             {simultaneous && <Badge tone="indigo">Đồng thời</Badge>}
@@ -168,6 +184,7 @@ export function CreateCampaignPage() {
   const [purpose, setPurpose] = useState<CampaignPurpose>('STUDENT_CARD');
   const [expiresAt, setExpiresAt] = useState('');
   const [enabledAngles, setEnabledAngles] = useState<Set<StepType>>(() => new Set(ALL_STEP_TYPES));
+  const [captureMode, setCaptureMode] = useState<CaptureTriggerMode | ''>('');
   const [simultaneous, setSimultaneous] = useState(false);
   const [recordVideo, setRecordVideo] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -197,6 +214,7 @@ export function CreateCampaignPage() {
         purpose,
         expiresAt: expiresAt ? new Date(expiresAt).toISOString() : undefined,
         captureAngles: ALL_STEP_TYPES.filter((type) => enabledAngles.has(type)).map((type) => CAPTURE_STEP_DEFS[type]),
+        captureMode: captureMode || undefined,
         simultaneousCapture: simultaneous,
         recordVideo,
       });
@@ -271,6 +289,27 @@ export function CreateCampaignPage() {
               onSimultaneousChange={setSimultaneous}
             />
 
+            <div>
+              <label className="block text-sm text-gray-500 mb-1">Chế độ chụp</label>
+              {/*
+                Labels must match CaptureTriggerEvaluator.evaluate exactly —
+                see EditCampaignPage.tsx's identical select for the
+                2026-09-05 "naming trap" this was already fixed for there:
+                MANUAL is the held hand-gesture trigger, OFF is the
+                shutter-button-only trigger, not the other way around.
+              */}
+              <select
+                value={captureMode}
+                onChange={(e) => setCaptureMode(e.target.value as CaptureTriggerMode | '')}
+                className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
+              >
+                <option value="">Mặc định của app (theo cấu hình từng máy)</option>
+                <option value="AUTO">Tự động (giữ đúng tư thế)</option>
+                <option value="MANUAL">Cử chỉ tay (giơ tay để chụp)</option>
+                <option value="OFF">Bấm nút chụp (thủ công)</option>
+              </select>
+            </div>
+
             <label className="flex items-start gap-2 text-sm">
               <input
                 type="checkbox"
@@ -309,6 +348,7 @@ export function CreateCampaignPage() {
             purpose={purpose}
             expiresAt={expiresAt}
             enabledAngles={enabledAngles}
+            captureMode={captureMode}
             simultaneous={simultaneous}
             recordVideo={recordVideo}
           />

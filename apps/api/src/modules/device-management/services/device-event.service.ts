@@ -70,6 +70,13 @@ export class DeviceEventService extends CommonService<DeviceEvent> {
             campaignId,
             event.metadata,
           );
+        } else if (event.type === DeviceEventType.VIDEO_STATUS) {
+          await this.captureReportService.applyVideoStatus(
+            manager,
+            deviceId,
+            campaignId,
+            event.metadata,
+          );
         }
       }
 

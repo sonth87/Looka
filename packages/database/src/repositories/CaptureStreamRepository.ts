@@ -100,4 +100,20 @@ export class CaptureStreamRepository {
     const rows = this.db.exec<Record<string, unknown>>(`SELECT * FROM capture_streams WHERE id = ?`, [id]);
     return rows[0] ? toItem(rows[0]) : null;
   }
+
+  /**
+   * Drop every row for a session — for an abandoned recording only (see
+   * apps/desktop/src/main/streams.ts's discardSessionVideos()). Safe
+   * unconditionally: a row that reached `upload_outbox` (via
+   * approveSessionUpload()) has already been reported centrally and stands
+   * on its own there, but nothing that ever approves a session also calls
+   * this, so the two paths never touch the same row.
+   */
+  public deleteBySession(sessionId: string): number {
+    const before = this.db.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM capture_streams WHERE session_id = ?`, [
+      sessionId,
+    ]);
+    this.db.run(`DELETE FROM capture_streams WHERE session_id = ?`, [sessionId]);
+    return Number(before[0]?.n ?? 0);
+  }
 }

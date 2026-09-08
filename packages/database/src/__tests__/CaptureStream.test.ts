@@ -79,4 +79,25 @@ describe('CaptureStreamRepository', () => {
     );
     adapter.close();
   });
+
+  test('deleteBySession removes only that session\'s rows and reports how many', async () => {
+    const { adapter, repo } = await makeRepo();
+    repo.startStream({ id: 'a', sessionId: 'sess_1', cameraId: 'CENTER', localPath: '/a.webm', startedAt: 1000 });
+    repo.startStream({ id: 'b', sessionId: 'sess_1', cameraId: 'LEFT', localPath: '/b.webm', startedAt: 2000 });
+    repo.startStream({ id: 'c', sessionId: 'sess_2', cameraId: 'CENTER', localPath: '/c.webm', startedAt: 1500 });
+
+    const removed = repo.deleteBySession('sess_1');
+
+    assert.equal(removed, 2);
+    assert.deepEqual(repo.listBySession('sess_1'), []);
+    assert.equal(repo.listBySession('sess_2').length, 1, 'a different session is untouched');
+    adapter.close();
+  });
+
+  test('deleteBySession on a session with no rows is a harmless no-op', async () => {
+    const { adapter, repo } = await makeRepo();
+    const removed = repo.deleteBySession('sess_missing');
+    assert.equal(removed, 0);
+    adapter.close();
+  });
 });

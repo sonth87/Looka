@@ -42,6 +42,7 @@ function fakeSink(
   let startSessionCalls = 0;
   const calls: string[] = [];
   const approveUploadSteps: Array<ApprovalStepInfo[] | undefined> = [];
+  const approveUploadVideoSessionIds: Array<string | undefined> = [];
 
   const sink: CaptureSink = {
     async startSession() {
@@ -59,9 +60,10 @@ function fakeSink(
     async completeSession(sessionId) {
       calls.push(`completeSession:${sessionId}`);
     },
-    async approveUpload(sessionId, steps) {
+    async approveUpload(sessionId, steps, videoSessionId) {
       calls.push(`approveUpload:${sessionId}`);
       approveUploadSteps.push(steps);
+      approveUploadVideoSessionIds.push(videoSessionId);
       if (options.approveShouldFail) throw new Error('approve failed');
     },
   };
@@ -70,6 +72,7 @@ function fakeSink(
     sink,
     calls,
     approveUploadSteps,
+    approveUploadVideoSessionIds,
     get startSessionCalls() {
       return startSessionCalls;
     },
@@ -221,6 +224,20 @@ test('approve() with no steps argument forwards undefined, not an empty array', 
   await run.approve();
 
   assert.deepEqual(approveUploadSteps, [undefined]);
+});
+
+test('approve() forwards videoSessionId through to the sink unchanged', async () => {
+  // FaceCaptureApp's onAccept passes completedSession.id (the workflow
+  // engine's own session id — a different id space than this sink's own
+  // sessionId, see CaptureSink.approveUpload's doc comment) as this
+  // argument, verbatim.
+  const { sink, approveUploadVideoSessionIds } = fakeSink();
+  const run = new RunScopedCaptureSession(sink);
+
+  await run.savePhoto({ stepId: 'step-front', attempt: 1, dataUrl: 'data:image/jpeg;base64,aaaa' });
+  await run.approve(undefined, 'session_1700000000000');
+
+  assert.deepEqual(approveUploadVideoSessionIds, ['session_1700000000000']);
 });
 
 test('two savePhoto calls fired in the same tick share one startSession call, not two', async () => {
@@ -396,7 +413,7 @@ test('ElectronCaptureSink.approveUpload still rejects on an explicit ok:false, s
     }
   ));
 
-test('ElectronCaptureSink.approveUpload forwards sessionId and steps in one payload to faceAPI', async () => {
+test('ElectronCaptureSink.approveUpload forwards sessionId, steps, and videoSessionId in one payload to faceAPI', async () => {
   const calls: unknown[] = [];
   await withFakeWindow(
     {
@@ -408,8 +425,38 @@ test('ElectronCaptureSink.approveUpload forwards sessionId and steps in one payl
     async () => {
       const sink = new ElectronCaptureSink();
       const steps = [{ stepId: 'step-front', stepType: 'FRONT', cameraRole: 'CENTER', attempt: 1 }];
-      await sink.approveUpload('session_ok', steps);
+      await sink.approveUpload('session_ok', steps, 'session_1700000000000');
     }
   );
-  assert.deepEqual(calls, [{ sessionId: 'session_ok', steps: [{ stepId: 'step-front', stepType: 'FRONT', cameraRole: 'CENTER', attempt: 1 }] }]);
+  assert.deepEqual(calls, [
+    {
+      sessionId: 'session_ok',
+      steps: [{ stepId: 'step-front', stepType: 'FRONT', cameraRole: 'CENTER', attempt: 1 }],
+      videoSessionId: 'session_1700000000000',
+    },
+  ]);
+});
+
+// videoSessionId is a separate id space (the workflow engine's own
+// CaptureSession.id) from sessionId (this sink's own crypto.randomUUID()) —
+// see CaptureSink.approveUpload's own doc comment. A caller with nothing to
+// send (no video recorded this run) must still forward `undefined` rather
+// than omit the field or substitute sessionId, so the main process's own
+// fallback-to-sessionId logic (apps/desktop's uploads.ts) is the only place
+// that decision is made.
+test('ElectronCaptureSink.approveUpload forwards videoSessionId as undefined when the caller has none', async () => {
+  const calls: unknown[] = [];
+  await withFakeWindow(
+    {
+      approveSessionUpload: async (payload: unknown) => {
+        calls.push(payload);
+        return { ok: true, approved: 1 };
+      },
+    },
+    async () => {
+      const sink = new ElectronCaptureSink();
+      await sink.approveUpload('session_ok');
+    }
+  );
+  assert.deepEqual(calls, [{ sessionId: 'session_ok', steps: undefined, videoSessionId: undefined }]);
 });

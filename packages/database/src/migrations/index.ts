@@ -8,6 +8,7 @@ import { MIGRATION_005_OUTBOX_APPROVAL } from './005-outbox-approval.js';
 import { MIGRATION_006_CAPTURE_STREAMS } from './006-capture-streams.js';
 import { MIGRATION_007_STATS_EVENTS } from './007-stats-events.js';
 import { MIGRATION_008_OUTBOX_ATTEMPT } from './008-outbox-attempt.js';
+import { MIGRATION_009_VIDEO_OUTBOX } from './009-video-outbox.js';
 
 export interface Migration {
   version: number;
@@ -29,6 +30,7 @@ export const MIGRATIONS: Migration[] = [
   MIGRATION_006_CAPTURE_STREAMS,
   MIGRATION_007_STATS_EVENTS,
   MIGRATION_008_OUTBOX_ATTEMPT,
+  MIGRATION_009_VIDEO_OUTBOX,
 ];
 
 const MIGRATION_TABLE = `
@@ -92,3 +94,4 @@ export { MIGRATION_005_OUTBOX_APPROVAL } from './005-outbox-approval.js';
 export { MIGRATION_006_CAPTURE_STREAMS } from './006-capture-streams.js';
 export { MIGRATION_007_STATS_EVENTS } from './007-stats-events.js';
 export { MIGRATION_008_OUTBOX_ATTEMPT } from './008-outbox-attempt.js';
+export { MIGRATION_009_VIDEO_OUTBOX } from './009-video-outbox.js';

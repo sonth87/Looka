@@ -37,6 +37,23 @@ interface CbHelpPublishState {
   simultaneous: boolean;
   currentStepId: string | null;
   frames: CbHelpFrame[];
+  /**
+   * Pre-session student greeting (2026-09-07) — mirrors
+   * `FaceCaptureApp.tsx`'s own copy of this field. Only ever non-null for
+   * the brief publish right after a student is identified; this component
+   * remembers it locally (`localGreeting` below) past that, since the
+   * corner badge is meant to stay up for the whole session that follows.
+   */
+  greeting: CbHelpGreeting | null;
+}
+
+/** Mirrors `apps/desktop/src/main/cbHelpWindow.ts`'s own copy. */
+interface CbHelpGreeting {
+  code: string;
+  name: string;
+  className: string;
+  major: string;
+  academicYear: string;
 }
 
 const EMPTY_STATE: CbHelpPublishState = {
@@ -45,7 +62,20 @@ const EMPTY_STATE: CbHelpPublishState = {
   simultaneous: false,
   currentStepId: null,
   frames: [],
+  greeting: null,
 };
+
+/**
+ * How long the full-screen greeting shows before collapsing to the
+ * top-left corner badge — must match `FaceCaptureApp.tsx`'s
+ * `GREETING_DURATION_MS` (the side that actually waits this long before
+ * starting the session/recording); duplicated rather than shared, same as
+ * every other value crossing this IPC boundary. A real session's frames
+ * arriving first (see the collapse effect below) also collapses it
+ * immediately, so a mismatch here only affects how long the greeting looks
+ * "held" with nothing behind it yet — never how long recording is delayed.
+ */
+const GREETING_DURATION_MS = 3000;
 
 /**
  * Whether `frame` should have a live camera stream open in this window right
@@ -101,6 +131,42 @@ export default function CbHelpFrames() {
   const streamsRef = useRef<Map<string, MediaStream>>(new Map());
   const deviceLabelsRef = useRef<Map<string, string>>(new Map());
   const [, forceRerender] = useState(0);
+
+  /**
+   * The student greeting outlives `state.greeting` itself — that field only
+   * arrives on the one publish right after identification, then goes back
+   * to `null` once the real session starts publishing (see
+   * `FaceCaptureApp.tsx`'s `publishCbHelpState`). This remembers it locally
+   * so the corner badge can stay up for the whole session that follows.
+   * Cleared only once the window is genuinely idle again (no greeting, no
+   * frames) — i.e. the next walk-up-kiosk cycle has fully reset.
+   */
+  const [localGreeting, setLocalGreeting] = useState<CbHelpGreeting | null>(null);
+  const [greetingCollapsed, setGreetingCollapsed] = useState(false);
+
+  useEffect(() => {
+    if (state.greeting) {
+      setLocalGreeting(state.greeting);
+      setGreetingCollapsed(false);
+    } else if (state.phase === 'idle' && state.frames.length === 0) {
+      setLocalGreeting(null);
+      setGreetingCollapsed(false);
+    }
+  }, [state.greeting, state.phase, state.frames.length]);
+
+  // Collapse to the corner badge after GREETING_DURATION_MS...
+  useEffect(() => {
+    if (!localGreeting || greetingCollapsed) return;
+    const timer = setTimeout(() => setGreetingCollapsed(true), GREETING_DURATION_MS);
+    return () => clearTimeout(timer);
+  }, [localGreeting, greetingCollapsed]);
+
+  // ...or as soon as the real session's frames actually arrive, whichever is
+  // first — the frame grid must never sit hidden behind a full-screen
+  // greeting once there is real capture progress to show.
+  useEffect(() => {
+    if (state.frames.length > 0) setGreetingCollapsed(true);
+  }, [state.frames.length]);
 
   useEffect(() => {
     const faceAPI = (window as any).faceAPI;
@@ -181,9 +247,39 @@ export default function CbHelpFrames() {
     []
   );
 
+  // Full-screen greeting (2026-09-07) — takes over the whole window for
+  // GREETING_DURATION_MS (or until real frames arrive, see the collapse
+  // effects above), ahead of every other branch below including the idle
+  // placeholder.
+  if (localGreeting && !greetingCollapsed) {
+    return (
+      <div className="w-screen h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center gap-3 overflow-hidden px-8 text-center">
+        <span className="text-6xl">👋</span>
+        <h1 className="text-4xl sm:text-5xl font-bold tracking-wide">Xin chào, {localGreeting.name}!</h1>
+        <p className="text-lg text-slate-400">
+          Lớp {localGreeting.className} · {localGreeting.major} · Năm học {localGreeting.academicYear}
+        </p>
+      </div>
+    );
+  }
+
+  // Once collapsed, the student's info follows as a small corner badge —
+  // rendered on top of whichever branch below is showing (idle placeholder,
+  // or the real frame grid once the session actually starts).
+  const cornerBadge = localGreeting && greetingCollapsed && (
+    <div className="absolute left-4 top-4 z-10 rounded-lg bg-slate-900/90 px-3 py-2 shadow-lg">
+      <p className="text-xs text-slate-400">Sinh viên</p>
+      <p className="text-sm font-semibold text-slate-100">{localGreeting.name}</p>
+      <p className="text-xs text-slate-400">
+        Lớp {localGreeting.className} · {localGreeting.major}
+      </p>
+    </div>
+  );
+
   if (state.phase === 'idle' || state.frames.length === 0) {
     return (
-      <div className="w-screen h-screen bg-slate-950 text-slate-100 flex items-center justify-center overflow-hidden">
+      <div className="relative w-screen h-screen bg-slate-950 text-slate-100 flex items-center justify-center overflow-hidden">
+        {cornerBadge}
         <p className="text-slate-500 text-3xl sm:text-4xl font-semibold text-center px-8">
           Chưa có phiên chụp nào đang diễn ra
         </p>
@@ -207,7 +303,8 @@ export default function CbHelpFrames() {
     : 'Đã chụp xong';
 
   return (
-    <div className="w-screen h-screen bg-slate-950 text-slate-100 flex flex-col p-4 gap-2 overflow-hidden">
+    <div className="relative w-screen h-screen bg-slate-950 text-slate-100 flex flex-col p-4 gap-2 overflow-hidden">
+      {cornerBadge}
       <header className="text-center shrink-0">
         <h1 className="text-2xl font-bold tracking-wide">{headerTitle}</h1>
         <p className="text-slate-400 mt-0.5">

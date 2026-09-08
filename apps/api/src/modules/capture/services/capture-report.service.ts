@@ -46,6 +46,22 @@ interface PhotoStatusPayload {
   cameraRole?: string | null;
 }
 
+interface VideoStatusPayload {
+  sessionId: string;
+  videoId: string;
+  at: string;
+  localStatus?: string | null;
+  fsFileId?: string | null;
+  fsStatus?: string | null;
+  error?: string | null;
+  mimeType: string;
+  sizeBytes: number;
+  sha256: string;
+  virtualPath: string;
+  cameraRole?: string | null;
+  durationMs?: number | null;
+}
+
 /**
  * Applies the two self-sufficient kiosk device-events onto the shared
  * `sessions`/`photos` tables - see
@@ -223,6 +239,82 @@ export class CaptureReportService {
     );
   }
 
+  /**
+   * Records one upload-lifecycle outcome for one video — mirrors
+   * `applyPhotoStatus` exactly, on `session_videos` instead of `photos`. No
+   * separate "report" event the way photos have `SESSION_REPORT`: a video is
+   * enqueued already-approved (see `apps/desktop/src/main/uploads.ts`'s
+   * `enqueueSessionVideos`), so the first VIDEO_STATUS the server ever sees
+   * for a given video is also the only creation path it needs — same
+   * create-if-missing-session, update-only-if-not-stale logic as photos.
+   */
+  async applyVideoStatus(
+    manager: EntityManager,
+    deviceId: string,
+    campaignId: string,
+    rawMetadata: Record<string, unknown> | null | undefined,
+  ): Promise<void> {
+    const payload = this.assertVideoStatusPayload(rawMetadata);
+    const at = new Date(payload.at);
+    const uploadedAt = payload.localStatus === 'UPLOADED' ? at : null;
+    const readyAt = payload.fsStatus === 'READY' ? at : null;
+
+    await manager.query(
+      `INSERT INTO sessions (id, source, device_id, campaign_id, status)
+       VALUES ($1, 'KIOSK', $2, $3, 'IN_PROGRESS')
+       ON CONFLICT (id) DO NOTHING`,
+      [payload.sessionId, deviceId, campaignId],
+    );
+
+    await manager.query(
+      `INSERT INTO session_videos (
+          id, session_id, camera_role, mime_type, bytes, sha256, duration_ms,
+          virtual_path, local_status, fs_file_id, fs_status, upload_error,
+          fs_status_at, uploaded_at, ready_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        ON CONFLICT (id) DO NOTHING`,
+      [
+        payload.videoId,
+        payload.sessionId,
+        payload.cameraRole ?? null,
+        payload.mimeType,
+        payload.sizeBytes,
+        payload.sha256,
+        payload.durationMs ?? null,
+        payload.virtualPath,
+        payload.localStatus ?? null,
+        payload.fsFileId ?? null,
+        payload.fsStatus ?? null,
+        payload.error ?? null,
+        at,
+        uploadedAt,
+        readyAt,
+      ],
+    );
+
+    await manager.query(
+      `UPDATE session_videos SET
+          local_status = $2,
+          fs_file_id = COALESCE($3, fs_file_id),
+          fs_status = $4,
+          upload_error = $5,
+          fs_status_at = $6,
+          uploaded_at = COALESCE($7, uploaded_at),
+          ready_at = COALESCE($8, ready_at)
+        WHERE id = $1 AND $6 >= COALESCE(fs_status_at, '-infinity')`,
+      [
+        payload.videoId,
+        payload.localStatus ?? null,
+        payload.fsFileId ?? null,
+        payload.fsStatus ?? null,
+        payload.error ?? null,
+        at,
+        uploadedAt,
+        readyAt,
+      ],
+    );
+  }
+
   private assertSessionReportPayload(
     raw: Record<string, unknown> | null | undefined,
   ): SessionReportPayload {
@@ -351,6 +443,53 @@ export class CaptureReportService {
       virtualPath: m.virtualPath,
       stepType: (m.stepType as string | null | undefined) ?? null,
       cameraRole: (m.cameraRole as string | null | undefined) ?? null,
+    };
+  }
+
+  private assertVideoStatusPayload(
+    raw: Record<string, unknown> | null | undefined,
+  ): VideoStatusPayload {
+    const invalid = (detail: string): never => {
+      throw new CustomException(
+        `VIDEO_STATUS payload invalid: ${detail}`,
+        ERROR_CODE.VIDEO_STATUS_INVALID_PAYLOAD,
+        HttpStatus.BAD_REQUEST,
+      );
+    };
+
+    if (!raw || typeof raw !== 'object')
+      return invalid('metadata must be an object');
+    const m = raw;
+
+    if (typeof m.sessionId !== 'string' || !m.sessionId)
+      return invalid('sessionId is required');
+    if (typeof m.videoId !== 'string' || !m.videoId)
+      return invalid('videoId is required');
+    if (typeof m.at !== 'string' || Number.isNaN(Date.parse(m.at)))
+      return invalid('at must be an ISO date string');
+    if (typeof m.mimeType !== 'string' || !m.mimeType)
+      return invalid('mimeType is required');
+    if (typeof m.sizeBytes !== 'number')
+      return invalid('sizeBytes must be a number');
+    if (typeof m.sha256 !== 'string' || !m.sha256)
+      return invalid('sha256 is required');
+    if (typeof m.virtualPath !== 'string' || !m.virtualPath)
+      return invalid('virtualPath is required');
+
+    return {
+      sessionId: m.sessionId,
+      videoId: m.videoId,
+      at: m.at,
+      localStatus: (m.localStatus as string | null | undefined) ?? null,
+      fsFileId: (m.fsFileId as string | null | undefined) ?? null,
+      fsStatus: (m.fsStatus as string | null | undefined) ?? null,
+      error: (m.error as string | null | undefined) ?? null,
+      mimeType: m.mimeType,
+      sizeBytes: m.sizeBytes,
+      sha256: m.sha256,
+      virtualPath: m.virtualPath,
+      cameraRole: (m.cameraRole as string | null | undefined) ?? null,
+      durationMs: (m.durationMs as number | null | undefined) ?? null,
     };
   }
 }

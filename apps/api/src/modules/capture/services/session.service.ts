@@ -248,6 +248,17 @@ export class SessionService extends CommonService<Session> {
         [id],
       );
 
+    const videoRows: Array<Record<string, unknown>> =
+      await this.dataSource.query(
+        `SELECT id, camera_role, mime_type, bytes, duration_ms,
+              fs_file_id, fs_status, local_status, virtual_path,
+              captured_at, uploaded_at, ready_at, upload_error
+         FROM session_videos
+        WHERE session_id = $1
+        ORDER BY camera_role`,
+        [id],
+      );
+
     return toDao(SessionDetailDao, {
       ...this.mapListRow(row),
       photos: photoRows.map((p) => ({
@@ -266,6 +277,21 @@ export class SessionService extends CommonService<Session> {
         uploadedAt: p.uploaded_at ?? undefined,
         readyAt: p.ready_at ?? undefined,
         uploadError: p.upload_error ?? undefined,
+      })),
+      videos: videoRows.map((v) => ({
+        id: v.id,
+        cameraRole: v.camera_role ?? undefined,
+        mimeType: v.mime_type,
+        bytes: v.bytes,
+        durationMs: v.duration_ms ?? undefined,
+        fsFileId: v.fs_file_id ?? undefined,
+        fsStatus: v.fs_status ?? undefined,
+        localStatus: v.local_status ?? undefined,
+        virtualPath: v.virtual_path ?? undefined,
+        capturedAt: v.captured_at ?? undefined,
+        uploadedAt: v.uploaded_at ?? undefined,
+        readyAt: v.ready_at ?? undefined,
+        uploadError: v.upload_error ?? undefined,
       })),
     });
   }

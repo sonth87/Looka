@@ -794,6 +794,153 @@ describeDb('device management persistence', () => {
     expect(detail.photos[0].localStatus).toBe('DONE');
   });
 
+  test('a VIDEO_STATUS creates its own minimal session and video row, no SESSION_REPORT needed', async () => {
+    // Unlike photos, a video is enqueued already-approved (see
+    // apps/desktop/src/main/uploads.ts's enqueueSessionVideos) and reports
+    // through VIDEO_STATUS alone — there is no VIDEO_REPORT equivalent of
+    // SESSION_REPORT, so the very first status event is also its creation.
+    const campaign = await campaignService.createCampaign({ name: 'Video A' });
+    const { device } = await deviceService.registerDevice(campaign.id, {
+      name: 'Kiosk V1',
+    });
+
+    const sessionId = randomUUID();
+    const videoId = randomUUID();
+    const sentAt = new Date().toISOString();
+
+    await deviceEventService.recordBatch(device.id, campaign.id, [
+      {
+        type: DeviceEventType.VIDEO_STATUS,
+        occurredAt: sentAt,
+        metadata: {
+          sessionId,
+          videoId,
+          at: sentAt,
+          localStatus: 'UPLOADED',
+          fsFileId: randomUUID(),
+          fsStatus: 'SCANNING',
+          error: null,
+          mimeType: 'video/webm',
+          sizeBytes: 4_500_000,
+          sha256: 'f'.repeat(64),
+          virtualPath: `video/2026/${sessionId}/${videoId}.webm`,
+          cameraRole: 'CENTER',
+          durationMs: 12_000,
+        },
+      },
+    ]);
+
+    const detail = await sessionService.getSessionDetail(sessionId);
+    expect(detail.status).toBe('IN_PROGRESS');
+    expect(detail.videos).toHaveLength(1);
+    expect(detail.videos[0].id).toBe(videoId);
+    expect(detail.videos[0].cameraRole).toBe('CENTER');
+    expect(detail.videos[0].durationMs).toBe(12_000);
+    expect(detail.videos[0].localStatus).toBe('UPLOADED');
+    expect(detail.videos[0].fsStatus).toBe('SCANNING');
+  });
+
+  test('a later VIDEO_STATUS advances the same video to READY, and a stale one is ignored', async () => {
+    const campaign = await campaignService.createCampaign({ name: 'Video B' });
+    const { device } = await deviceService.registerDevice(campaign.id, {
+      name: 'Kiosk V2',
+    });
+
+    const sessionId = randomUUID();
+    const videoId = randomUUID();
+    const uploadedAt = new Date(Date.now() - 10_000).toISOString();
+    const baseVideo = {
+      sessionId,
+      videoId,
+      mimeType: 'video/webm',
+      sizeBytes: 4_500_000,
+      sha256: 'a'.repeat(64),
+      virtualPath: `video/2026/${sessionId}/${videoId}.webm`,
+      cameraRole: 'LEFT',
+      durationMs: 8_000,
+    };
+
+    await deviceEventService.recordBatch(device.id, campaign.id, [
+      {
+        type: DeviceEventType.VIDEO_STATUS,
+        occurredAt: uploadedAt,
+        metadata: {
+          ...baseVideo,
+          at: uploadedAt,
+          localStatus: 'UPLOADED',
+          fsFileId: randomUUID(),
+          fsStatus: 'SCANNING',
+          error: null,
+        },
+      },
+    ]);
+
+    const readyAt = new Date().toISOString();
+    await deviceEventService.recordBatch(device.id, campaign.id, [
+      {
+        type: DeviceEventType.VIDEO_STATUS,
+        occurredAt: readyAt,
+        metadata: {
+          ...baseVideo,
+          at: readyAt,
+          localStatus: 'DONE',
+          fsFileId: randomUUID(),
+          fsStatus: 'READY',
+          error: null,
+        },
+      },
+    ]);
+
+    // Arrives later over the wire but describes an earlier instant — must
+    // not undo the READY status the newer event already recorded, same
+    // high-water-mark rule as PHOTO_STATUS.
+    const staleAt = new Date(Date.now() - 60_000).toISOString();
+    await deviceEventService.recordBatch(device.id, campaign.id, [
+      {
+        type: DeviceEventType.VIDEO_STATUS,
+        occurredAt: staleAt,
+        metadata: {
+          ...baseVideo,
+          at: staleAt,
+          localStatus: 'SENDING',
+          fsFileId: null,
+          fsStatus: 'FAILED',
+          error: 'stale',
+        },
+      },
+    ]);
+
+    const detail = await sessionService.getSessionDetail(sessionId);
+    expect(detail.videos[0].fsStatus).toBe('READY');
+    expect(detail.videos[0].localStatus).toBe('DONE');
+  });
+
+  test('a VIDEO_STATUS missing videoId is rejected with a clear 400', async () => {
+    const campaign = await campaignService.createCampaign({ name: 'Video C' });
+    const { device } = await deviceService.registerDevice(campaign.id, {
+      name: 'Kiosk V3',
+    });
+
+    await expect(
+      deviceEventService.recordBatch(device.id, campaign.id, [
+        {
+          type: DeviceEventType.VIDEO_STATUS,
+          occurredAt: new Date().toISOString(),
+          metadata: {
+            sessionId: randomUUID(),
+            at: new Date().toISOString(),
+            mimeType: 'video/webm',
+            sizeBytes: 100,
+            sha256: 'b'.repeat(64),
+            virtualPath: 'video/2026/x/y.webm',
+          },
+        },
+      ]),
+    ).rejects.toMatchObject({
+      payload: { code: ERROR_CODE.VIDEO_STATUS_INVALID_PAYLOAD },
+    });
+  });
+
   test('a SESSION_REPORT missing sessionId is rejected with a clear 400', async () => {
     const campaign = await campaignService.createCampaign({ name: 'Report E' });
     const { device } = await deviceService.registerDevice(campaign.id, {

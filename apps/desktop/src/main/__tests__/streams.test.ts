@@ -1,10 +1,10 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { CaptureStreamItem, EndStreamInput } from '@face/database';
-import { endVideoStream, EndVideoStreamRepo } from '../streams.js';
+import { endVideoStream, EndVideoStreamRepo, discardSessionVideos, DiscardSessionVideosRepo } from '../streams.js';
 
 /**
  * Stands in for `CaptureStreamRepository` — `endVideoStream`'s injectable
@@ -87,5 +87,60 @@ describe('endVideoStream', () => {
     // the two-call start/end shape is that ended_at only ever reflects bytes
     // that actually made it to disk.
     assert.equal(repo.ended.length, 0);
+  });
+});
+
+/**
+ * Stands in for `CaptureStreamRepository` for `discardSessionVideos` — same
+ * "no Electron needed" reasoning as `FakeRepo` above.
+ */
+class FakeDiscardRepo implements DiscardSessionVideosRepo {
+  public deletedSessions: string[] = [];
+  constructor(private items: CaptureStreamItem[]) {}
+
+  listBySession(sessionId: string): CaptureStreamItem[] {
+    return this.items.filter((i) => i.sessionId === sessionId);
+  }
+
+  deleteBySession(sessionId: string): number {
+    this.deletedSessions.push(sessionId);
+    const before = this.items.length;
+    this.items = this.items.filter((i) => i.sessionId !== sessionId);
+    return before - this.items.length;
+  }
+}
+
+describe('discardSessionVideos', () => {
+  test('deletes every file of an abandoned session and its capture_streams rows', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'face-streams-'));
+    try {
+      const pathA = join(dir, 'a.webm');
+      const pathB = join(dir, 'b.webm');
+      writeFileSync(pathA, 'a');
+      writeFileSync(pathB, 'b');
+      const repo = new FakeDiscardRepo([makeItem(pathA), { ...makeItem(pathB), id: 'stream-2' }]);
+
+      const result = discardSessionVideos('session-1', repo);
+
+      assert.deepEqual(result, { removed: 2 });
+      assert.equal(existsSync(pathA), false);
+      assert.equal(existsSync(pathB), false);
+      assert.deepEqual(repo.deletedSessions, ['session-1']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a session with no recordings is a harmless no-op', () => {
+    const repo = new FakeDiscardRepo([]);
+    const result = discardSessionVideos('session-missing', repo);
+    assert.deepEqual(result, { removed: 0 });
+    assert.deepEqual(repo.deletedSessions, ['session-missing']);
+  });
+
+  test('a missing file on disk does not stop the row from being deleted', () => {
+    const repo = new FakeDiscardRepo([makeItem('/does/not/exist/orphan.webm')]);
+    const result = discardSessionVideos('session-1', repo);
+    assert.deepEqual(result, { removed: 1 });
   });
 });
