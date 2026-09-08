@@ -4,8 +4,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import type { Visibility } from '@face/core';
 import { FsClient, UploadWorker, WorkerEvent, deterministicUuid, sha256Hex } from '@face/fs-client';
-import { UploadOutboxRepository, CaptureStreamRepository, nextRetryDelayMs } from '@face/database';
-import type { OutboxItem, OutboxStatus } from '@face/database';
+import { UploadOutboxRepository, CaptureStreamRepository, CapturedStudentRepository, nextRetryDelayMs } from '@face/database';
+import type { OutboxItem, OutboxStatus, CaptureStreamItem } from '@face/database';
 import { getDatabase } from './db.js';
 import { recordStatsEvent } from './statsEvents.js';
 
@@ -292,6 +292,19 @@ export interface ApproveSessionUploadOptions {
    * FaceCaptureApp.tsx) always sends it.
    */
   videoSessionId?: string;
+  /** The student this session belongs to, if the operator's kiosk looked one up — see SessionReportPayload.subjectCode's own doc comment. */
+  subjectCode?: string;
+  subjectName?: string;
+  /**
+   * className/major/academicYear, when a subject was looked up. No
+   * dedicated column exists for these anywhere server-side — they ride
+   * along as free-form metadata on the SESSION_REPORT payload, merged into
+   * the Postgres `sessions.metadata` jsonb column (see
+   * `CaptureReportService.applySessionReport()`), the same "whatever the
+   * client wants to remember, without a migration" column the web path's
+   * `CreateSessionDto.metadata` already writes to.
+   */
+  metadata?: Record<string, unknown>;
 }
 
 /** One photo inside a SESSION_REPORT event — see §5 of phase-11's plan for the exact contract. */
@@ -318,15 +331,19 @@ export interface SessionReportPayload {
   approvedAt: string;
   workflowId?: string;
   /**
-   * Always null today — kept because §5 of phase-11's plan fixes these field
-   * names as part of the contract. Nothing in the current kiosk flow collects
-   * a subject identity for a face-capture session (`RunScopedCaptureSession`
-   * always opens with `startSession({})`, and `CaptureSession` — @face/core —
-   * has no such field), so there is nothing to plumb through yet; a future
-   * caller that does have one can pass it via `meta`.
+   * The student the kiosk's "nhập mã sinh viên" screen looked up for this
+   * run (2026-09-08 "student gallery" feature) — null for the web path's own
+   * subjectCode/subjectName handling (that goes through `startSession()`
+   * directly, not through this report) or when no student was ever looked
+   * up. `FaceCaptureApp.tsx`'s `handleStudentSubmit()` caches it via
+   * `RunScopedCaptureSession.setSubject()`, which `approve()` forwards to
+   * `ElectronCaptureSink.approveUpload()` and from there into
+   * `ApproveSessionUploadOptions` below.
    */
   subjectCode: string | null;
   subjectName: string | null;
+  /** className/major/academicYear, when a subject was looked up — see ApproveSessionUploadOptions.metadata's own doc comment for why these ride along here instead of dedicated fields. */
+  metadata: Record<string, unknown> | null;
   photos: SessionReportPhoto[];
 }
 
@@ -341,11 +358,21 @@ export interface ApproveSessionUploadRepo {
   listBySession: UploadOutboxRepository['listBySession'];
   /** Used by enqueueSessionVideos() below — kept on the same injected repo rather than a second lookup of the module's own `outbox` singleton, so a test-supplied fake is exercised for video the same as it already is for photos. */
   enqueue: UploadOutboxRepository['enqueue'];
+  /** Post-save retake (2026-09-08) — see supersedeStaleAttempt()'s own doc comment. */
+  supersedeOlderApprovedAttempts: UploadOutboxRepository['supersedeOlderApprovedAttempts'];
 }
 
 /** The subset of CaptureStreamRepository approveSessionUpload() needs — same injectable-for-tests reasoning as ApproveSessionUploadRepo. */
 export interface ApproveSessionUploadStreamRepo {
   listBySession: CaptureStreamRepository['listBySession'];
+  /** Post-save retake (2026-09-08) — see supersedeStaleAttempt()'s own doc comment. */
+  listOlderFinishedRecordings: CaptureStreamRepository['listOlderFinishedRecordings'];
+  deleteById: CaptureStreamRepository['deleteById'];
+}
+
+/** The subset of CapturedStudentRepository approveSessionUpload() needs — same injectable-for-tests reasoning as ApproveSessionUploadRepo. */
+export interface ApproveSessionUploadStudentRepo {
+  recordApproval: CapturedStudentRepository['recordApproval'];
 }
 
 /**
@@ -370,6 +397,7 @@ export function buildSessionReportPayload(
     approvedAt: string;
     subjectCode?: string | null;
     subjectName?: string | null;
+    metadata?: Record<string, unknown> | null;
   }
 ): SessionReportPayload {
   const stepById = new Map((steps ?? []).map((s) => [s.stepId, s] as const));
@@ -384,6 +412,7 @@ export function buildSessionReportPayload(
     workflowId: meta.workflowId,
     subjectCode: meta.subjectCode ?? null,
     subjectName: meta.subjectName ?? null,
+    metadata: meta.metadata ?? null,
     photos: rows.map((row) => {
       const step = row.stepId ? stepById.get(row.stepId) : undefined;
       return {
@@ -440,7 +469,8 @@ export async function approveSessionUpload(
   steps?: SessionApprovalStepInfo[],
   options?: ApproveSessionUploadOptions,
   repo: ApproveSessionUploadRepo = outbox ?? new UploadOutboxRepository(getDatabase()),
-  streamRepo: ApproveSessionUploadStreamRepo = new CaptureStreamRepository(getDatabase())
+  streamRepo: ApproveSessionUploadStreamRepo = new CaptureStreamRepository(getDatabase()),
+  studentRepo: ApproveSessionUploadStudentRepo = new CapturedStudentRepository(getDatabase())
 ): Promise<{ approved: number; superseded: number; videosEnqueued: number }> {
   const result = repo.approveSession(sessionId);
 
@@ -471,16 +501,114 @@ export async function approveSessionUpload(
       workflowId: options?.workflowId,
       startedAt: options?.startedAt,
       approvedAt: new Date().toISOString(),
+      subjectCode: options?.subjectCode,
+      subjectName: options?.subjectName,
+      metadata: options?.metadata,
     });
     // Spread into a fresh object literal: recordStatsEvent takes
     // Record<string, unknown>, and passing a named interface value (rather
     // than a literal) for that would fail TS's index-signature check.
     recordStatsEvent('SESSION_REPORT', { ...payload });
+
+    // Local "student gallery" index (2026-09-08 feature) — best-effort,
+    // kiosk-local only, independent of whether SESSION_REPORT itself ever
+    // reaches the API. Only when a real student was actually looked up:
+    // most sessions before this feature (and any run started without the
+    // ID-entry screen, e.g. a dev/simulation build) have no subjectCode at
+    // all, and there is nothing useful to index for those.
+    if (payload.subjectCode) {
+      try {
+        studentRepo.recordApproval({
+          sessionId,
+          subjectCode: payload.subjectCode,
+          subjectName: payload.subjectName,
+          className: (payload.metadata?.className as string | undefined) ?? null,
+          major: (payload.metadata?.major as string | undefined) ?? null,
+          academicYear: (payload.metadata?.academicYear as string | undefined) ?? null,
+          workflowId: payload.workflowId ?? null,
+          photoCount: payload.photos.length,
+          approvedAt: Date.now(),
+        });
+      } catch (err) {
+        console.warn('[approveSessionUpload] failed to record local student index:', (err as Error).message);
+      }
+    }
+
+    // Post-save retake (2026-09-08): a row just approved here might be
+    // replacing one this same session already had approved from an EARLIER
+    // call — see supersedeStaleAttempt()'s own doc comment for why that is
+    // a different case than the superseded-rows loop above (which only ever
+    // sees rows staged together in *this* call).
+    for (const row of result.approvedRows) {
+      if (!row.stepId) continue;
+      supersedeStaleAttempt(repo, sessionId, row.kind, row.stepId, row.id);
+    }
   }
 
-  const videosEnqueued = await enqueueSessionVideos(sessionId, options?.videoSessionId ?? sessionId, repo, streamRepo);
+  const videoSessionId = options?.videoSessionId ?? sessionId;
+  const enqueuedStreams = await enqueueSessionVideos(sessionId, videoSessionId, repo, streamRepo);
+  for (const stream of enqueuedStreams) {
+    const older = streamRepo.listOlderFinishedRecordings(videoSessionId, stream.cameraId, stream.id);
+    for (const oldStream of older) {
+      // Video has no "keep the highest attempt at this stepId" concept the
+      // way a photo does — each recording's stepId (its own capture_streams
+      // id) is unique to it, so there is nothing else at that (kind, stepId)
+      // to keep. An empty keepId can never match a real id, so this deletes
+      // the old recording's outbox row outright, exactly as intended.
+      supersedeStaleAttempt(repo, sessionId, 'video', oldStream.id, '');
+      streamRepo.deleteById(oldStream.id);
+    }
+  }
 
-  return { approved: result.approved, superseded: result.superseded.length, videosEnqueued };
+  return { approved: result.approved, superseded: result.superseded.length, videosEnqueued: enqueuedStreams.length };
+}
+
+/**
+ * Post-save retake (2026-09-08 "chụp lại sau khi đã lưu" feature): a fresh
+ * attempt/recording just got approved/enqueued, replacing an OLDER one at
+ * the same `(kind, stepId)` that was approved in a PREVIOUS call to
+ * `approveSessionUpload()` — possibly long enough ago that it already
+ * finished uploading to READY. `UploadOutboxRepository.approveSession()`'s
+ * own supersede logic can never find this on its own: it only ever compares
+ * rows staged together in one call (see its own doc comment), and by
+ * definition the stale row here was approved in an earlier one.
+ *
+ * Best-effort throughout, matching every other cleanup path in this file: a
+ * failed local unlink or a failed file-service delete is logged, never
+ * thrown — the approval that already committed must stand regardless.
+ * `ATTEMPT_SUPERSEDED` tells the API to delete its own now-stale
+ * `photos`/`session_videos` row — see `CaptureReportService.applyAttemptSuperseded()`
+ * and, same as `VIDEO_STATUS` before it, the API must know this enum value
+ * before any kiosk build emits it (`statsEvents.ts` batches every pending
+ * event type together; one unrecognised value 400s the whole batch).
+ */
+function supersedeStaleAttempt(
+  repo: ApproveSessionUploadRepo,
+  sessionId: string,
+  kind: string,
+  stepId: string,
+  keepId: string
+): void {
+  const stale = repo.supersedeOlderApprovedAttempts(sessionId, kind, stepId, keepId);
+  for (const item of stale) {
+    try {
+      fs.unlinkSync(item.localPath);
+    } catch (err) {
+      console.warn(
+        `[approveSessionUpload] failed to remove superseded file ${item.localPath}:`,
+        (err as Error).message
+      );
+    }
+    if (item.fsFileId) {
+      client?.deleteFile(item.fsFileId).catch((err) => {
+        console.warn(
+          `[approveSessionUpload] failed to delete superseded file ${item.fsFileId} from file-service:`,
+          (err as Error).message
+        );
+      });
+    }
+    recordStatsEvent('ATTEMPT_SUPERSEDED', { kind: kind === 'video' ? 'video' : 'photo', id: item.id });
+  }
 }
 
 /**
@@ -520,12 +648,16 @@ async function enqueueSessionVideos(
   videoSessionId: string,
   repo: ApproveSessionUploadRepo,
   streamRepo: ApproveSessionUploadStreamRepo
-): Promise<number> {
+): Promise<CaptureStreamItem[]> {
   const streams = streamRepo.listBySession(videoSessionId).filter((s) => s.endedAt !== null);
   const year = new Date().getFullYear();
   const approvedAt = Date.now();
 
-  let enqueued = 0;
+  // Returns the streams actually enqueued (2026-09-08, widened from a plain
+  // count) so the caller can check each one for an older recording of the
+  // same camera it replaces — see approveSessionUpload()'s post-save-retake
+  // supersede loop right after this function's call site.
+  const enqueued: CaptureStreamItem[] = [];
   for (const stream of streams) {
     const idemKey = `${outboxSessionId}:${stream.id}:1:video`;
     const ext = stream.mimeType.includes('mp4') ? 'mp4' : 'webm';
@@ -549,7 +681,7 @@ async function enqueueSessionVideos(
         attempt: 1,
         approvedAt,
       });
-      enqueued++;
+      enqueued.push(stream);
     } catch (err) {
       console.warn(`[approveSessionUpload] failed to enqueue video ${stream.id}:`, (err as Error).message);
     }

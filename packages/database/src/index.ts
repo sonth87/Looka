@@ -28,6 +28,8 @@ export { UploadOutboxRepository, nextRetryDelayMs } from './repositories/UploadO
 export type { OutboxItem, OutboxStatus, EnqueueInput, OutboxStats, ApproveSessionResult } from './repositories/UploadOutboxRepository.js';
 export { CaptureStreamRepository } from './repositories/CaptureStreamRepository.js';
 export type { CaptureStreamItem, StartStreamInput, EndStreamInput } from './repositories/CaptureStreamRepository.js';
+export { CapturedStudentRepository } from './repositories/CapturedStudentRepository.js';
+export type { CapturedStudentItem, RecordApprovalInput } from './repositories/CapturedStudentRepository.js';
 export { StatsEventRepository } from './repositories/StatsEventRepository.js';
 export type { StatsEventItem, StatsEventType, EnqueueStatsEventInput } from './repositories/StatsEventRepository.js';
 export { PersonRepository } from './repositories/PersonRepository.js';

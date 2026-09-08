@@ -6,6 +6,7 @@ import { CampaignList } from './components/CampaignList';
 import { CreateCampaignPage } from './components/CreateCampaignPage';
 import { CampaignDetail } from './components/CampaignDetail';
 import { EditCampaignPage } from './components/EditCampaignPage';
+import { StudentsPage } from './components/StudentsPage';
 
 /**
  * `react-router-dom` (2026-09-07) — this app previously used a hand-rolled
@@ -45,6 +46,7 @@ export default function App() {
             <Route path="/campaigns/new" element={<CreateCampaignPage />} />
             <Route path="/campaigns/:id" element={<CampaignDetail />} />
             <Route path="/campaigns/:id/edit" element={<EditCampaignPage />} />
+            <Route path="/students" element={<StudentsPage />} />
           </Routes>
         </Layout>
       </BrowserRouter>

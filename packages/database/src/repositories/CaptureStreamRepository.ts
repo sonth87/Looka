@@ -116,4 +116,35 @@ export class CaptureStreamRepository {
     this.db.run(`DELETE FROM capture_streams WHERE session_id = ?`, [sessionId]);
     return Number(before[0]?.n ?? 0);
   }
+
+  /**
+   * Post-save retake (2026-09-08): other finished recordings of the same
+   * camera under the same session — i.e. an earlier attempt this new
+   * recording (`keepStreamId`) replaces. Video has no `stepId`/`attempt` of
+   * its own (each recording groups under its own id — see migration 006's
+   * doc comment), so "the same camera, an earlier recording, in this same
+   * session" is the only way to recognise a redo of a *specific* camera role
+   * rather than an unrelated recording. `endedAt IS NOT NULL` excludes a
+   * still-in-progress recording, which can never be "older" in any
+   * meaningful sense — it hasn't finished yet.
+   */
+  public listOlderFinishedRecordings(
+    sessionId: string,
+    cameraId: string,
+    keepStreamId: string
+  ): CaptureStreamItem[] {
+    return this.db
+      .exec<Record<string, unknown>>(
+        `SELECT * FROM capture_streams
+          WHERE session_id = ? AND camera_id = ? AND ended_at IS NOT NULL AND id != ?
+          ORDER BY started_at`,
+        [sessionId, cameraId, keepStreamId]
+      )
+      .map(toItem);
+  }
+
+  /** Removes one recording's own row — used once its file has been handled (locally unlinked, and remotely deleted if it had already been enqueued/uploaded) by the post-save retake supersede path. */
+  public deleteById(id: string): void {
+    this.db.run(`DELETE FROM capture_streams WHERE id = ?`, [id]);
+  }
 }

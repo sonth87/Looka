@@ -437,6 +437,60 @@ export class WorkflowEngine implements IWorkflowEngine {
   }
 
   /**
+   * Post-save "chụp lại toàn bộ" (2026-09-08 feature): resets every step
+   * back to PENDING and rewinds to the first one, the same shape a fresh
+   * `startSession()` would leave things in — except `_currentSession.id`
+   * (and everything else about the session/workflow) is left untouched.
+   * Mirrors `retakeStep()`'s own body almost exactly, applied to every step
+   * instead of one; see that method's own doc comment for the shared guard
+   * conditions and for why `capturedImagePath` is left alone until each
+   * step's replacement actually lands.
+   *
+   * `retakeReturnIdx` stays `null` rather than pointing anywhere — unlike a
+   * single-step retake (which must come back to wherever ordered capture
+   * was interrupted), a full retake has no later point to return to: every
+   * step is being redone from the start, in the original order.
+   *
+   * Exists specifically for retaking a session that was already reviewed
+   * and approved once (`FaceCaptureApp.tsx`'s `handlePostSaveRetakeAll`) —
+   * `handleRestart`'s pre-approval "chụp lại toàn bộ" keeps using
+   * `startSession()` unchanged (a fresh session id there is correct and
+   * unrelated to this method).
+   */
+  public retakeAllSteps(): boolean {
+    if (this.isCapturing || !this.activeWorkflow || !this._currentSession) return false;
+
+    this.currentStepIdx = 0;
+    this.retakeReturnIdx = null;
+    this.stepStartTime = Date.now();
+    this.stabilityTracker.reset();
+    this.externalCaptureOnly = false;
+
+    this._currentSession.status = 'RUNNING';
+    this._currentSession.completedAt = undefined;
+    for (const stepResult of this._currentSession.steps) {
+      stepResult.status = 'PENDING';
+      stepResult.attempts++;
+    }
+
+    const firstStep = this.activeWorkflow.steps[0];
+    this._currentState = {
+      status: 'POSITIONING',
+      primaryInstruction: firstStep.instruction,
+      primaryReason: 'NO_FACE',
+      progress: 0,
+      hints: [],
+      currentStepIndex: 0,
+      totalSteps: this.activeWorkflow.steps.length,
+      stepId: firstStep.id,
+      stepType: firstStep.type,
+    };
+
+    this.emit('state-change', this._currentState);
+    return true;
+  }
+
+  /**
    * Hands the engine a photo captured by another physical camera for
    * `stepId` — the "simultaneous capture" flow, where one shutter press
    * fires every frame's own camera at once and the UI routes each resulting

@@ -16,7 +16,7 @@ import { getAccessToken, getRefreshToken } from './auth/authCookies';
 
 export type CampaignPurpose = 'STUDENT_CARD' | 'KYC_ENROLLMENT';
 export type CaptureTriggerMode = 'AUTO' | 'MANUAL' | 'OFF';
-export type DeviceStatus = 'REGISTERED' | 'ACTIVATED';
+export type DeviceStatus = 'REGISTERED' | 'ACTIVATED' | 'REVOKED';
 
 export interface Campaign {
   id: string;
@@ -42,6 +42,22 @@ export interface Device {
   authApiEndpoint?: string;
   status: DeviceStatus;
   activatedAt?: string | null;
+  /**
+   * Secret rotation with overlap (2026-09-08 — see docs/ROADMAP.md's dated
+   * entry): non-null means a `reissueDevice` call rotated the secret and
+   * the kiosk hasn't loaded the new package yet — the OLD secret is still
+   * valid, no time limit, until it does (or an admin revokes). This is the
+   * single source of truth for that "chưa nạp gói mới" chip — there is no
+   * separate boolean, mirroring the API's own `Device` entity.
+   */
+  secretRotatedAt?: string | null;
+  /** Last time this device's secret successfully authenticated — "xác thực gần nhất". */
+  lastAuthAt?: string | null;
+  /** Last time this device's secret was rejected — paired with `lastAuthFailReason`. */
+  lastAuthFailedAt?: string | null;
+  lastAuthFailReason?: 'INVALID_SECRET' | 'EXPIRED' | 'REVOKED' | null;
+  /** Set when `revokeDevice` was called — display-only, the actual source of truth is `status === 'REVOKED'`. */
+  revokedAt?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -231,6 +247,58 @@ export interface SessionDetail extends SessionListItem {
   videos: SessionVideo[];
 }
 
+/** One row of `GET /v1/students` — one per distinct mã sinh viên, not per session (a student may have several, across campaigns/days). */
+export interface StudentListItem {
+  subjectCode: string;
+  subjectName?: string;
+  sessionCount: number;
+  totalPhotos: number;
+  lastCapturedAt?: string;
+  campaignIds: string[];
+}
+
+/** A photo/video inside a student's session summary, with viewUrl already resolved server-side — see StudentService.getStudentDetail's own doc comment (apps/api) for why. */
+export interface StudentSessionPhoto {
+  id: string;
+  cameraRole?: string;
+  mimeType: string;
+  fsStatus?: string;
+  viewUrl?: string;
+  viewUrlExpiresAt?: string;
+}
+
+export interface StudentSessionVideo {
+  id: string;
+  cameraRole?: string;
+  mimeType: string;
+  durationMs?: number;
+  fsStatus?: string;
+  viewUrl?: string;
+  viewUrlExpiresAt?: string;
+}
+
+/** One of a student's sessions, inside `GET /v1/students/:code` — a summary, not the full SessionDetail; click through to SessionDetailDrawer (via `id`) for the full single-session view. */
+export interface StudentSessionSummary {
+  id: string;
+  source: SessionSource;
+  deviceId?: string;
+  deviceName?: string;
+  campaignId?: string;
+  status: SessionStatus;
+  capturedAt?: string;
+  completedAt?: string;
+  approvedAt?: string;
+  photos: StudentSessionPhoto[];
+  videos: StudentSessionVideo[];
+}
+
+/** `GET /v1/students/:code` — every session the student has, across every campaign (ignores whatever campaign filter reached the list page). */
+export interface StudentDetail {
+  subjectCode: string;
+  subjectName?: string;
+  sessions: StudentSessionSummary[];
+}
+
 /** Mirrors `PaginationMetaDao` server-side — `totalItems`/`totalPages` are optional there too. */
 export interface PaginationMeta {
   itemCount: number;
@@ -379,6 +447,32 @@ export function listSessions(params: ListSessionsParams = {}): Promise<Paginated
 /** One session with every one of its photos. */
 export const getSession = (id: string) => request<SessionDetail>(`/v1/sessions/${id}`);
 
+export interface ListStudentsParams {
+  campaignId?: string;
+  q?: string;
+  page?: number;
+  limit?: number;
+}
+
+/**
+ * "Sinh viên đã chụp" (2026-09-08) — grouped by subjectCode, global across
+ * campaigns unless filtered. Reachable from both the CMS (via the SSO
+ * headers `request()` already attaches) and apps/web (via its own api-key) —
+ * see apps/api's `ApiKeyOrSsoGuard`.
+ */
+export function listStudents(params: ListStudentsParams = {}): Promise<Paginated<StudentListItem>> {
+  const search = new URLSearchParams();
+  if (params.campaignId) search.set('campaignId', params.campaignId);
+  if (params.q) search.set('q', params.q);
+  if (params.page) search.set('page', String(params.page));
+  if (params.limit) search.set('limit', String(params.limit));
+  const qs = search.toString();
+  return request<Paginated<StudentListItem>>(`/v1/students${qs ? `?${qs}` : ''}`);
+}
+
+/** One student, every session across every campaign — photos/videos come with `viewUrl` already resolved. */
+export const getStudent = (code: string) => request<StudentDetail>(`/v1/students/${encodeURIComponent(code)}`);
+
 /**
  * Every signed-in SSO operator may open full-size photos (product decision 3
  * in the Phase 11 plan) — there is no per-admin identity plumbed through to
@@ -440,13 +534,16 @@ export interface ReissueDeviceInput {
 }
 
 /**
- * Rotates an existing device's secret and returns a fresh activation zip —
- * see `DeviceController.reissueDevice`'s own doc comment server-side: this
- * works for a device in any status, including ACTIVATED, and an already-
- * running kiosk's old secret stops authenticating the moment this call
- * succeeds. Callers are responsible for confirming that consequence with the
- * operator before calling this for an ACTIVATED device — see
- * `DevicesPanel.tsx`.
+ * Rotates an existing device's secret WITH OVERLAP and returns a fresh
+ * activation zip — see `DeviceController.reissueDevice`'s own doc comment
+ * server-side: this works for a device in any status, including ACTIVATED,
+ * and (2026-09-08, fixing the "kiosk 3" incident — see docs/ROADMAP.md's
+ * dated entry) no longer stops an already-running kiosk from authenticating.
+ * The old secret stays valid, no time limit, until either the new one is
+ * used or the device is explicitly revoked via `revokeDevice` below — so
+ * this no longer needs an operator confirmation before calling it for an
+ * ACTIVATED device (that confirmation used to exist because this call used
+ * to revoke on the spot; see `DevicesPanel.tsx`).
  */
 export function reissueDevice(
   deviceId: string,
@@ -459,7 +556,17 @@ export function reissueDevice(
  * Manually marks a device ACTIVATED — see `DeviceController.activateDevice`'s
  * doc comment server-side: for testing/ops, when an admin wants the device
  * to read as activated without waiting for a real kiosk to call in. Never
- * touches the device secret.
+ * touches the device secret. Rejected (409, `DEVICE_REVOKED`) for a REVOKED
+ * device — reissuing is the only way back in for one of those.
  */
 export const activateDevice = (deviceId: string) =>
   request<Device>(`/v1/devices/${deviceId}/activate`, { method: 'POST' });
+
+/**
+ * "Thu hồi" (revoke) — 2026-09-08: invalidates every secret this device has
+ * (current + previous) immediately, no overlap. The explicit hard-stop
+ * counterpart to `reissueDevice`'s soft, overlapping rotation — see
+ * `DeviceService.revokeDevice`'s own doc comment server-side.
+ */
+export const revokeDevice = (deviceId: string) =>
+  request<Device>(`/v1/devices/${deviceId}/revoke`, { method: 'POST' });

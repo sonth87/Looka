@@ -77,6 +77,11 @@ export class DeviceEventService extends CommonService<DeviceEvent> {
             campaignId,
             event.metadata,
           );
+        } else if (event.type === DeviceEventType.ATTEMPT_SUPERSEDED) {
+          await this.captureReportService.applyAttemptSuperseded(
+            manager,
+            event.metadata,
+          );
         }
       }
 

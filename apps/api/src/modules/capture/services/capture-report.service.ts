@@ -25,6 +25,8 @@ interface SessionReportPayload {
   workflowId?: string | null;
   subjectCode?: string | null;
   subjectName?: string | null;
+  /** className/major/academicYear when a kiosk looked up a student — no dedicated column exists for these, see applySessionReport()'s own doc comment for why they merge into `sessions.metadata` instead. */
+  metadata?: Record<string, unknown> | null;
   photos: SessionReportPhotoInput[];
 }
 
@@ -62,6 +64,12 @@ interface VideoStatusPayload {
   durationMs?: number | null;
 }
 
+/** "Chụp lại sau khi đã lưu" (2026-09-08) — see `applyAttemptSuperseded()`'s own doc comment. */
+interface AttemptSupersededPayload {
+  kind: 'photo' | 'video';
+  id: string;
+}
+
 /**
  * Applies the two self-sufficient kiosk device-events onto the shared
  * `sessions`/`photos` tables - see
@@ -87,6 +95,14 @@ export class CaptureReportService {
    * `fs_status`) are deliberately set ONLY when the row is first created
    * here — a resent or late-arriving SESSION_REPORT must never regress
    * progress a PHOTO_STATUS has already recorded (see `applyPhotoStatus`).
+   *
+   * `payload.metadata` (2026-09-08 "student gallery" feature — a looked-up
+   * student's className/major/academicYear, which have no dedicated column
+   * anywhere) is *merged* into `sessions.metadata` (`||`, jsonb
+   * concatenation), never overwritten wholesale — same COALESCE-style
+   * protection as `subject_code`/`subject_name` just below: a resend that
+   * happens to omit this key (or a caller with nothing to report) must not
+   * erase what an earlier application already recorded.
    */
   async applySessionReport(
     manager: EntityManager,
@@ -100,8 +116,8 @@ export class CaptureReportService {
       `INSERT INTO sessions (
           id, source, device_id, campaign_id, status,
           captured_at, completed_at, approved_at, workflow_id,
-          subject_code, subject_name
-        ) VALUES ($1, 'KIOSK', $2, $3, 'COMPLETED', $4, $5, $5, $6, $7, $8)
+          subject_code, subject_name, metadata
+        ) VALUES ($1, 'KIOSK', $2, $3, 'COMPLETED', $4, $5, $5, $6, $7, $8, $9::jsonb)
         ON CONFLICT (id) DO UPDATE SET
           source = 'KIOSK',
           device_id = EXCLUDED.device_id,
@@ -112,7 +128,8 @@ export class CaptureReportService {
           approved_at = EXCLUDED.approved_at,
           workflow_id = EXCLUDED.workflow_id,
           subject_code = COALESCE(EXCLUDED.subject_code, sessions.subject_code),
-          subject_name = COALESCE(EXCLUDED.subject_name, sessions.subject_name)`,
+          subject_name = COALESCE(EXCLUDED.subject_name, sessions.subject_name),
+          metadata = sessions.metadata || EXCLUDED.metadata`,
       [
         payload.sessionId,
         deviceId,
@@ -122,6 +139,7 @@ export class CaptureReportService {
         payload.workflowId ?? null,
         payload.subjectCode ?? null,
         payload.subjectName ?? null,
+        JSON.stringify(payload.metadata ?? {}),
       ],
     );
 
@@ -315,6 +333,31 @@ export class CaptureReportService {
     );
   }
 
+  /**
+   * "Chụp lại sau khi đã lưu" (2026-09-08 post-save retake feature): the
+   * kiosk found and removed a stale attempt/recording it just replaced —
+   * possibly one that had already reached `READY` — and this is the
+   * signal to drop this API's own now-stale row for it. Plain `DELETE`,
+   * not a soft-delete/superseded flag: mirrors how every other supersede
+   * path in this codebase (`UploadOutboxRepository.approveSession()`,
+   * `SessionService.completeSession()`) already deletes outright rather
+   * than marking, and matches how `photos`/`session_videos` have no such
+   * flag column to set in the first place.
+   *
+   * Idempotent by construction — a plain `DELETE ... WHERE id = $1` is a
+   * harmless no-op if the row is already gone (a duplicate device-event, or
+   * one that arrives after some other path already removed it), same as
+   * every other `applyX` method here.
+   */
+  async applyAttemptSuperseded(
+    manager: EntityManager,
+    rawMetadata: Record<string, unknown> | null | undefined,
+  ): Promise<void> {
+    const payload = this.assertAttemptSupersededPayload(rawMetadata);
+    const table = payload.kind === 'video' ? 'session_videos' : 'photos';
+    await manager.query(`DELETE FROM ${table} WHERE id = $1`, [payload.id]);
+  }
+
   private assertSessionReportPayload(
     raw: Record<string, unknown> | null | undefined,
   ): SessionReportPayload {
@@ -345,6 +388,9 @@ export class CaptureReportService {
       return invalid('startedAt must be an ISO date string when present');
     }
     if (!Array.isArray(m.photos)) return invalid('photos must be an array');
+    if (m.metadata != null && typeof m.metadata !== 'object') {
+      return invalid('metadata must be an object when present');
+    }
 
     const photos = m.photos.map((rawPhoto, index) => {
       if (!rawPhoto || typeof rawPhoto !== 'object')
@@ -389,6 +435,7 @@ export class CaptureReportService {
       workflowId: (m.workflowId as string | null | undefined) ?? null,
       subjectCode: (m.subjectCode as string | null | undefined) ?? null,
       subjectName: (m.subjectName as string | null | undefined) ?? null,
+      metadata: (m.metadata as Record<string, unknown> | null | undefined) ?? null,
       photos,
     };
   }
@@ -491,5 +538,27 @@ export class CaptureReportService {
       cameraRole: (m.cameraRole as string | null | undefined) ?? null,
       durationMs: (m.durationMs as number | null | undefined) ?? null,
     };
+  }
+
+  private assertAttemptSupersededPayload(
+    raw: Record<string, unknown> | null | undefined,
+  ): AttemptSupersededPayload {
+    const invalid = (detail: string): never => {
+      throw new CustomException(
+        `ATTEMPT_SUPERSEDED payload invalid: ${detail}`,
+        ERROR_CODE.ATTEMPT_SUPERSEDED_INVALID_PAYLOAD,
+        HttpStatus.BAD_REQUEST,
+      );
+    };
+
+    if (!raw || typeof raw !== 'object')
+      return invalid('metadata must be an object');
+    const m = raw;
+
+    if (m.kind !== 'photo' && m.kind !== 'video')
+      return invalid('kind must be "photo" or "video"');
+    if (typeof m.id !== 'string' || !m.id) return invalid('id is required');
+
+    return { kind: m.kind, id: m.id };
   }
 }

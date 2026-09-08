@@ -51,10 +51,17 @@ export const ERROR_CODE = {
   DEVICE_SECRET_INVALID: 5005,
   INSTALLER_NOT_CONFIGURED: 5006,
   CAMPAIGN_HAS_DEPENDENCIES: 5007,
+  DEVICE_REVOKED: 5008,
 
   // VIDEO — kiosk video upload reporting (6xxx)
   VIDEO_NOT_FOUND: 6000,
   VIDEO_STATUS_INVALID_PAYLOAD: 6001,
+
+  // STUDENT — "sinh viên đã chụp" gallery (7xxx)
+  STUDENT_NOT_FOUND: 7000,
+
+  // ATTEMPT_SUPERSEDED — post-save retake cleanup (8xxx)
+  ATTEMPT_SUPERSEDED_INVALID_PAYLOAD: 8000,
 };
 
 export const ERROR_TYPE = {};

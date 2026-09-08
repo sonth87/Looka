@@ -4,6 +4,7 @@ import path from 'node:path';
 import { CAMERA_ROLES, type CameraRole } from '@face/core';
 import { FsClient } from '@face/fs-client';
 import { SecretStore, CryptoProvider } from './SecretStore.js';
+import { parseActivationPayload, activationFileSupersedesStored } from './activationFile.js';
 
 // Same tenant apps/api provisions under by default (see its file-service.ts) —
 // both sides of this platform sharing one tenant name is intentional, not a
@@ -186,47 +187,69 @@ export function hasDeviceCredentials(): boolean {
  * way `setFileServiceCredentials` does: encrypted, never left sitting in a
  * plaintext file as the ongoing source of truth. Throws on a missing/malformed
  * file rather than silently leaving the kiosk unactivated with no signal why.
+ * Parsing/validation itself lives in `activationFile.ts` (Electron-free, so
+ * it can be unit-tested — see that file's own doc comment).
+ *
+ * This is now also the re-activation path (2026-09-08, "kiosk 3" incident
+ * fix), not just first-time setup: `findAndImportActivationFileIfPresent`
+ * below calls this again on an already-activated kiosk once its
+ * activation.json describes a genuinely new credential. The §3.3 24h
+ * fail-closed clock (`setLastVerifiedDeviceState`) is only reset when the
+ * device id itself changed, or there was no prior credential at all — a
+ * secret-only rotation of the SAME device keeps the offline config cache,
+ * since nothing about which campaign/config this kiosk trusts has changed.
  */
 export async function importActivationFile(filePath: string): Promise<DeviceCredentials> {
   const raw = await fs.readFile(filePath, 'utf8');
-  const parsed = JSON.parse(raw) as Record<string, unknown>;
-
-  const deviceId = typeof parsed.deviceId === 'string' ? parsed.deviceId : null;
-  const deviceSecret = typeof parsed.deviceSecret === 'string' ? parsed.deviceSecret : null;
-  const campaignId = typeof parsed.campaignId === 'string' ? parsed.campaignId : null;
-  if (!deviceId || !deviceSecret || !campaignId) {
-    throw new Error(`Malformed activation file at ${filePath}: missing deviceId/deviceSecret/campaignId`);
+  let parsed: ReturnType<typeof parseActivationPayload>;
+  try {
+    parsed = parseActivationPayload(raw);
+  } catch (err) {
+    throw new Error(`Malformed activation file at ${filePath}: ${(err as Error).message}`);
   }
-  const apiBaseUrl = typeof parsed.authApiEndpoint === 'string' ? parsed.authApiEndpoint : null;
+  const { deviceId, deviceSecret, campaignId, apiBaseUrl } = parsed;
+
+  const priorDeviceId = getSecret('device.id');
 
   setSecret('device.id', deviceId);
   setSecret('device.secret', deviceSecret);
   setSecret('device.campaignId', campaignId);
   if (apiBaseUrl) setSecret('device.apiBaseUrl', apiBaseUrl);
-  // Seeds the §3.3 24h fail-closed clock at activation time, with no config
-  // yet — an admin just registered this exact device, which is itself a
-  // trust-establishing moment. Without this, a kiosk whose network isn't up
-  // yet on its very first boot would read as "never verified" and could be
-  // treated as already-expired before it ever got a chance to phone home.
-  setLastVerifiedDeviceState(null, Date.now());
+
+  if (priorDeviceId === null || priorDeviceId !== deviceId) {
+    // Seeds the §3.3 24h fail-closed clock at activation time, with no
+    // config yet — an admin just registered this exact device, which is
+    // itself a trust-establishing moment. Without this, a kiosk whose
+    // network isn't up yet on its very first boot would read as "never
+    // verified" and could be treated as already-expired before it ever got
+    // a chance to phone home. Skipped when the same device just got a new
+    // secret (rotation) — the last confirmed-good config is still valid for
+    // this device and must not be thrown away for nothing.
+    setLastVerifiedDeviceState(null, Date.now());
+  }
 
   return { deviceId, deviceSecret, campaignId, apiBaseUrl };
 }
 
 /**
- * Looks for `activation.json` next to this install and imports it if this
- * kiosk has no device identity yet — a one-time import, the same shape as
- * `getFileServiceCredentials`'s `FS_BASE_URL`/`FS_API_KEY` handling above.
- * Already-activated kiosks skip this entirely, so a leftover activation.json
- * from setup does not silently re-import over an operator's later changes.
+ * Looks for `activation.json` next to this install and imports it whenever
+ * it describes a credential this kiosk does not already have — first-time
+ * setup (no device identity at all yet), the same shape as
+ * `getFileServiceCredentials`'s `FS_BASE_URL`/`FS_API_KEY` handling above,
+ * AND now also the official "load a re-issued package onto an
+ * already-activated kiosk" path (2026-09-08 fix for the "kiosk 3" incident:
+ * an admin re-downloading a device's activation package rotates its secret
+ * server-side, and short of this there was no way to get the new secret onto
+ * a running kiosk besides wiping its secrets by hand). An activation.json
+ * identical to what's already stored (a leftover file from setup, an
+ * operator re-copying the same package) is a harmless no-op — see
+ * `activationFileSupersedesStored`.
  *
  * `LOOKA_ACTIVATION_PATH` overrides the lookup location for development and
  * testing, where there is no real installed-next-to-the-exe layout to read
  * from.
  */
 export async function findAndImportActivationFileIfPresent(): Promise<boolean> {
-  if (hasDeviceCredentials()) return false;
-
   const candidate =
     process.env.LOOKA_ACTIVATION_PATH?.trim() ||
     path.join(path.dirname(app.getPath('exe')), 'activation.json');
@@ -238,8 +261,20 @@ export async function findAndImportActivationFileIfPresent(): Promise<boolean> {
   }
 
   try {
+    const raw = await fs.readFile(candidate, 'utf8');
+    const parsed = parseActivationPayload(raw);
+    const stored = getDeviceCredentials();
+    if (!activationFileSupersedesStored(stored, parsed)) {
+      // Same device, same secret already stored — nothing to do.
+      return false;
+    }
+
     await importActivationFile(candidate);
-    console.warn(`[secrets] imported device activation from ${candidate}`);
+    console.warn(
+      stored
+        ? `[secrets] re-imported newer device activation from ${candidate}`
+        : `[secrets] imported device activation from ${candidate}`
+    );
     return true;
   } catch (err) {
     console.error('[secrets] failed to import activation file:', (err as Error).message);

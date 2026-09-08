@@ -1,7 +1,7 @@
 import { CustomException, ERROR_CODE } from '@app/common/errors';
 import { HttpStatus, Injectable, NestMiddleware } from '@nestjs/common';
 import { NextFunction, Request, Response } from 'express';
-import { DeviceService } from '../services/device.service';
+import { DeviceService, deviceCredentialFailure } from '../services/device.service';
 
 /**
  * The "Lớp Looka (apps/api)" half of the two-layer expiry block described in
@@ -42,13 +42,12 @@ export class DeviceExpiryMiddleware implements NestMiddleware {
 
     const check = await this.deviceService.verifyCredentials(deviceId, deviceSecret);
     if (!check.ok) {
-      const [code, message] =
-        check.reason === 'EXPIRED'
-          ? [ERROR_CODE.DEVICE_EXPIRED, 'Device expired']
-          : check.reason === 'NOT_FOUND'
-            ? [ERROR_CODE.DEVICE_NOT_FOUND, 'Device not found']
-            : [ERROR_CODE.DEVICE_SECRET_INVALID, 'Invalid device secret'];
-      throw new CustomException(message, code, HttpStatus.UNAUTHORIZED);
+      // 2026-09-08: now shares `deviceCredentialFailure` with
+      // `DeviceCredentialsGuard` instead of its own manual reason→code map,
+      // so the two authentication paths can never drift apart on which
+      // `ERROR_CODE` a given reason maps to (this map was missing the new
+      // REVOKED reason until this shared helper existed).
+      throw deviceCredentialFailure(check.reason);
     }
 
     next();

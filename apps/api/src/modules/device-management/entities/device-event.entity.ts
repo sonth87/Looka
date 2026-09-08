@@ -19,6 +19,13 @@ export enum DeviceEventType {
   // and migration 1788000000000-SessionVideos for the enum-rollout ordering
   // this depends on (API must know this value before any kiosk build emits it).
   VIDEO_STATUS = 'VIDEO_STATUS',
+  // "Chụp lại sau khi đã lưu" (2026-09-08 post-save retake feature) — a
+  // kiosk retake that happens AFTER a session was already approved once
+  // sends this to tell the API to drop the stale photos/session_videos row
+  // it is replacing. See CaptureReportService.applyAttemptSuperseded and
+  // migration 1789000000000-AttemptSuperseded for the same enum-rollout
+  // ordering requirement as VIDEO_STATUS above.
+  ATTEMPT_SUPERSEDED = 'ATTEMPT_SUPERSEDED',
 }
 
 /**

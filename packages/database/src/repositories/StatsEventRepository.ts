@@ -8,7 +8,8 @@ export type StatsEventType =
   | 'CB_HELP_INTERVENTION'
   | 'SESSION_REPORT'
   | 'PHOTO_STATUS'
-  | 'VIDEO_STATUS';
+  | 'VIDEO_STATUS'
+  | 'ATTEMPT_SUPERSEDED';
 
 export interface StatsEventItem {
   id: string;
