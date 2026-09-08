@@ -5,6 +5,7 @@ import {
   getLastVerifiedDeviceState,
   setLastVerifiedDeviceState,
 } from './secrets.js';
+import { parseRejectReason, type DeviceRejectReason } from './deviceAuth.js';
 
 export interface CampaignConfig {
   id: string;
@@ -34,7 +35,7 @@ export interface CampaignConfig {
 
 export type ConfigFetchResult =
   | { status: 'ok'; config: CampaignConfig }
-  | { status: 'unauthorized' }
+  | { status: 'unauthorized'; rejectReason: DeviceRejectReason }
   | { status: 'unreachable' };
 
 /**
@@ -104,10 +105,15 @@ export class DeviceApiClient {
       });
       if (res.status === 401) {
         // DeviceCredentialsGuard's own verdict: this device id/secret is
-        // wrong, unknown, or its campaign has expired. A confirmed rejection,
-        // not a connectivity problem — see fetchCampaignConfigResult's own
-        // doc comment.
-        return { status: 'unauthorized' };
+        // wrong, unknown, its campaign has expired, or the device was
+        // revoked. A confirmed rejection, not a connectivity problem — see
+        // fetchCampaignConfigResult's own doc comment. Body must be read
+        // BEFORE returning (a past bug here returned first, discarding the
+        // reason) — see `HttpExceptionFilter`'s `{ errorCode, message }`
+        // envelope this reads (`deviceAuth.ts`'s own doc comment covers the
+        // old-API/non-JSON fallback to 'UNKNOWN').
+        const body = (await res.json().catch(() => null)) as { errorCode?: unknown } | null;
+        return { status: 'unauthorized', rejectReason: parseRejectReason(body?.errorCode) };
       }
       if (!res.ok) {
         console.error(`[deviceApi] campaign config fetch failed: ${res.status}`);
@@ -124,14 +130,21 @@ export class DeviceApiClient {
   /**
    * Pushes a batch of stats events to `POST /v1/devices/events` — see
    * docs/plans/multi-camera-device-management-discussion.md §3.4. Returns
-   * `false` on any failure (no device identity, network error, non-2xx) so
-   * `StatsEventWorker` knows to leave the batch `PENDING` and retry next
-   * tick — same offline-first reasoning as `fetchCampaignConfig`.
+   * `'ok'` on success, `'unauthorized'` on a confirmed 401 (device
+   * id/secret rejected — the caller must stop hammering the endpoint until
+   * a new package is loaded, see `statsEvents.ts`'s own backoff), or
+   * `'failed'` for anything else (no device identity, network error, other
+   * non-2xx). Was a boolean before the 2026-09-08 fix: `StatsEventWorker`
+   * used to retry every 401 forever, exactly like every other failure, with
+   * no way to tell an operator why. Rows stay `PENDING` on every non-`'ok'`
+   * outcome, same offline-first reasoning as `fetchCampaignConfig`.
    */
-  async pushEvents(events: { type: string; occurredAt: string; metadata?: Record<string, unknown> }[]): Promise<boolean> {
+  async pushEvents(
+    events: { type: string; occurredAt: string; metadata?: Record<string, unknown> }[]
+  ): Promise<'ok' | 'unauthorized' | 'failed'> {
     const creds = getDeviceCredentials();
-    if (!creds || !creds.apiBaseUrl) return false;
-    if (events.length === 0) return true;
+    if (!creds || !creds.apiBaseUrl) return 'failed';
+    if (events.length === 0) return 'ok';
 
     try {
       const res = await this.fetchImpl(`${creds.apiBaseUrl}/v1/devices/events`, {
@@ -143,14 +156,24 @@ export class DeviceApiClient {
         },
         body: JSON.stringify({ events }),
       });
+      if (res.status === 401) {
+        // Body isn't currently surfaced further than this (StatsEventWorker
+        // only needs the tri-state, not the specific reason), but it's read
+        // here rather than discarded for the same reason
+        // `fetchCampaignConfigResult` reads it — leaving it unread on a 401
+        // was the exact bug that made the "kiosk 3" incident opaque.
+        await res.json().catch(() => null);
+        console.error('[deviceApi] events push rejected: 401');
+        return 'unauthorized';
+      }
       if (!res.ok) {
         console.error(`[deviceApi] events push failed: ${res.status}`);
-        return false;
+        return 'failed';
       }
-      return true;
+      return 'ok';
     } catch (err) {
       console.error('[deviceApi] events push failed:', (err as Error).message);
-      return false;
+      return 'failed';
     }
   }
 }
@@ -186,6 +209,15 @@ export interface DeviceAccessStatus {
   blocked: boolean;
   /** Set only when `blocked` — why the caller must refuse to run a session. */
   reason?: 'unauthorized' | 'unreachable-too-long';
+  /**
+   * Set only when `reason === 'unauthorized'` — the specific server-side
+   * cause (secret rotated, revoked, campaign expired, device gone), so the
+   * kiosk UI can tell those apart instead of one undifferentiated message
+   * (the 2026-09-08 "kiosk 3" incident: an operator went looking at campaign
+   * expiry when the real cause was a rotated device secret). `'UNKNOWN'`
+   * against an API that predates this, or any body that failed to parse.
+   */
+  rejectReason?: DeviceRejectReason;
   /** Best-known config: fresh if the admin portal answered, otherwise the last confirmed-good one from disk. Null when this kiosk has no device identity, or none has ever been confirmed. */
   config: CampaignConfig | null;
 }
@@ -212,7 +244,7 @@ export async function getDeviceAccessStatus(client = new DeviceApiClient()): Pro
   }
 
   if (result.status === 'unauthorized') {
-    return { blocked: true, reason: 'unauthorized', config: null };
+    return { blocked: true, reason: 'unauthorized', rejectReason: result.rejectReason, config: null };
   }
 
   // Unreachable — fall back to the last confirmed-good state on disk and its age.

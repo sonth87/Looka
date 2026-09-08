@@ -1,6 +1,7 @@
 import { useEffect, Component, ReactNode } from "react";
 import { DeviceLayout, AppConfig } from "@sonth87/device-layout";
 import { FaceCaptureApp, HttpCaptureSink, LookaIcon } from "@face/ui";
+import { StudentsScreen } from "./StudentsScreen";
 
 /**
  * Captures go to our own backend, which holds the file-service key.
@@ -71,6 +72,16 @@ const appsConfig: AppConfig[] = [
     defaultSize: { width: 1150, height: 780 },
     minSize: { width: 640, height: 480 },
     defaultMaximized: true,
+    category: "utilities",
+  },
+  {
+    id: "looka-students",
+    name: "Sinh viên đã chụp",
+    icon: "lucide:Users",
+    iconColor: ["#4f46e5", "#818cf8"],
+    render: StudentsScreen,
+    defaultSize: { width: 1000, height: 700 },
+    minSize: { width: 640, height: 480 },
     category: "utilities",
   },
 ];

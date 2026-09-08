@@ -100,4 +100,60 @@ describe('CaptureStreamRepository', () => {
     assert.equal(removed, 0);
     adapter.close();
   });
+
+  describe('listOlderFinishedRecordings — post-save retake (2026-09-08)', () => {
+    test('finds an earlier finished recording of the same camera, excluding the kept one', async () => {
+      const { adapter, repo } = await makeRepo();
+      repo.startStream({ id: 'old', sessionId: 'sess_1', cameraId: 'CENTER', localPath: '/old.webm', startedAt: 1000 });
+      repo.endStream({ id: 'old', sizeBytes: 100, durationMs: 5000, endedAt: 2000 });
+      repo.startStream({ id: 'new', sessionId: 'sess_1', cameraId: 'CENTER', localPath: '/new.webm', startedAt: 3000 });
+      repo.endStream({ id: 'new', sizeBytes: 200, durationMs: 6000, endedAt: 4000 });
+
+      const older = repo.listOlderFinishedRecordings('sess_1', 'CENTER', 'new');
+      assert.deepEqual(older.map((s) => s.id), ['old']);
+      adapter.close();
+    });
+
+    test('ignores a different camera and a still-in-progress recording', async () => {
+      const { adapter, repo } = await makeRepo();
+      repo.startStream({ id: 'other-camera', sessionId: 'sess_1', cameraId: 'LEFT', localPath: '/l.webm', startedAt: 1000 });
+      repo.endStream({ id: 'other-camera', sizeBytes: 100, durationMs: 5000, endedAt: 2000 });
+      repo.startStream({ id: 'unfinished', sessionId: 'sess_1', cameraId: 'CENTER', localPath: '/u.webm', startedAt: 1500 });
+      repo.startStream({ id: 'new', sessionId: 'sess_1', cameraId: 'CENTER', localPath: '/new.webm', startedAt: 3000 });
+      repo.endStream({ id: 'new', sizeBytes: 200, durationMs: 6000, endedAt: 4000 });
+
+      const older = repo.listOlderFinishedRecordings('sess_1', 'CENTER', 'new');
+      assert.deepEqual(older, []);
+      adapter.close();
+    });
+
+    test('no older recordings at all is a harmless empty result', async () => {
+      const { adapter, repo } = await makeRepo();
+      repo.startStream({ id: 'new', sessionId: 'sess_1', cameraId: 'CENTER', localPath: '/new.webm', startedAt: 1000 });
+      repo.endStream({ id: 'new', sizeBytes: 200, durationMs: 6000, endedAt: 2000 });
+
+      assert.deepEqual(repo.listOlderFinishedRecordings('sess_1', 'CENTER', 'new'), []);
+      adapter.close();
+    });
+  });
+
+  describe('deleteById', () => {
+    test('removes exactly the named recording, leaving others untouched', async () => {
+      const { adapter, repo } = await makeRepo();
+      repo.startStream({ id: 'a', sessionId: 'sess_1', cameraId: 'CENTER', localPath: '/a.webm', startedAt: 1000 });
+      repo.startStream({ id: 'b', sessionId: 'sess_1', cameraId: 'LEFT', localPath: '/b.webm', startedAt: 2000 });
+
+      repo.deleteById('a');
+
+      assert.equal(repo.getById('a'), null);
+      assert.ok(repo.getById('b'));
+      adapter.close();
+    });
+
+    test('deleting an id that does not exist is a harmless no-op', async () => {
+      const { adapter, repo } = await makeRepo();
+      repo.deleteById('does-not-exist');
+      adapter.close();
+    });
+  });
 });

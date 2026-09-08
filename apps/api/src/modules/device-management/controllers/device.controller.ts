@@ -68,9 +68,9 @@ export class DeviceController {
   }
 
   /**
-   * Rotates a device's secret and hands back a fresh activation zip — the
-   * only way to get a device a usable activation package again once the
-   * original is gone (tab closed, download failed, etc.), since the
+   * Rotates a device's secret WITH OVERLAP and hands back a fresh activation
+   * zip — the only way to get a device a usable activation package again
+   * once the original is gone (tab closed, download failed, etc.), since the
    * plaintext secret is never stored and so cannot simply be re-sent (see
    * `DeviceService.registerDevice`'s own doc comment). Same device row
    * throughout: id/name/history are untouched, only the secret (and,
@@ -80,24 +80,30 @@ export class DeviceController {
    * omitted `os` falls back to `buildActivationZip`'s own default (there is
    * no stored per-device `os`).
    *
-   * Works for a device in ANY status, including already ACTIVATED — a real
-   * kiosk still running on the old secret will stop authenticating the
-   * moment this call succeeds. That is the intended behavior for "revoke
-   * this kiosk's credentials," not a bug to prevent: this endpoint
-   * deliberately does not block or silently no-op on an already-activated
-   * device. The CMS requires an explicit operator confirmation before
-   * calling this for an ACTIVATED device for exactly that reason.
+   * Works for a device in ANY status, including already ACTIVATED — but,
+   * as of 2026-09-08 (fixing the "kiosk 3" incident, see docs/ROADMAP.md's
+   * dated entry), it no longer kills a kiosk already running on the old
+   * secret: that secret stays valid, with no time limit, until the *new*
+   * secret is used successfully once or the device is explicitly revoked
+   * via `revokeDevice` below. Clicking "Tải gói kích hoạt" a second time for
+   * an already-running kiosk — the exact incident this fixes — is now
+   * harmless: the CMS just shows a "chưa nạp gói mới" chip. This is
+   * precisely why the CMS no longer needs an operator confirmation before
+   * calling this for an ACTIVATED device (that confirmation used to exist
+   * because this call used to revoke on the spot).
    *
    * An already-ACTIVATED device's status is left as ACTIVATED across the
    * reissue (2026-09-07 — see `DeviceService.reissueDevice`'s own doc
    * comment) even though the *new* secret hasn't been confirmed by a kiosk
    * yet — a deliberate trade so "I just need the file again" doesn't read
-   * as "starting over."
+   * as "starting over." A REVOKED device reissued this way returns to
+   * REGISTERED — see `DeviceService.reissueDevice`'s own doc comment.
    */
   @Post('devices/:id/reissue')
   @Header('Content-Type', 'application/zip')
   @ApiOperation({
-    summary: "Reissue a device's activation package, rotating its secret (works even if the device is already ACTIVATED)",
+    summary:
+      "Reissue a device's activation package, rotating its secret with overlap (the old secret stays valid until the new one is used, or the device is revoked)",
   })
   async reissueDevice(
     @Param('id') id: string,
@@ -111,6 +117,22 @@ export class DeviceController {
     return new StreamableFile(zip, {
       disposition: `attachment; filename="looka-kiosk-${device.id}.zip"`,
     });
+  }
+
+  /**
+   * "Thu hồi" (revoke) — 2026-09-08, the explicit hard-stop action added
+   * alongside the softer, overlapping `reissueDevice` above: invalidates
+   * every secret this device has (current + previous) immediately, no
+   * overlap, no grace period. Reissuing no longer revokes a running kiosk on
+   * its own, so this is the only way to intentionally lock one out right
+   * now (lost/stolen device, decommissioned kiosk) — see
+   * `DeviceService.revokeDevice`'s own doc comment.
+   */
+  @Post('devices/:id/revoke')
+  @ApiOperation({ summary: "Revoke a device's credentials immediately (no overlap)" })
+  @ApiResponseDecorator(DeviceDao)
+  revokeDevice(@Param('id') id: string): Promise<DeviceDao> {
+    return this.deviceService.revokeDevice(id);
   }
 
   /**

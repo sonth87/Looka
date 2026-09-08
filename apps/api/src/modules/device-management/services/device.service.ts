@@ -12,7 +12,37 @@ import { CampaignService } from './campaign.service';
 
 export type DeviceCredentialCheck =
   | { ok: true; device: Device }
-  | { ok: false; reason: 'NOT_FOUND' | 'INVALID_SECRET' | 'EXPIRED' };
+  | { ok: false; reason: 'NOT_FOUND' | 'INVALID_SECRET' | 'EXPIRED' | 'REVOKED' };
+
+/**
+ * Maps a failed `DeviceCredentialCheck.reason` to the `CustomException` both
+ * `DeviceCredentialsGuard` and `DeviceExpiryMiddleware` must throw — shared
+ * here instead of duplicated in each so the two authentication paths can
+ * never drift apart on which `ERROR_CODE` a given reason maps to. Always
+ * 401: even `NOT_FOUND` is treated as an auth failure at this boundary
+ * (never leaking "does this id exist" beyond "your credentials don't work"),
+ * matching both callers' existing behavior.
+ *
+ * The resulting body (`HttpExceptionFilter` → `HttpResponseError`) is
+ * `{ errorCode, message }` — the kiosk (`apps/desktop/src/main/deviceApi.ts`)
+ * reads `errorCode` to tell "your secret was rotated, get the new package"
+ * (5005) apart from "you were revoked, contact an admin" (5008) apart from
+ * "your campaign expired" (5003), which a bare `UnauthorizedException`
+ * (falls into `HttpExceptionFilter`'s default branch as `errorCode: 401`)
+ * could never distinguish.
+ */
+export function deviceCredentialFailure(reason: 'NOT_FOUND' | 'INVALID_SECRET' | 'EXPIRED' | 'REVOKED'): CustomException {
+  switch (reason) {
+    case 'NOT_FOUND':
+      return new CustomException('Device not found', ERROR_CODE.DEVICE_NOT_FOUND, HttpStatus.UNAUTHORIZED);
+    case 'EXPIRED':
+      return new CustomException('Device expired', ERROR_CODE.DEVICE_EXPIRED, HttpStatus.UNAUTHORIZED);
+    case 'REVOKED':
+      return new CustomException('Device revoked', ERROR_CODE.DEVICE_REVOKED, HttpStatus.UNAUTHORIZED);
+    case 'INVALID_SECRET':
+      return new CustomException('Invalid device secret', ERROR_CODE.DEVICE_SECRET_INVALID, HttpStatus.UNAUTHORIZED);
+  }
+}
 
 @Injectable()
 export class DeviceService extends CommonService<Device> {
@@ -65,54 +95,114 @@ export class DeviceService extends CommonService<Device> {
   }
 
   /**
-   * Rotates an existing device's secret in place — same id/name/history,
-   * only `deviceSecretHash` (and, optionally, `authApiEndpoint`) change. This
-   * is the only way to get a device a usable activation package again once
-   * the original zip is gone (tab closed, download failed, etc.), since the
+   * Rotates an existing device's secret WITH OVERLAP (2026-09-08 fix for the
+   * "kiosk 3" incident — see docs/ROADMAP.md's dated entry): same
+   * id/name/history, only `deviceSecretHash`/`previousSecretHash`/
+   * `secretRotatedAt` (and, optionally, `authApiEndpoint`) change. This is
+   * the only way to get a device a usable activation package again once the
+   * original zip is gone (tab closed, download failed, etc.), since the
    * plaintext secret is never persisted and therefore cannot simply be
    * re-sent — see this class's own doc comment on `registerDevice`.
    *
-   * Called both for a still-REGISTERED device (the first zip was lost
-   * before any kiosk ever used it) and for an already-ACTIVATED one
-   * (revoking a running kiosk's credentials on purpose, or an admin just
-   * wants a fresh copy of the zip) — see `DeviceController.reissueDevice`'s
-   * own doc comment for why revoking a running kiosk is intended behavior,
-   * not something to guard against here.
+   * Unlike the old behavior, this no longer kills whatever secret a running
+   * kiosk currently has loaded: that secret (tracked as `previousSecretHash`)
+   * stays valid — no time limit — until either the *new* secret is used
+   * successfully once (`verifyCredentials` clears it) or an admin explicitly
+   * calls `revokeDevice`. That is what makes clicking "Tải gói kích hoạt" a
+   * second time for an already-running kiosk harmless instead of a silent
+   * 401 lockout (the actual incident this fixes).
+   *
+   * "Keep the secret the kiosk is actually running" rule: if
+   * `previousSecretHash` is already set (an earlier reissue's new secret was
+   * never used), it is left untouched — that intermediate, never-loaded
+   * secret is the one that dies here, not the one the kiosk is live on.
+   * Only when `previousSecretHash` is still null does the *current* hash
+   * move into it.
+   *
+   * **Verified pitfall**: `findDeviceEntityOrFail` does not select
+   * `select:false` columns, so a naive `previousSecretHash = device.deviceSecretHash`
+   * would read `undefined` — and TypeORM's `save()` silently skips
+   * `undefined` properties, so the overlap would never actually persist.
+   * This loads the row with an explicit `select` (same pattern as
+   * `verifyCredentials` below) and writes via `CommonService.update()`
+   * rather than `save()` of a partially-loaded entity, for the same reason.
    *
    * `status`/`activatedAt` (2026-09-07, changed by product request — "chỉ
    * cần tải gói chứ không cần phải thiết lập lại kích hoạt"): only reset to
    * REGISTERED/`null` when the device was NOT already ACTIVATED — a device
-   * that was already running is left showing ACTIVATED across the reissue,
-   * even though strictly the *new* secret hasn't been confirmed by any
-   * kiosk yet. That's a deliberate, acknowledged trade of strict accuracy
-   * (the badge can lag reality until the new zip is actually loaded
-   * somewhere) for not making a routine "just get me the file again" action
-   * look like starting over from scratch. A device that was still
-   * REGISTERED keeps resetting normally — there is no "was activated"
-   * state to preserve for it. The manual `activateDevice` action remains
-   * available if an admin wants to force ACTIVATED back on regardless.
+   * that was already running is left showing ACTIVATED across the reissue.
+   * A REVOKED device reissued this way goes back to REGISTERED (it has no
+   * "was activated" state worth preserving across a revoke), clearing
+   * `revokedAt` — this is the normal "cấp gói kích hoạt mới" path back in
+   * after a "Thu hồi".
    */
   async reissueDevice(
     id: string,
     dto: ReissueDeviceDto,
     requestApiBaseUrl = '',
   ): Promise<{ device: Device; plainSecret: string }> {
-    const device = await this.findDeviceEntityOrFail(id);
+    const device = await this.repository.findOne({
+      where: { id },
+      select: {
+        id: true,
+        campaignId: true,
+        name: true,
+        authApiEndpoint: true,
+        status: true,
+        deviceSecretHash: true,
+        previousSecretHash: true,
+      },
+    });
+    if (!device) {
+      throw new CustomException('Device not found', ERROR_CODE.DEVICE_NOT_FOUND, HttpStatus.NOT_FOUND);
+    }
 
     const plainSecret = generateDeviceSecret();
-    device.deviceSecretHash = hashDeviceSecret(plainSecret);
+    const patch: Partial<Device> = {
+      deviceSecretHash: hashDeviceSecret(plainSecret),
+      previousSecretHash: device.previousSecretHash ?? device.deviceSecretHash,
+      secretRotatedAt: new Date(),
+      revokedAt: null,
+    };
     if (device.status !== DeviceStatus.ACTIVATED) {
-      device.status = DeviceStatus.REGISTERED;
-      device.activatedAt = null;
+      patch.status = DeviceStatus.REGISTERED;
+      patch.activatedAt = null;
     }
     if (dto.authApiEndpoint !== undefined) {
-      device.authApiEndpoint = dto.authApiEndpoint;
+      patch.authApiEndpoint = dto.authApiEndpoint;
     } else if (!device.authApiEndpoint) {
-      device.authApiEndpoint = requestApiBaseUrl;
+      patch.authApiEndpoint = requestApiBaseUrl;
     }
-    await this.save(device);
+    await this.update(id, patch);
 
-    return { device, plainSecret };
+    return { device: { ...device, ...patch }, plainSecret };
+  }
+
+  /**
+   * Explicit "Thu hồi" (revoke) — 2026-09-08, the harder counterpart to
+   * `reissueDevice`'s soft, overlapping rotation above: invalidates BOTH the
+   * current and previous secret immediately, no overlap, no grace period.
+   * The right action when an admin actually wants a kiosk locked out right
+   * now (lost/stolen device, decommissioned kiosk), as opposed to just
+   * wanting a fresh copy of the activation package.
+   *
+   * One `update()`: flips `status` to REVOKED, stamps `revokedAt`, clears
+   * the overlap pair (`previousSecretHash`/`secretRotatedAt` — there is
+   * nothing to overlap with once revoked), and — defense in depth, in case
+   * anything ever reads `deviceSecretHash` without checking `status` first —
+   * overwrites it with the hash of a secret nobody was ever given.
+   */
+  async revokeDevice(id: string): Promise<DeviceDao> {
+    await this.findDeviceEntityOrFail(id);
+    const patch: Partial<Device> = {
+      status: DeviceStatus.REVOKED,
+      revokedAt: new Date(),
+      previousSecretHash: null,
+      secretRotatedAt: null,
+      deviceSecretHash: hashDeviceSecret(generateDeviceSecret()),
+    };
+    await this.update(id, patch);
+    return this.findDeviceOrFail(id);
   }
 
   /**
@@ -124,9 +214,19 @@ export class DeviceService extends CommonService<Device> {
    * having) a real kiosk call in. Deliberately does NOT touch
    * `deviceSecretHash` — unlike `reissueDevice`, this never invalidates
    * whatever credentials are already out there.
+   *
+   * Refuses a REVOKED device (2026-09-08): manually flipping the CMS badge
+   * back to ACTIVATED without going through `reissueDevice` would make the
+   * CMS lie — the device's only stored secret at that point is the
+   * `revokeDevice` decoy nobody was ever given, so no kiosk could actually
+   * be running successfully. Reissuing (which clears REVOKED back to
+   * REGISTERED) is the only way back in.
    */
   async activateDevice(id: string): Promise<DeviceDao> {
     const device = await this.findDeviceEntityOrFail(id);
+    if (device.status === DeviceStatus.REVOKED) {
+      throw new CustomException('Device is revoked', ERROR_CODE.DEVICE_REVOKED, HttpStatus.CONFLICT);
+    }
     device.status = DeviceStatus.ACTIVATED;
     device.activatedAt = new Date();
     await this.save(device);
@@ -154,13 +254,33 @@ export class DeviceService extends CommonService<Device> {
   /**
    * The check every authenticated kiosk request ultimately reduces to (see
    * docs/plans/multi-camera-device-management-discussion.md §3.3): does
-   * `deviceId`/`secret` resolve to a real, non-expired device? `deviceSecretHash`
-   * has `select: false` on the entity, so it must be asked for explicitly here
-   * — every other read path in this service never sees it.
+   * `deviceId`/`secret` resolve to a real, non-expired, non-revoked device?
+   * `deviceSecretHash`/`previousSecretHash` both have `select: false` on the
+   * entity, so they must be asked for explicitly here — every other read
+   * path in this service never sees them.
    *
-   * Expiry is checked on the device's *campaign*, never the device itself —
-   * there is no `expires_at` column on `devices` (see the campaign-level
-   * decision in §3.2). `NULL` there means the campaign is permanent.
+   * Order (2026-09-08, "secret rotation with overlap" — see
+   * docs/ROADMAP.md's dated entry):
+   *   1. no row → `NOT_FOUND`.
+   *   2. `status === REVOKED` → `REVOKED` (checked before any secret compare —
+   *      a revoked device's stored `deviceSecretHash` is a decoy nobody was
+   *      ever given, but REVOKED must win over INVALID_SECRET regardless).
+   *   3. current hash matches → OK; if `previousSecretHash` was set, this is
+   *      the kiosk finally loading the new package — clear it (and
+   *      `secretRotatedAt`) since the rotation this represents is now complete.
+   *   4. else, `previousSecretHash` set and matches → OK, but do NOT clear —
+   *      the kiosk is still running the old secret, the overlap continues.
+   *   5. else → `INVALID_SECRET`.
+   *   6. only now, campaign expiry → `EXPIRED` — kept after the secret check
+   *      (unchanged from before) so a wrong secret on an expired campaign
+   *      still reads as INVALID_SECRET, not EXPIRED.
+   *
+   * Bookkeeping: exactly one `update()` on success (`lastAuthAt` + the
+   * REGISTERED→ACTIVATED flip + clearing `previousSecretHash`/`secretRotatedAt`
+   * when applicable) and exactly one `update()` on failure other than
+   * NOT_FOUND (`lastAuthFailedAt`/`lastAuthFailReason`) — this runs on the
+   * kiosk's hot path (once per session/config fetch, events ≤ every 15s), so
+   * it deliberately never does more than one write per call.
    */
   async verifyCredentials(deviceId: string, secret: string): Promise<DeviceCredentialCheck> {
     const device = await this.repository.findOne({
@@ -170,29 +290,51 @@ export class DeviceService extends CommonService<Device> {
         id: true,
         campaignId: true,
         deviceSecretHash: true,
+        previousSecretHash: true,
         status: true,
         campaign: { id: true, expiresAt: true },
       },
     });
     if (!device) return { ok: false, reason: 'NOT_FOUND' };
 
-    if (!verifyDeviceSecret(secret, device.deviceSecretHash)) {
-      return { ok: false, reason: 'INVALID_SECRET' };
+    const fail = async (reason: 'INVALID_SECRET' | 'EXPIRED' | 'REVOKED'): Promise<DeviceCredentialCheck> => {
+      await this.update(device.id, { lastAuthFailedAt: new Date(), lastAuthFailReason: reason });
+      return { ok: false, reason };
+    };
+
+    if (device.status === DeviceStatus.REVOKED) {
+      return fail('REVOKED');
+    }
+
+    let rotationCompleted = false;
+    if (verifyDeviceSecret(secret, device.deviceSecretHash)) {
+      rotationCompleted = device.previousSecretHash != null;
+    } else if (device.previousSecretHash != null && verifyDeviceSecret(secret, device.previousSecretHash)) {
+      // Kiosk is still running the pre-rotation secret — valid, but the
+      // overlap isn't resolved yet, so previousSecretHash/secretRotatedAt
+      // are left as-is.
+    } else {
+      return fail('INVALID_SECRET');
     }
 
     const expiresAt = device.campaign?.expiresAt;
     if (expiresAt && expiresAt.getTime() <= Date.now()) {
-      return { ok: false, reason: 'EXPIRED' };
+      return fail('EXPIRED');
     }
 
+    const patch: Partial<Device> = { lastAuthAt: new Date() };
+    if (rotationCompleted) {
+      patch.previousSecretHash = null;
+      patch.secretRotatedAt = null;
+    }
     // First successful call is what "activation" means — the kiosk has
     // proven it actually loaded the file, not just that CMS created a row.
     if (device.status === DeviceStatus.REGISTERED) {
-      device.status = DeviceStatus.ACTIVATED;
-      device.activatedAt = new Date();
-      await this.save(device);
+      patch.status = DeviceStatus.ACTIVATED;
+      patch.activatedAt = new Date();
     }
+    await this.update(device.id, patch);
 
-    return { ok: true, device };
+    return { ok: true, device: { ...device, ...patch } };
   }
 }

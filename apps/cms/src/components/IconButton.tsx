@@ -17,12 +17,13 @@ export function IconButton({
   label: string;
   onClick: () => void;
   disabled?: boolean;
-  tone?: 'default' | 'primary' | 'success';
+  tone?: 'default' | 'primary' | 'success' | 'danger';
 }) {
   const toneClass = {
     default: 'text-gray-500 hover:text-gray-900 hover:bg-gray-100',
     primary: 'text-blue-600 hover:text-blue-800 hover:bg-blue-50',
     success: 'text-emerald-600 hover:text-emerald-800 hover:bg-emerald-50',
+    danger: 'text-red-600 hover:text-red-800 hover:bg-red-50',
   }[tone];
 
   return (

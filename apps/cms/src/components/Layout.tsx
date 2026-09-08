@@ -31,9 +31,9 @@ function SsoLogoutButton() {
 /**
  * Standard admin-CMS shell: a fixed sidebar (branding + nav) and a scrolling
  * content area — the layout every mainstream admin tool (Strapi, Directus,
- * Retool...) uses, rather than a single unstyled column of forms. Two nav
- * items today (Tổng quan, Campaigns) — the sidebar was already built to make
- * room for exactly this kind of Dashboard/overview addition.
+ * Retool...) uses, rather than a single unstyled column of forms. The
+ * sidebar was already built to make room for exactly this kind of
+ * Dashboard/overview addition (now Tổng quan, Campaigns, Sinh viên).
  *
  * Light theme, deliberately: this is an office/daytime admin tool, distinct
  * from the dark kiosk-facing capture screen elsewhere in this monorepo — the
@@ -67,6 +67,9 @@ export function Layout({ children }: { children: ReactNode }) {
           </NavLink>
           <NavLink to="/campaigns" className={navItemClass}>
             Campaigns
+          </NavLink>
+          <NavLink to="/students" className={navItemClass}>
+            Sinh viên
           </NavLink>
         </nav>
 

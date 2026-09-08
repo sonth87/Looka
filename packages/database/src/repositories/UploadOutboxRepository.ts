@@ -106,6 +106,16 @@ export interface ApproveSessionResult {
   approved: number;
   /** Rows this call deleted because a later attempt at the same step superseded them, so the caller can unlink their local files. */
   superseded: Array<{ id: string; localPath: string }>;
+  /**
+   * The actual rows newly approved (same rows `approved` counts) — added for
+   * the post-save retake feature (2026-09-08): the caller needs each row's
+   * `kind`/`stepId` to look for an OLDER, already-approved-in-a-PREVIOUS-call
+   * attempt at that same `(kind, stepId)` via `supersedeOlderApprovedAttempts()`
+   * below, which this method's own supersede logic cannot find (it only ever
+   * compares rows staged together in this one call — see that method's own
+   * doc comment for why a separate pass is needed).
+   */
+  approvedRows: OutboxItem[];
 }
 
 /** Exponential backoff with jitter, capped so a long outage still retries hourly-ish. */
@@ -226,7 +236,7 @@ export class UploadOutboxRepository {
         )
         .map(toItem);
 
-      if (staged.length === 0) return { approved: 0, superseded: [] };
+      if (staged.length === 0) return { approved: 0, superseded: [], approvedRows: [] };
 
       // Group by (kind, stepId) — see D5 in the phase-11 plan. A stepId that
       // somehow fails to resolve (never observed — see toItem()'s fallback)
@@ -274,7 +284,46 @@ export class UploadOutboxRepository {
         this.db.run(`DELETE FROM upload_outbox WHERE id IN (${delPlaceholders})`, superseded.map((s) => s.id));
       }
 
-      return { approved: keep.length, superseded };
+      return { approved: keep.length, superseded, approvedRows: keep };
+    });
+  }
+
+  /**
+   * Post-save retake (2026-09-08): finds and deletes any OTHER row already
+   * approved for `(sessionId, kind, stepId)` from an EARLIER call to
+   * `approveSession()` — the case that method's own supersede logic cannot
+   * reach, since it only ever compares rows staged together in one call (see
+   * its own doc comment). Call once per row `approveSession()` just approved,
+   * passing that row's own id as `keepId`.
+   *
+   * Unlike `approveSession()`'s supersede path, a row found here may already
+   * be `DONE`/uploaded — the caller is responsible for also removing it from
+   * the file-service (`fsFileId`) and reporting the deletion centrally, not
+   * just unlinking the local file. Returns what it deleted so the caller can
+   * do both; an empty array (the common case — most attempts are never
+   * retaken after approval) means there was nothing to do.
+   */
+  public supersedeOlderApprovedAttempts(
+    sessionId: string,
+    kind: string,
+    stepId: string,
+    keepId: string
+  ): Array<{ id: string; localPath: string; fsFileId: string | null }> {
+    return this.db.transaction(() => {
+      const rows = this.db
+        .exec<Record<string, unknown>>(
+          `SELECT * FROM upload_outbox
+            WHERE session_id = ? AND kind = ? AND step_id = ? AND approved_at IS NOT NULL AND id != ?`,
+          [sessionId, kind, stepId, keepId]
+        )
+        .map(toItem);
+
+      if (rows.length === 0) return [];
+
+      const placeholders = rows.map(() => '?').join(',');
+      this.db.run(`DELETE FROM upload_outbox WHERE id IN (${placeholders})`, rows.map((r) => r.id));
+
+      return rows.map((r) => ({ id: r.id, localPath: r.localPath, fsFileId: r.fsFileId }));
     });
   }
 

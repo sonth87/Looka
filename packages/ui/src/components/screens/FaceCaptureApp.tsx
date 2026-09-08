@@ -33,6 +33,7 @@ import {
   isRecordingOverCap,
   MAX_RECORDING_DURATION_MS,
 } from '../../lib/recordingGate.js';
+import { deviceUnauthorizedMessage, type DeviceRejectReason } from '../../lib/deviceBlockMessage.js';
 
 /**
  * Capped bitrate for session recordings (2026-09-08) — `MediaRecorder`'s own
@@ -54,7 +55,7 @@ import { StepItem } from '../workflow/StepProgress.js';
 import { TooltipProvider, Tooltip, TooltipTrigger, TooltipContent } from '../ui/tooltip.js';
 import { getSettings, updateSettings } from '../../lib/settingsStore.js';
 import { CaptureSink, RunScopedCaptureSession } from '../../lib/CaptureSink.js';
-import type { ApprovalStepInfo } from '../../lib/CaptureSink.js';
+import type { ApprovalStepInfo, StudentSubjectInfo } from '../../lib/CaptureSink.js';
 import { SQLiteStorageAdapter, SessionRepository } from '@face/database';
 
 const defaultWorkflow: CaptureWorkflow = {
@@ -176,6 +177,16 @@ async function resolveActiveWorkflow(): Promise<{
    */
   blockedReason: 'unauthorized' | 'unreachable-too-long' | null;
   /**
+   * Set only when `blockedReason === 'unauthorized'` — the specific
+   * server-side cause (secret rotated, revoked, campaign expired, device
+   * gone), so the overlay can explain the actual problem instead of one
+   * undifferentiated message (2026-09-08 "kiosk 3" incident: an operator
+   * went looking at campaign expiry when the real cause was a rotated
+   * device secret). `null` for every other `blockedReason`, an app build
+   * predating this, or an API predating this (see `deviceBlockMessage.ts`).
+   */
+  rejectReason: DeviceRejectReason | null;
+  /**
    * Multi-frame simultaneous capture (§ desktop kiosk multi-camera capture)
    * — true only when the campaign explicitly turns it on. Absent/undefined
    * on older builds' config is treated as false, same fallback-is-safe
@@ -200,11 +211,13 @@ async function resolveActiveWorkflow(): Promise<{
   let campaignMode: CaptureTriggerMode | null | undefined;
   let campaignAutoHoldMs: number | null | undefined;
   let blockedReason: 'unauthorized' | 'unreachable-too-long' | null = null;
+  let rejectReason: DeviceRejectReason | null = null;
   let simultaneousCapture = false;
   let recordVideo = false;
   try {
     const status = await faceAPI?.getDeviceAccessStatus?.();
     blockedReason = status?.blocked ? status.reason ?? 'unauthorized' : null;
+    rejectReason = blockedReason === 'unauthorized' ? status?.rejectReason ?? 'UNKNOWN' : null;
     const config = status?.config;
     if (config?.captureAngles && Array.isArray(config.captureAngles) && config.captureAngles.length > 0) {
       workflow = { ...defaultWorkflow, steps: config.captureAngles };
@@ -226,6 +239,7 @@ async function resolveActiveWorkflow(): Promise<{
       fromCampaign: campaignMode != null,
     },
     blockedReason,
+    rejectReason,
     simultaneousCapture,
     recordVideo,
   };
@@ -504,6 +518,14 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   const [deviceBlockedReason, setDeviceBlockedReason] = useState<'unauthorized' | 'unreachable-too-long' | null>(
     null
   );
+  /**
+   * The specific `'unauthorized'` cause — see `resolveActiveWorkflow`'s
+   * `rejectReason` doc comment. Set alongside `deviceBlockedReason` at every
+   * call site below, and read only by the overlay's message selection
+   * (`deviceUnauthorizedMessage`); every other blocked-reason branch ignores
+   * it.
+   */
+  const [deviceRejectReason, setDeviceRejectReason] = useState<DeviceRejectReason | null>(null);
 
   /**
    * Pre-session "nhập mã sinh viên" step (2026-09-07 product request) — the
@@ -928,6 +950,60 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         );
         return;
       }
+      const subject: StudentSubjectInfo = {
+        subjectCode: result.code,
+        subjectName: result.name,
+        className: result.className,
+        major: result.major,
+        academicYear: result.academicYear,
+      };
+      // Cached for RunScopedCaptureSession's own startSession()/approveUpload()
+      // calls, made further down inside handleStartWorkflow()/onAccept — see
+      // setSubject()'s own doc comment. This is the only place a real (not
+      // simulated) student identity ever enters the capture pipeline; without
+      // it every session's subjectCode/subjectName stays NULL centrally.
+      runSessionRef.current.setSubject(subject);
+      // Kept alongside (not just inside RunScopedCaptureSession) so onAccept
+      // can stash it on lastCompletedSessionRef without re-deriving it — see
+      // that ref's own doc comment.
+      currentStudentRef.current = subject;
+
+      // Post-save retake (2026-09-08): same mã SV re-entered, same kiosk
+      // sitting, before anyone else used the machine — reopen the review for
+      // the session just saved instead of starting a brand-new one. See the
+      // plan's §2 for why this branch skips the greeting/handleStartWorkflow
+      // path entirely: the engine's own session/workflow were never torn
+      // down after that save (see lastCompletedSessionRef's own doc comment),
+      // so there is nothing to "start" — only to resume and reopen.
+      const lastCompleted = lastCompletedSessionRef.current;
+      if (lastCompleted && lastCompleted.subjectCode === result.code) {
+        // setSubject() was already called with this fresh lookup's `subject`
+        // above (line ~943) — not re-set here from `lastCompleted.subject`,
+        // so a name/class correction made between the two lookups (however
+        // unlikely within one kiosk sitting) is what actually gets approved.
+        runSessionRef.current.resume(lastCompleted.outboxSessionId);
+        setIsWorkflowStarted(true);
+        isWorkflowStartedRef.current = true;
+        retookSinceReopenRef.current = false;
+        setIsPostSaveReview(true);
+        setSession(lastCompleted.session);
+        setShowReviewModal(true);
+        setAwaitingStudent(false);
+        return;
+      }
+      // A genuinely different student's session is starting — the previous
+      // one can no longer be reopened via this path (see this ref's own doc
+      // comment on why staleness is only a concern once the NEXT session
+      // actually begins, not merely once the code differs at lookup time).
+      // Also clears any post-save-review flags left over from a reopened
+      // review the operator closed (SessionReviewModal's onClose) without
+      // confirming — without this, this brand-new session's own review
+      // would wrongly route "chụp lại toàn bộ" through
+      // `handlePostSaveRetakeAll` instead of the normal `handleRestart`.
+      lastCompletedSessionRef.current = null;
+      setIsPostSaveReview(false);
+      retookSinceReopenRef.current = false;
+
       publishCbHelpState({
         greeting: {
           code: result.code,
@@ -954,10 +1030,12 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         workflow,
         triggerConfig,
         blockedReason,
+        rejectReason,
         simultaneousCapture: campaignSimultaneous,
         recordVideo: campaignRecordVideo,
       } = await resolveActiveWorkflow();
       setDeviceBlockedReason(blockedReason);
+      setDeviceRejectReason(rejectReason);
       if (blockedReason) {
         setIsWorkflowStarted(false);
         isWorkflowStartedRef.current = false;
@@ -1008,6 +1086,53 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    * than let the next run silently reuse this id.
    */
   const runSessionRef = useRef<RunScopedCaptureSession>(new RunScopedCaptureSession(sink));
+
+  /**
+   * The student `setSubject()` was last given — cached here (not just
+   * inside `RunScopedCaptureSession`) so `onAccept` can also stash it on
+   * `lastCompletedSessionRef` below without re-deriving it. Cleared whenever
+   * a genuinely different student's session starts (see
+   * `handleStudentSubmit`), so it can never leak into an unrelated run.
+   */
+  const currentStudentRef = useRef<StudentSubjectInfo | null>(null);
+
+  /**
+   * "Chụp lại sau khi đã lưu" (2026-09-08 post-save retake feature): the
+   * session `onAccept` most recently saved successfully, kept around so
+   * that if the SAME student re-enters their code before anyone else uses
+   * this kiosk, `handleStudentSubmit` can reopen `SessionReviewModal`
+   * against it instead of starting a brand-new session — see
+   * `handleStudentSubmit`'s own doc comment for the exact branch. Cleared
+   * the moment a genuinely different student's session starts, so a stale
+   * entry can never be offered to the wrong person.
+   *
+   * `outboxSessionId`/`videoSessionId` are captured here (not re-read later)
+   * because `onAccept` clears both `runSessionRef` and `recordingSessionKey`
+   * right after saving — this is the only place that still has them.
+   */
+  const lastCompletedSessionRef = useRef<{
+    subjectCode: string;
+    subject: StudentSubjectInfo;
+    session: CaptureSession;
+    outboxSessionId: string;
+    videoSessionId: string;
+    steps: ApprovalStepInfo[] | undefined;
+  } | null>(null);
+
+  /**
+   * Set by the post-save-retake handlers below the instant an actual retake
+   * capture happens, so `onAccept` can tell "reopened just to look, then
+   * re-confirmed with nothing changed" (a harmless no-op — there is nothing
+   * new to approve) from "something was genuinely retaken" (approve again
+   * for real). Without this, re-confirming an unchanged reopened session
+   * would call `runSessionRef.current.approve()` with no staged rows behind
+   * it, and `ElectronCaptureSink.approveUpload` throws on `approved: 0`.
+   */
+  const retookSinceReopenRef = useRef(false);
+
+  /** True while `SessionReviewModal` is open for a post-save retake (mục 2/3 of the plan) rather than the normal pre-save review — see `handleStudentSubmit`'s matching branch and the modal's own `onRetake` prop below for what this changes. */
+  const [isPostSaveReview, setIsPostSaveReview] = useState(false);
+
   /**
    * Local record of the session, in the browser's own sql.js database.
    *
@@ -1218,8 +1343,10 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           workflow: simWorkflow,
           triggerConfig: simTriggerConfig,
           blockedReason: simBlockedReason,
+          rejectReason: simRejectReason,
         } = await resolveActiveWorkflow();
         setDeviceBlockedReason(simBlockedReason);
+        setDeviceRejectReason(simRejectReason);
         setActiveWorkflow(simWorkflow);
         simEngine.setCaptureTriggerConfig(simTriggerConfig);
         setEffectiveTriggerConfig(simTriggerConfig);
@@ -1361,10 +1488,12 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           workflow: liveWorkflow,
           triggerConfig: liveTriggerConfig,
           blockedReason: liveBlockedReason,
+          rejectReason: liveRejectReason,
           simultaneousCapture: liveSimultaneous,
           recordVideo: liveRecordVideo,
         } = await resolveActiveWorkflow();
         setDeviceBlockedReason(liveBlockedReason);
+        setDeviceRejectReason(liveRejectReason);
         setActiveWorkflow(liveWorkflow);
         liveEngine.setCaptureTriggerConfig(liveTriggerConfig);
         setEffectiveTriggerConfig(liveTriggerConfig);
@@ -1821,6 +1950,12 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     const engine = liveWorkflowEngineRef.current;
     if (!engine) return;
 
+    // Post-save retake (2026-09-08): harmless when called from the normal
+    // pre-save review (only read inside onAccept's post-save-review branch)
+    // — marks that a real retake actually happened this time round, so
+    // re-confirming afterwards approves it for real instead of no-op'ing.
+    retookSinceReopenRef.current = true;
+
     const frame = simultaneousCaptureRef.current
       ? framesForWorkflow(activeWorkflowRef.current).find((f) => f.stepId === stepId)
       : null;
@@ -1903,10 +2038,12 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         workflow,
         triggerConfig,
         blockedReason,
+        rejectReason,
         simultaneousCapture: campaignSimultaneous,
         recordVideo: campaignRecordVideo,
       } = await resolveActiveWorkflow();
       setDeviceBlockedReason(blockedReason);
+      setDeviceRejectReason(rejectReason);
       setActiveWorkflow(workflow);
       activeEngine.setCaptureTriggerConfig(triggerConfig);
       setEffectiveTriggerConfig(triggerConfig);
@@ -1921,6 +2058,59 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
       setFaceState(null);
       if (mockEngineRef.current) mockEngineRef.current.updateSettings({ detected: false, faceCount: 0 });
     }
+  };
+
+  /**
+   * Post-save retake, "chụp lại toàn bộ" (2026-09-08 plan §3) — the
+   * post-save counterpart to `handleRestart`, used only while
+   * `isPostSaveReview` is true. Deliberately does NOT reuse `handleRestart`:
+   * that function resets `runSessionRef` and calls `activeEngine.startSession`,
+   * both of which mint a brand-new session id — exactly what must NOT happen
+   * here, since the whole point is that the retaken photos/video land under
+   * the SAME session id so the supersede mechanism
+   * (`UploadOutboxRepository.supersedeOlderApprovedAttempts`) recognizes them
+   * as replacing the earlier approved attempt rather than starting an
+   * unrelated run. `runSessionRef` is already pointed at the old session id
+   * via `resume()` (see `handleStudentSubmit`'s matching branch) and stays
+   * that way — nothing here touches it.
+   *
+   * Also does not discard the old video the way `handleRestart` does: the
+   * old recording is still the currently-approved one until the new
+   * recording actually finishes and supersedes it centrally (§4/§5 of the
+   * plan) — discarding it here, before a replacement exists, would leave the
+   * session with no video at all if the operator backs out.
+   */
+  const handlePostSaveRetakeAll = () => {
+    const engine = liveWorkflowEngineRef.current;
+    if (!engine) return;
+    const started = engine.retakeAllSteps();
+    if (!started) return;
+
+    setShowReviewModal(false);
+    setLatestCapturedImage(null);
+    setIsWorkflowStarted(true);
+    isWorkflowStartedRef.current = true;
+    retookSinceReopenRef.current = true;
+    reportStatsEvent('RETAKE');
+
+    // Re-arms the SAME video session id this run was already keyed under
+    // (see `lastCompletedSessionRef`'s own doc comment) — going from `null`
+    // to that id is what the recording effects' own dependency arrays treat
+    // as "a session started, begin recording" (see `recordingGate.ts`'s
+    // tests), so this alone is enough to resume recording without any other
+    // change to those effects.
+    if (recordVideo && lastCompletedSessionRef.current) {
+      setRecordingSessionKey(lastCompletedSessionRef.current.videoSessionId);
+    }
+
+    if (simultaneousCaptureRef.current) {
+      void (async () => {
+        const preflight = await runFramePreflight(activeWorkflowRef.current);
+        if (preflight.ok) await openFrameStreams(preflight);
+      })();
+    }
+
+    publishCbHelpState();
   };
 
   const activeGuidance = mode === 'live' ? liveGuidance : simGuidance;
@@ -2698,10 +2888,12 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         workflow,
         triggerConfig,
         blockedReason,
+        rejectReason,
         simultaneousCapture: campaignSimultaneous,
         recordVideo: campaignRecordVideo,
       } = await resolveActiveWorkflow();
       setDeviceBlockedReason(blockedReason);
+      setDeviceRejectReason(rejectReason);
       setActiveWorkflow(workflow);
       activeEngine.setCaptureTriggerConfig(triggerConfig);
       setEffectiveTriggerConfig(triggerConfig);
@@ -2725,7 +2917,11 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         §3.3's fail-closed verdict — a confirmed rejection, or unreachable for
         over 24h. Deliberately opaque and undismissable, unlike storeError
         below: the whole point is that capture must not proceed, not just be
-        flagged while continuing underneath.
+        flagged while continuing underneath. The 'unauthorized' message is
+        reason-specific (see `deviceUnauthorizedMessage`) — 2026-09-08 "kiosk
+        3" incident fix: a single undifferentiated message here used to send
+        operators looking at campaign expiry when the real cause was a
+        rotated device secret.
       */}
       {deviceBlockedReason && (
         <div className="absolute inset-0 z-[200] bg-slate-950/98 flex flex-col items-center justify-center gap-4 px-8 text-center">
@@ -2733,7 +2929,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           <h2 className="text-xl font-semibold">Thiết bị đã bị khoá</h2>
           <p className="max-w-md text-sm text-slate-300">
             {deviceBlockedReason === 'unauthorized'
-              ? 'Thiết bị này không còn được phép hoạt động (đã hết hạn hoặc bị thu hồi). Vui lòng liên hệ quản trị viên.'
+              ? deviceUnauthorizedMessage(deviceRejectReason)
               : 'Không thể liên lạc với hệ thống quản trị trong hơn 24 giờ. Vui lòng kiểm tra kết nối mạng hoặc liên hệ quản trị viên.'}
           </p>
         </div>
@@ -2866,6 +3062,20 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
                   };
                 })
               : undefined;
+            // Post-save retake (2026-09-08, plan §2): the review was
+            // reopened against an already-saved session and the operator
+            // confirmed without retaking anything — nothing new is staged,
+            // so there is nothing for approve() to release. Calling it
+            // anyway would find 0 pending outbox rows and the main process
+            // would reject the call (see `RunScopedCaptureSession.approve`'s
+            // own doc comment on why it throws rather than no-op'ing).
+            // Simply close out as a genuine no-op instead.
+            if (isPostSaveReview && !retookSinceReopenRef.current) {
+              setShowReviewModal(false);
+              setIsPostSaveReview(false);
+              setAwaitingStudent(true);
+              return;
+            }
             const approved = await approveUpload(steps, completedSession?.id);
             if (!approved) return;
             await finishSession();
@@ -2882,6 +3092,22 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
             // session, so it still holds every capturedImagePath this reads.
             publishCbHelpState({ phase: 'done' });
             setShowReviewModal(false);
+            // Post-save retake (2026-09-08, plan §1): stash this run so a
+            // matching mã SV re-entered before another student uses the
+            // kiosk can reopen this exact review instead of starting fresh —
+            // see `lastCompletedSessionRef`'s own doc comment. Must read
+            // `cachedSessionId` here, before `runSessionRef.current.reset()`
+            // below clears it.
+            if (completedSession && currentStudentRef.current) {
+              lastCompletedSessionRef.current = {
+                subjectCode: currentStudentRef.current.subjectCode ?? '',
+                subject: currentStudentRef.current,
+                session: completedSession,
+                outboxSessionId: runSessionRef.current.cachedSessionId ?? completedSession.id,
+                videoSessionId: completedSession.id,
+                steps,
+              };
+            }
             // Walk-up-kiosk loop (2026-09-07 product request, requirement
             // #5): one student's session just finished — fall straight back
             // to the "nhập mã sinh viên" step for the next one, instead of
@@ -2900,9 +3126,11 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
             setRecordingSessionKey(null);
             runSessionRef.current.reset();
             setStudentLookupError(null);
+            setIsPostSaveReview(false);
+            retookSinceReopenRef.current = false;
             setAwaitingStudent(true);
           }}
-          onRetake={handleRestart}
+          onRetake={isPostSaveReview ? handlePostSaveRetakeAll : handleRestart}
           onRetakeStep={handleRetakeStep}
           onClose={() => setShowReviewModal(false)}
         />

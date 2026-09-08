@@ -824,6 +824,13 @@ codebase only ever produces a Windows installer where it's actually run.
 **Verified**: `pnpm --filter @face/api test` and `pnpm --filter @face/api
 build`, and `pnpm --filter @face/cms build`, all clean.
 
+**Superseded 2026-09-08 — see §3h**: the "reissue always kills the current
+secret on the spot" behavior described above turned out to be the root
+cause of a real incident (a second "Tải gói kích hoạt" click 401-locked an
+already-running kiosk). §3h replaces it with secret rotation *with overlap*
+plus a separate, explicit "Thu hồi" (revoke) action — reissuing an
+ACTIVATED device no longer needs (or has) a confirmation modal.
+
 ---
 
 ## 3c. Bug found and fixed: kiosk permanently stuck on default 5-step workflow (2026-09-07)
@@ -1123,6 +1130,291 @@ approve → confirm upload → READY → local file deleted → `session_videos`
 deleted from disk and `capture_streams`, never appears in `upload_outbox`).
 Per the standing project rule, **not committed** until that manual pass is
 done and the user confirms it.
+
+---
+
+## 3f. Implemented: "sinh viên đã chụp" (captured-students gallery) — CMS, kiosk, apps/web (2026-09-08)
+
+Product request: an area in CMS, the desktop kiosk, and apps/web showing a
+list of students who have been captured, grouped by student (not by
+session — one student can have several sessions across campaigns/days),
+with the ability to view their photos/videos again.
+
+**Prerequisite gap found and fixed first**: neither the kiosk nor apps/web
+ever actually sent the looked-up/entered student identity to the server.
+`RunScopedCaptureSession.ensure()` (`packages/ui/src/lib/CaptureSink.ts`)
+called `sink.startSession({})` unconditionally — a hardcoded empty object —
+so `sessions.subject_code`/`subject_name` were NULL for every session
+regardless of path. Fixed with a new `StudentSubjectInfo` type and a
+`RunScopedCaptureSession.setSubject()` method: `FaceCaptureApp.tsx`'s
+`handleStudentSubmit()` calls it once, right after a successful kiosk-ID
+lookup, and it is then read by both `ensure()` (actually sends it to
+`POST /v1/sessions` for the web path) and `approve()` (forwards it as a 4th
+`CaptureSink.approveUpload()` argument for the kiosk path, since
+`ElectronCaptureSink.startSession()` is a pure local no-op that never talks
+to the API — a kiosk session's identity can only ever reach the server
+through its SESSION_REPORT at approval time).
+`className`/`major`/`academicYear` have no dedicated column anywhere; they
+ride along as free-form `metadata`, **merged** (`jsonb ||`) into
+`sessions.metadata` server-side, never overwritten wholesale — same
+COALESCE-style non-regression guarantee `subject_code`/`subject_name`
+already had.
+
+**New API surface**: `GET /v1/students` (paginated, grouped by
+`subject_code`, campaign-filterable, searchable by code/name — aggregates
+narrow to the filtered campaign, mirroring how `deviceId` already narrows
+`SessionService.listSessions()`) and `GET /v1/students/:code` (every session
+across every campaign, ignoring any campaign filter used to reach the list —
+grouping by student exists specifically to show full history). The detail
+endpoint resolves each photo/video's file-service `viewUrl` **server-side**
+(`FileStorageService.issueViewLink()` called directly from
+`StudentService`, not through `PhotoController`/`VideoController`) so those
+two existing SSO-only routes never needed widening — this was a deliberate
+design choice to keep the new api-key-acceptance surface confined to
+exactly the two brand-new routes being reviewed, not spread onto existing
+ones. New `ApiKeyOrSsoGuard` (`apps/api/src/common/guards/`) gates just
+those two routes: accepts the existing shared `x-api-key` (same credential
+`ApiKeyMiddleware` already enforces elsewhere) as an alternative to SSO,
+because apps/web has no SSO concept at all and CMS has had api-key removed
+from its bundle since 2026-09-07 — this is the one controller in the API
+reachable by both credentials.
+
+**CMS**: new global "Sinh viên" nav item + `/students` route
+(`StudentsPage.tsx`) — search/campaign-filter list, click a student to see
+their sessions (`StudentDetailDrawer`, inline in the same file), click a
+session to open the existing, **unmodified** `SessionDetailDrawer`.
+
+**apps/web**: a second desktop icon ("Sinh viên đã chụp",
+`StudentsScreen.tsx`) alongside the capture app, using the
+`@sonth87/device-layout` multi-app shell already in place there rather than
+inventing routing. **Known, explicitly accepted exposure**: apps/web has no
+login of any kind (same shared `window.LOOKA_API_KEY` every caller uses),
+so this screen is reachable — and every student's photos/videos visible —
+to anyone who can load the page. Product decision, not an oversight.
+
+**Kiosk**: local-only, offline-capable, since the existing local SQLite
+session store (`SessionRepository`) only supported single-key
+write/lookup, never listing. New migration
+`packages/database/src/migrations/010-captured-students.ts`
+(`captured_students` table, one row per approved session carrying a
+subject) + `CapturedStudentRepository` (`recordApproval`/`listRecentStudents`/
+`listByStudent`/`search`), written from `approveSessionUpload()` right after
+its existing `SESSION_REPORT` stats event, only when a subjectCode is
+present — best-effort, a write failure is logged, never thrown (the
+approval itself must still succeed). New hidden screen, same pattern as the
+camera-setup screen (`cameraSetupWindow.ts`/`Ctrl+Shift+K`): a separate
+`BrowserWindow` loading `#recent-students`
+(`recentStudentsWindow.ts`/`RecentStudentsScreen.tsx`), opened via
+`Ctrl/Cmd+Shift+S` — for a teacher/operator at the kiosk, not the student
+being photographed. Photo viewing reuses the existing
+`faceAPI.listSessionPhotos`/`viewPhoto` pipeline unchanged — no new
+photo-serving code was needed.
+
+**Testing status**: `pnpm --filter @face/database test` (44/44, new
+`CapturedStudentRepository` suite), `pnpm --filter @face/ui` build+test
+(52/52, new `setSubject()`/`ensure()`/`approve()` coverage in
+`CaptureSink.test.ts`), `pnpm --filter @face/desktop test` (35/35, new
+"local student index" suite in `videoUpload.test.ts`) and full build (vite
++ tsc, renderer included), `pnpm --filter @face/api build` clean and
+**tested against real Postgres** (`TEST_DATABASE_URL` pointed at the dev DB)
+— 64/64 passing, including 3 new `StudentService` persistence tests
+(cross-campaign grouping, campaign-filtered aggregates, global detail,
+`STUDENT_NOT_FOUND`) and a metadata-jsonb-merge test — all fixture rows
+cleaned up afterward. `pnpm --filter @face/cms build` and
+`pnpm --filter @face/web build` both clean. **No manual end-to-end
+click-through has been run yet** (real kiosk capture with a real student
+code → approve → confirm appears in CMS/apps/web/kiosk's own
+`Ctrl+Shift+S` screen with working photo view-links). Per the standing
+project rule, **not committed** until that manual pass is done and the user
+confirms it.
+
+---
+
+## 3h. Device secret rotation with overlap + explicit revoke (2026-09-08)
+
+**Real incident that triggered this**: admin registered "kiosk 3", the kiosk
+loaded its activation package and activated successfully at 13:52:48, then
+the admin clicked "Tải gói kích hoạt" a second time at 13:52:50 for the same,
+already-running device. `POST /v1/devices/:id/reissue` (added in §3b)
+**always rotated the secret unconditionally, killing the old one on the
+spot** — the running kiosk was still using secret #1, so every subsequent
+request came back `401 INVALID_SECRET` with no way back short of noticing
+the CMS badge and manually re-issuing a fresh package. Three things made
+this hard to diagnose in the moment: the kiosk (`FaceCaptureApp.tsx`) had
+one generic message for every 401 ("hết hạn hoặc bị thu hồi") because
+`apps/desktop/src/main/deviceApi.ts` discarded the 401 response body instead
+of reading it; the CMS kept showing "Đã kích hoạt" with no way to tell a
+device's *stored* secret no longer matched what the kiosk actually had
+loaded; and the desktop stats-event pusher retried silently every 15s
+forever on a 401 with no visible signal. Separately (found during the same
+investigation, not yet fixed): an already-activated kiosk has no way to load
+a *new* activation package by copying `activation.json` over the running
+one — `secrets.ts` only ever reads that file when no secret is stored yet.
+
+**User's decision** (asked directly, three-part): (1) rotate WITH OVERLAP —
+the old secret stays valid until the new one is used by the kiosk for the
+first time, with no time limit, so a second/accidental reissue click is
+harmless; (2) add a separate, explicit "Thu hồi" (revoke) action that
+invalidates everything immediately, for when an admin actually wants a
+kiosk locked out (lost device, decommissioning); (3) make the real auth
+state visible in both the CMS and the kiosk, not just a stale
+REGISTERED/ACTIVATED badge.
+
+**API** (`apps/api`, `DeviceStatus` gains `REVOKED`; new migration
+`1790000000000-DeviceSecretRotation.ts`, `ALTER TYPE ... ADD VALUE IF NOT
+EXISTS 'REVOKED'` + 6 new nullable `devices` columns): `previousSecretHash`
+(`select: false`, same reasoning as `deviceSecretHash`) holds the secret the
+kiosk is *actually running* across a reissue instead of discarding it;
+`secretRotatedAt` is the CMS-visible half of that same fact (non-null ⇔ a
+rotation is pending) — deliberately one source of truth, not a separate
+boolean that could drift; `lastAuthAt`/`lastAuthFailedAt`/
+`lastAuthFailReason` (`'INVALID_SECRET' | 'EXPIRED' | 'REVOKED'`) give the
+CMS a real "last seen, last rejected, and why" instead of nothing;
+`revokedAt` is display-only (the source of truth for "revoked" is
+`status === REVOKED`). `DeviceService.reissueDevice()` now loads the row
+with an **explicit `select`** (a verified pitfall: the existing
+`findDeviceEntityOrFail()` doesn't select `select:false` columns, and
+TypeORM's `save()` silently skips `undefined` properties — a naive
+`previousSecretHash = device.deviceSecretHash` would never actually
+persist) and writes via `CommonService.update()`, never `save()` of a
+partially-loaded entity. Rule: if `previousSecretHash` is already set (an
+earlier reissue's secret was never used), it's left alone — a second
+consecutive reissue kills only the never-loaded intermediate secret, never
+the one the kiosk is live on. New `DeviceService.revokeDevice()`: one
+`update()` sets `status = REVOKED`, stamps `revokedAt`, clears the overlap
+pair, and (defense in depth) overwrites `deviceSecretHash` with a hash of a
+secret nobody was ever given. `activateDevice()` now refuses a REVOKED
+device (`CustomException(..., ERROR_CODE.DEVICE_REVOKED, 409)`) — reissuing
+is the only way back to REGISTERED. `verifyCredentials()` order: NOT_FOUND
+→ REVOKED → current-hash match (clears `previousSecretHash`/
+`secretRotatedAt` if a previous was set — rotation complete) → previous-hash
+match (no clear — kiosk still on the old secret) → INVALID_SECRET → campaign
+expiry → EXPIRED (kept after the secret check, unchanged). New shared
+`deviceCredentialFailure(reason)` helper (`device.service.ts`) maps a
+failure reason to a `CustomException(message, ERROR_CODE.DEVICE_*, 401)`;
+both `DeviceCredentialsGuard` and `DeviceExpiryMiddleware` now throw through
+it instead of the guard's old bare `UnauthorizedException`, which the
+global `HttpExceptionFilter` mapped to `errorCode: 401` in its default
+branch — the kiosk could not tell "secret rotated" (5005) apart from
+"revoked" (5008) apart from "campaign expired" (5003). New error code
+`DEVICE_REVOKED: 5008`. New `POST /v1/devices/:id/revoke` (`SsoAuthGuard`,
+same pattern as its siblings). `DeviceDao` exposes all 6 new fields
+(`@Expose()` — `toDao`'s `excludeExtraneousValues` needs nothing else);
+never exposes any hash.
+
+**CMS** (`apps/cms`): `Device`/`DeviceStatus` mirror the new API shape.
+`DevicesPanel.tsx`'s two-branch status ternary becomes three (`REVOKED` →
+"Đã thu hồi", red); a new amber chip reads `secretRotatedAt` directly
+("Kiosk chưa nạp gói mới (cấp lại lúc HH:MM)"); a new red chip shows
+`lastAuthFailReason` with a plain-language reason + hint tooltip whenever
+`lastAuthFailedAt` is newer than `lastAuthAt`; the "Kích hoạt lúc" column
+gained an "Xác thực gần nhất" subline from `lastAuthAt`. "Tải gói kích
+hoạt" (reissue) **no longer shows a confirmation modal** — `ReissueConfirmModal`/
+`confirmReissue`/`requestReissue` are gone, since reissuing no longer
+revokes anything on the spot; its success banner now reads "Đã tạo gói mới
+cho «tên». Kiosk đang chạy vẫn dùng được mã cũ cho tới khi nạp gói này." A
+new "Thu hồi" `IconButton` (new `danger` tone, `Ban` icon from lucide,
+hidden once already REVOKED) opens a `RevokeConfirmModal` — reusing
+`ModalShell`, same shape the old reissue-confirm modal had, since revoke is
+now the one genuinely destructive action here. "Kích hoạt" (manual
+activate) is now shown only for `REGISTERED` (not for REVOKED, which the
+API rejects).
+
+**Kiosk main process** (`apps/desktop/src/main`, implemented by a parallel
+workstream against the same API contract above — errorCode/DAO shape fixed
+by this plan so both sides could build independently): the credential-check
+logic moves into Electron-free modules so it's reachable by `node --test`
+— `deviceAuth.ts` (`parseRejectReason(errorCode)`: 5005/5001/5003/5008 →
+`'INVALID_SECRET' | 'NOT_FOUND' | 'EXPIRED' | 'REVOKED'`, anything else →
+`'UNKNOWN'`) and `activationFile.ts` (`parseActivationPayload`,
+`activationFileSupersedesStored` — true when the parsed file's `deviceId`
+or `deviceSecret` differs from what's stored). `deviceApi.ts` reads the 401
+response body (it used to return before ever calling `res.json()`) and
+threads `rejectReason` through `ConfigFetchResult`/`DeviceAccessStatus`;
+`statsEvents.ts` backs off for 10 minutes on an `'unauthorized'` push
+instead of retrying every 15s forever, logging once. `secrets.ts` gains the
+"load a new activation package into an already-activated kiosk" path this
+investigation surfaced as missing: `findAndImportActivationFileIfPresent()`
+no longer bails out early just because a secret is already stored — it now
+diffs the file against what's stored via `activationFileSupersedesStored()`
+and re-imports on a real difference, resetting the cached offline config
+only when the `deviceId` itself changed (not on a same-device secret swap).
+This is the intended day-to-day "nạp gói mới" mechanism now that reissue no
+longer force-reactivates a device: copy the new `activation.json` next to
+`Looka.exe`, relaunch.
+
+**Kiosk UI** (`packages/ui/src/components/screens/FaceCaptureApp.tsx`, same
+parallel workstream): `resolveActiveWorkflow()` threads a new
+`rejectReason` alongside the existing `blockedReason` (kept as-is — several
+call sites already destructure it) into a new `deviceRejectReason` state,
+set at every site `deviceBlockedReason` already is. The generic "hết hạn
+hoặc bị thu hồi" overlay becomes reason-specific: `INVALID_SECRET` explains
+the secret was rotated on the CMS and to load the new `activation.json`;
+`REVOKED` says the device was revoked, contact an admin; `EXPIRED` points at
+the campaign; `NOT_FOUND` says the device no longer exists on the CMS;
+`UNKNOWN` (or no reason — e.g. an older API this kiosk build doesn't
+recognize) keeps the old generic message, so an old kiosk talking to a new
+API, or a new kiosk talking to an old API, degrades gracefully instead of
+crashing or showing nonsense.
+
+**Deployment order matters**: API first (migration + `REVOKED` enum value +
+new endpoint) — an old CMS build talking to the upgraded API just shows a
+REVOKED device as "Chưa kích hoạt" (its status ternary doesn't know the
+third value), never crashes. Then CMS. Then the kiosk build — an
+already-deployed old kiosk talking to the new API still works (it just
+loses the specific rejection reason, same generic message as before); a new
+kiosk talking to an unupgraded API falls back to `UNKNOWN` the same way.
+
+**Verified**: `pnpm --filter @face/api build` and `pnpm exec tsc --noEmit`
+both clean; `pnpm --filter @face/api test` — 73/73 (24 non-DB, the rest
+DB-gated) before the migration, 73/73 **with `TEST_DATABASE_URL` against
+the dev DB** after applying the migration, including 5 new
+`device-management-persistence.spec.ts` cases (revoke kills both secrets;
+`activateDevice` refuses REVOKED; reissue after revoke returns to
+REGISTERED; double-reissue keeps the in-use secret alive and kills only
+the never-used intermediate one; `lastAuthAt`/`lastAuthFailedAt`/
+`lastAuthFailReason` bookkeeping) plus the two existing reissue tests
+rewritten for overlap semantics and an added
+wrong-secret-on-expired-campaign case. Migration applied to the dev DB
+(`postgres://postgres:postgres@localhost:5432/camera`) and confirmed via
+`psql`: all 6 columns present, `devices_status_enum` now
+`{REGISTERED,ACTIVATED,REVOKED}`. Every fixture row the test runs created
+was cleaned up by id afterward (diffed against a snapshot taken before any
+migration/test ran) — final `campaigns`/`devices`/`sessions` id sets verified
+byte-identical to the pre-run snapshot, not just matching counts. `pnpm
+--filter @face/cms build` (tsc -b + vite build) clean. Kiosk workstream
+(`apps/desktop` + `packages/ui`): `tsc -p tsconfig.electron.json --noEmit`
+clean; `pnpm --filter @face/desktop test` went 40 → 54 passing (+6
+`deviceAuth.test.ts`, +8 `activationFile.test.ts`); `packages/ui`'s `tsc
+--noEmit` clean and `pnpm test` went 52 → 55 (+3
+`deviceBlockMessage.test.ts`); renderer `vite build` clean. Full monorepo
+`pnpm test` (turbo) — 27/27 tasks green — after both workstreams were
+merged in the working tree. A live check against the dev API already
+running on :3100 (`nest start --watch`, so it hot-reloaded the new code —
+no restart needed) confirmed the wire behavior end to end: `GET
+/v1/devices/config` with kiosk 3's real device id and a wrong secret now
+returns `401 {"errorCode":5005,"message":"Invalid device secret"}`
+(previously `errorCode: 401`), and kiosk 3's `devices` row immediately
+showed `last_auth_failed_at` + `last_auth_fail_reason = INVALID_SECRET` —
+bookkeeping confirmed on the real DB, not only in the spec. The Windows
+kiosk build was regenerated by `pnpm --filter @face/desktop package:win`,
+which refreshed both the NSIS installer
+(`apps/desktop/release/Looka-0.1.0-win-x64.exe`, 2026-09-08 14:39, ~113 MB)
+and the portable `apps/desktop/release/win-unpacked/` folder (`Looka.exe` /
+`resources/app.asar`, 14:36) — `DESKTOP_INSTALLER_PATH_WIN` in
+`apps/api/.env` points at that `win-unpacked` folder, which
+`ActivationPackageService` flattens into the activation zip's root with
+`activation.json` landing beside `Looka.exe`, exactly where
+`findAndImportActivationFileIfPresent()` looks, so the next "Tải gói kích
+hoạt" download from the CMS already carries the new kiosk build. Per the standing project rule,
+**not committed** until the user confirms it. What's still pending: a
+physical-kiosk pass — load the new package onto kiosk 3 via the rebuilt
+installer, reproduce a double "Tải gói kích hoạt" click on a running kiosk
+and confirm it stays up showing only the amber chip, confirm "Thu hồi"
+locks it out with the specific message, and confirm reissue-after-revoke
+recovers it — and a CMS UI look, since the CMS dev server needs the SSO
+backend, which was unreachable from this environment, so the CMS side was
+verified by build and code review only here.
 
 ---
 

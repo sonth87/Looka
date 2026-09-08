@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { CaptureSink, ElectronCaptureSink, RunScopedCaptureSession } from '../CaptureSink.js';
-import type { ApprovalStepInfo } from '../CaptureSink.js';
+import type { ApprovalStepInfo, StudentSubjectInfo } from '../CaptureSink.js';
 
 /**
  * Stubs the desktop preload bridge `ElectronCaptureSink` reaches through
@@ -43,10 +43,13 @@ function fakeSink(
   const calls: string[] = [];
   const approveUploadSteps: Array<ApprovalStepInfo[] | undefined> = [];
   const approveUploadVideoSessionIds: Array<string | undefined> = [];
+  const approveUploadSubjects: Array<StudentSubjectInfo | undefined> = [];
+  const startSessionInputs: Array<{ subjectCode?: string; subjectName?: string; metadata?: Record<string, unknown> }> = [];
 
   const sink: CaptureSink = {
-    async startSession() {
+    async startSession(input) {
       startSessionCalls += 1;
+      startSessionInputs.push(input);
       if (options.startSessionDelayMs) {
         await new Promise((resolve) => setTimeout(resolve, options.startSessionDelayMs));
       }
@@ -60,10 +63,11 @@ function fakeSink(
     async completeSession(sessionId) {
       calls.push(`completeSession:${sessionId}`);
     },
-    async approveUpload(sessionId, steps, videoSessionId) {
+    async approveUpload(sessionId, steps, videoSessionId, subject) {
       calls.push(`approveUpload:${sessionId}`);
       approveUploadSteps.push(steps);
       approveUploadVideoSessionIds.push(videoSessionId);
+      approveUploadSubjects.push(subject);
       if (options.approveShouldFail) throw new Error('approve failed');
     },
   };
@@ -73,6 +77,8 @@ function fakeSink(
     calls,
     approveUploadSteps,
     approveUploadVideoSessionIds,
+    approveUploadSubjects,
+    startSessionInputs,
     get startSessionCalls() {
       return startSessionCalls;
     },
@@ -238,6 +244,85 @@ test('approve() forwards videoSessionId through to the sink unchanged', async ()
   await run.approve(undefined, 'session_1700000000000');
 
   assert.deepEqual(approveUploadVideoSessionIds, ['session_1700000000000']);
+});
+
+const STUDENT: StudentSubjectInfo = {
+  subjectCode: 'SV001',
+  subjectName: 'Nguyễn Văn An',
+  className: 'CNTT01',
+  major: 'Công nghệ thông tin',
+  academicYear: '2025-2026',
+};
+
+test('setSubject() before the first capture makes ensure() send it to startSession (the web path)', async () => {
+  const { sink, startSessionInputs } = fakeSink();
+  const run = new RunScopedCaptureSession(sink);
+
+  run.setSubject(STUDENT);
+  await run.savePhoto({ stepId: 'step-front', attempt: 1, dataUrl: 'data:image/jpeg;base64,aaaa' });
+
+  assert.deepEqual(startSessionInputs, [
+    {
+      subjectCode: 'SV001',
+      subjectName: 'Nguyễn Văn An',
+      metadata: { className: 'CNTT01', major: 'Công nghệ thông tin', academicYear: '2025-2026' },
+    },
+  ]);
+});
+
+test('with no setSubject() call, ensure() sends startSession an all-undefined subject, not {}', async () => {
+  // ElectronCaptureSink.startSession() ignores its input entirely (a pure
+  // no-op — see its own doc comment), so this only matters for the web
+  // path, but the caching layer must behave identically regardless of which
+  // sink is active.
+  const { sink, startSessionInputs } = fakeSink();
+  const run = new RunScopedCaptureSession(sink);
+
+  await run.savePhoto({ stepId: 'step-front', attempt: 1, dataUrl: 'data:image/jpeg;base64,aaaa' });
+
+  assert.deepEqual(startSessionInputs, [
+    { subjectCode: undefined, subjectName: undefined, metadata: { className: undefined, major: undefined, academicYear: undefined } },
+  ]);
+});
+
+test('setSubject() before approve() forwards the cached student to the kiosk approve path', async () => {
+  // ElectronCaptureSink.startSession() never talks to the API — this is the
+  // *only* path a kiosk session's subject identity actually reaches the
+  // server through, via approveSessionUpload()'s SESSION_REPORT.
+  const { sink, approveUploadSubjects } = fakeSink();
+  const run = new RunScopedCaptureSession(sink);
+
+  run.setSubject(STUDENT);
+  await run.savePhoto({ stepId: 'step-front', attempt: 1, dataUrl: 'data:image/jpeg;base64,aaaa' });
+  await run.approve();
+
+  assert.deepEqual(approveUploadSubjects, [STUDENT]);
+});
+
+test('reset() clears the cached subject so an abandoned run never leaks its student into the next one', async () => {
+  const { sink, startSessionInputs } = fakeSink();
+  const run = new RunScopedCaptureSession(sink);
+
+  run.setSubject(STUDENT);
+  await run.savePhoto({ stepId: 'step-front', attempt: 1, dataUrl: 'data:image/jpeg;base64,aaaa' });
+  run.reset();
+  await run.savePhoto({ stepId: 'step-front', attempt: 1, dataUrl: 'data:image/jpeg;base64,bbbb' });
+
+  assert.equal(startSessionInputs[0].subjectCode, 'SV001');
+  assert.equal(startSessionInputs[1].subjectCode, undefined);
+});
+
+test('complete() clears the cached subject too, same as reset()', async () => {
+  const { sink, startSessionInputs } = fakeSink();
+  const run = new RunScopedCaptureSession(sink);
+
+  run.setSubject(STUDENT);
+  await run.savePhoto({ stepId: 'step-front', attempt: 1, dataUrl: 'data:image/jpeg;base64,aaaa' });
+  await run.complete();
+  await run.savePhoto({ stepId: 'step-front', attempt: 1, dataUrl: 'data:image/jpeg;base64,bbbb' });
+
+  assert.equal(startSessionInputs[0].subjectCode, 'SV001');
+  assert.equal(startSessionInputs[1].subjectCode, undefined);
 });
 
 test('two savePhoto calls fired in the same tick share one startSession call, not two', async () => {
@@ -433,6 +518,9 @@ test('ElectronCaptureSink.approveUpload forwards sessionId, steps, and videoSess
       sessionId: 'session_ok',
       steps: [{ stepId: 'step-front', stepType: 'FRONT', cameraRole: 'CENTER', attempt: 1 }],
       videoSessionId: 'session_1700000000000',
+      subjectCode: undefined,
+      subjectName: undefined,
+      metadata: undefined,
     },
   ]);
 });
@@ -458,5 +546,46 @@ test('ElectronCaptureSink.approveUpload forwards videoSessionId as undefined whe
       await sink.approveUpload('session_ok');
     }
   );
-  assert.deepEqual(calls, [{ sessionId: 'session_ok', steps: undefined, videoSessionId: undefined }]);
+  assert.deepEqual(calls, [
+    {
+      sessionId: 'session_ok',
+      steps: undefined,
+      videoSessionId: undefined,
+      subjectCode: undefined,
+      subjectName: undefined,
+      metadata: undefined,
+    },
+  ]);
+});
+
+test('ElectronCaptureSink.approveUpload forwards a student subject as subjectCode/subjectName/metadata', async () => {
+  const calls: unknown[] = [];
+  await withFakeWindow(
+    {
+      approveSessionUpload: async (payload: unknown) => {
+        calls.push(payload);
+        return { ok: true, approved: 1 };
+      },
+    },
+    async () => {
+      const sink = new ElectronCaptureSink();
+      await sink.approveUpload('session_ok', undefined, undefined, {
+        subjectCode: 'SV001',
+        subjectName: 'Nguyễn Văn An',
+        className: 'CNTT01',
+        major: 'Công nghệ thông tin',
+        academicYear: '2025-2026',
+      });
+    }
+  );
+  assert.deepEqual(calls, [
+    {
+      sessionId: 'session_ok',
+      steps: undefined,
+      videoSessionId: undefined,
+      subjectCode: 'SV001',
+      subjectName: 'Nguyễn Văn An',
+      metadata: { className: 'CNTT01', major: 'Công nghệ thông tin', academicYear: '2025-2026' },
+    },
+  ]);
 });

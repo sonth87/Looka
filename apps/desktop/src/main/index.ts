@@ -47,9 +47,11 @@ import {
   sanitizeCameraRoleMapping,
 } from './secrets.js';
 import { openCameraSetupWindow } from './cameraSetupWindow.js';
+import { openRecentStudentsWindow } from './recentStudentsWindow.js';
 import { getDeviceAccessStatus } from './deviceApi.js';
 import { startVideoStream, endVideoStream, discardSessionVideos } from './streams.js';
 import { recordStatsEvent, startStatsEventPush, stopStatsEventPush } from './statsEvents.js';
+import { CapturedStudentRepository } from '@face/database';
 import type { StatsEventType } from '@face/database';
 import {
   enrollAttendancePerson,
@@ -328,7 +330,7 @@ app.whenReady().then(async () => {
     }
     // Independent of fs-core being configured — a kiosk with no device
     // identity yet just never has anything to push (DeviceApiClient.pushEvents
-    // returns false with no baseUrl/creds), same offline-first shape as
+    // returns 'failed' with no baseUrl/creds), same offline-first shape as
     // uploads. See statsEvents.ts's own doc comment.
     startStatsEventPush();
   }
@@ -486,6 +488,27 @@ app.whenReady().then(async () => {
   ipcMain.handle('camera:openSetup', () => {
     openCameraSetupWindow();
     return true;
+  });
+
+  /**
+   * Local "sinh viên đã chụp" index — see recentStudentsWindow.ts's own doc
+   * comment for the hidden screen these back (`Ctrl/Cmd+Shift+S`), and
+   * `CapturedStudentRepository`'s own doc comment for why this reads local
+   * SQLite rather than the central API.
+   */
+  ipcMain.handle('students:listRecent', (_, limit: unknown) => {
+    const repo = new CapturedStudentRepository(getDatabase());
+    return repo.listRecentStudents(typeof limit === 'number' ? limit : undefined);
+  });
+  ipcMain.handle('students:listSessions', (_, subjectCode: unknown) => {
+    if (typeof subjectCode !== 'string' || !subjectCode) return [];
+    const repo = new CapturedStudentRepository(getDatabase());
+    return repo.listByStudent(subjectCode);
+  });
+  ipcMain.handle('students:search', (_, query: unknown) => {
+    if (typeof query !== 'string' || !query.trim()) return [];
+    const repo = new CapturedStudentRepository(getDatabase());
+    return repo.search(query);
   });
 
   /**
@@ -711,6 +734,9 @@ app.whenReady().then(async () => {
         workflowId?: unknown;
         startedAt?: unknown;
         videoSessionId?: unknown;
+        subjectCode?: unknown;
+        subjectName?: unknown;
+        metadata?: unknown;
       }
     ) => {
       const sessionId = String(payload?.sessionId ?? '');
@@ -720,10 +746,19 @@ app.whenReady().then(async () => {
         const workflowId = typeof payload?.workflowId === 'string' ? payload.workflowId : undefined;
         const startedAt = typeof payload?.startedAt === 'string' ? payload.startedAt : undefined;
         const videoSessionId = typeof payload?.videoSessionId === 'string' ? payload.videoSessionId : undefined;
+        const subjectCode = typeof payload?.subjectCode === 'string' ? payload.subjectCode : undefined;
+        const subjectName = typeof payload?.subjectName === 'string' ? payload.subjectName : undefined;
+        const metadata =
+          payload?.metadata && typeof payload.metadata === 'object'
+            ? (payload.metadata as Record<string, unknown>)
+            : undefined;
         const { approved, superseded, videosEnqueued } = await approveSessionUpload(sessionId, steps, {
           workflowId,
           startedAt,
           videoSessionId,
+          subjectCode,
+          subjectName,
+          metadata,
         });
         console.warn(
           `[session:approveUpload] sessionId=${sessionId} approved=${approved} superseded=${superseded} videosEnqueued=${videosEnqueued}`
@@ -841,6 +876,12 @@ app.whenReady().then(async () => {
   // also have an on-screen button (FaceCaptureApp.tsx's "Màn hình mở rộng"),
   // registered here too so it works even while that button isn't in focus.
   globalShortcut.register('CommandOrControl+Shift+H', () => toggleCbHelpWindow(currentMainDisplayId()));
+
+  // The kiosk's own "sinh viên đã chụp" screen (2026-09-08) — see
+  // recentStudentsWindow.ts's own doc comment. Same "hidden shortcut, no
+  // on-screen button" reasoning as the camera setup shortcut above: not for
+  // the student being photographed.
+  globalShortcut.register('CommandOrControl+Shift+S', () => openRecentStudentsWindow());
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

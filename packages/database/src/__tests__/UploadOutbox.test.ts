@@ -160,7 +160,7 @@ describe('UploadOutbox — attempt de-duplication (phase-11 D5)', () => {
     repo.approveSession('sess_1');
     const second = repo.approveSession('sess_1');
 
-    assert.deepEqual(second, { approved: 0, superseded: [] });
+    assert.deepEqual(second, { approved: 0, superseded: [], approvedRows: [] });
     adapter.close();
   });
 
@@ -314,6 +314,58 @@ describe('UploadOutbox — scan tracking', () => {
     assert.equal(stats.awaitingScan, 1);
     assert.equal(stats.failedPermanent, 1);
     assert.ok(stats.oldestPendingAt !== null);
+    adapter.close();
+  });
+});
+
+describe('UploadOutbox — post-save retake (2026-09-08)', () => {
+  test('supersedeOlderApprovedAttempts finds and deletes an attempt approved in an EARLIER call', async () => {
+    const { adapter, repo } = await makeRepo();
+    repo.enqueue(job('front-1', { kind: 'face', stepId: 'step-front', attempt: 1, idemKey: 'sess_1:step-front:1:face' }));
+    repo.approveSession('sess_1');
+    // Simulate the file having already been uploaded before the retake happens.
+    repo.markSending('front-1');
+    repo.markUploaded('front-1', 'file_front_1', 'READY');
+
+    // A later, separate approveSession() call for a freshly staged retake —
+    // this is the case approveSession()'s own supersede logic cannot reach,
+    // since front-1 is no longer in the staged set it considers.
+    repo.enqueue(job('front-2', { kind: 'face', stepId: 'step-front', attempt: 2, idemKey: 'sess_1:step-front:2:face' }));
+    const result = repo.approveSession('sess_1');
+    assert.equal(result.approved, 1);
+    assert.equal(result.approvedRows[0].id, 'front-2');
+
+    const superseded = repo.supersedeOlderApprovedAttempts('sess_1', 'face', 'step-front', 'front-2');
+
+    assert.deepEqual(superseded, [{ id: 'front-1', localPath: '/data/front-1.jpg', fsFileId: 'file_front_1' }]);
+    assert.equal(repo.getById('front-1'), null, 'the stale approved row is gone, not just unapproved');
+    assert.equal(repo.getById('front-2')!.status, 'PENDING', 'the new attempt itself is untouched');
+    adapter.close();
+  });
+
+  test('supersedeOlderApprovedAttempts is a harmless no-op when there is nothing stale', async () => {
+    const { adapter, repo } = await makeRepo();
+    repo.enqueue(job('front-1', { kind: 'face', stepId: 'step-front', idemKey: 'sess_1:step-front:1:face' }));
+    repo.approveSession('sess_1');
+
+    // keepId is the only approved row for this (kind, stepId) — nothing else to find.
+    const superseded = repo.supersedeOlderApprovedAttempts('sess_1', 'face', 'step-front', 'front-1');
+    assert.deepEqual(superseded, []);
+    assert.ok(repo.getById('front-1'), 'the kept row itself must survive');
+    adapter.close();
+  });
+
+  test('supersedeOlderApprovedAttempts never touches a different step in the same session', async () => {
+    const { adapter, repo } = await makeRepo();
+    repo.enqueue(job('a1', { sessionId: 'sess_A', stepId: 'step-front', idemKey: 'sess_A:step-front:1:face', kind: 'face' }));
+    repo.approveSession('sess_A');
+    repo.enqueue(job('a2', { sessionId: 'sess_A', stepId: 'step-left', idemKey: 'sess_A:step-left:1:face', kind: 'face' }));
+    repo.approveSession('sess_A');
+
+    // Superseding step-front must not delete step-left's already-approved row.
+    const superseded = repo.supersedeOlderApprovedAttempts('sess_A', 'face', 'step-front', 'nonexistent-keep-id');
+    assert.deepEqual(superseded, [{ id: 'a1', localPath: '/data/a1.jpg', fsFileId: null }]);
+    assert.ok(repo.getById('a2'), 'a different step in the same session is untouched');
     adapter.close();
   });
 });

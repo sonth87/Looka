@@ -26,9 +26,30 @@ export interface ApprovalStepInfo {
   capturedAt?: string;
 }
 
+/**
+ * A looked-up student identity, cached on `RunScopedCaptureSession` for the
+ * run in progress — see its `setSubject()`'s own doc comment for why one
+ * setter feeds both `startSession` (web path) and `approveUpload` (kiosk
+ * path) instead of each call site threading these fields separately.
+ * `className`/`major`/`academicYear` have no dedicated column anywhere
+ * server-side; they ride along as free-form `metadata` wherever a sink
+ * accepts it.
+ */
+export interface StudentSubjectInfo {
+  subjectCode?: string;
+  subjectName?: string;
+  className?: string;
+  major?: string;
+  academicYear?: string;
+}
+
 export interface CaptureSink {
   /** Open a record for this run. The returned id identifies it from here on. */
-  startSession(input: { subjectCode?: string; subjectName?: string }): Promise<string>;
+  startSession(input: {
+    subjectCode?: string;
+    subjectName?: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<string>;
 
   /**
    * Store one capture, as its step completes.
@@ -65,8 +86,19 @@ export interface CaptureSink {
    * that id, passed through unchanged so `ElectronCaptureSink` can tell the
    * main process which `capture_streams` rows belong to this run; omitted
    * (or by a sink with no video story) is a safe no-op.
+   *
+   * `subject` is the same `StudentSubjectInfo` `RunScopedCaptureSession`
+   * cached at `setSubject()` time — `ElectronCaptureSink` forwards it into
+   * the SESSION_REPORT the kiosk builds on approval, since `startSession()`
+   * on that sink is a pure local no-op that never talks to the API. Omitted
+   * (or by a sink with nothing to enrich) is a safe no-op.
    */
-  approveUpload(sessionId: string, steps?: ApprovalStepInfo[], videoSessionId?: string): Promise<void>;
+  approveUpload(
+    sessionId: string,
+    steps?: ApprovalStepInfo[],
+    videoSessionId?: string,
+    subject?: StudentSubjectInfo
+  ): Promise<void>;
 }
 
 /**
@@ -126,6 +158,7 @@ export class HttpCaptureSink implements CaptureSink {
   public async startSession(input: {
     subjectCode?: string;
     subjectName?: string;
+    metadata?: Record<string, unknown>;
   }): Promise<string> {
     const data = await this.post<{ id: string }>('/v1/sessions', input);
     return data.id;
@@ -162,8 +195,13 @@ export class HttpCaptureSink implements CaptureSink {
    * FaceCaptureApp's review screen can call it unconditionally regardless of
    * which sink is active.
    */
-  public async approveUpload(_sessionId?: string, _steps?: ApprovalStepInfo[], _videoSessionId?: string): Promise<void> {
-    // Intentionally does nothing, including with `_steps`/`_videoSessionId` — see method doc comment.
+  public async approveUpload(
+    _sessionId?: string,
+    _steps?: ApprovalStepInfo[],
+    _videoSessionId?: string,
+    _subject?: StudentSubjectInfo
+  ): Promise<void> {
+    // Intentionally does nothing, including with `_steps`/`_videoSessionId`/`_subject` — see method doc comment.
   }
 }
 
@@ -247,12 +285,26 @@ export class ElectronCaptureSink implements CaptureSink {
    * reject path, which `FaceCaptureApp.approveUpload()` already turns into a
    * visible error banner and a modal that stays open for a retry.
    */
-  public async approveUpload(sessionId: string, steps?: ApprovalStepInfo[], videoSessionId?: string): Promise<void> {
+  public async approveUpload(
+    sessionId: string,
+    steps?: ApprovalStepInfo[],
+    videoSessionId?: string,
+    subject?: StudentSubjectInfo
+  ): Promise<void> {
     const faceAPI = (window as any).faceAPI;
     if (!faceAPI?.approveSessionUpload) {
       throw new Error('faceAPI.approveSessionUpload is not available — not running inside the desktop app');
     }
-    const result = await faceAPI.approveSessionUpload({ sessionId, steps, videoSessionId });
+    const result = await faceAPI.approveSessionUpload({
+      sessionId,
+      steps,
+      videoSessionId,
+      subjectCode: subject?.subjectCode,
+      subjectName: subject?.subjectName,
+      metadata: subject
+        ? { className: subject.className, major: subject.major, academicYear: subject.academicYear }
+        : undefined,
+    });
     if (!result?.ok) {
       throw new Error(result?.error ?? 'approveSessionUpload failed');
     }
@@ -304,6 +356,26 @@ export class RunScopedCaptureSession {
   }
 
   /**
+   * Post-save retake (2026-09-08 "chụp lại sau khi đã lưu" feature): reopens
+   * this run against a session id that was already approved once, instead of
+   * `ensure()`'s "open a fresh one via `startSession()`" path. Callers use
+   * this when the underlying workflow-engine session itself was never torn
+   * down (`WorkflowEngine.retakeStep()`/`retakeAllSteps()` both operate on
+   * the still-live `_currentSession` — see their own doc comments), so the
+   * sink-side id needs to catch back up to it rather than mint a new one:
+   * a fresh id here would file the retaken photo under an unrelated session,
+   * defeating the whole "replace the old attempt" mechanism (see
+   * `UploadOutboxRepository.supersedeOlderApprovedAttempts`).
+   *
+   * Deliberately bypasses `startSession()` entirely — unlike `ensure()`,
+   * this never talks to the sink, since the caller already knows the id (it
+   * cached it itself, right before the earlier `reset()` that cleared it).
+   */
+  public resume(sessionId: string): void {
+    this.sessionId = sessionId;
+  }
+
+  /**
    * The in-flight `startSession` call, memoised so concurrent callers share
    * it instead of each racing their own.
    *
@@ -325,22 +397,50 @@ export class RunScopedCaptureSession {
    */
   private sessionPromise: Promise<string> | null = null;
 
+  /**
+   * The looked-up student for the run in progress, if any — set once via
+   * `setSubject()` before the first capture, read by both `ensure()` (the
+   * web path, which actually sends it to the API at `startSession` time) and
+   * `approve()` (the kiosk path, which has no session-open call to the API
+   * at all and only reports identity at approval — see `approve()`'s own
+   * doc comment and `ElectronCaptureSink.startSession()`'s no-op).
+   */
+  private pendingSubject: StudentSubjectInfo = {};
+
   constructor(private readonly sink: CaptureSink | null) {}
+
+  /**
+   * Caches the student this run belongs to, for `ensure()`/`approve()` to
+   * pick up. Call before the first capture (e.g. right after a successful
+   * kiosk ID lookup) — a run that already opened a session via `ensure()`
+   * will not retroactively rename it, since `startSession` only fires once
+   * per run.
+   */
+  public setSubject(subject: StudentSubjectInfo): void {
+    this.pendingSubject = subject;
+  }
 
   /** The id for the current run, opening one with the sink if none is cached yet. */
   public async ensure(): Promise<string | null> {
     if (!this.sink) return null;
     if (this.sessionId) return this.sessionId;
     if (!this.sessionPromise) {
-      this.sessionPromise = this.sink.startSession({}).catch((err) => {
-        // A failed startSession must not stay memoised forever — the next
-        // ensure() (this run's own retry, or an unrelated later run reusing
-        // this instance) needs to try a fresh call, not keep awaiting this
-        // same rejection. sessionId is never set in this branch, so the
-        // existing "no session yet" path already re-enters ensure() cleanly.
-        this.sessionPromise = null;
-        throw err;
-      });
+      const subject = this.pendingSubject;
+      this.sessionPromise = this.sink
+        .startSession({
+          subjectCode: subject.subjectCode,
+          subjectName: subject.subjectName,
+          metadata: { className: subject.className, major: subject.major, academicYear: subject.academicYear },
+        })
+        .catch((err) => {
+          // A failed startSession must not stay memoised forever — the next
+          // ensure() (this run's own retry, or an unrelated later run reusing
+          // this instance) needs to try a fresh call, not keep awaiting this
+          // same rejection. sessionId is never set in this branch, so the
+          // existing "no session yet" path already re-enters ensure() cleanly.
+          this.sessionPromise = null;
+          throw err;
+        });
     }
     this.sessionId = await this.sessionPromise;
     return this.sessionId;
@@ -383,7 +483,7 @@ export class RunScopedCaptureSession {
         'No active capture session to approve — the app may have hot-reloaded mid-session. Please fully reload and recapture.'
       );
     }
-    await this.sink.approveUpload(sessionId, steps, videoSessionId);
+    await this.sink.approveUpload(sessionId, steps, videoSessionId, this.pendingSubject);
   }
 
   /** The run finished naturally: tell the sink, then drop the cached id. */
@@ -393,6 +493,7 @@ export class RunScopedCaptureSession {
     await this.sink.completeSession(sessionId);
     this.sessionId = null;
     this.sessionPromise = null;
+    this.pendingSubject = {};
   }
 
   /**
@@ -403,5 +504,6 @@ export class RunScopedCaptureSession {
   public reset(): void {
     this.sessionId = null;
     this.sessionPromise = null;
+    this.pendingSubject = {};
   }
 }

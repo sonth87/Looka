@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { AttendanceResult, Person } from '@face/core';
+import type { CapturedStudentItem } from '@face/database';
 
 export interface ExportResult {
   success: boolean;
@@ -165,6 +166,14 @@ export interface CampaignConfig {
 export interface DeviceAccessStatus {
   blocked: boolean;
   reason?: 'unauthorized' | 'unreachable-too-long';
+  /**
+   * The specific 401 cause (secret rotated, revoked, campaign expired,
+   * device gone) — see deviceApi.ts's DeviceAccessStatus.rejectReason for
+   * why this exists (2026-09-08 "kiosk 3" incident). Duplicated here rather
+   * than imported, on purpose, per this file's own existing pattern for
+   * every other type it mirrors.
+   */
+  rejectReason?: 'INVALID_SECRET' | 'NOT_FOUND' | 'EXPIRED' | 'REVOKED' | 'UNKNOWN';
   config: CampaignConfig | null;
 }
 
@@ -231,6 +240,11 @@ export interface FaceAPIBridge {
      * why the two ids exist at all.
      */
     videoSessionId?: string;
+    /** The student this session belongs to, if the kiosk's ID-entry screen looked one up — see uploads.ts's SessionReportPayload.subjectCode doc comment. */
+    subjectCode?: string;
+    subjectName?: string;
+    /** className/major/academicYear, when a subject was looked up — no dedicated column exists for these, they ride along as free-form metadata. */
+    metadata?: Record<string, unknown>;
   }) => Promise<ApproveSessionUploadResult>;
 
   getUploadStatus: () => Promise<UploadStatus>;
@@ -353,6 +367,16 @@ export interface FaceAPIBridge {
   openCameraSetup: () => Promise<boolean>;
 
   /**
+   * Local "sinh viên đã chụp" index (2026-09-08) — only meaningful from
+   * inside the kiosk's own hidden `#recent-students` window (`Ctrl/Cmd+Shift+S`,
+   * see `recentStudentsWindow.ts`). Reads local SQLite only, so these work
+   * fully offline; see `CapturedStudentRepository`'s own doc comment.
+   */
+  listRecentStudents: (limit?: number) => Promise<CapturedStudentItem[]>;
+  listStudentSessions: (subjectCode: string) => Promise<CapturedStudentItem[]>;
+  searchStudents: (query: string) => Promise<CapturedStudentItem[]>;
+
+  /**
    * Reports a stats-worthy moment (§3.4) — queued locally and pushed to the
    * admin portal on its own schedule. Never rejects; a failed/impossible
    * report must not interrupt the capture flow that triggered it.
@@ -366,7 +390,8 @@ export interface FaceAPIBridge {
       | 'CB_HELP_INTERVENTION'
       | 'SESSION_REPORT'
       | 'PHOTO_STATUS'
-      | 'VIDEO_STATUS';
+      | 'VIDEO_STATUS'
+      | 'ATTEMPT_SUPERSEDED';
     metadata?: Record<string, unknown>;
   }) => Promise<boolean>;
 
@@ -426,6 +451,10 @@ const faceAPI: FaceAPIBridge = {
   getCameraRoleMapping: () => ipcRenderer.invoke('camera:getRoleMapping'),
   setCameraRoleMapping: (mapping) => ipcRenderer.invoke('camera:setRoleMapping', mapping),
   openCameraSetup: () => ipcRenderer.invoke('camera:openSetup'),
+
+  listRecentStudents: (limit) => ipcRenderer.invoke('students:listRecent', limit),
+  listStudentSessions: (subjectCode) => ipcRenderer.invoke('students:listSessions', subjectCode),
+  searchStudents: (query) => ipcRenderer.invoke('students:search', query),
 
   recordStatsEvent: (payload) => ipcRenderer.invoke('stats:recordEvent', payload),
   setFileServiceCredentials: (payload) => ipcRenderer.invoke('secrets:setFileService', payload),
