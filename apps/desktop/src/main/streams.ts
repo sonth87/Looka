@@ -108,3 +108,46 @@ export function endVideoStream(
 
   return { ok: true };
 }
+
+/** The subset of `CaptureStreamRepository` `discardSessionVideos` needs — same injectable-for-tests reasoning as `EndVideoStreamRepo`. */
+export interface DiscardSessionVideosRepo {
+  listBySession: CaptureStreamRepository['listBySession'];
+  deleteBySession: CaptureStreamRepository['deleteBySession'];
+}
+
+/**
+ * Delete a session's recorded video, on disk and from `capture_streams`,
+ * when the operator abandons the session instead of approving it —
+ * `FaceCaptureApp.tsx`'s `handleRestart`/`handleCancelWorkflow` call this.
+ *
+ * Safe to reach for any session here: `approveSessionUpload` is the only
+ * thing that ever moves a video into `upload_outbox` (see that function's
+ * own doc comment in uploads.ts), and a cancelled/retaken session never
+ * calls it — so a row this function finds still in `capture_streams` was
+ * never queued for upload and is safe to remove outright.
+ *
+ * Video is heavier than a photo and a kiosk otherwise has no way to reclaim
+ * this disk space at all (there is no equivalent cleanup for an abandoned
+ * photo attempt today — see `queueCapture`'s own doc comment), so unlike
+ * that path this actively deletes rather than leaving an orphan. Best-effort
+ * per file: a failed unlink is logged, never thrown, and the row is deleted
+ * from `capture_streams` regardless — a missing file on disk is not a
+ * reason to keep a bookkeeping row for it.
+ */
+export function discardSessionVideos(
+  sessionId: string,
+  repo: DiscardSessionVideosRepo = getRepo()
+): { removed: number } {
+  const streams = repo.listBySession(sessionId);
+
+  for (const stream of streams) {
+    try {
+      fs.unlinkSync(stream.localPath);
+    } catch (err) {
+      console.warn(`[discardSessionVideos] failed to remove ${stream.localPath}:`, (err as Error).message);
+    }
+  }
+
+  const removed = repo.deleteBySession(sessionId);
+  return { removed };
+}

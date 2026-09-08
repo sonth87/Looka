@@ -1,9 +1,10 @@
 import { app } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import type { Visibility } from '@face/core';
 import { FsClient, UploadWorker, WorkerEvent, deterministicUuid, sha256Hex } from '@face/fs-client';
-import { UploadOutboxRepository, nextRetryDelayMs } from '@face/database';
+import { UploadOutboxRepository, CaptureStreamRepository, nextRetryDelayMs } from '@face/database';
 import type { OutboxItem, OutboxStatus } from '@face/database';
 import { getDatabase } from './db.js';
 import { recordStatsEvent } from './statsEvents.js';
@@ -12,6 +13,23 @@ import { recordStatsEvent } from './statsEvents.js';
 const diskReader = {
   read: async (localPath: string): Promise<Uint8Array> => fs.promises.readFile(localPath),
 };
+
+/**
+ * sha256 of a file already on disk, streamed rather than read whole into
+ * memory — used only for video (packages/ui's `sha256Hex` variant works on
+ * bytes already in memory, which is how photos are hashed at capture time,
+ * but a video's bytes are not held in memory by the time its session is
+ * approved).
+ */
+function sha256HexOfFile(filePath: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    fs.createReadStream(filePath)
+      .on('error', reject)
+      .on('data', (chunk) => hash.update(chunk))
+      .on('end', () => resolve(hash.digest('hex')));
+  });
+}
 
 export interface UploadsConfig {
   baseUrl: string;
@@ -40,6 +58,13 @@ export function startUploads(config: UploadsConfig | null): boolean {
   if (!config?.baseUrl || !config.apiKey) return false;
 
   outbox = new UploadOutboxRepository(getDatabase());
+  // Read-only lookup for emitVideoStatus() below — item.stepId is a
+  // capture_streams.id (see enqueueSessionVideos()'s own doc comment), so
+  // this is how cameraRole/durationMs get into the VIDEO_STATUS event
+  // without duplicating them into the outbox row's own metadata (which is
+  // sent to the file-service verbatim — see EnqueueInput.metadata's doc
+  // comment — and these two fields have no business being there).
+  const streamsForStatus = new CaptureStreamRepository(getDatabase());
   client = new FsClient({ baseUrl: config.baseUrl, apiKey: config.apiKey });
 
   // Looks the job up in the outbox so the PHOTO_STATUS event stands on its
@@ -69,6 +94,48 @@ export function startUploads(config: UploadsConfig | null): boolean {
     });
   };
 
+  // Mirrors emitPhotoStatus() on its own DeviceEventType (VIDEO_STATUS) so
+  // the API/CMS side can tell video rows from photo rows without inspecting
+  // metadata shape — see CaptureReportService.applyVideoStatus(). stepId
+  // here is capture_streams.id (see enqueueSessionVideos() below): video has
+  // no retake concept, so "the recording" and "the step" are the same thing.
+  const emitVideoStatus = (jobId: string, error: string | null = null) => {
+    const item = outbox?.getById(jobId);
+    if (!item) return;
+    const stream = item.stepId ? streamsForStatus.getById(item.stepId) : null;
+    recordStatsEvent('VIDEO_STATUS', {
+      sessionId: item.sessionId,
+      videoId: item.id,
+      at: new Date().toISOString(),
+      localStatus: item.status,
+      fsFileId: item.fsFileId,
+      fsStatus: item.fsStatus,
+      error: error ?? item.lastError,
+      mimeType: item.mimeType,
+      sizeBytes: item.sizeBytes,
+      sha256: item.sha256,
+      virtualPath: item.virtualPath,
+      cameraRole: stream?.cameraId ?? null,
+      durationMs: stream?.durationMs ?? null,
+    });
+  };
+
+  // Video-only (plan §3): once the server confirms the file is scanned and
+  // READY, the local copy has served its purpose (recover-on-crash before
+  // that point). Best-effort — a failed unlink is logged, never thrown; a
+  // leftover video file is a disk-space nag, not a correctness problem, and
+  // must not stop the VIDEO_STATUS report from going out. Photos are never
+  // auto-deleted this way; that behaviour is unchanged.
+  const deleteLocalVideo = (jobId: string) => {
+    const item = outbox?.getById(jobId);
+    if (!item) return;
+    try {
+      fs.unlinkSync(item.localPath);
+    } catch (err) {
+      console.warn(`[uploads] failed to remove local video ${item.localPath}:`, (err as Error).message);
+    }
+  };
+
   worker = new UploadWorker({
     client,
     outbox,
@@ -80,6 +147,12 @@ export function startUploads(config: UploadsConfig | null): boolean {
       if (event.type === 'failed' || event.type === 'quarantined') {
         console.warn('[uploads]', event);
       }
+      // 'recovered' carries no jobId — nothing below applies to it.
+      if (event.type === 'recovered') return;
+
+      const isVideo = outbox?.getById(event.jobId)?.kind === 'video';
+      const emitStatus = isVideo ? emitVideoStatus : emitPhotoStatus;
+
       // Stats events (§3.4) only on a *final* outcome, not every transient
       // retry attempt: 'uploaded' is bytes actually accepted by fs-core;
       // 'quarantined'/'failed' are permanent rejections (D6 in phase-11's
@@ -89,16 +162,19 @@ export function startUploads(config: UploadsConfig | null): boolean {
       // would wildly over-count if treated as a stats-facing signal.
       if (event.type === 'uploaded') {
         recordStatsEvent('UPLOAD_SUCCESS', { jobId: event.jobId });
-        emitPhotoStatus(event.jobId);
+        emitStatus(event.jobId);
       }
-      if (event.type === 'ready') emitPhotoStatus(event.jobId);
+      if (event.type === 'ready') {
+        emitStatus(event.jobId);
+        if (isVideo) deleteLocalVideo(event.jobId);
+      }
       if (event.type === 'failed') {
         recordStatsEvent('UPLOAD_FAILED', { jobId: event.jobId });
-        emitPhotoStatus(event.jobId, event.error);
+        emitStatus(event.jobId, event.error);
       }
       if (event.type === 'quarantined') {
         recordStatsEvent('UPLOAD_FAILED', { jobId: event.jobId });
-        emitPhotoStatus(event.jobId);
+        emitStatus(event.jobId);
       }
     },
   });
@@ -205,6 +281,17 @@ export interface SessionApprovalStepInfo {
 export interface ApproveSessionUploadOptions {
   workflowId?: string;
   startedAt?: string;
+  /**
+   * The workflow engine's own session id — a different id space than
+   * `sessionId` (see `CaptureSink.approveUpload`'s doc comment in
+   * packages/ui). Local video recording is keyed on this id, not on
+   * `sessionId`, so `enqueueSessionVideos()` looks `capture_streams` up by
+   * this instead. Falls back to `sessionId` when omitted, which is a
+   * harmless no-op for any caller with no video story (it will simply match
+   * no `capture_streams` rows) — every real renderer call site (onAccept in
+   * FaceCaptureApp.tsx) always sends it.
+   */
+  videoSessionId?: string;
 }
 
 /** One photo inside a SESSION_REPORT event — see §5 of phase-11's plan for the exact contract. */
@@ -252,6 +339,13 @@ export interface SessionReportPayload {
 export interface ApproveSessionUploadRepo {
   approveSession: UploadOutboxRepository['approveSession'];
   listBySession: UploadOutboxRepository['listBySession'];
+  /** Used by enqueueSessionVideos() below — kept on the same injected repo rather than a second lookup of the module's own `outbox` singleton, so a test-supplied fake is exercised for video the same as it already is for photos. */
+  enqueue: UploadOutboxRepository['enqueue'];
+}
+
+/** The subset of CaptureStreamRepository approveSessionUpload() needs — same injectable-for-tests reasoning as ApproveSessionUploadRepo. */
+export interface ApproveSessionUploadStreamRepo {
+  listBySession: CaptureStreamRepository['listBySession'];
 }
 
 /**
@@ -329,17 +423,25 @@ export function buildSessionReportPayload(
  * renderer sends — see SessionApprovalStepInfo) merged with whatever the
  * repository knows about the surviving rows (see buildSessionReportPayload).
  *
+ * This is also the one moment a session's recorded video is allowed to leave
+ * the kiosk (see enqueueSessionVideos() below): "Xác nhận & Lưu hồ sơ" IS the
+ * approval this function performs, so video is enqueued here rather than at
+ * recording end. A session that is cancelled or retaken instead never calls
+ * this function, so its video is never enqueued — see
+ * streams.ts's discardSessionVideos() for how that video gets cleaned up.
+ *
  * Returns how many rows this call actually approved and how many it deleted
  * as superseded (0/0 for an already-approved or nonexistent session — never
  * an error, since "nothing to do" is a perfectly valid outcome for a
- * duplicate approve call).
+ * duplicate approve call), plus how many videos it enqueued.
  */
-export function approveSessionUpload(
+export async function approveSessionUpload(
   sessionId: string,
   steps?: SessionApprovalStepInfo[],
   options?: ApproveSessionUploadOptions,
-  repo: ApproveSessionUploadRepo = outbox ?? new UploadOutboxRepository(getDatabase())
-): { approved: number; superseded: number } {
+  repo: ApproveSessionUploadRepo = outbox ?? new UploadOutboxRepository(getDatabase()),
+  streamRepo: ApproveSessionUploadStreamRepo = new CaptureStreamRepository(getDatabase())
+): Promise<{ approved: number; superseded: number; videosEnqueued: number }> {
   const result = repo.approveSession(sessionId);
 
   // Best-effort: an unlink failure must not undo the approval that already
@@ -376,7 +478,83 @@ export function approveSessionUpload(
     recordStatsEvent('SESSION_REPORT', { ...payload });
   }
 
-  return { approved: result.approved, superseded: result.superseded.length };
+  const videosEnqueued = await enqueueSessionVideos(sessionId, options?.videoSessionId ?? sessionId, repo, streamRepo);
+
+  return { approved: result.approved, superseded: result.superseded.length, videosEnqueued };
+}
+
+/**
+ * Enqueue every finished recording of a session for upload — see
+ * approveSessionUpload()'s own doc comment for why this runs there and not
+ * at recording end.
+ *
+ * Two different session ids are in play here, deliberately: `videoSessionId`
+ * (the workflow engine's `CaptureSession.id`) is what `capture_streams` rows
+ * were actually written under (see `FaceCaptureApp.tsx`'s recording effects),
+ * so it is what `listBySession` below must query by — but the row this
+ * writes into `upload_outbox` is stamped with `outboxSessionId` (the id
+ * `SESSION_REPORT`/`PHOTO_STATUS` already report under, i.e. the id the
+ * central Postgres `sessions` row actually has), so `emitVideoStatus()` and
+ * `session_videos` group correctly with that session's photos instead of
+ * under an id the API has never heard of. See `CaptureSink.approveUpload`'s
+ * own doc comment (packages/ui) for why these two ids exist at all.
+ *
+ * `stepId` is the recording's own id (`capture_streams.id`), never
+ * `cameraId`: `UploadOutboxRepository.approveSession()` groups rows by
+ * `(kind, stepId)` and deletes every row but the highest attempt in a
+ * group — grouping by camera would put a session's up-to-3 simultaneous-mode
+ * videos in overlapping groups and delete two of them. One recording, one
+ * stepId, attempt always 1 — each video is alone in its own group, so none
+ * is ever deleted. Enqueued already-approved (`approvedAt` set): this call
+ * already IS the approval moment (see the caller), so there is no separate
+ * staged-then-approved window the way a photo has.
+ *
+ * A stream missing `endedAt` (the recorder never stopped — a crash, or a
+ * step somehow still mid-recording) is skipped: there is no complete file to
+ * send. `enqueue()`'s own `ON CONFLICT(idem_key) DO NOTHING` makes a repeat
+ * call for an already-enqueued video a harmless no-op, so this needs no
+ * approved-check of its own the way the photo branch above does.
+ */
+async function enqueueSessionVideos(
+  outboxSessionId: string,
+  videoSessionId: string,
+  repo: ApproveSessionUploadRepo,
+  streamRepo: ApproveSessionUploadStreamRepo
+): Promise<number> {
+  const streams = streamRepo.listBySession(videoSessionId).filter((s) => s.endedAt !== null);
+  const year = new Date().getFullYear();
+  const approvedAt = Date.now();
+
+  let enqueued = 0;
+  for (const stream of streams) {
+    const idemKey = `${outboxSessionId}:${stream.id}:1:video`;
+    const ext = stream.mimeType.includes('mp4') ? 'mp4' : 'webm';
+    try {
+      const sha256 = await sha256HexOfFile(stream.localPath);
+      repo.enqueue({
+        id: deterministicUuid(idemKey),
+        sessionId: outboxSessionId,
+        kind: 'video',
+        localPath: stream.localPath,
+        virtualPath: `video/${year}/${outboxSessionId}/${stream.id}.${ext}`,
+        mimeType: stream.mimeType,
+        sha256,
+        sizeBytes: stream.sizeBytes,
+        idemKey,
+        uploadId: deterministicUuid(idemKey),
+        // Recorded evidence, not shareable content — same reasoning as
+        // capture:queue's handler in index.ts uses for photos.
+        visibility: 'private',
+        stepId: stream.id,
+        attempt: 1,
+        approvedAt,
+      });
+      enqueued++;
+    } catch (err) {
+      console.warn(`[approveSessionUpload] failed to enqueue video ${stream.id}:`, (err as Error).message);
+    }
+  }
+  return enqueued;
 }
 
 export interface UploadStatus {

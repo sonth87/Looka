@@ -7,7 +7,8 @@ export type StatsEventType =
   | 'RETAKE'
   | 'CB_HELP_INTERVENTION'
   | 'SESSION_REPORT'
-  | 'PHOTO_STATUS';
+  | 'PHOTO_STATUS'
+  | 'VIDEO_STATUS';
 
 export interface StatsEventItem {
   id: string;

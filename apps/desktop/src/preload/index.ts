@@ -70,6 +70,8 @@ export interface ApproveSessionUploadResult {
   approved?: number;
   /** Rows this call deleted because a later attempt at the same step superseded them. */
   superseded?: number;
+  /** Recordings of this session this call enqueued for upload to file-service. */
+  videosEnqueued?: number;
   error?: string;
 }
 
@@ -221,6 +223,14 @@ export interface FaceAPIBridge {
     steps?: ApprovalStepInfo[];
     workflowId?: string;
     startedAt?: string;
+    /**
+     * The workflow engine's own session id (`CaptureSession.id`), which is
+     * what local video recording is keyed on — a different id space than
+     * `sessionId` above. Falls back to `sessionId` on the main-process side
+     * when omitted; see `CaptureSink.approveUpload`'s own doc comment for
+     * why the two ids exist at all.
+     */
+    videoSessionId?: string;
   }) => Promise<ApproveSessionUploadResult>;
 
   getUploadStatus: () => Promise<UploadStatus>;
@@ -320,6 +330,15 @@ export interface FaceAPIBridge {
     durationMs: number;
   }) => Promise<{ ok: boolean; error?: string }>;
 
+  /**
+   * Deletes a session's recorded video, on disk and from `capture_streams`,
+   * when the operator abandons the session instead of approving it — call
+   * from `handleRestart`/`handleCancelWorkflow`. A video that already
+   * reached `upload_outbox` (the session was approved) is untouched by this;
+   * see `discardSessionVideos`'s own doc comment in `streams.ts`.
+   */
+  discardSessionVideos: (sessionId: string) => Promise<{ removed: number }>;
+
   /** Runtime camera role mapping (§2.1) — set from the camera setup screen. */
   getCameraRoleMapping: () => Promise<CameraRoleMapping>;
   setCameraRoleMapping: (mapping: CameraRoleMapping) => Promise<boolean>;
@@ -346,7 +365,8 @@ export interface FaceAPIBridge {
       | 'RETAKE'
       | 'CB_HELP_INTERVENTION'
       | 'SESSION_REPORT'
-      | 'PHOTO_STATUS';
+      | 'PHOTO_STATUS'
+      | 'VIDEO_STATUS';
     metadata?: Record<string, unknown>;
   }) => Promise<boolean>;
 
@@ -401,6 +421,7 @@ const faceAPI: FaceAPIBridge = {
 
   startVideoStream: (payload) => ipcRenderer.invoke('stream:start', payload),
   endVideoStream: (payload) => ipcRenderer.invoke('stream:end', payload),
+  discardSessionVideos: (sessionId) => ipcRenderer.invoke('stream:discardSession', sessionId),
 
   getCameraRoleMapping: () => ipcRenderer.invoke('camera:getRoleMapping'),
   setCameraRoleMapping: (mapping) => ipcRenderer.invoke('camera:setRoleMapping', mapping),

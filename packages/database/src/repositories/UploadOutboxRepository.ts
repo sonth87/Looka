@@ -81,6 +81,14 @@ export interface EnqueueInput {
    */
   stepId?: string;
   attempt?: number;
+  /**
+   * Pass this when the caller is enqueueing an already-reviewed capture —
+   * video is enqueued at the moment of "Xác nhận & Lưu hồ sơ" itself (see
+   * apps/desktop/src/main/uploads.ts's approveSessionUpload()), so there is
+   * no separate staged-then-approved window the way a photo has. Omitted
+   * (the photo path) leaves the row staged, exactly as before.
+   */
+  approvedAt?: number;
 }
 
 export interface OutboxStats {
@@ -121,14 +129,19 @@ export class UploadOutboxRepository {
    * pick it up — until the operator reviews the session and approveSession()
    * releases it. This is the "capture first, upload only after explicit
    * approval" gate; see approveSession()'s own doc comment.
+   *
+   * Pass `approvedAt` to skip that staging window entirely and enqueue an
+   * already-approved row — the video path uses this, since it is only ever
+   * enqueued at the moment of approval itself (see apps/desktop/src/main/
+   * uploads.ts's approveSessionUpload()), so there is nothing to stage.
    */
   public enqueue(input: EnqueueInput): void {
     this.db.run(
       `INSERT INTO upload_outbox (
          id, session_id, kind, local_path, virtual_path, mime_type, sha256, size_bytes,
          metadata, idem_key, upload_id, depends_on, visibility, step_id, attempt,
-         status, attempts, next_retry_at, created_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, ?, ?)
+         status, attempts, next_retry_at, created_at, approved_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, ?, ?, ?)
        ON CONFLICT(idem_key) DO NOTHING`,
       [
         input.id,
@@ -148,6 +161,7 @@ export class UploadOutboxRepository {
         input.attempt ?? null,
         Date.now(),
         Date.now(),
+        input.approvedAt ?? null,
       ]
     );
   }

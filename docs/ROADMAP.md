@@ -966,6 +966,166 @@ and kiosk testing):
 
 ---
 
+## 3d. Investigated: photo → file-service upload pipeline (2026-09-08)
+
+User asked to verify the "save photo to file-service" flow end-to-end and
+whether retrieval (GET) works. **Verdict: Looka's own pipeline is correct and
+working exactly as designed; the external file-service is currently down at
+its metadata layer, so nothing can upload right now.** Not a Looka bug — no
+code changed.
+
+**How it was verified**: DB inspection first showed every `photos` row
+(3 total, all from earlier kiosk testing) with `fs_file_id IS NULL` and
+`upload_outbox` completely empty — meaning no session had ever actually been
+*approved* (the review modal's "Xác nhận & Lưu hồ sơ") in this environment's
+history; captures that are never approved are correctly never queued, by
+design. To get a real signal, drove a fresh session through the API directly
+(`POST /v1/sessions` → `POST /v1/sessions/:id/photos` with a tiny real JPEG →
+`POST /v1/sessions/:id/complete`, all with `x-api-key`) — this exercises the
+exact same `UploadWorkerService` (`apps/api`, `@Cron('*/3 * * * * *')`) a real
+kiosk/web capture would.
+
+**Result**: the outbox row was correctly created and `approved_at` correctly
+stamped the instant `/complete` was called — the pipeline wiring is sound.
+`UploadWorkerService` picked it up within 3s and attempted the upload, but
+every attempt (3 automatic retries, plus repeating it manually 3 more times
+directly against the file-service, bypassing Looka's API entirely) failed
+identically:
+```
+503 {"error":{"code":"METADATA_UNAVAILABLE","message":"Không truy cập được dữ liệu: app", ...}}
+```
+Calling the file-service's own `GET /api/v1/usage` and
+`POST /api/v1/self-service/provision` endpoints directly (same `FS_API_KEY`,
+bypassing Looka's API and DB entirely) **also** fail the same way — `usage`
+says `"Không truy cập được dữ liệu: app"`, `provision` says
+`"Không truy cập được dữ liệu: tenant"`. Different resource names, identical
+failure shape, across three unrelated endpoints. `GET /healthz` still returns
+`{"status":"ok"}`, so this is a shallow liveness check that doesn't cover the
+service's own metadata/database dependency.
+
+**Conclusion**: the file-service at `FS_BASE_URL` (`http://192.168.101.32:8080`,
+tenant `sontt@dainam.edu.vn`) has its own backing metadata store unreachable
+right now — an infrastructure problem on that external service, entirely
+outside this repo, not something to fix in Looka's code. `FsError.retryable`
+already correctly treats a 503 as retryable (`packages/fs-client`), so
+**no action is needed on the Looka side** — once file-service's own backend
+recovers, the already-queued `upload_outbox` row (and any future capture)
+will upload automatically on its next 3s tick, with zero code changes and no
+need to re-run anything. If uploads are still failing after file-service is
+confirmed healthy again, re-check this exact repro (`POST /api/v1/usage`
+directly against file-service with the current `FS_API_KEY`) before assuming
+a Looka-side regression.
+
+---
+
+## 3e. Implemented: video upload to file-service (2026-09-08)
+
+Video recorded during a capture session was local-only by design since
+migration 006/2026-09-05 (see the multi-camera device-management discussion
+doc's §2.5/§3.1/§4 open question #3). Product decision on 2026-09-08: upload
+it too, gated on the exact same "Xác nhận & Lưu hồ sơ" moment as photos — not
+during recording — plus a bitrate cap, local-delete-on-ready, cleanup for
+cancelled/never-approved video, and full central Postgres/API/CMS reporting
+mirroring the photo pipeline. Plan went through 4 rounds of scope
+negotiation in plan mode before final approval; the approved plan (saved at
+the time as `distributed-percolating-tulip.md`) is reproduced in full in this
+session's own history.
+
+**What changed, by layer:**
+
+- **Bitrate** (`packages/ui/src/components/screens/FaceCaptureApp.tsx`):
+  `VIDEO_BITRATE_BPS = 1_000_000` applied to both `MediaRecorder`
+  constructors (single-stream and multi-channel/simultaneous) — the ~234MB
+  field incident this addresses is documented next to the constant.
+- **Enqueue at approval** (`packages/database`, `apps/desktop/src/main/uploads.ts`):
+  migration 009 documents that `upload_outbox.kind = 'video'` is legal
+  (no schema change needed — no CHECK constraint on `kind`);
+  `UploadOutboxRepository.enqueue()` gained an optional `approvedAt` param so
+  a row can be created already-released rather than staged-then-approved,
+  since a video's approval moment and its enqueue moment are the same event.
+  `approveSessionUpload()`'s new `enqueueSessionVideos()` reads
+  `CaptureStreamRepository.listBySession()` for finished (`ended_at IS NOT NULL`)
+  recordings and enqueues each with `stepId = capture_streams.id`,
+  `attempt = 1` — never `cameraId` — so `approveSession()`'s
+  "keep only the highest attempt per `(kind, stepId)`" grouping can never
+  delete one of up to 3 simultaneous-mode videos.
+- **Two session ids, not one** — the correctness trap this feature actually
+  hinged on: `RunScopedCaptureSession`'s own session id (`ElectronCaptureSink`'s
+  `crypto.randomUUID()`, what photos/`upload_outbox`/central Postgres all key
+  on) and the workflow engine's `CaptureSession.id` (`session_<timestamp>`,
+  what `capture_streams` rows are actually written under via
+  `recordingSessionKey`) are **different values that were never reconciled
+  before this feature needed them to be**. Fixed by threading a second,
+  explicit `videoSessionId` argument through the whole approve call chain
+  (`CaptureSink.approveUpload` → `RunScopedCaptureSession.approve` →
+  `faceAPI.approveSessionUpload` → `ApproveSessionUploadOptions.videoSessionId`),
+  populated in `FaceCaptureApp.tsx`'s `onAccept` from `completedSession.id`
+  (the exact CaptureSession object the recording effects were keyed on).
+  `enqueueSessionVideos()` queries `capture_streams` by the video-session id
+  but stamps the resulting `upload_outbox`/`session_videos` rows with the
+  outbox session id, so central reporting groups a session's video with its
+  photos under the one id the API/CMS actually know.
+- **Local delete on ready** (`apps/desktop/src/main/uploads.ts`): the
+  `UploadWorker`'s `'ready'` event now branches on `item.kind` — video gets
+  `emitVideoStatus()` (a new VIDEO_STATUS-emitting twin of `emitPhotoStatus()`,
+  enriched with `cameraRole`/`durationMs` via a `CaptureStreamRepository`
+  lookup keyed on `item.stepId`) and a best-effort `fs.unlinkSync` of the
+  local file; photos are unchanged (never auto-deleted).
+- **Cancelled-session cleanup** (`apps/desktop/src/main/streams.ts`, new
+  `discardSessionVideos()` + `CaptureStreamRepository.deleteBySession()`):
+  wired into `FaceCaptureApp.tsx`'s `handleRestart`/`handleCancelWorkflow` via
+  a new `faceAPI.discardSessionVideos(sessionId)` IPC call, keyed on the same
+  video-session id the recording effects used (read before `recordingSessionKey`
+  is nulled). Safe unconditionally: a video only ever reaches `upload_outbox`
+  via `approveSessionUpload()`, which a cancelled/retaken run never calls.
+- **Central reporting** (`apps/api`): new `DeviceEventType.VIDEO_STATUS`
+  enum value + migration `1788000000000-SessionVideos` (new `session_videos`
+  table, FK-cascades on its session, `id`-only `ON CONFLICT` — no
+  `step_id`/`attempt`, since a video is never retaken); new `SessionVideo`
+  entity; `CaptureReportService.applyVideoStatus()` mirrors `applyPhotoStatus()`
+  exactly (create-session-if-missing, upsert-if-missing, update-only-if-not-stale
+  via the `fs_status_at` high-water mark); new error codes `VIDEO_NOT_FOUND`/
+  `VIDEO_STATUS_INVALID_PAYLOAD` (6xxx range); new `VideoController` (mirrors
+  `PhotoController`'s `POST /v1/:id/view-link`, same `SsoAuthGuard`,
+  same `FileStorageService.issueViewLink()`); `SessionService.getSessionDetail()`
+  now also returns `videos: SessionVideoDao[]`. Deliberately did **not** touch
+  `campaignStats`/`allCampaignsStats`/`campaignsTimeseries` — the approved
+  plan scoped central reporting to session-detail view-and-playback, not
+  dashboard aggregates; that would be a separate follow-up if ever needed.
+- **CMS** (`SessionDetailDrawer.tsx`, `api.ts`): a `videos` section below the
+  photo grid, `<video controls>` per ready video, reusing `LinkState`/
+  `classifyLinkError`/`fsStatusBadgeClass`/`ROLE_LABEL`/`copyFsFileId`
+  (widened to accept either a photo or a video) as-is; new `formatDurationMs()`
+  helper for the `mm:ss` label.
+
+**Rollout-ordering risk this depends on, unresolved by code**: `apps/desktop/
+src/main/statsEvents.ts` batches every pending stats-event type together in
+one `POST /v1/devices/events`, and the API validates `type` via `@IsEnum` —
+an unrecognized value 400s the **whole batch**, silently blocking
+`PHOTO_STATUS`/`SESSION_COMPLETED` reporting too for that device. **The API
+build carrying the `VIDEO_STATUS` enum value must be deployed and confirmed
+healthy before any kiosk build that calls `emitVideoStatus()` ships.**
+Sections other than "central reporting" above have no such dependency.
+
+**Testing status**: `pnpm --filter @face/database test` (38/38),
+`pnpm --filter @face/fs-client test` (28/28),
+`pnpm --filter @face/desktop test` (31/31, includes new `discardSessionVideos`
+and `approveSessionUpload` video-enqueue suites) and `build`,
+`pnpm --filter @face/api test` (24/24 non-DB; 3 new VIDEO_STATUS persistence
+tests added to `device-management-persistence.spec.ts`, correctly wired but
+**not yet run against a real Postgres** — this environment has no
+`TEST_DATABASE_URL` configured) and `build`, `pnpm --filter @face/ui`
+build+test (46/46, including new `CaptureSink.test.ts` coverage for the
+`videoSessionId` plumbing), `pnpm --filter @face/cms build` — all clean.
+**No manual end-to-end test has been run yet** (record a video session →
+approve → confirm upload → READY → local file deleted → `session_videos` row
+→ CMS playback; separately, "Chụp lại toàn bộ" → confirm the video is
+deleted from disk and `capture_streams`, never appears in `upload_outbox`).
+Per the standing project rule, **not committed** until that manual pass is
+done and the user confirms it.
+
+---
+
 ## 4. How this file should be maintained
 
 Re-verify a step's status here by reading the referenced code directly, the

@@ -209,8 +209,26 @@ export interface SessionPhoto {
   uploadError?: string;
 }
 
+/** One recorded video — no stepId/attempt (a video is never retaken); bytes live only on the file server, same as SessionPhoto. */
+export interface SessionVideo {
+  id: string;
+  cameraRole?: string;
+  mimeType: string;
+  bytes: number;
+  durationMs?: number;
+  fsFileId?: string;
+  fsStatus?: string;
+  localStatus?: string;
+  virtualPath?: string;
+  capturedAt?: string;
+  uploadedAt?: string;
+  readyAt?: string;
+  uploadError?: string;
+}
+
 export interface SessionDetail extends SessionListItem {
   photos: SessionPhoto[];
+  videos: SessionVideo[];
 }
 
 /** Mirrors `PaginationMetaDao` server-side — `totalItems`/`totalPages` are optional there too. */
@@ -369,6 +387,13 @@ export const getSession = (id: string) => request<SessionDetail>(`/v1/sessions/$
  */
 export const issuePhotoViewLink = (photoId: string, viewerId = 'cms-admin') =>
   request<PhotoViewLink>(`/v1/photos/${photoId}/view-link`, {
+    method: 'POST',
+    body: JSON.stringify({ viewerId }),
+  });
+
+/** Same contract as `issuePhotoViewLink`, for a session's recorded video (`POST /v1/videos/:id/view-link`). */
+export const issueVideoViewLink = (videoId: string, viewerId = 'cms-admin') =>
+  request<PhotoViewLink>(`/v1/videos/${videoId}/view-link`, {
     method: 'POST',
     body: JSON.stringify({ viewerId }),
   });

@@ -33,6 +33,16 @@ import {
   isRecordingOverCap,
   MAX_RECORDING_DURATION_MS,
 } from '../../lib/recordingGate.js';
+
+/**
+ * Capped bitrate for session recordings (2026-09-08) — `MediaRecorder`'s own
+ * default is uncapped and scales with resolution/motion, which is how a
+ * real capture session recorded a ~234MB file (see `recordingGate.ts`'s own
+ * doc comment on that field incident). This footage exists as process
+ * evidence, not a print-quality artifact, so 1 Mbps is deliberately modest —
+ * resolution is untouched, only the encoder's target bitrate is capped.
+ */
+const VIDEO_BITRATE_BPS = 1_000_000;
 import type { MultiFrameViewProps, MultiFrameViewFrame } from './views/types.js';
 import { GuidedCaptureScreen } from './GuidedCaptureScreen.js';
 import { StudentIdEntryScreen } from './StudentIdEntryScreen.js';
@@ -885,11 +895,27 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    * FOUND: publishes the greeting to the CB Help window, waits
    * `GREETING_DURATION_MS` so it is actually seen before anything else
    * happens (§ requirement: capture, and recording, must start only after
-   * the greeting — not before), then closes this screen and starts the
-   * session via the existing, unmodified `handleStartWorkflow` — which
-   * already arms recording in the same call (`setRecordVideo` +
-   * `startSession`), so capture and recording start together with no
-   * separate wiring needed here.
+   * the greeting — not before), then starts the session via the existing,
+   * unmodified `handleStartWorkflow` — which already arms recording in the
+   * same call (`setRecordVideo` + `startSession`), so capture and recording
+   * start together with no separate wiring needed here — and only THEN
+   * closes this screen.
+   *
+   * `setAwaitingStudent(false)` deliberately runs AFTER `handleStartWorkflow`
+   * resolves, not before it (2026-09-08 audit fix — was the other way
+   * around). `handleStartWorkflow` is where `activeSession` (the live
+   * engine's own `currentSession`), `stepsList`'s completion markers,
+   * `multiFrameProp`'s per-frame status, and `activeGuidance` all actually
+   * get overwritten for the new session — the engine keeps serving the
+   * *previous* student's completed session/guidance right up until its
+   * `startSession()` call, mid-way through `handleStartWorkflow`, replaces
+   * it (see `WorkflowEngine.startSession`'s synchronous `state-change` emit
+   * and `activeSession`'s own doc comment below). Closing this overlay
+   * before that finishes would flash the previous student's fully-completed
+   * step thumbnails/frames at the next student for however long
+   * `resolveActiveWorkflow`/`runSimultaneousCaptureGate` take. Awaiting
+   * first means every one of those pieces is already fresh by the time this
+   * screen actually disappears.
    */
   const handleStudentSubmit = async (code: string) => {
     setStudentSubmitting(true);
@@ -912,8 +938,8 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         },
       });
       await new Promise((resolve) => setTimeout(resolve, GREETING_DURATION_MS));
-      setAwaitingStudent(false);
       await handleStartWorkflow();
+      setAwaitingStudent(false);
     } finally {
       setStudentSubmitting(false);
     }
@@ -1053,8 +1079,16 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    * stepType/cameraRole/capturedAt through to the main process — see
    * `ApprovalStepInfo`'s own doc comment for why the outbox row alone cannot
    * supply those.
+   *
+   * `videoSessionId` is the workflow engine's own `CaptureSession.id`
+   * (`completedSession.id` in onAccept below) — a different id space than
+   * `runSessionRef`'s own sessionId (see `CaptureSink.approveUpload`'s doc
+   * comment). It is what the recording effects tagged this run's
+   * `capture_streams` rows with, so it — not the outbox sessionId — is what
+   * lets the main process find this run's video when releasing it for
+   * upload.
    */
-  const approveUpload = async (steps?: ApprovalStepInfo[]): Promise<boolean> => {
+  const approveUpload = async (steps?: ApprovalStepInfo[], videoSessionId?: string): Promise<boolean> => {
     // Diagnostic only (2026-09-05 field bug — operator confirms, modal
     // closes, nothing ever gets approved, with no trace anywhere). Logging
     // the id this run is about to approve, before the call, means a future
@@ -1064,7 +1098,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     // hand.
     console.warn('[FaceCaptureApp] onAccept: approving sessionId=', runSessionRef.current.cachedSessionId);
     try {
-      await runSessionRef.current.approve(steps);
+      await runSessionRef.current.approve(steps, videoSessionId);
       setStoreError(null);
       return true;
     } catch (err) {
@@ -1834,6 +1868,20 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     // pre-armed session) deliberately does NOT set this key back — same as
     // before this fix, recording only (re)arms from a real
     // `handleStartWorkflow`, once the operator presses Start again.
+    //
+    // Video cleanup (plan §4, 2026-09-08): a retaken run's video was never
+    // approved, so approveSessionUpload() never enqueued it (see that
+    // function's own doc comment in uploads.ts) — nothing else will ever
+    // reclaim its disk space. Fire-and-forget: a failed discard leaves an
+    // orphaned file, a disk-space nag rather than a correctness problem, and
+    // must not block the retake itself. `recordingSessionKey` here reads the
+    // run being abandoned, not the one this function may go on to start.
+    if (recordingSessionKey) {
+      const faceAPI = (window as any).faceAPI;
+      void faceAPI?.discardSessionVideos?.(recordingSessionKey).catch((err: unknown) => {
+        console.warn('[FaceCaptureApp] discardSessionVideos failed:', err);
+      });
+    }
     setRecordingSessionKey(null);
     reportStatsEvent('RETAKE');
     // CB Help (§3.5): an abandoned run must not leave its last frame/photo
@@ -2150,7 +2198,10 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         if (cancelled) return;
         streamId = result.streamId;
 
-        recorder = new MediaRecorder(stream!, mimeType ? { mimeType } : undefined);
+        recorder = new MediaRecorder(stream!, {
+          ...(mimeType ? { mimeType } : {}),
+          videoBitsPerSecond: VIDEO_BITRATE_BPS,
+        });
         recorder.ondataavailable = (e) => {
           if (e.data.size > 0) chunks.push(e.data);
         };
@@ -2335,7 +2386,10 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           }
 
           const chunks: BlobPart[] = [];
-          const recorder = new MediaRecorder(mediaStream, mimeType ? { mimeType } : undefined);
+          const recorder = new MediaRecorder(mediaStream, {
+            ...(mimeType ? { mimeType } : {}),
+            videoBitsPerSecond: VIDEO_BITRATE_BPS,
+          });
           recorder.ondataavailable = (e) => {
             if (e.data.size > 0) chunks.push(e.data);
           };
@@ -2616,6 +2670,16 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     // Stop-recording hook (§3.1 fix, 2026-09-05) — see `recordingSessionKey`'s
     // own doc comment. Same "does not re-arm on this function's own
     // pre-armed startSession" reasoning as handleRestart above.
+    //
+    // Video cleanup (plan §4, 2026-09-08) — same reasoning as handleRestart's
+    // identical block: a cancelled run's video was never approved, so
+    // nothing else will ever reclaim its disk space.
+    if (recordingSessionKey) {
+      const faceAPI = (window as any).faceAPI;
+      void faceAPI?.discardSessionVideos?.(recordingSessionKey).catch((err: unknown) => {
+        console.warn('[FaceCaptureApp] discardSessionVideos failed:', err);
+      });
+    }
     setRecordingSessionKey(null);
     setLatestCapturedImage(null);
     // Cancelling abandons a run that has not completed, same as "Chụp lại
@@ -2648,7 +2712,12 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         if (canStart) await activeEngine.startSession(workflow);
       }
     }
-  }, [mode]);
+    // recordingSessionKey added for the video-discard block above: without it
+    // in deps, this callback would memoize on whatever recordingSessionKey
+    // was at the FIRST render where `mode` had its current value, and every
+    // cancel after that would read that stale (often null) snapshot instead
+    // of the run actually being cancelled.
+  }, [mode, recordingSessionKey]);
 
   return (
     <div className="relative h-full w-full overflow-hidden flex flex-col bg-slate-950 text-slate-100">
@@ -2797,7 +2866,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
                   };
                 })
               : undefined;
-            const approved = await approveUpload(steps);
+            const approved = await approveUpload(steps, completedSession?.id);
             if (!approved) return;
             await finishSession();
             // The one true "this session is done" moment — the operator

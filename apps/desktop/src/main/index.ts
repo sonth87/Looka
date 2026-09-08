@@ -48,7 +48,7 @@ import {
 } from './secrets.js';
 import { openCameraSetupWindow } from './cameraSetupWindow.js';
 import { getDeviceAccessStatus } from './deviceApi.js';
-import { startVideoStream, endVideoStream } from './streams.js';
+import { startVideoStream, endVideoStream, discardSessionVideos } from './streams.js';
 import { recordStatsEvent, startStatsEventPush, stopStatsEventPush } from './statsEvents.js';
 import type { StatsEventType } from '@face/database';
 import {
@@ -517,6 +517,18 @@ app.whenReady().then(async () => {
     }
   );
 
+  /**
+   * Delete a session's recorded video, on disk and in `capture_streams`, when
+   * the operator abandons it instead of approving it — see
+   * discardSessionVideos()'s own doc comment in streams.ts. Never approved
+   * (`session:approveUpload` never ran), so nothing here can touch a video
+   * the outbox/UploadWorker already knows about.
+   */
+  ipcMain.handle('stream:discardSession', (_, sessionId: unknown) => {
+    if (typeof sessionId !== 'string' || !sessionId) return { removed: 0 };
+    return discardSessionVideos(sessionId);
+  });
+
   /** Save credentials from the setup screen and (re)start uploading with them. */
   ipcMain.handle('secrets:setFileService', async (_, payload: { baseUrl?: unknown; apiKey?: unknown }) => {
     const baseUrl = String(payload?.baseUrl ?? '').trim();
@@ -691,9 +703,15 @@ app.whenReady().then(async () => {
    */
   ipcMain.handle(
     'session:approveUpload',
-    (
+    async (
       _,
-      payload: { sessionId?: unknown; steps?: unknown; workflowId?: unknown; startedAt?: unknown }
+      payload: {
+        sessionId?: unknown;
+        steps?: unknown;
+        workflowId?: unknown;
+        startedAt?: unknown;
+        videoSessionId?: unknown;
+      }
     ) => {
       const sessionId = String(payload?.sessionId ?? '');
       if (!sessionId) return { ok: false, error: 'A session id is required.' };
@@ -701,11 +719,16 @@ app.whenReady().then(async () => {
         const steps = Array.isArray(payload?.steps) ? (payload.steps as SessionApprovalStepInfo[]) : undefined;
         const workflowId = typeof payload?.workflowId === 'string' ? payload.workflowId : undefined;
         const startedAt = typeof payload?.startedAt === 'string' ? payload.startedAt : undefined;
-        const { approved, superseded } = approveSessionUpload(sessionId, steps, { workflowId, startedAt });
+        const videoSessionId = typeof payload?.videoSessionId === 'string' ? payload.videoSessionId : undefined;
+        const { approved, superseded, videosEnqueued } = await approveSessionUpload(sessionId, steps, {
+          workflowId,
+          startedAt,
+          videoSessionId,
+        });
         console.warn(
-          `[session:approveUpload] sessionId=${sessionId} approved=${approved} superseded=${superseded}`
+          `[session:approveUpload] sessionId=${sessionId} approved=${approved} superseded=${superseded} videosEnqueued=${videosEnqueued}`
         );
-        return { ok: true, approved, superseded };
+        return { ok: true, approved, superseded, videosEnqueued };
       } catch (err) {
         console.warn(`[session:approveUpload] sessionId=${sessionId} failed: ${(err as Error).message}`);
         return { ok: false, error: (err as Error).message };

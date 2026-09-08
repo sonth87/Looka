@@ -138,9 +138,73 @@ export class SessionListItemDao {
   photosFailed: number;
 }
 
+/**
+ * One video inside `GET /v1/sessions/:id` — mirrors `SessionPhotoDao`. No
+ * `stepId`/`attempt`: a video is never retaken, so `cameraRole` alone
+ * distinguishes one from another within a session.
+ */
+export class SessionVideoDao {
+  @ApiProperty({ description: 'Video id (uuid)' })
+  @Expose()
+  id: string;
+
+  @ApiPropertyOptional({ description: 'Camera đã quay video này' })
+  @Expose()
+  cameraRole?: string;
+
+  @ApiProperty()
+  @Expose()
+  mimeType: string;
+
+  @ApiProperty()
+  @Expose()
+  bytes: number;
+
+  @ApiPropertyOptional({ description: 'Thời lượng video, tính bằng mili giây' })
+  @Expose()
+  durationMs?: number;
+
+  @ApiPropertyOptional({ description: 'file_id trên file-service' })
+  @Expose()
+  fsFileId?: string;
+
+  @ApiPropertyOptional({ description: 'Trạng thái file trên file-service' })
+  @Expose()
+  fsStatus?: string;
+
+  @ApiPropertyOptional({ description: 'Trạng thái hàng đợi cục bộ trên kiosk' })
+  @Expose()
+  localStatus?: string;
+
+  @ApiPropertyOptional({ description: 'Đường dẫn ảo trên file-service' })
+  @Expose()
+  virtualPath?: string;
+
+  @ApiPropertyOptional()
+  @Expose()
+  capturedAt?: Date;
+
+  @ApiPropertyOptional()
+  @Expose()
+  uploadedAt?: Date;
+
+  @ApiPropertyOptional()
+  @Expose()
+  readyAt?: Date;
+
+  @ApiPropertyOptional({ description: 'Lỗi upload gần nhất, nếu có' })
+  @Expose()
+  uploadError?: string;
+}
+
 export class SessionDetailDao extends SessionListItemDao {
   @ApiProperty({ type: [SessionPhotoDao] })
   @Expose()
   @Type(() => SessionPhotoDao)
   photos: SessionPhotoDao[];
+
+  @ApiProperty({ type: [SessionVideoDao] })
+  @Expose()
+  @Type(() => SessionVideoDao)
+  videos: SessionVideoDao[];
 }

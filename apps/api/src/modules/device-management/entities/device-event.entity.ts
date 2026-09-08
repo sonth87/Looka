@@ -14,6 +14,11 @@ export enum DeviceEventType {
   // saved, same as every other type here.
   SESSION_REPORT = 'SESSION_REPORT',
   PHOTO_STATUS = 'PHOTO_STATUS',
+  // Video-upload-to-file-service (2026-09-08) — mirrors PHOTO_STATUS, one
+  // per video per lifecycle milestone. See CaptureReportService.applyVideoStatus
+  // and migration 1788000000000-SessionVideos for the enum-rollout ordering
+  // this depends on (API must know this value before any kiosk build emits it).
+  VIDEO_STATUS = 'VIDEO_STATUS',
 }
 
 /**

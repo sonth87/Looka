@@ -1,5 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
-import { ApiError, SessionDetail, SessionPhoto, SessionStatus, getSession, issuePhotoViewLink } from '../api';
+import {
+  ApiError,
+  SessionDetail,
+  SessionPhoto,
+  SessionStatus,
+  SessionVideo,
+  getSession,
+  issuePhotoViewLink,
+  issueVideoViewLink,
+} from '../api';
 import { formatSessionDuration } from '../sessionFormat';
 
 // Mirrors apps/api/src/common/errors/code.constants.error.ts - kept as plain
@@ -47,6 +56,20 @@ function formatDateTime(iso?: string): string {
   return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+/** A video's camera role, when known - unlike SessionPhoto there is no stepType fallback (a video has no workflow step of its own). */
+function videoRoleLabel(video: SessionVideo): string {
+  if (video.cameraRole && ROLE_LABEL[video.cameraRole]) return ROLE_LABEL[video.cameraRole];
+  return video.cameraRole ?? 'Video';
+}
+
+function formatDurationMs(ms?: number): string {
+  if (!ms || ms <= 0) return '—';
+  const totalSeconds = Math.round(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
 /** Per-photo state of the fs-core view-link request that backs its `<img>`. */
 type LinkState =
   | { status: 'loading' }
@@ -75,11 +98,16 @@ export function SessionDetailDrawer({ sessionId, onClose }: { sessionId: string;
   const [session, setSession] = useState<SessionDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [links, setLinks] = useState<Record<string, LinkState>>({});
+  // Independent of `links` (photos) - a video's view-link lifecycle is
+  // identical but the two must never share one id space, since a photo and
+  // a video could in principle collide if either service ever reused ids.
+  const [videoLinks, setVideoLinks] = useState<Record<string, LinkState>>({});
   const [copiedId, setCopiedId] = useState<string | null>(null);
   // A ref (not state) because it must be read-after-write synchronously inside
   // `retryLink` - state would still show the pre-update value if two `onError`
   // events fire back-to-back before a re-render lands.
   const retriedRef = useRef<Set<string>>(new Set());
+  const retriedVideoRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -94,7 +122,9 @@ export function SessionDetailDrawer({ sessionId, onClose }: { sessionId: string;
     setSession(null);
     setError(null);
     setLinks({});
+    setVideoLinks({});
     retriedRef.current = new Set();
+    retriedVideoRef.current = new Set();
 
     getSession(sessionId)
       .then(async (detail) => {
@@ -104,16 +134,36 @@ export function SessionDetailDrawer({ sessionId, onClose }: { sessionId: string;
         // Only photos that already reached the file server get a link request -
         // the rest show "chưa upload" from their own fsStatus badge instead.
         const withFile = detail.photos.filter((p) => p.fsFileId);
-        if (withFile.length === 0) return;
-        setLinks(Object.fromEntries(withFile.map((p) => [p.id, { status: 'loading' as const }])));
+        const videosWithFile = detail.videos.filter((v) => v.fsFileId);
+        if (withFile.length > 0) {
+          setLinks(Object.fromEntries(withFile.map((p) => [p.id, { status: 'loading' as const }])));
+        }
+        if (videosWithFile.length > 0) {
+          setVideoLinks(Object.fromEntries(videosWithFile.map((v) => [v.id, { status: 'loading' as const }])));
+        }
+        if (withFile.length === 0 && videosWithFile.length === 0) return;
 
-        const settled = await Promise.allSettled(withFile.map((p) => issuePhotoViewLink(p.id)));
+        const [photoSettled, videoSettled] = await Promise.all([
+          Promise.allSettled(withFile.map((p) => issuePhotoViewLink(p.id))),
+          Promise.allSettled(videosWithFile.map((v) => issueVideoViewLink(v.id))),
+        ]);
         if (cancelled) return;
         setLinks((prev) => {
           const next = { ...prev };
-          settled.forEach((res, i) => {
+          photoSettled.forEach((res, i) => {
             const photoId = withFile[i].id;
             next[photoId] =
+              res.status === 'fulfilled'
+                ? { status: 'ready', url: res.value.url, viewUrl: res.value.viewUrl }
+                : classifyLinkError(res.reason);
+          });
+          return next;
+        });
+        setVideoLinks((prev) => {
+          const next = { ...prev };
+          videoSettled.forEach((res, i) => {
+            const videoId = videosWithFile[i].id;
+            next[videoId] =
               res.status === 'fulfilled'
                 ? { status: 'ready', url: res.value.url, viewUrl: res.value.viewUrl }
                 : classifyLinkError(res.reason);
@@ -143,13 +193,27 @@ export function SessionDetailDrawer({ sessionId, onClose }: { sessionId: string;
       .catch((err) => setLinks((prev) => ({ ...prev, [photoId]: classifyLinkError(err) })));
   }
 
-  function copyFsFileId(photo: SessionPhoto) {
-    if (!photo.fsFileId) return;
+  /** Mirrors `retryLink` for videos - a stale token shows as a `<video>` that fails to load. */
+  function retryVideoLink(videoId: string) {
+    if (retriedVideoRef.current.has(videoId)) return;
+    retriedVideoRef.current.add(videoId);
+
+    setVideoLinks((prev) => ({ ...prev, [videoId]: { status: 'loading' } }));
+    issueVideoViewLink(videoId)
+      .then((link) =>
+        setVideoLinks((prev) => ({ ...prev, [videoId]: { status: 'ready', url: link.url, viewUrl: link.viewUrl } }))
+      )
+      .catch((err) => setVideoLinks((prev) => ({ ...prev, [videoId]: classifyLinkError(err) })));
+  }
+
+  /** Shared by photos and videos - both are `{id, fsFileId}` for this purpose, and `copiedId` is one id space since a photo and a video never share an id. */
+  function copyFsFileId(item: SessionPhoto | SessionVideo) {
+    if (!item.fsFileId) return;
     navigator.clipboard
-      .writeText(photo.fsFileId)
+      .writeText(item.fsFileId)
       .then(() => {
-        setCopiedId(photo.id);
-        setTimeout(() => setCopiedId((cur) => (cur === photo.id ? null : cur)), 1500);
+        setCopiedId(item.id);
+        setTimeout(() => setCopiedId((cur) => (cur === item.id ? null : cur)), 1500);
       })
       .catch(() => {
         /* clipboard permission denied or unavailable - nothing actionable to show */
@@ -247,6 +311,71 @@ export function SessionDetailDrawer({ sessionId, onClose }: { sessionId: string;
                   </div>
                 );
               })}
+            </div>
+          )}
+
+          {session && session.videos.length > 0 && (
+            <div className="mt-6">
+              <h3 className="font-semibold text-gray-900 text-sm mb-3">Video đã quay</h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {session.videos.map((video) => {
+                  const link = videoLinks[video.id];
+                  return (
+                    <div key={video.id} className="border border-gray-200 rounded-xl overflow-hidden bg-gray-50">
+                      <div className="aspect-video bg-gray-100 flex items-center justify-center text-center text-xs text-gray-400 px-3">
+                        {!video.fsFileId && <span>Chưa upload lên file server</span>}
+                        {video.fsFileId && (!link || link.status === 'loading') && <span>Đang tải video...</span>}
+                        {video.fsFileId && link && link.status === 'not_ready' && <span>Chưa có trên file server</span>}
+                        {video.fsFileId && link && link.status === 'upstream_error' && (
+                          <span>File server không phản hồi</span>
+                        )}
+                        {video.fsFileId && link && link.status === 'error' && <span>{link.message}</span>}
+                        {video.fsFileId && link && link.status === 'ready' && (
+                          <video
+                            controls
+                            src={link.url}
+                            onError={() => retryVideoLink(video.id)}
+                            className="w-full h-full object-cover"
+                          />
+                        )}
+                      </div>
+                      <div className="p-3 space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-medium text-gray-900 text-sm">
+                            {videoRoleLabel(video)} · {formatDurationMs(video.durationMs)}
+                          </span>
+                          <span
+                            className={`px-1.5 py-0.5 rounded-full border text-xs font-medium shrink-0 ${fsStatusBadgeClass(video.fsStatus)}`}
+                          >
+                            {video.fsStatus ?? 'chưa upload'}
+                          </span>
+                        </div>
+                        {video.localStatus && <div className="text-xs text-gray-400">Cục bộ: {video.localStatus}</div>}
+                        <div className="flex gap-2 pt-1">
+                          <button
+                            onClick={() =>
+                              link &&
+                              link.status === 'ready' &&
+                              window.open(link.viewUrl ?? link.url, '_blank', 'noopener,noreferrer')
+                            }
+                            disabled={!link || link.status !== 'ready'}
+                            className="flex-1 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold disabled:opacity-40 disabled:hover:bg-blue-600"
+                          >
+                            Mở video gốc
+                          </button>
+                          <button
+                            onClick={() => copyFsFileId(video)}
+                            disabled={!video.fsFileId}
+                            className="flex-1 py-1.5 rounded-lg border border-gray-300 text-gray-700 text-xs font-medium disabled:opacity-40 hover:bg-gray-100"
+                          >
+                            {copiedId === video.id ? 'Đã sao chép' : 'Sao chép fs_file_id'}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
         </div>

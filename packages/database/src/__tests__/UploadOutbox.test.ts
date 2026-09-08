@@ -53,6 +53,17 @@ describe('UploadOutbox — queueing', () => {
     adapter.close();
   });
 
+  test('enqueue with an explicit approvedAt skips the staging window entirely (the video path)', async () => {
+    const { adapter, repo } = await makeRepo();
+    const now = Date.now();
+    repo.enqueue(job('vid1', { kind: 'video', idemKey: 'sess_1:stream-1:1:video', approvedAt: now }));
+
+    const item = repo.getById('vid1')!;
+    assert.equal(item.approvedAt, now);
+    assert.deepEqual(repo.claimDue(Date.now()).map((d) => d.id), ['vid1'], 'already approved — visible to the worker immediately');
+    adapter.close();
+  });
+
   test('a dependent job waits until its parent has been uploaded', async () => {
     // The card photo is derived from the raw capture and must not be sent first.
     const { adapter, repo } = await makeRepo();
