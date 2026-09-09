@@ -41,7 +41,9 @@ export class StudentService {
    * not "global stats with a filtered view" — mirroring how `deviceId`
    * already narrows `SessionService.listSessions()`.
    */
-  async listStudents(query: ListStudentsQueryDto): Promise<Pagination<StudentListItemDao>> {
+  async listStudents(
+    query: ListStudentsQueryDto,
+  ): Promise<Pagination<StudentListItemDao>> {
     const page = query.page ?? 1;
     const limit = query.limit ?? 20;
     const offset = (page - 1) * limit;
@@ -55,10 +57,21 @@ export class StudentService {
     }
     if (query.q) {
       params.push(`%${query.q}%`);
-      conditions.push(`(s.subject_code ILIKE $${params.length} OR s.subject_name ILIKE $${params.length})`);
+      conditions.push(
+        `(s.subject_code ILIKE $${params.length} OR s.subject_name ILIKE $${params.length})`,
+      );
     }
     const where = `WHERE ${conditions.join(' AND ')}`;
 
+    // `last_session`/`last_session_photos` add the per-student "most recent
+    // session" (§3.8.2/Q19 of the discussion doc) on top of the existing
+    // `agg` grouping, applying the exact same `${where}` filter so a
+    // campaign-scoped list only ever surfaces a last session within that
+    // campaign. `last_session` is DISTINCT ON (subject_code) - one row per
+    // student, same cardinality as `agg` - so joining it in does not change
+    // how many rows either the count or the paginated query returns; the
+    // `deviceName` join mirrors `StudentService.getStudentDetail()`'s own
+    // per-session `devices` join exactly, just narrowed to one session.
     const cte = `
       WITH agg AS (
         SELECT
@@ -73,8 +86,32 @@ export class StudentService {
         LEFT JOIN photos p ON p.session_id = s.id
         ${where}
         GROUP BY s.subject_code
+      ),
+      last_session AS (
+        SELECT DISTINCT ON (s.subject_code)
+          s.subject_code,
+          s.id AS session_id,
+          d.name AS device_name,
+          COALESCE(s.captured_at, s.created_at) AS captured_at
+        FROM sessions s
+        LEFT JOIN devices d ON d.id = s.device_id
+        ${where}
+        ORDER BY s.subject_code, COALESCE(s.captured_at, s.created_at) DESC
+      ),
+      last_session_photos AS (
+        SELECT p.session_id, COUNT(*)::int AS photo_count
+        FROM photos p
+        WHERE p.session_id IN (SELECT session_id FROM last_session)
+        GROUP BY p.session_id
       )
-      SELECT * FROM agg
+      SELECT
+        agg.*,
+        last_session.device_name AS last_session_device_name,
+        last_session.captured_at AS last_session_captured_at,
+        COALESCE(last_session_photos.photo_count, 0) AS last_session_photo_count
+      FROM agg
+      LEFT JOIN last_session ON last_session.subject_code = agg.subject_code
+      LEFT JOIN last_session_photos ON last_session_photos.session_id = last_session.session_id
     `;
 
     const countRows: Array<{ count: number }> = await this.dataSource.query(
@@ -97,6 +134,13 @@ export class StudentService {
         totalPhotos: row.total_photos,
         lastCapturedAt: row.last_captured_at ?? undefined,
         campaignIds: (row.campaign_ids as string[] | null) ?? [],
+        lastSession: {
+          deviceName:
+            (row.last_session_device_name as string | null) ?? undefined,
+          capturedAt:
+            (row.last_session_captured_at as Date | null) ?? undefined,
+          photoCount: (row.last_session_photo_count as number | null) ?? 0,
+        },
       })),
     );
 
@@ -126,8 +170,9 @@ export class StudentService {
    * widen its own guard to accommodate apps/web.
    */
   async getStudentDetail(subjectCode: string): Promise<StudentDetailDao> {
-    const sessionRows: Array<Record<string, unknown>> = await this.dataSource.query(
-      `SELECT
+    const sessionRows: Array<Record<string, unknown>> =
+      await this.dataSource.query(
+        `SELECT
           s.id, s.source, s.device_id, d.name AS device_name, s.campaign_id,
           s.subject_code, s.subject_name, s.status,
           s.captured_at, s.completed_at, s.approved_at
@@ -135,34 +180,53 @@ export class StudentService {
          LEFT JOIN devices d ON d.id = s.device_id
         WHERE s.subject_code = $1
         ORDER BY COALESCE(s.captured_at, s.created_at) DESC`,
-      [subjectCode],
-    );
+        [subjectCode],
+      );
 
     if (sessionRows.length === 0) {
-      throw new CustomException('Student not found', ERROR_CODE.STUDENT_NOT_FOUND, HttpStatus.NOT_FOUND);
+      throw new CustomException(
+        'Student not found',
+        ERROR_CODE.STUDENT_NOT_FOUND,
+        HttpStatus.NOT_FOUND,
+      );
     }
 
     const sessionIds = sessionRows.map((r) => r.id as string);
 
-    const photoRows: Array<Record<string, unknown>> = await this.dataSource.query(
-      `SELECT id, session_id, camera_role, mime_type, fs_file_id, fs_status
+    const photoRows: Array<Record<string, unknown>> =
+      await this.dataSource.query(
+        `SELECT id, session_id, camera_role, mime_type, fs_file_id, fs_status
          FROM photos WHERE session_id = ANY($1::uuid[])`,
-      [sessionIds],
-    );
-    const videoRows: Array<Record<string, unknown>> = await this.dataSource.query(
-      `SELECT id, session_id, camera_role, mime_type, duration_ms, fs_file_id, fs_status
+        [sessionIds],
+      );
+    const videoRows: Array<Record<string, unknown>> =
+      await this.dataSource.query(
+        `SELECT id, session_id, camera_role, mime_type, duration_ms, fs_file_id, fs_status
          FROM session_videos WHERE session_id = ANY($1::uuid[])`,
-      [sessionIds],
+        [sessionIds],
+      );
+
+    const tenantForSession = (
+      row: Record<string, unknown>,
+    ): string | undefined =>
+      row.source === SessionSource.KIOSK && row.device_id
+        ? (row.device_id as string)
+        : undefined;
+    const tenantBySessionId = new Map(
+      sessionRows.map((r) => [r.id as string, tenantForSession(r)]),
     );
 
-    const tenantForSession = (row: Record<string, unknown>): string | undefined =>
-      row.source === SessionSource.KIOSK && row.device_id ? (row.device_id as string) : undefined;
-    const tenantBySessionId = new Map(sessionRows.map((r) => [r.id as string, tenantForSession(r)]));
-
-    const resolveLink = async (fsFileId: string | null, tenantName: string | undefined) => {
+    const resolveLink = async (
+      fsFileId: string | null,
+      tenantName: string | undefined,
+    ) => {
       if (!fsFileId) return null;
       try {
-        return await this.fileStorage.issueViewLink(fsFileId, 'students-gallery', tenantName);
+        return await this.fileStorage.issueViewLink(
+          fsFileId,
+          'students-gallery',
+          tenantName,
+        );
       } catch {
         // Best-effort — see this method's own doc comment. A photo/video
         // that isn't ready or whose file-service call fails just shows with
@@ -173,10 +237,20 @@ export class StudentService {
     };
 
     const photoLinks = await Promise.all(
-      photoRows.map((p) => resolveLink(p.fs_file_id as string | null, tenantBySessionId.get(p.session_id as string))),
+      photoRows.map((p) =>
+        resolveLink(
+          p.fs_file_id as string | null,
+          tenantBySessionId.get(p.session_id as string),
+        ),
+      ),
     );
     const videoLinks = await Promise.all(
-      videoRows.map((v) => resolveLink(v.fs_file_id as string | null, tenantBySessionId.get(v.session_id as string))),
+      videoRows.map((v) =>
+        resolveLink(
+          v.fs_file_id as string | null,
+          tenantBySessionId.get(v.session_id as string),
+        ),
+      ),
     );
 
     const photosBySession = new Map<string, StudentSessionPhotoDao[]>();
@@ -228,7 +302,9 @@ export class StudentService {
 
     return toDao(StudentDetailDao, {
       subjectCode,
-      subjectName: (sessionRows.find((r) => r.subject_name)?.subject_name as string | undefined) ?? undefined,
+      subjectName:
+        (sessionRows.find((r) => r.subject_name)?.subject_name as
+          string | undefined) ?? undefined,
       sessions,
     });
   }

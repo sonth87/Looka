@@ -115,16 +115,26 @@ export class CampaignsTimeseriesPointDao {
   @ApiProperty({ example: '2026-09-06' })
   date: string;
 
-  @ApiProperty({ description: 'Số sự kiện SESSION_COMPLETED trong ngày, cộng dồn mọi campaign' })
+  @ApiProperty({
+    description:
+      'Số sự kiện SESSION_COMPLETED trong ngày, cộng dồn mọi campaign',
+  })
   sessionsCompleted: number;
 
-  @ApiProperty({ description: 'Số sự kiện UPLOAD_SUCCESS trong ngày, cộng dồn mọi campaign' })
+  @ApiProperty({
+    description: 'Số sự kiện UPLOAD_SUCCESS trong ngày, cộng dồn mọi campaign',
+  })
   uploadsSuccess: number;
 
-  @ApiProperty({ description: 'Số sự kiện UPLOAD_FAILED trong ngày, cộng dồn mọi campaign' })
+  @ApiProperty({
+    description: 'Số sự kiện UPLOAD_FAILED trong ngày, cộng dồn mọi campaign',
+  })
   uploadsFailed: number;
 
-  @ApiProperty({ description: 'Số sự kiện RETAKE (chụp lại) trong ngày, cộng dồn mọi campaign' })
+  @ApiProperty({
+    description:
+      'Số sự kiện RETAKE (chụp lại) trong ngày, cộng dồn mọi campaign',
+  })
   retakes: number;
 }
 
@@ -138,7 +148,8 @@ export class CampaignsTimeseriesPointDao {
 export class CampaignsTimeseriesDao {
   @ApiProperty({
     type: [CampaignsTimeseriesPointDao],
-    description: 'Một điểm mỗi ngày, theo thứ tự tăng dần, không có ngày nào bị thiếu',
+    description:
+      'Một điểm mỗi ngày, theo thứ tự tăng dần, không có ngày nào bị thiếu',
   })
   points: CampaignsTimeseriesPointDao[];
 }

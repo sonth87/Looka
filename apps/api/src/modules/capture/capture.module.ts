@@ -1,5 +1,6 @@
 import { ApiKeyOrSsoGuard, SsoAuthGuard } from '@app/common/guards';
 import { FileStorageModule } from '@app/modules/file-storage/file-storage.module';
+import { PhotoReviewModule } from '@app/modules/photo-review/photo-review.module';
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { PhotoController } from './controllers/photo.controller';
@@ -21,8 +22,19 @@ import { UploadWorkerService } from './services/upload-worker.service';
   imports: [
     TypeOrmModule.forFeature([Session, Photo, SessionVideo, UploadOutboxEntry]),
     FileStorageModule,
+    // For SessionService.completeSession()'s best-effort
+    // PhotoReviewService.ensureSetForApprovedSession() call (the web-path
+    // half of the photo-review "hồ sơ ảnh" auto-creation hook — see that
+    // service's own doc comment; the kiosk-path half is wired in
+    // DeviceEventService instead, since that's where SESSION_REPORT lands).
+    PhotoReviewModule,
   ],
-  controllers: [SessionController, PhotoController, VideoController, StudentController],
+  controllers: [
+    SessionController,
+    PhotoController,
+    VideoController,
+    StudentController,
+  ],
   providers: [
     SessionService,
     PhotoService,

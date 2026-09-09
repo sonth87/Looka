@@ -1,5 +1,6 @@
 import { ERROR_CODE } from '@app/common/errors';
 import { FileStorageService } from '@app/modules/file-storage/services/file-storage.service';
+import { PhotoReviewService } from '@app/modules/photo-review/services/photo-review.service';
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigModule } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
@@ -85,7 +86,20 @@ describeDb('device management persistence', () => {
         // fsFileId — none of the fixtures below ever set one, but the stub
         // still needs the method to exist so a future fixture that does
         // fails loudly instead of hitting "not a function".
-        { provide: FileStorageService, useValue: { deleteFile: jest.fn(), issueViewLink: jest.fn() } },
+        {
+          provide: FileStorageService,
+          useValue: { deleteFile: jest.fn(), issueViewLink: jest.fn() },
+        },
+        // SessionService.completeSession() and DeviceEventService.recordBatch()
+        // both make a best-effort PhotoReviewService.ensureSetForApprovedSession()
+        // call after a session is approved (2026-09-08) — irrelevant to what
+        // these tests check (device-management/session/student persistence,
+        // not photo-review), so a resolved-no-op stub is enough to satisfy DI
+        // without pulling in PhotoReviewModule's own entities/FileStorage setup.
+        {
+          provide: PhotoReviewService,
+          useValue: { ensureSetForApprovedSession: jest.fn().mockResolvedValue(null) },
+        },
       ],
     }).compile();
 
@@ -288,16 +302,16 @@ describeDb('device management persistence', () => {
     const campaignDao = await campaignService.createCampaign({
       name: 'Reissue test (registered)',
     });
-    const campaign = await campaignService.findCampaignEntityOrFail(campaignDao.id);
-    const { device, plainSecret: originalSecret } = await deviceService.registerDevice(
-      campaign.id,
-      { name: 'Kiosk Reissue Registered' },
+    const campaign = await campaignService.findCampaignEntityOrFail(
+      campaignDao.id,
     );
+    const { device, plainSecret: originalSecret } =
+      await deviceService.registerDevice(campaign.id, {
+        name: 'Kiosk Reissue Registered',
+      });
 
-    const { device: reissued, plainSecret: newSecret } = await deviceService.reissueDevice(
-      device.id,
-      {},
-    );
+    const { device: reissued, plainSecret: newSecret } =
+      await deviceService.reissueDevice(device.id, {});
     expect(reissued.id).toBe(device.id);
     expect(newSecret).not.toBe(originalSecret);
 
@@ -305,7 +319,10 @@ describeDb('device management persistence', () => {
     // incident): the old secret stays valid — no time limit — until the
     // new one is used successfully once. `secretRotatedAt` marks that a
     // rotation is pending.
-    const oldCheckBeforeNewUsed = await deviceService.verifyCredentials(device.id, originalSecret);
+    const oldCheckBeforeNewUsed = await deviceService.verifyCredentials(
+      device.id,
+      originalSecret,
+    );
     expect(oldCheckBeforeNewUsed.ok).toBe(true);
     const pendingRotation = await deviceService.findDeviceOrFail(device.id);
     // secretRotatedAt stays set — this success came via the *previous*
@@ -322,17 +339,28 @@ describeDb('device management persistence', () => {
     // The new secret also works - and, since this completes the rotation
     // (it's the *current* hash, with a previous still on file), the overlap
     // window closes: secretRotatedAt clears and the old secret dies.
-    const newCheck = await deviceService.verifyCredentials(device.id, newSecret);
+    const newCheck = await deviceService.verifyCredentials(
+      device.id,
+      newSecret,
+    );
     expect(newCheck.ok).toBe(true);
     const activated = await deviceService.findDeviceOrFail(device.id);
     expect(activated.status).toBe('ACTIVATED');
     expect(activated.secretRotatedAt).toBeFalsy();
 
-    const oldCheckAfterNewUsed = await deviceService.verifyCredentials(device.id, originalSecret);
+    const oldCheckAfterNewUsed = await deviceService.verifyCredentials(
+      device.id,
+      originalSecret,
+    );
     expect(oldCheckAfterNewUsed.ok).toBe(false);
-    if (!oldCheckAfterNewUsed.ok) expect(oldCheckAfterNewUsed.reason).toBe('INVALID_SECRET');
+    if (!oldCheckAfterNewUsed.ok)
+      expect(oldCheckAfterNewUsed.reason).toBe('INVALID_SECRET');
 
-    const zip = await activationPackageService.buildActivationZip(reissued, campaign, newSecret);
+    const zip = await activationPackageService.buildActivationZip(
+      reissued,
+      campaign,
+      newSecret,
+    );
     expect(zip.length).toBeGreaterThan(0);
     expect(zip.subarray(0, 4)).toEqual(Buffer.from([0x50, 0x4b, 0x03, 0x04]));
   });
@@ -341,29 +369,35 @@ describeDb('device management persistence', () => {
     const campaignDao = await campaignService.createCampaign({
       name: 'Reissue test (activated)',
     });
-    const campaign = await campaignService.findCampaignEntityOrFail(campaignDao.id);
-    const { device, plainSecret: originalSecret } = await deviceService.registerDevice(
-      campaign.id,
-      { name: 'Kiosk Reissue Activated' },
+    const campaign = await campaignService.findCampaignEntityOrFail(
+      campaignDao.id,
     );
+    const { device, plainSecret: originalSecret } =
+      await deviceService.registerDevice(campaign.id, {
+        name: 'Kiosk Reissue Activated',
+      });
 
     // Activate it first - reissuing an already-ACTIVATED device must still
     // work (DeviceController.reissueDevice's own doc comment: this is
     // intended, not blocked).
-    const activated = await deviceService.verifyCredentials(device.id, originalSecret);
+    const activated = await deviceService.verifyCredentials(
+      device.id,
+      originalSecret,
+    );
     expect(activated.ok).toBe(true);
     const beforeReissue = await deviceService.findDeviceOrFail(device.id);
     expect(beforeReissue.status).toBe('ACTIVATED');
 
-    const { device: reissued, plainSecret: newSecret } = await deviceService.reissueDevice(
-      device.id,
-      {},
-    );
+    const { device: reissued, plainSecret: newSecret } =
+      await deviceService.reissueDevice(device.id, {});
     expect(newSecret).not.toBe(originalSecret);
 
     // This is the exact "kiosk 3" incident, fixed: a running kiosk on the
     // old secret is NOT locked out by a reissue anymore.
-    const oldCheck = await deviceService.verifyCredentials(device.id, originalSecret);
+    const oldCheck = await deviceService.verifyCredentials(
+      device.id,
+      originalSecret,
+    );
     expect(oldCheck.ok).toBe(true);
     const pendingRotation = await deviceService.findDeviceOrFail(device.id);
     expect(pendingRotation.secretRotatedAt).toBeTruthy();
@@ -376,30 +410,49 @@ describeDb('device management persistence', () => {
     expect(pendingRotation.status).toBe('ACTIVATED');
 
     // The new secret works too, and using it completes the rotation.
-    const newCheck = await deviceService.verifyCredentials(device.id, newSecret);
+    const newCheck = await deviceService.verifyCredentials(
+      device.id,
+      newSecret,
+    );
     expect(newCheck.ok).toBe(true);
     const afterNewUsed = await deviceService.findDeviceOrFail(device.id);
     expect(afterNewUsed.secretRotatedAt).toBeFalsy();
 
     // ... which finally kills the old one.
-    const oldCheckAfterNewUsed = await deviceService.verifyCredentials(device.id, originalSecret);
+    const oldCheckAfterNewUsed = await deviceService.verifyCredentials(
+      device.id,
+      originalSecret,
+    );
     expect(oldCheckAfterNewUsed.ok).toBe(false);
-    if (!oldCheckAfterNewUsed.ok) expect(oldCheckAfterNewUsed.reason).toBe('INVALID_SECRET');
+    if (!oldCheckAfterNewUsed.ok)
+      expect(oldCheckAfterNewUsed.reason).toBe('INVALID_SECRET');
 
-    const zip = await activationPackageService.buildActivationZip(reissued, campaign, newSecret);
+    const zip = await activationPackageService.buildActivationZip(
+      reissued,
+      campaign,
+      newSecret,
+    );
     expect(zip.length).toBeGreaterThan(0);
     expect(zip.subarray(0, 4)).toEqual(Buffer.from([0x50, 0x4b, 0x03, 0x04]));
   });
 
   test('revoking a device kills both its current and previous secret immediately, no overlap', async () => {
-    const campaign = await campaignService.createCampaign({ name: 'Revoke test' });
-    const { device, plainSecret: s1 } = await deviceService.registerDevice(campaign.id, {
-      name: 'Kiosk Revoke',
+    const campaign = await campaignService.createCampaign({
+      name: 'Revoke test',
     });
+    const { device, plainSecret: s1 } = await deviceService.registerDevice(
+      campaign.id,
+      {
+        name: 'Kiosk Revoke',
+      },
+    );
     // Activate on S1, then reissue to S2 so a previous secret is live too -
     // revoke must kill both, not just the current one.
     await deviceService.verifyCredentials(device.id, s1);
-    const { plainSecret: s2 } = await deviceService.reissueDevice(device.id, {});
+    const { plainSecret: s2 } = await deviceService.reissueDevice(
+      device.id,
+      {},
+    );
 
     const revoked = await deviceService.revokeDevice(device.id);
     expect(revoked.status).toBe('REVOKED');
@@ -416,24 +469,36 @@ describeDb('device management persistence', () => {
   });
 
   test('activateDevice refuses a REVOKED device', async () => {
-    const campaign = await campaignService.createCampaign({ name: 'Revoke then activate' });
-    const { device } = await deviceService.registerDevice(campaign.id, { name: 'Kiosk RA' });
+    const campaign = await campaignService.createCampaign({
+      name: 'Revoke then activate',
+    });
+    const { device } = await deviceService.registerDevice(campaign.id, {
+      name: 'Kiosk RA',
+    });
     await deviceService.revokeDevice(device.id);
 
-    await expect(deviceService.activateDevice(device.id)).rejects.toMatchObject({
-      payload: { code: ERROR_CODE.DEVICE_REVOKED },
-    });
+    await expect(deviceService.activateDevice(device.id)).rejects.toMatchObject(
+      {
+        payload: { code: ERROR_CODE.DEVICE_REVOKED },
+      },
+    );
   });
 
   test('reissuing a REVOKED device returns it to REGISTERED, clears revokedAt, and the new secret works', async () => {
-    const campaign = await campaignService.createCampaign({ name: 'Revoke then reissue' });
-    const { device, plainSecret: original } = await deviceService.registerDevice(campaign.id, {
-      name: 'Kiosk RR',
+    const campaign = await campaignService.createCampaign({
+      name: 'Revoke then reissue',
     });
+    const { device, plainSecret: original } =
+      await deviceService.registerDevice(campaign.id, {
+        name: 'Kiosk RR',
+      });
     await deviceService.verifyCredentials(device.id, original);
     await deviceService.revokeDevice(device.id);
 
-    const { plainSecret: fresh } = await deviceService.reissueDevice(device.id, {});
+    const { plainSecret: fresh } = await deviceService.reissueDevice(
+      device.id,
+      {},
+    );
     const afterReissue = await deviceService.findDeviceOrFail(device.id);
     expect(afterReissue.status).toBe('REGISTERED');
     expect(afterReissue.revokedAt).toBeFalsy();
@@ -443,17 +508,28 @@ describeDb('device management persistence', () => {
   });
 
   test('double reissue keeps the secret a running kiosk actually uses alive, kills only the never-used intermediate one', async () => {
-    const campaign = await campaignService.createCampaign({ name: 'Double reissue' });
-    const { device, plainSecret: s1 } = await deviceService.registerDevice(campaign.id, {
-      name: 'Kiosk Double',
+    const campaign = await campaignService.createCampaign({
+      name: 'Double reissue',
     });
+    const { device, plainSecret: s1 } = await deviceService.registerDevice(
+      campaign.id,
+      {
+        name: 'Kiosk Double',
+      },
+    );
     // S1 is the secret an actual kiosk loaded and is running on.
     await deviceService.verifyCredentials(device.id, s1);
 
     // Admin clicks "Tải gói kích hoạt" twice in a row without the kiosk
     // ever loading either new package - reproducing the exact incident.
-    const { plainSecret: s2 } = await deviceService.reissueDevice(device.id, {});
-    const { plainSecret: s3 } = await deviceService.reissueDevice(device.id, {});
+    const { plainSecret: s2 } = await deviceService.reissueDevice(
+      device.id,
+      {},
+    );
+    const { plainSecret: s3 } = await deviceService.reissueDevice(
+      device.id,
+      {},
+    );
 
     // S1 (in use) must still work - the whole point of this fix.
     const s1Check = await deviceService.verifyCredentials(device.id, s1);
@@ -472,14 +548,20 @@ describeDb('device management persistence', () => {
     // Now that S3 has been used, S1 finally dies.
     const s1CheckAfterS3 = await deviceService.verifyCredentials(device.id, s1);
     expect(s1CheckAfterS3.ok).toBe(false);
-    if (!s1CheckAfterS3.ok) expect(s1CheckAfterS3.reason).toBe('INVALID_SECRET');
+    if (!s1CheckAfterS3.ok)
+      expect(s1CheckAfterS3.reason).toBe('INVALID_SECRET');
   });
 
   test('lastAuthAt/lastAuthFailedAt/lastAuthFailReason are recorded on every credential check', async () => {
-    const campaign = await campaignService.createCampaign({ name: 'Auth bookkeeping' });
-    const { device, plainSecret } = await deviceService.registerDevice(campaign.id, {
-      name: 'Kiosk Bookkeeping',
+    const campaign = await campaignService.createCampaign({
+      name: 'Auth bookkeeping',
     });
+    const { device, plainSecret } = await deviceService.registerDevice(
+      campaign.id,
+      {
+        name: 'Kiosk Bookkeeping',
+      },
+    );
 
     const initial = await deviceService.findDeviceOrFail(device.id);
     expect(initial.lastAuthAt).toBeFalsy();
@@ -537,9 +619,13 @@ describeDb('device management persistence', () => {
     // wrong secret must read as INVALID_SECRET, not EXPIRED, so an admin
     // isn't misled into thinking "just renew the campaign" would fix a
     // simple typo'd/stale secret.
-    const wrongSecretResult = await deviceService.verifyCredentials(device.id, 'not-the-secret');
+    const wrongSecretResult = await deviceService.verifyCredentials(
+      device.id,
+      'not-the-secret',
+    );
     expect(wrongSecretResult.ok).toBe(false);
-    if (!wrongSecretResult.ok) expect(wrongSecretResult.reason).toBe('INVALID_SECRET');
+    if (!wrongSecretResult.ok)
+      expect(wrongSecretResult.reason).toBe('INVALID_SECRET');
   });
 
   test('the activation zip contains activation.json with the plaintext secret, exactly once', async () => {
@@ -727,7 +813,9 @@ describeDb('device management persistence', () => {
     // along as free-form metadata — this must merge (jsonb `||`), never
     // overwrite wholesale, same COALESCE-style protection subject_code
     // already has, so a later report that omits a key never erases it.
-    const campaign = await campaignService.createCampaign({ name: 'Report Metadata' });
+    const campaign = await campaignService.createCampaign({
+      name: 'Report Metadata',
+    });
     const { device } = await deviceService.registerDevice(campaign.id, {
       name: 'Kiosk RM1',
     });
@@ -749,11 +837,14 @@ describeDb('device management persistence', () => {
       },
     ]);
 
-    const midway: Array<{ metadata: Record<string, unknown> }> = await dataSource.query(
-      'SELECT metadata FROM sessions WHERE id = $1',
-      [sessionId],
-    );
-    expect(midway[0].metadata).toEqual({ className: 'CNTT01', major: 'Công nghệ thông tin' });
+    const midway: Array<{ metadata: Record<string, unknown> }> =
+      await dataSource.query('SELECT metadata FROM sessions WHERE id = $1', [
+        sessionId,
+      ]);
+    expect(midway[0].metadata).toEqual({
+      className: 'CNTT01',
+      major: 'Công nghệ thông tin',
+    });
 
     // A later report adds academicYear but does not repeat className/major —
     // both must survive the merge, not just the newest key.
@@ -771,10 +862,10 @@ describeDb('device management persistence', () => {
       },
     ]);
 
-    const after: Array<{ metadata: Record<string, unknown> }> = await dataSource.query(
-      'SELECT metadata FROM sessions WHERE id = $1',
-      [sessionId],
-    );
+    const after: Array<{ metadata: Record<string, unknown> }> =
+      await dataSource.query('SELECT metadata FROM sessions WHERE id = $1', [
+        sessionId,
+      ]);
     expect(after[0].metadata).toEqual({
       className: 'CNTT01',
       major: 'Công nghệ thông tin',
@@ -1146,7 +1237,9 @@ describeDb('device management persistence', () => {
 
   describe('ATTEMPT_SUPERSEDED — post-save retake cleanup (2026-09-08)', () => {
     test('deletes the stale photo row it names, leaving the session and its other photos alone', async () => {
-      const campaign = await campaignService.createCampaign({ name: 'Supersede A' });
+      const campaign = await campaignService.createCampaign({
+        name: 'Supersede A',
+      });
       const { device } = await deviceService.registerDevice(campaign.id, {
         name: 'Kiosk SA1',
       });
@@ -1202,7 +1295,9 @@ describeDb('device management persistence', () => {
     });
 
     test('deletes the stale video row it names', async () => {
-      const campaign = await campaignService.createCampaign({ name: 'Supersede B' });
+      const campaign = await campaignService.createCampaign({
+        name: 'Supersede B',
+      });
       const { device } = await deviceService.registerDevice(campaign.id, {
         name: 'Kiosk SB1',
       });
@@ -1243,7 +1338,9 @@ describeDb('device management persistence', () => {
     });
 
     test('superseding an id that does not exist (or was already removed) is a harmless no-op', async () => {
-      const campaign = await campaignService.createCampaign({ name: 'Supersede C' });
+      const campaign = await campaignService.createCampaign({
+        name: 'Supersede C',
+      });
       const { device } = await deviceService.registerDevice(campaign.id, {
         name: 'Kiosk SC1',
       });
@@ -1260,7 +1357,9 @@ describeDb('device management persistence', () => {
     });
 
     test('an ATTEMPT_SUPERSEDED with an invalid kind is rejected with a clear 400', async () => {
-      const campaign = await campaignService.createCampaign({ name: 'Supersede D' });
+      const campaign = await campaignService.createCampaign({
+        name: 'Supersede D',
+      });
       const { device } = await deviceService.registerDevice(campaign.id, {
         name: 'Kiosk SD1',
       });
@@ -1548,12 +1647,35 @@ describeDb('device management persistence', () => {
 
   describe('StudentService — "sinh viên đã chụp" (2026-09-08)', () => {
     test('listStudents groups sessions by subjectCode across campaigns, excluding sessions with none', async () => {
-      const campaignA = await campaignService.createCampaign({ name: 'Student List A' });
-      const campaignB = await campaignService.createCampaign({ name: 'Student List B' });
-      const { device: deviceA } = await deviceService.registerDevice(campaignA.id, { name: 'Kiosk SLA' });
-      const { device: deviceB } = await deviceService.registerDevice(campaignB.id, { name: 'Kiosk SLB' });
+      const campaignA = await campaignService.createCampaign({
+        name: 'Student List A',
+      });
+      const campaignB = await campaignService.createCampaign({
+        name: 'Student List B',
+      });
+      const { device: deviceA } = await deviceService.registerDevice(
+        campaignA.id,
+        { name: 'Kiosk SLA' },
+      );
+      const { device: deviceB } = await deviceService.registerDevice(
+        campaignB.id,
+        { name: 'Kiosk SLB' },
+      );
+      // Unique per run (2026-09-08 fix) — this suite runs against a real,
+      // persistent, shared Postgres (looka_test) with no per-test rollback;
+      // a fixed literal subject code here would accumulate extra sessions
+      // across repeated suite runs and break the exact-count assertions
+      // below. `listStudents` has no campaign-scoped uniqueness requirement
+      // on subjectCode itself, so any unique string works.
+      const suffix = randomUUID().slice(0, 8);
+      const sv1Code = `SV_LIST_01_${suffix}`;
+      const sv2Code = `SV_LIST_02_${suffix}`;
 
-      const reportSession = async (deviceId: string, campaignId: string, subjectCode: string | null) => {
+      const reportSession = async (
+        deviceId: string,
+        campaignId: string,
+        subjectCode: string | null,
+      ) => {
         const sessionId = randomUUID();
         const at = new Date().toISOString();
         await deviceEventService.recordBatch(deviceId, campaignId, [
@@ -1584,43 +1706,71 @@ describeDb('device management persistence', () => {
 
       // Same student, two campaigns — must be counted as one row with
       // sessionCount 2 across both, not two separate rows.
-      await reportSession(deviceA.id, campaignA.id, 'SV_LIST_01');
-      await reportSession(deviceB.id, campaignB.id, 'SV_LIST_01');
+      await reportSession(deviceA.id, campaignA.id, sv1Code);
+      await reportSession(deviceB.id, campaignB.id, sv1Code);
       // A different student, only in campaign A.
-      await reportSession(deviceA.id, campaignA.id, 'SV_LIST_02');
+      await reportSession(deviceA.id, campaignA.id, sv2Code);
       // No subjectCode at all — must never appear in the list.
       await reportSession(deviceA.id, campaignA.id, null);
 
-      const allResults = await studentService.listStudents({ page: 1, limit: 50 });
+      const allResults = await studentService.listStudents({
+        page: 1,
+        limit: 50,
+      });
       const codes = allResults.items.map((i) => i.subjectCode);
-      expect(codes).toContain('SV_LIST_01');
-      expect(codes).toContain('SV_LIST_02');
+      expect(codes).toContain(sv1Code);
+      expect(codes).toContain(sv2Code);
 
-      const sv1 = allResults.items.find((i) => i.subjectCode === 'SV_LIST_01')!;
+      const sv1 = allResults.items.find((i) => i.subjectCode === sv1Code)!;
       expect(sv1.sessionCount).toBe(2);
       expect(sv1.totalPhotos).toBe(2);
-      expect(sv1.campaignIds.sort()).toEqual([campaignA.id, campaignB.id].sort());
+      expect(sv1.campaignIds.sort()).toEqual(
+        [campaignA.id, campaignB.id].sort(),
+      );
 
-      // Filtered to campaign A only: SV_LIST_01's aggregate narrows to just
+      // Filtered to campaign A only: sv1Code's aggregate narrows to just
       // that campaign's one session, not its global total of 2.
-      const filteredA = await studentService.listStudents({ page: 1, limit: 50, campaignId: campaignA.id });
-      const sv1FilteredA = filteredA.items.find((i) => i.subjectCode === 'SV_LIST_01')!;
+      const filteredA = await studentService.listStudents({
+        page: 1,
+        limit: 50,
+        campaignId: campaignA.id,
+      });
+      const sv1FilteredA = filteredA.items.find(
+        (i) => i.subjectCode === sv1Code,
+      )!;
       expect(sv1FilteredA.sessionCount).toBe(1);
-      expect(filteredA.items.map((i) => i.subjectCode)).toContain('SV_LIST_02');
+      expect(filteredA.items.map((i) => i.subjectCode)).toContain(sv2Code);
 
-      // SV_LIST_02 never appeared in campaign B — filtering to B must not
+      // sv2Code never appeared in campaign B — filtering to B must not
       // show them at all, not show them with a zeroed-out count.
-      const filteredB = await studentService.listStudents({ page: 1, limit: 50, campaignId: campaignB.id });
-      expect(filteredB.items.map((i) => i.subjectCode)).not.toContain('SV_LIST_02');
+      const filteredB = await studentService.listStudents({
+        page: 1,
+        limit: 50,
+        campaignId: campaignB.id,
+      });
+      expect(filteredB.items.map((i) => i.subjectCode)).not.toContain(sv2Code);
     });
 
     test('getStudentDetail returns every session across every campaign, ignoring any list-page campaign filter', async () => {
-      const campaignA = await campaignService.createCampaign({ name: 'Student Detail A' });
-      const campaignB = await campaignService.createCampaign({ name: 'Student Detail B' });
-      const { device: deviceA } = await deviceService.registerDevice(campaignA.id, { name: 'Kiosk SDA' });
-      const { device: deviceB } = await deviceService.registerDevice(campaignB.id, { name: 'Kiosk SDB' });
+      const campaignA = await campaignService.createCampaign({
+        name: 'Student Detail A',
+      });
+      const campaignB = await campaignService.createCampaign({
+        name: 'Student Detail B',
+      });
+      const { device: deviceA } = await deviceService.registerDevice(
+        campaignA.id,
+        { name: 'Kiosk SDA' },
+      );
+      const { device: deviceB } = await deviceService.registerDevice(
+        campaignB.id,
+        { name: 'Kiosk SDB' },
+      );
 
-      const subjectCode = 'SV_DETAIL_01';
+      // Unique per run (2026-09-08 fix) — same reasoning as sv1Code/sv2Code
+      // above: a fixed literal here accumulates extra sessions across
+      // repeated runs against the shared, persistent looka_test database.
+      const subjectCode = `SV_DETAIL_01_${randomUUID().slice(0, 8)}`;
       for (const [device, campaign] of [
         [deviceA, campaignA],
         [deviceB, campaignB],
@@ -1668,7 +1818,9 @@ describeDb('device management persistence', () => {
     });
 
     test('getStudentDetail throws STUDENT_NOT_FOUND for a code with no sessions', async () => {
-      await expect(studentService.getStudentDetail('SV_DOES_NOT_EXIST')).rejects.toMatchObject({
+      await expect(
+        studentService.getStudentDetail('SV_DOES_NOT_EXIST'),
+      ).rejects.toMatchObject({
         payload: { code: ERROR_CODE.STUDENT_NOT_FOUND },
       });
     });

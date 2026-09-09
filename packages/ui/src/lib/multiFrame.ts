@@ -1,4 +1,11 @@
-import { CameraRole, CaptureWorkflow, StepType, defaultCameraRoleForStepType } from '@face/core';
+import {
+  CAMERA_ROLES,
+  CameraRole,
+  CaptureStep,
+  CaptureWorkflow,
+  StepType,
+  defaultCameraRoleForStepType,
+} from '@face/core';
 
 /**
  * Vietnamese labels for the operator-facing camera role badges (multi-frame
@@ -107,6 +114,244 @@ export function checkFramesReadiness(
     missing,
     duplicates,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Round planning (discussion doc §3.1.5 "Quy tắc phủ N ảnh bằng K camera",
+// bổ sung 2026-09-08) — replaces the old "block the whole session when a
+// step's preferred camera isn't mapped" behaviour above with "always plan
+// something, using whatever cameras this kiosk actually has."
+//
+// `checkFramesReadiness` above is left untouched: it still backs the
+// existing simultaneous-capture flow in FaceCaptureApp.tsx (session start,
+// hot-unplug re-check, duplicate-device detection), none of which this pass
+// rewires — see the TODO at FaceCaptureApp.tsx's session-start call site
+// (`runFramePreflight`/`if (!preflight.ok) return false;`) for exactly what
+// switching that call site over to `planCaptureRounds` below would involve.
+// This section only adds the new planning primitive itself, fully
+// implemented and unit-tested, per the product decision that a session
+// should only ever refuse to start when the kiosk has *zero* cameras mapped
+// at all (§3.1.5's opening line: "Phiên chỉ bị chặn khi không có camera
+// nào").
+// ---------------------------------------------------------------------------
+
+/** Physical mounting yaw/pitch of one logical camera role, in degrees. */
+export interface PhysicalCameraAngles {
+  yaw: number;
+  pitch: number;
+}
+
+/**
+ * Default physical mounting angles, used until a kiosk has its own
+ * `camera.physicalAngles` configured (Cài đặt thiết bị, §3.9 — a follow-up
+ * pass; see this file's `planCaptureRounds` doc comment for how to plug real
+ * per-device values in once that exists). Mirrors §3.9's own defaults
+ * exactly: CENTER faces straight ahead by convention; LEFT/RIGHT are
+ * mounted ∓30° off axis; UP/DOWN ±25° of pitch. These are deliberately NOT
+ * the same numbers as `defaultWorkflow`'s pose *targets* in
+ * FaceCaptureApp.tsx (yaw ∓22.5°, pitch ±25°) — those describe what angle a
+ * step asks the *subject's face* to reach, a completely different thing
+ * from where a side camera is physically bolted.
+ */
+export const DEFAULT_PHYSICAL_ANGLES: Record<CameraRole, PhysicalCameraAngles> = {
+  CENTER: { yaw: 0, pitch: 0 },
+  LEFT: { yaw: -30, pitch: 0 },
+  RIGHT: { yaw: 30, pitch: 0 },
+  UP: { yaw: 0, pitch: 25 },
+  DOWN: { yaw: 0, pitch: -25 },
+};
+
+/** Per-role override of `DEFAULT_PHYSICAL_ANGLES`, e.g. from `camera.physicalAngles`. */
+export type PhysicalAngleMap = Partial<Record<CameraRole, Partial<PhysicalCameraAngles>>>;
+
+/** Kiosk-local setting (§3.9) — no longer a campaign flag (`simultaneous_capture` retired). */
+export type CaptureSequencing = 'sequential' | 'simultaneous';
+
+/** One step's resolved camera + gate pose within a capture plan. */
+export interface RoundStepPlan {
+  step: CaptureStep;
+  /** The physical camera role that will actually take this step's photo — its own `cameraRole` preference when mapped, otherwise the fallback role. */
+  cameraRole: CameraRole;
+  /**
+   * The pose the subject must hold, expressed on the CV-analysed camera
+   * (CENTER) — `step.pose.yaw.target - physicalAngle(cameraRole).yaw`
+   * (§3.1.5 step 2's `gateYaw` formula). `undefined` when the step declares
+   * no yaw target at all (e.g. a pitch-only UP/DOWN step).
+   */
+  effectiveYaw?: number;
+  /** Same idea as `effectiveYaw`, for pitch. */
+  effectivePitch?: number;
+  /** True when `cameraRole` differs from the step's own `cameraRole` preference (or its type default) — i.e. this photo is a fallback, subject-turns-instead-of-camera-moves shot (Q18: accepted, tagged `fallback: true` in photo metadata downstream). */
+  isFallback: boolean;
+}
+
+/** One round: every step in it fires together (simultaneous mode) or is the sole step of its own round (sequential mode). */
+export interface CaptureRound {
+  steps: RoundStepPlan[];
+}
+
+/** Output of `planCaptureRounds` — what `FaceCaptureApp.tsx` should drive the capture screen from once wired up (see this file's header comment). */
+export interface CapturePlan {
+  /** True only when the kiosk has no camera mapped to any role at all — the one case §3.1.5 still blocks. */
+  blocked: boolean;
+  /** Vietnamese, user-facing — set only when `blocked`. */
+  reason?: string;
+  rounds: CaptureRound[];
+}
+
+const DEFAULT_GATE_TOLERANCE_DEG = 0.01;
+
+function resolvePhysicalAngle(role: CameraRole, overrides?: PhysicalAngleMap): PhysicalCameraAngles {
+  const base = DEFAULT_PHYSICAL_ANGLES[role];
+  const override = overrides?.[role];
+  return override ? { ...base, ...override } : base;
+}
+
+function anglesMatch(a: number | undefined, b: number | undefined, tolerance: number): boolean {
+  // Either side leaving an axis unconstrained never blocks a match — a
+  // pitch-only step (UP/DOWN) has nothing to say about yaw, so it must not
+  // refuse to share a round with a step that does specify one.
+  if (a === undefined || b === undefined) return true;
+  return Math.abs(a - b) <= tolerance;
+}
+
+/**
+ * Resolves which physical camera actually takes `step`'s photo: its own
+ * preferred role (`step.cameraRole`, or the type default) when that role has
+ * a mapped camera; otherwise CENTER when CENTER is mapped, otherwise the
+ * kiosk's one and only mapped camera (§3.1.5 step 1's two named cases).
+ *
+ * A kiosk with, say, only LEFT+RIGHT mapped (no CENTER) is not covered by
+ * either of the doc's two named cases — reasonable enough on real hardware
+ * to still produce a plan for rather than special-case into blocking, so
+ * this falls through to "the first mapped role in `CAMERA_ROLES` order" for
+ * that situation, deterministically.
+ */
+function resolveStepCamera(
+  step: CaptureStep,
+  mappedRoles: ReadonlySet<CameraRole>
+): { cameraRole: CameraRole; isFallback: boolean } {
+  const preferredRole = step.cameraRole ?? defaultCameraRoleForStepType(step.type);
+  if (mappedRoles.has(preferredRole)) {
+    return { cameraRole: preferredRole, isFallback: false };
+  }
+  if (mappedRoles.has('CENTER')) {
+    return { cameraRole: 'CENTER', isFallback: true };
+  }
+  if (mappedRoles.size === 1) {
+    const [soleRole] = mappedRoles;
+    return { cameraRole: soleRole, isFallback: true };
+  }
+  // No CENTER and more than one candidate: pick deterministically rather
+  // than arbitrarily by Set iteration order.
+  const fallbackRole = CAMERA_ROLES.find((role) => mappedRoles.has(role))!;
+  return { cameraRole: fallbackRole, isFallback: true };
+}
+
+function planStep(
+  step: CaptureStep,
+  mappedRoles: ReadonlySet<CameraRole>,
+  physicalAngles: PhysicalAngleMap | undefined
+): RoundStepPlan {
+  const { cameraRole, isFallback } = resolveStepCamera(step, mappedRoles);
+  const physical = resolvePhysicalAngle(cameraRole, physicalAngles);
+  const effectiveYaw =
+    step.pose?.yaw !== undefined ? step.pose.yaw.target - physical.yaw : undefined;
+  const effectivePitch =
+    step.pose?.pitch !== undefined ? step.pose.pitch.target - physical.pitch : undefined;
+  return { step, cameraRole, effectiveYaw, effectivePitch, isFallback };
+}
+
+/**
+ * Builds a kiosk-specific capture plan out of a campaign's steps and this
+ * machine's camera role mapping (discussion doc §3.1.5) — the replacement
+ * for the old "refuse to start when any step's camera is missing" rule.
+ * Blocks only when `roleMapping` has no usable entry at all; every other
+ * combination of steps × cameras produces *some* plan, falling back to
+ * CENTER (subject turns their head) for whichever steps' preferred camera
+ * isn't physically present.
+ *
+ * **Simultaneous mode** (`sequencing` omitted or `'simultaneous'`): steps
+ * are packed into rounds with a simple greedy, single-pass-in-input-order
+ * algorithm — a step joins the first open round whose gate pose doesn't
+ * conflict with its own (§3.1.5 step 2's `anglesMatch`, axis-by-axis, an
+ * unconstrained axis never conflicts) and that doesn't already have a step
+ * using the same physical camera; failing that, it opens a new round. This
+ * is deliberately not an optimal bin-packing search — see this function's
+ * own module header comment for why a straightforward greedy pass is
+ * enough here (it reproduces the discussion doc's own worked 10-photo/
+ * 2-camera example exactly; see `multiFrame.test.ts`).
+ *
+ * **Sequential mode** (§3.9's kiosk-local "Cách chụp" setting): every step
+ * is its own round — same per-step camera/gate resolution, just never
+ * grouped, so no two cameras ever fire at once.
+ *
+ * `physicalAngles` lets a caller override `DEFAULT_PHYSICAL_ANGLES` per
+ * role (e.g. once `camera.physicalAngles` — §3.9, `apps/desktop`'s
+ * `secrets.ts` — is wired up and read on the renderer side); omitted roles
+ * keep the default.
+ */
+export function planCaptureRounds(
+  steps: CaptureStep[],
+  roleMapping: Partial<Record<CameraRole, string>>,
+  options?: {
+    sequencing?: CaptureSequencing;
+    physicalAngles?: PhysicalAngleMap;
+    /** Degrees of slack when comparing two steps' gate poses for round-compatibility. Default 0.01°. */
+    gateTolerance?: number;
+  }
+): CapturePlan {
+  const mappedRoles = new Set<CameraRole>(
+    CAMERA_ROLES.filter((role) => !!roleMapping[role])
+  );
+
+  if (mappedRoles.size === 0) {
+    return {
+      blocked: true,
+      reason: 'Chưa gán camera nào cho máy này',
+      rounds: [],
+    };
+  }
+
+  const plans = steps.map((step) => planStep(step, mappedRoles, options?.physicalAngles));
+
+  if (options?.sequencing === 'sequential') {
+    return { blocked: false, rounds: plans.map((plan) => ({ steps: [plan] })) };
+  }
+
+  const tolerance = options?.gateTolerance ?? DEFAULT_GATE_TOLERANCE_DEG;
+  const rounds: CaptureRound[] = [];
+  // Parallel to `rounds` — the yaw/pitch each round has committed to so far
+  // (first step to constrain an axis decides it for the round; see
+  // `anglesMatch`) and which physical cameras are already spoken for.
+  const roundGates: Array<{ yaw?: number; pitch?: number; roles: Set<CameraRole> }> = [];
+
+  for (const plan of plans) {
+    let placed = false;
+    for (let i = 0; i < rounds.length; i++) {
+      const gate = roundGates[i];
+      if (gate.roles.has(plan.cameraRole)) continue;
+      if (!anglesMatch(gate.yaw, plan.effectiveYaw, tolerance)) continue;
+      if (!anglesMatch(gate.pitch, plan.effectivePitch, tolerance)) continue;
+
+      rounds[i].steps.push(plan);
+      gate.roles.add(plan.cameraRole);
+      if (gate.yaw === undefined) gate.yaw = plan.effectiveYaw;
+      if (gate.pitch === undefined) gate.pitch = plan.effectivePitch;
+      placed = true;
+      break;
+    }
+    if (!placed) {
+      rounds.push({ steps: [plan] });
+      roundGates.push({
+        yaw: plan.effectiveYaw,
+        pitch: plan.effectivePitch,
+        roles: new Set([plan.cameraRole]),
+      });
+    }
+  }
+
+  return { blocked: false, rounds };
 }
 
 /**

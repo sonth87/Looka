@@ -76,6 +76,31 @@ describe('endVideoStream', () => {
     assert.equal(repo.ended.length, 0);
   });
 
+  test('a 0-byte payload is written and the row is still finalized, but ok is false (§3.10 layer 3 — the historical size_bytes=0 bug)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'face-streams-'));
+    try {
+      const localPath = join(dir, 'stream-1.webm');
+      const repo = new FakeRepo(makeItem(localPath));
+      const data = new Uint8Array([]);
+
+      const result = endVideoStream({ streamId: 'stream-1', data, durationMs: 4200 }, repo);
+
+      assert.equal(result.ok, false);
+      if (!result.ok) assert.match(result.error, /0 bytes/);
+
+      // Unlike a write failure, a 0-byte recording still finalizes the row —
+      // an open (ended_at NULL) row is a worse bug than a zero-byte one; the
+      // `ok: false` here is what makes the failure visible to the renderer's
+      // existing `if (!result?.ok)` logging, not a missing endStream call.
+      assert.equal(existsSync(localPath), true);
+      assert.equal(repo.ended.length, 1);
+      assert.equal(repo.ended[0].sizeBytes, 0);
+      assert.ok(repo.ended[0].endedAt > 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('a write failure (bad localPath) is reported, not thrown, and the row is left unfinalized', () => {
     const repo = new FakeRepo(makeItem(join('this', 'directory', 'does', 'not', 'exist', 'stream-1.webm')));
 

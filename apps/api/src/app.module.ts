@@ -7,6 +7,7 @@ import { SessionController } from '@app/modules/capture/controllers/session.cont
 import { SharedModule } from '@app/modules/shared/shared.module';
 import { DeviceManagementModule } from '@app/modules/device-management/device-management.module';
 import { DeviceExpiryMiddleware } from '@app/modules/device-management/middlewares/device-expiry.middleware';
+import { PhotoReviewModule } from '@app/modules/photo-review/photo-review.module';
 import { MiddlewareConsumer, Module, NestModule, RequestMethod } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
@@ -24,6 +25,7 @@ import { AppController } from './app.controller';
     SharedModule,
     CaptureModule,
     DeviceManagementModule,
+    PhotoReviewModule,
   ],
   controllers: [AppController],
   providers: [ApiKeyMiddleware, DeviceExpiryMiddleware],

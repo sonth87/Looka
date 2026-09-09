@@ -1,5 +1,7 @@
 import { app, safeStorage } from 'electron';
 import fs from 'node:fs/promises';
+import os from 'node:os';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { CAMERA_ROLES, type CameraRole } from '@face/core';
 import { FsClient } from '@face/fs-client';
@@ -37,7 +39,9 @@ export type SecretKey =
   | 'device.campaignId'
   | 'device.apiBaseUrl'
   | 'device.lastVerified'
-  | 'camera.roleMapping';
+  | 'device.fingerprint'
+  | 'camera.roleMapping'
+  | 'capture.sequencing';
 
 const electronCrypto: CryptoProvider = {
   isAvailable: () => safeStorage.isEncryptionAvailable(),
@@ -175,6 +179,54 @@ export function getDeviceCredentials(): DeviceCredentials | null {
   if (!deviceId || !deviceSecret || !campaignId) return null;
 
   return { deviceId, deviceSecret, campaignId, apiBaseUrl: getSecret('device.apiBaseUrl') };
+}
+
+/**
+ * A stable id for `POST /v1/devices/self-enroll`'s `fingerprint` field
+ * (§3.3) — how the server recognizes "the same kiosk enrolling again" rather
+ * than minting a new device row every time. Generated once and persisted
+ * (a random UUID, not derived from real hardware identifiers — this app has
+ * no existing machine-id source, and a random-but-stable value satisfies
+ * the server's "recognize this exact install again" contract just as well).
+ * `os.hostname()` is passed as a separate, human-readable field alongside
+ * this — see the self-enroll call site — not folded in here, since a
+ * hostname can change (renamed machine) without this kiosk installation
+ * being a different one.
+ */
+export function getOrCreateDeviceFingerprint(): string {
+  const existing = getSecret('device.fingerprint');
+  if (existing) return existing;
+  const fresh = crypto.randomUUID();
+  setSecret('device.fingerprint', fresh);
+  return fresh;
+}
+
+export function getHostname(): string {
+  return os.hostname();
+}
+
+/**
+ * Persists the result of `POST /v1/devices/self-enroll` (called from the
+ * renderer with the operator's SSO token — see `CampaignGate.tsx`) the same
+ * way `importActivationFile` persists a zip-activation payload, so
+ * `getDeviceCredentials()`/`DeviceApiClient` pick it up transparently and
+ * the stats/events pipeline (`statsEvents.ts`) starts working with no
+ * further changes. Unlike `importActivationFile`, this never touches
+ * `device.lastVerified` — self-enroll is a *user-driven* re-identification
+ * of this kiosk (happens every time the operator picks a campaign, see
+ * `CampaignGate.tsx`), not the once-per-activation trust-establishing event
+ * that clock exists to bound the fail-closed window from.
+ */
+export function storeSelfEnrolledDevice(result: {
+  deviceId: string;
+  deviceSecret: string;
+  campaignId: string | null;
+  apiBaseUrl: string;
+}): void {
+  setSecret('device.id', result.deviceId);
+  setSecret('device.secret', result.deviceSecret);
+  if (result.campaignId) setSecret('device.campaignId', result.campaignId);
+  setSecret('device.apiBaseUrl', result.apiBaseUrl);
 }
 
 export function hasDeviceCredentials(): boolean {
@@ -389,4 +441,23 @@ export function sanitizeCameraRoleMapping(input: unknown): CameraRoleMapping {
 
 export function setCameraRoleMapping(mapping: CameraRoleMapping): void {
   setSecret('camera.roleMapping', JSON.stringify(mapping));
+}
+
+/**
+ * "Cách chụp" — Tuần tự / Đồng thời (discussion doc §3.9, ui-redesign-plan.md
+ * S7). A kiosk-local setting, same reasoning as `camera.roleMapping`: it
+ * replaced `campaigns.simultaneous_capture` per the 2026-09-08 decision
+ * that this belongs to the machine, not the campaign. Defaults to
+ * `'sequential'` when unset — the safe default for a freshly-installed
+ * kiosk with only one camera mapped so far.
+ */
+export type CaptureSequencing = 'sequential' | 'simultaneous';
+
+export function getCaptureSequencing(): CaptureSequencing {
+  const raw = getSecret('capture.sequencing');
+  return raw === 'simultaneous' ? 'simultaneous' : 'sequential';
+}
+
+export function setCaptureSequencing(value: CaptureSequencing): void {
+  setSecret('capture.sequencing', value === 'simultaneous' ? 'simultaneous' : 'sequential');
 }

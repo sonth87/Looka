@@ -68,9 +68,36 @@ export function Layout({ children }: { children: ReactNode }) {
           <NavLink to="/campaigns" className={navItemClass}>
             Campaigns
           </NavLink>
-          <NavLink to="/students" className={navItemClass}>
-            Sinh viên
+          <NavLink to="/angle-presets" className={navItemClass}>
+            Góc chụp
           </NavLink>
+          {/*
+            "Cấu hình" (2026-09-08, product feedback) — standalone page for
+            "loại ảnh" (`photo_kinds`): standards shared across campaigns
+            (card size/dpi/background, AI-edit prompt hints), not tied to any
+            one campaign. "Sinh viên" moved OUT of this top-level nav the
+            same day — it's now a tab inside each campaign's own detail page
+            (`CampaignStudentsPanel`, `CampaignDetail.tsx`), since captured
+            students only ever make sense in the context of one campaign.
+          */}
+          <NavLink to="/config" className={navItemClass}>
+            Cấu hình
+          </NavLink>
+          {/*
+            "Duyệt ảnh" (C5, cms-photo-review-plan.md §0/§R-Q7) — a deliberately
+            separate area ("route riêng, menu riêng, vai trò riêng REVIEWER")
+            rather than folded into the admin nav group above; visually set
+            apart with a divider so it doesn't read as "just another campaign
+            admin page". `ReviewerRoleGuard` isn't wired into `AuthGate` yet in
+            this pass (server-side guard from the concurrent backend
+            workstream) — every signed-in SSO user sees this link today, same
+            as the rest of the CMS currently does.
+          */}
+          <div className="pt-3 mt-3 border-t border-gray-200">
+            <NavLink to="/review" className={navItemClass}>
+              Duyệt ảnh
+            </NavLink>
+          </div>
         </nav>
 
         <div className="px-4 py-4 border-t border-gray-200 space-y-2">

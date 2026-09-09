@@ -73,6 +73,26 @@ export class Photo extends BaseEntity {
   @ApiPropertyOptional({ description: 'Camera vật lý đã chụp (kiosk)' })
   cameraRole?: string;
 
+  /**
+   * What actually fired this shutter - `@face/core`'s `CaptureTriggerSource`
+   * ('AUTO'|'GESTURE'|'SHUTTER'|'EXTERNAL'). See §3.7.1 of
+   * docs/plans/campaign-config-sso-card-photo-discussion.md.
+   */
+  @Column('varchar', { length: 20, nullable: true, name: 'trigger_source' })
+  @ApiPropertyOptional({
+    description: 'Nguồn kích hoạt chụp: AUTO/GESTURE/SHUTTER/EXTERNAL',
+  })
+  triggerSource?: string;
+
+  /**
+   * Which kiosk-wide setting was active when this shutter fired -
+   * `@face/core`'s `CaptureTriggerMode` ('AUTO'|'MANUAL'|'OFF'). Distinct
+   * from `triggerSource` above - see that field's doc comment.
+   */
+  @Column('varchar', { length: 10, nullable: true, name: 'capture_mode' })
+  @ApiPropertyOptional({ description: 'Chế độ chụp: AUTO/MANUAL/OFF' })
+  captureMode?: string;
+
   /** The kiosk's own clock at capture time (kiosk only; the web path has no separate capture instant worth keeping). */
   @Column('timestamptz', { nullable: true, name: 'captured_at' })
   @ApiPropertyOptional({ description: 'Thời điểm chụp, theo đồng hồ kiosk' })

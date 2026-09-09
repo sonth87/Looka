@@ -1,15 +1,5 @@
 import { useEffect, useState } from 'react';
-import {
-  ApiError,
-  Campaign,
-  ListStudentsParams,
-  Paginated,
-  StudentDetail,
-  StudentListItem,
-  getStudent,
-  listCampaigns,
-  listStudents,
-} from '../api';
+import { ApiError, ListStudentsParams, Paginated, StudentDetail, StudentListItem, getStudent, listStudents } from '../api';
 import { SessionDetailDrawer } from './SessionDetailDrawer';
 
 const PAGE_SIZE = 20;
@@ -22,16 +12,23 @@ function formatDateTime(iso?: string): string {
 }
 
 /**
- * Global "Sinh viên đã chụp" page (2026-09-08) — one row per `subjectCode`,
- * across every campaign unless filtered, distinct from `SessionsPanel`'s
- * per-campaign, one-row-per-session list. Clicking a student opens
- * `StudentDetailDrawer` below; clicking one of their sessions there opens
- * the existing, unmodified `SessionDetailDrawer` — this page never renders
- * a photo/video grid itself.
+ * "Sinh viên" tab within a campaign's own detail page — moved here
+ * 2026-09-08 from a global, cross-campaign `/students` page (per product
+ * feedback: "sinh viên đã chụp sẽ nằm trong từng campaign, không nằm bên
+ * ngoài"). One row per `subjectCode` **within this campaign only** — the
+ * campaign-filter dropdown and "Campaign" column the old global page had
+ * are both gone, since the scope is now implicit. Still calls the same
+ * `GET /v1/students?campaignId=` endpoint (unchanged, campaign-scoped
+ * aggregation already existed there), just always with this tab's own
+ * `campaignId`, never empty.
+ *
+ * `StudentDetailDrawer` below intentionally still shows a student's
+ * sessions **across every campaign** when opened (via `GET
+ * /v1/students/:code`, which always ignores any campaign filter) — that
+ * cross-campaign history is useful context even from inside one campaign's
+ * tab (e.g. "has this person already been captured somewhere else?").
  */
-export function StudentsPage() {
-  const [campaigns, setCampaigns] = useState<Campaign[]>([]);
-  const [campaignId, setCampaignId] = useState('');
+export function CampaignStudentsPanel({ campaignId }: { campaignId: string }) {
   const [q, setQ] = useState('');
   const [page, setPage] = useState(1);
 
@@ -40,19 +37,11 @@ export function StudentsPage() {
   const [openStudentCode, setOpenStudentCode] = useState<string | null>(null);
 
   useEffect(() => {
-    listCampaigns()
-      .then(setCampaigns)
-      .catch(() => {
-        /* the campaign filter just stays empty — not fatal to the page */
-      });
-  }, []);
-
-  useEffect(() => {
-    const params: ListStudentsParams = { page, limit: PAGE_SIZE };
-    if (campaignId) params.campaignId = campaignId;
+    const params: ListStudentsParams = { page, limit: PAGE_SIZE, campaignId };
     if (q.trim()) params.q = q.trim();
 
     setError(null);
+    setResult(null);
     listStudents(params)
       .then(setResult)
       .catch((err) => setError(err instanceof ApiError ? err.message : String(err)));
@@ -63,44 +52,24 @@ export function StudentsPage() {
   const isEmpty = result !== null && students.length === 0;
 
   return (
-    <div className="max-w-5xl">
-      <h1 className="text-2xl font-bold text-gray-900 mb-6">Sinh viên đã chụp</h1>
-
+    <div>
       <div className="p-5 rounded-2xl border border-gray-200 bg-white shadow-sm space-y-4">
-        <div className="flex flex-wrap gap-3">
-          <input
-            type="text"
-            value={q}
-            onChange={(e) => {
-              setQ(e.target.value);
-              setPage(1);
-            }}
-            placeholder="Tìm theo mã hoặc tên sinh viên..."
-            className="flex-1 min-w-[220px] bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900"
-          />
-
-          <select
-            value={campaignId}
-            onChange={(e) => {
-              setCampaignId(e.target.value);
-              setPage(1);
-            }}
-            className="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900"
-          >
-            <option value="">Tất cả campaign</option>
-            {campaigns.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
-        </div>
+        <input
+          type="text"
+          value={q}
+          onChange={(e) => {
+            setQ(e.target.value);
+            setPage(1);
+          }}
+          placeholder="Tìm theo mã hoặc tên sinh viên..."
+          className="w-full max-w-sm bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900"
+        />
 
         {error && <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">{error}</div>}
 
         {result === null && !error && <p className="text-gray-500 text-sm">Đang tải...</p>}
 
-        {isEmpty && !error && <p className="text-sm text-gray-500">Chưa có sinh viên nào được chụp.</p>}
+        {isEmpty && !error && <p className="text-sm text-gray-500">Chưa có sinh viên nào được chụp trong campaign này.</p>}
 
         {students.length > 0 && (
           <>
@@ -111,8 +80,8 @@ export function StudentsPage() {
                   <th className="py-2.5 px-4">Tên</th>
                   <th className="py-2.5 px-4">Số phiên</th>
                   <th className="py-2.5 px-4">Tổng ảnh</th>
-                  <th className="py-2.5 px-4">Campaign</th>
                   <th className="py-2.5 px-4">Chụp gần nhất</th>
+                  <th className="py-2.5 px-4">Đang chụp</th>
                 </tr>
               </thead>
               <tbody>
@@ -126,8 +95,20 @@ export function StudentsPage() {
                     <td className="py-2.5 px-4 text-gray-500">{s.subjectName ?? '—'}</td>
                     <td className="py-2.5 px-4 text-gray-900 tabular-nums">{s.sessionCount}</td>
                     <td className="py-2.5 px-4 text-gray-900 tabular-nums">{s.totalPhotos}</td>
-                    <td className="py-2.5 px-4 text-gray-500">{s.campaignIds.length}</td>
                     <td className="py-2.5 px-4 text-gray-500">{formatDateTime(s.lastCapturedAt)}</td>
+                    <td className="py-2.5 px-4 text-gray-500">
+                      {/* `lastSession` (campaign-config-sso-card-photo-discussion.md §3.8.2's
+                          planned StudentListItemDao addition) isn't shipped by every backend yet —
+                          dash rather than crash when it's absent. */}
+                      {s.lastSession ? (
+                        <>
+                          {s.lastSession.deviceName ?? '—'}
+                          {s.lastSession.photoCount != null ? ` · ${s.lastSession.photoCount} ảnh` : ''}
+                        </>
+                      ) : (
+                        '—'
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -172,7 +153,9 @@ type StudentSessionSummarySource = 'KIOSK' | 'WEB';
  * Right-side drawer listing one student's sessions across every campaign —
  * mirrors `SessionDetailDrawer`'s drawer chrome, but shows session summaries
  * rather than a photo grid: clicking a session opens `SessionDetailDrawer`
- * itself (unmodified) for the actual photos/videos.
+ * itself (unmodified) for the actual photos/videos. Deliberately still
+ * cross-campaign (see this file's top comment) even though the list this
+ * opens from is now campaign-scoped.
  */
 function StudentDetailDrawer({ subjectCode, onClose }: { subjectCode: string; onClose: () => void }) {
   const [detail, setDetail] = useState<StudentDetail | null>(null);

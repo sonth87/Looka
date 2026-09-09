@@ -72,6 +72,18 @@ export class Session extends BaseEntity {
   @ApiPropertyOptional({ description: 'Id quy trình chụp đã dùng, nếu có' })
   workflowId?: string;
 
+  /**
+   * Người vận hành đã chụp phiên này, nếu có - id trong bảng `users`, không
+   * ràng buộc FK (xem doc comment của migration `SessionOperatorUser`). Đến
+   * từ `CreateSessionDto.operatorUserId` (web) hoặc `operatorUserId` trong
+   * payload SESSION_REPORT (kiosk) - xem `CaptureReportService.applySessionReport()`.
+   */
+  @Column('uuid', { nullable: true, name: 'operator_user_id' })
+  @ApiPropertyOptional({
+    description: 'Id người vận hành đã chụp phiên này, nếu có',
+  })
+  operatorUserId?: string;
+
   @OneToMany(() => Photo, (photo) => photo.session)
   photos?: Photo[];
 }

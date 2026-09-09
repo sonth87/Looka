@@ -1,7 +1,14 @@
 import { QueryPaginateDto } from '@app/common/dto';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsInt, IsOptional, IsPositive, IsString, IsUUID, Max } from 'class-validator';
+import {
+  IsInt,
+  IsOptional,
+  IsPositive,
+  IsString,
+  IsUUID,
+  Max,
+} from 'class-validator';
 
 export class ListStudentsQueryDto extends QueryPaginateDto {
   // Same override reasoning as ListSessionsQueryDto: this endpoint's own

@@ -4,15 +4,22 @@ import { CommonService } from '@app/modules/shared/common/common.service';
 import { HttpStatus, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { DeviceDao } from '../dao';
-import { CreateDeviceDto, ReissueDeviceDto } from '../dto';
+import { DeviceDao, SelfEnrollDeviceDao } from '../dao';
+import { CreateDeviceDto, ReissueDeviceDto, SelfEnrollDeviceDto } from '../dto';
 import { Device, DeviceStatus } from '../entities/device.entity';
-import { generateDeviceSecret, hashDeviceSecret, verifyDeviceSecret } from './device-secret.util';
+import {
+  generateDeviceSecret,
+  hashDeviceSecret,
+  verifyDeviceSecret,
+} from './device-secret.util';
 import { CampaignService } from './campaign.service';
 
 export type DeviceCredentialCheck =
   | { ok: true; device: Device }
-  | { ok: false; reason: 'NOT_FOUND' | 'INVALID_SECRET' | 'EXPIRED' | 'REVOKED' };
+  | {
+      ok: false;
+      reason: 'NOT_FOUND' | 'INVALID_SECRET' | 'EXPIRED' | 'REVOKED';
+    };
 
 /**
  * Maps a failed `DeviceCredentialCheck.reason` to the `CustomException` both
@@ -31,16 +38,34 @@ export type DeviceCredentialCheck =
  * (falls into `HttpExceptionFilter`'s default branch as `errorCode: 401`)
  * could never distinguish.
  */
-export function deviceCredentialFailure(reason: 'NOT_FOUND' | 'INVALID_SECRET' | 'EXPIRED' | 'REVOKED'): CustomException {
+export function deviceCredentialFailure(
+  reason: 'NOT_FOUND' | 'INVALID_SECRET' | 'EXPIRED' | 'REVOKED',
+): CustomException {
   switch (reason) {
     case 'NOT_FOUND':
-      return new CustomException('Device not found', ERROR_CODE.DEVICE_NOT_FOUND, HttpStatus.UNAUTHORIZED);
+      return new CustomException(
+        'Device not found',
+        ERROR_CODE.DEVICE_NOT_FOUND,
+        HttpStatus.UNAUTHORIZED,
+      );
     case 'EXPIRED':
-      return new CustomException('Device expired', ERROR_CODE.DEVICE_EXPIRED, HttpStatus.UNAUTHORIZED);
+      return new CustomException(
+        'Device expired',
+        ERROR_CODE.DEVICE_EXPIRED,
+        HttpStatus.UNAUTHORIZED,
+      );
     case 'REVOKED':
-      return new CustomException('Device revoked', ERROR_CODE.DEVICE_REVOKED, HttpStatus.UNAUTHORIZED);
+      return new CustomException(
+        'Device revoked',
+        ERROR_CODE.DEVICE_REVOKED,
+        HttpStatus.UNAUTHORIZED,
+      );
     case 'INVALID_SECRET':
-      return new CustomException('Invalid device secret', ERROR_CODE.DEVICE_SECRET_INVALID, HttpStatus.UNAUTHORIZED);
+      return new CustomException(
+        'Invalid device secret',
+        ERROR_CODE.DEVICE_SECRET_INVALID,
+        HttpStatus.UNAUTHORIZED,
+      );
   }
 }
 
@@ -92,6 +117,104 @@ export class DeviceService extends CommonService<Device> {
     });
 
     return { device, plainSecret };
+  }
+
+  /**
+   * `POST /v1/devices/self-enroll` (§3.3) — user-token, no campaign. Looks
+   * the calling machine up by `fingerprint`:
+   *
+   * - **Found** (same machine, logging in again — possibly a different
+   *   user): rotates its secret WITH OVERLAP, mirroring exactly the
+   *   "keep the secret a running kiosk actually uses alive" pattern
+   *   `reissueDevice` already implements (same pitfall this shares with
+   *   it: `deviceSecretHash`/`previousSecretHash` are `select: false`, so
+   *   they must be asked for explicitly). Updates `lastUserId` and
+   *   `hostname` (the machine's reported name may have changed since);
+   *   `enrolledByUserId`/`campaignId` are left untouched — this is a
+   *   returning device, not a new registration. Refuses (409) a REVOKED
+   *   device rather than silently letting self-enroll undo an admin's
+   *   explicit "Thu hồi" — that action stays admin-only, via `reissueDevice`.
+   * - **Not found**: creates a brand-new row, `campaignId: null` (chosen at
+   *   login/session time instead, §3.9), `enrolledByUserId`/`lastUserId`
+   *   both set to the calling user, secret generated the same way
+   *   `registerDevice` does.
+   *
+   * Returns the plaintext secret exactly once, same rule as
+   * `registerDevice`/`reissueDevice` — nothing persists it, only its hash.
+   */
+  async selfEnroll(
+    dto: SelfEnrollDeviceDto,
+    userId: string,
+    requestApiBaseUrl = '',
+  ): Promise<SelfEnrollDeviceDao> {
+    // Fails clearly here rather than storing a campaignId that later 404s
+    // out of GET /v1/devices/config with no obvious cause.
+    if (dto.campaignId) {
+      await this.campaignService.findCampaignEntityOrFail(dto.campaignId);
+    }
+
+    const existing = await this.repository.findOne({
+      where: { fingerprint: dto.fingerprint },
+      select: {
+        id: true,
+        campaignId: true,
+        name: true,
+        authApiEndpoint: true,
+        status: true,
+        deviceSecretHash: true,
+        previousSecretHash: true,
+      },
+    });
+
+    if (existing) {
+      if (existing.status === DeviceStatus.REVOKED) {
+        throw new CustomException(
+          'This device was revoked — an admin must reissue it before it can self-enroll again',
+          ERROR_CODE.DEVICE_FINGERPRINT_REVOKED,
+          HttpStatus.CONFLICT,
+        );
+      }
+
+      const plainSecret = generateDeviceSecret();
+      const patch: Partial<Device> = {
+        deviceSecretHash: hashDeviceSecret(plainSecret),
+        previousSecretHash:
+          existing.previousSecretHash ?? existing.deviceSecretHash,
+        secretRotatedAt: new Date(),
+        hostname: dto.hostname,
+        lastUserId: userId,
+        // Re-attaches whichever campaign the operator picked this time —
+        // see the DTO's own doc comment for why this is how a kiosk that
+        // capture-for a different campaign than before gets updated.
+        // Omitted (undefined) leaves the existing value untouched.
+        ...(dto.campaignId !== undefined ? { campaignId: dto.campaignId } : {}),
+      };
+      await this.update(existing.id, patch);
+
+      const apiBaseUrl = existing.authApiEndpoint || requestApiBaseUrl;
+      const campaignId = dto.campaignId ?? existing.campaignId ?? null;
+      return { deviceId: existing.id, deviceSecret: plainSecret, apiBaseUrl, campaignId };
+    }
+
+    const plainSecret = generateDeviceSecret();
+    const device = await this.create({
+      campaignId: dto.campaignId ?? null,
+      name: dto.hostname,
+      hostname: dto.hostname,
+      fingerprint: dto.fingerprint,
+      authApiEndpoint: requestApiBaseUrl,
+      deviceSecretHash: hashDeviceSecret(plainSecret),
+      status: DeviceStatus.REGISTERED,
+      enrolledByUserId: userId,
+      lastUserId: userId,
+    });
+
+    return {
+      deviceId: device.id,
+      deviceSecret: plainSecret,
+      apiBaseUrl: requestApiBaseUrl,
+      campaignId: dto.campaignId ?? null,
+    };
   }
 
   /**
@@ -154,7 +277,11 @@ export class DeviceService extends CommonService<Device> {
       },
     });
     if (!device) {
-      throw new CustomException('Device not found', ERROR_CODE.DEVICE_NOT_FOUND, HttpStatus.NOT_FOUND);
+      throw new CustomException(
+        'Device not found',
+        ERROR_CODE.DEVICE_NOT_FOUND,
+        HttpStatus.NOT_FOUND,
+      );
     }
 
     const plainSecret = generateDeviceSecret();
@@ -225,7 +352,11 @@ export class DeviceService extends CommonService<Device> {
   async activateDevice(id: string): Promise<DeviceDao> {
     const device = await this.findDeviceEntityOrFail(id);
     if (device.status === DeviceStatus.REVOKED) {
-      throw new CustomException('Device is revoked', ERROR_CODE.DEVICE_REVOKED, HttpStatus.CONFLICT);
+      throw new CustomException(
+        'Device is revoked',
+        ERROR_CODE.DEVICE_REVOKED,
+        HttpStatus.CONFLICT,
+      );
     }
     device.status = DeviceStatus.ACTIVATED;
     device.activatedAt = new Date();
@@ -235,14 +366,24 @@ export class DeviceService extends CommonService<Device> {
 
   async findAllByCampaign(campaignId: string): Promise<DeviceDao[]> {
     await this.campaignService.findCampaignEntityOrFail(campaignId);
-    const devices = await this.findAll({ where: { campaignId }, order: { createdAt: 'DESC' } });
+    const devices = await this.findAll({
+      where: { campaignId },
+      order: { createdAt: 'DESC' },
+    });
     return toDao(DeviceDao, devices);
   }
 
   async findDeviceEntityOrFail(id: string): Promise<Device> {
-    const device = await this.findOne({ where: { id }, relations: { campaign: true } });
+    const device = await this.findOne({
+      where: { id },
+      relations: { campaign: true },
+    });
     if (!device) {
-      throw new CustomException('Device not found', ERROR_CODE.DEVICE_NOT_FOUND, HttpStatus.NOT_FOUND);
+      throw new CustomException(
+        'Device not found',
+        ERROR_CODE.DEVICE_NOT_FOUND,
+        HttpStatus.NOT_FOUND,
+      );
     }
     return device;
   }
@@ -282,7 +423,10 @@ export class DeviceService extends CommonService<Device> {
    * kiosk's hot path (once per session/config fetch, events ≤ every 15s), so
    * it deliberately never does more than one write per call.
    */
-  async verifyCredentials(deviceId: string, secret: string): Promise<DeviceCredentialCheck> {
+  async verifyCredentials(
+    deviceId: string,
+    secret: string,
+  ): Promise<DeviceCredentialCheck> {
     const device = await this.repository.findOne({
       where: { id: deviceId },
       relations: { campaign: true },
@@ -297,8 +441,13 @@ export class DeviceService extends CommonService<Device> {
     });
     if (!device) return { ok: false, reason: 'NOT_FOUND' };
 
-    const fail = async (reason: 'INVALID_SECRET' | 'EXPIRED' | 'REVOKED'): Promise<DeviceCredentialCheck> => {
-      await this.update(device.id, { lastAuthFailedAt: new Date(), lastAuthFailReason: reason });
+    const fail = async (
+      reason: 'INVALID_SECRET' | 'EXPIRED' | 'REVOKED',
+    ): Promise<DeviceCredentialCheck> => {
+      await this.update(device.id, {
+        lastAuthFailedAt: new Date(),
+        lastAuthFailReason: reason,
+      });
       return { ok: false, reason };
     };
 
@@ -309,7 +458,10 @@ export class DeviceService extends CommonService<Device> {
     let rotationCompleted = false;
     if (verifyDeviceSecret(secret, device.deviceSecretHash)) {
       rotationCompleted = device.previousSecretHash != null;
-    } else if (device.previousSecretHash != null && verifyDeviceSecret(secret, device.previousSecretHash)) {
+    } else if (
+      device.previousSecretHash != null &&
+      verifyDeviceSecret(secret, device.previousSecretHash)
+    ) {
       // Kiosk is still running the pre-rotation secret — valid, but the
       // overlap isn't resolved yet, so previousSecretHash/secretRotatedAt
       // are left as-is.

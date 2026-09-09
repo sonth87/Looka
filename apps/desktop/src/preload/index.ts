@@ -292,6 +292,21 @@ export interface FaceAPIBridge {
   getDeviceAccessStatus: () => Promise<DeviceAccessStatus>;
 
   /**
+   * This kiosk's stable fingerprint + hostname, for the renderer's own
+   * `POST /v1/devices/self-enroll` call (needs the operator's SSO token,
+   * which only the renderer holds).
+   */
+  getDeviceFingerprintInfo: () => Promise<{ fingerprint: string; hostname: string }>;
+
+  /** Persists a self-enroll result — see `secrets.ts`'s `storeSelfEnrolledDevice` doc comment. */
+  storeSelfEnrolledDevice: (payload: {
+    deviceId: string;
+    deviceSecret: string;
+    campaignId: string | null;
+    apiBaseUrl: string;
+  }) => Promise<{ ok: boolean }>;
+
+  /**
    * Opens the CB Help window if closed, closes it if open — the same
    * action `Ctrl/Cmd+Shift+H` triggers. Used by the kiosk UI's "Màn hình mở
    * rộng" button; see cbHelpWindow.ts's own doc comment for what that
@@ -366,6 +381,19 @@ export interface FaceAPIBridge {
    */
   openCameraSetup: () => Promise<boolean>;
 
+  /** "Cách chụp" — Tuần tự/Đồng thời, a kiosk-local setting (§3.9). */
+  getCaptureSequencing: () => Promise<'sequential' | 'simultaneous'>;
+  setCaptureSequencing: (value: 'sequential' | 'simultaneous') => Promise<boolean>;
+
+  /**
+   * Real Microsoft 365 SSO login — opens `ssoLogin.ts`'s `BrowserWindow` and
+   * resolves with the tokens LOGIN.md §3.3 hands back, or `null` if the
+   * operator closed the window without finishing. See
+   * `apps/desktop/src/renderer/ssoAuthClient.ts` for the `AuthClient` this
+   * backs.
+   */
+  ssoLogin: () => Promise<{ accessToken: string; refreshToken: string; email: string; userCode: string } | null>;
+
   /**
    * Local "sinh viên đã chụp" index (2026-09-08) — only meaningful from
    * inside the kiosk's own hidden `#recent-students` window (`Ctrl/Cmd+Shift+S`,
@@ -433,6 +461,8 @@ const faceAPI: FaceAPIBridge = {
 
   getSecretsStatus: () => ipcRenderer.invoke('secrets:status'),
   getDeviceAccessStatus: () => ipcRenderer.invoke('device:getAccessStatus'),
+  getDeviceFingerprintInfo: () => ipcRenderer.invoke('device:getFingerprintInfo'),
+  storeSelfEnrolledDevice: (payload) => ipcRenderer.invoke('device:storeSelfEnrolled', payload),
 
   toggleCbHelpWindow: () => ipcRenderer.invoke('cbhelp:toggle'),
   isCbHelpWindowOpen: () => ipcRenderer.invoke('cbhelp:isOpen'),
@@ -451,6 +481,10 @@ const faceAPI: FaceAPIBridge = {
   getCameraRoleMapping: () => ipcRenderer.invoke('camera:getRoleMapping'),
   setCameraRoleMapping: (mapping) => ipcRenderer.invoke('camera:setRoleMapping', mapping),
   openCameraSetup: () => ipcRenderer.invoke('camera:openSetup'),
+  getCaptureSequencing: () => ipcRenderer.invoke('capture:getSequencing'),
+  setCaptureSequencing: (value) => ipcRenderer.invoke('capture:setSequencing', value),
+
+  ssoLogin: () => ipcRenderer.invoke('auth:ssoLogin'),
 
   listRecentStudents: (limit) => ipcRenderer.invoke('students:listRecent', limit),
   listStudentSessions: (subjectCode) => ipcRenderer.invoke('students:listSessions', subjectCode),

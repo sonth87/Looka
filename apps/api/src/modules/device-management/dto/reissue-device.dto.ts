@@ -15,14 +15,18 @@ import { IsEnum, IsOptional, IsUrl, MaxLength } from 'class-validator';
  */
 export class ReissueDeviceDto {
   @ApiPropertyOptional({
-    description: 'API endpoint lấy thông tin xác thực cho thiết bị này (bỏ trống = giữ nguyên giá trị hiện tại)',
+    description:
+      'API endpoint lấy thông tin xác thực cho thiết bị này (bỏ trống = giữ nguyên giá trị hiện tại)',
   })
   @IsOptional()
   @IsUrl({ require_tld: false })
   @MaxLength(500)
   authApiEndpoint?: string;
 
-  @ApiPropertyOptional({ enum: ['mac', 'win'], description: 'Hệ điều hành của installer đóng gói kèm' })
+  @ApiPropertyOptional({
+    enum: ['mac', 'win'],
+    description: 'Hệ điều hành của installer đóng gói kèm',
+  })
   @IsOptional()
   @IsEnum(['mac', 'win'])
   os?: 'mac' | 'win';

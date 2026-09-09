@@ -93,12 +93,37 @@ export interface CaptureStep {
    */
   postureCheck?: boolean;
   /**
-   * Which logical camera captures this frame. Defaults per
-   * `defaultCameraRoleForStepType(type)`. In a campaign with
-   * `simultaneousCapture` every step must resolve to a distinct role that
-   * has a physical camera mapped on the kiosk.
+   * Which logical camera this frame *prefers* to be captured by. Defaults
+   * per `defaultCameraRoleForStepType(type)`. As of the 2026-09-08 product
+   * decision (see docs/plans/campaign-config-sso-card-photo-discussion.md
+   * §3.1.5/§3.9), this is a preference, not a hard requirement — the kiosk
+   * decides at runtime (in its own sequential/simultaneous setting) whether
+   * a physical camera is actually mapped to this role; if not, it falls
+   * back to CENTER with a re-derived "gate" pose target and the subject
+   * turns their head instead. A campaign is never blocked from being
+   * created or run by how many cameras a given kiosk happens to have.
    */
   cameraRole?: CameraRole;
+  /**
+   * Foreign key into the (server-side, CMS-managed) dynamic angle catalog
+   * this step was created from — see §3.1.6 of the discussion doc above.
+   * `CaptureStep` itself still carries a full, self-contained snapshot of
+   * `pose`/`instruction`/`cameraRole` at the time the campaign saved this
+   * row (so a later edit to the catalog entry never silently changes a
+   * running campaign's steps) — `angleCode` is purely a display/traceability
+   * link back to that catalog entry, never re-read at capture time. Absent
+   * on steps created before the catalog existed, or on ad-hoc `CUSTOM`
+   * steps not backed by any catalog entry.
+   */
+  angleCode?: string;
+  /**
+   * Marks the one step in a workflow whose captured photo is the source for
+   * the derived 4x6 ID card photo (crop/background/retouch pipeline — see
+   * the discussion doc §3.5). Exactly one step per workflow should set this
+   * to true; enforced by `capture-angles.validator.ts` on the API side, not
+   * by this type.
+   */
+  isCardSource?: boolean;
 }
 
 export interface CaptureWorkflow {

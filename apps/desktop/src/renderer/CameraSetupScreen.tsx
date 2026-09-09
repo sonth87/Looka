@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { CAMERA_ROLES, defaultCameraRoleForStepType, type CameraRole, type CaptureStep } from '@face/core';
+import { getSettings, updateSettings } from '@face/ui';
+import type { CaptureTriggerMode } from '@face/core';
 
 type CameraRoleMapping = Partial<Record<CameraRole, string>>;
 
@@ -89,6 +91,15 @@ export default function CameraSetupScreen() {
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [moveNotice, setMoveNotice] = useState<string | null>(null);
+  // "Cách chụp" / "Kích hoạt chụp" (§3.9) — kiosk-local settings, no longer
+  // read from the campaign. Sequencing persists via secrets.dat (mirrors
+  // camera.roleMapping's own persistence); capture mode/gestures reuse the
+  // existing @face/ui settingsStore (packages/ui/src/lib/settingsStore.ts),
+  // just given a proper home in this screen per the plan's instruction.
+  const [sequencing, setSequencing] = useState<'sequential' | 'simultaneous'>('sequential');
+  const [captureMode, setCaptureModeState] = useState<CaptureTriggerMode>('MANUAL');
+  const [allowGesture, setAllowGesture] = useState(false);
+  const [autoHoldMs, setAutoHoldMs] = useState(1500);
   const streamsRef = useRef<Map<string, MediaStream>>(new Map());
   const videoRefs = useRef<Map<CameraRole, HTMLVideoElement | null>>(new Map());
   const cancelledRef = useRef(false);
@@ -97,6 +108,17 @@ export default function CameraSetupScreen() {
   // without risking a stale read the one time it matters (attaching a
   // just-opened stream to the row of the role it's already assigned to).
   const mappingRef = useRef<CameraRoleMapping>({});
+
+  useEffect(() => {
+    const settings = getSettings();
+    setCaptureModeState(settings.captureMode ?? 'MANUAL');
+    setAllowGesture((settings.allowedGestures?.length ?? 0) > 0);
+    setAutoHoldMs(settings.autoHoldMs ?? 1500);
+    const faceAPI = (window as any).faceAPI;
+    faceAPI?.getCaptureSequencing?.().then((v: 'sequential' | 'simultaneous') => {
+      if (v) setSequencing(v);
+    });
+  }, []);
 
   useEffect(() => {
     cancelledRef.current = false;
@@ -245,6 +267,12 @@ export default function CameraSetupScreen() {
   const handleSave = async () => {
     const faceAPI = (window as any).faceAPI;
     await faceAPI?.setCameraRoleMapping?.(mapping);
+    await faceAPI?.setCaptureSequencing?.(sequencing);
+    updateSettings({
+      captureMode,
+      autoHoldMs,
+      allowedGestures: allowGesture ? ['VICTORY', 'THUMBS_UP', 'OPEN_PALM'] : [],
+    });
     setSaved(true);
   };
 
@@ -352,14 +380,84 @@ export default function CameraSetupScreen() {
         </div>
       )}
 
-      <div className="mt-8 flex items-center gap-4">
-        <button
-          onClick={handleSave}
-          className="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 font-semibold"
-        >
-          Lưu
-        </button>
-        {saved && <span className="text-emerald-400 text-sm">Đã lưu</span>}
+      <div className="mt-8 pt-6 border-t border-slate-800 space-y-5">
+        <div>
+          <p className="font-semibold mb-2">Cách chụp</p>
+          <div className="flex gap-4 text-sm">
+            <label className="flex items-center gap-2">
+              <input
+                type="radio"
+                checked={sequencing === 'sequential'}
+                onChange={() => setSequencing('sequential')}
+              />
+              Tuần tự — từng ảnh một
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="radio"
+                checked={sequencing === 'simultaneous'}
+                onChange={() => setSequencing('simultaneous')}
+              />
+              Đồng thời — nhiều camera bấm cùng lúc mỗi vòng
+            </label>
+          </div>
+        </div>
+
+        <div>
+          <p className="font-semibold mb-2">Kích hoạt chụp</p>
+          <div className="flex flex-wrap items-center gap-4 text-sm">
+            <label className="flex items-center gap-2">
+              <input type="radio" checked={captureMode === 'AUTO'} onChange={() => setCaptureModeState('AUTO')} />
+              Tự động — giữ tư thế
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="radio"
+                checked={captureMode !== 'AUTO'}
+                onChange={() => setCaptureModeState(allowGesture ? 'MANUAL' : 'OFF')}
+              />
+              Thủ công — bấm nút
+            </label>
+            {captureMode !== 'AUTO' && (
+              <label className="flex items-center gap-2 text-slate-400">
+                <input
+                  type="checkbox"
+                  checked={allowGesture}
+                  onChange={(e) => {
+                    setAllowGesture(e.target.checked);
+                    setCaptureModeState(e.target.checked ? 'MANUAL' : 'OFF');
+                  }}
+                />
+                Cho phép cử chỉ tay
+              </label>
+            )}
+            {captureMode === 'AUTO' && (
+              <label className="flex items-center gap-2 text-slate-400">
+                Giữ tư thế
+                <input
+                  type="number"
+                  min={500}
+                  max={3000}
+                  step={100}
+                  value={autoHoldMs}
+                  onChange={(e) => setAutoHoldMs(Number(e.target.value))}
+                  className="w-20 bg-slate-950 border border-slate-700 rounded px-2 py-1"
+                />
+                ms
+              </label>
+            )}
+          </div>
+        </div>
+
+        <div className="flex items-center gap-4">
+          <button
+            onClick={handleSave}
+            className="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 font-semibold"
+          >
+            Lưu
+          </button>
+          {saved && <span className="text-emerald-400 text-sm">Đã lưu</span>}
+        </div>
       </div>
     </div>
   );

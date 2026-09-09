@@ -181,3 +181,17 @@ export interface CaptureTriggerConfig {
   allowedGestures: GestureType[];
 }
 
+/**
+ * What actually fired a given capture — recorded per-photo for the
+ * auto-vs-manual statistics feature (docs/plans/campaign-config-sso-card-photo-discussion.md
+ * §3.7). Distinct from `CaptureTriggerMode` (the kiosk-wide *setting* that
+ * was active): `AUTO`/`GESTURE`/`SHUTTER` are the three ways a step can
+ * actually complete under that setting (mirroring
+ * `CaptureTriggerEvaluator`'s `AUTO_STABILITY_REACHED` /
+ * `MANUAL_GESTURE_<X>` / `SHUTTER_BUTTON_CLICKED` reasons), and `EXTERNAL`
+ * covers a side-camera frame captured via `WorkflowEngine.recordExternalCapture`
+ * when the CENTER frame's own trigger fires in simultaneous-capture mode —
+ * it never has its own independent trigger.
+ */
+export type CaptureTriggerSource = 'AUTO' | 'GESTURE' | 'SHUTTER' | 'EXTERNAL';
+

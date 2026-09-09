@@ -26,14 +26,19 @@ export class StudentController {
   constructor(private readonly studentService: StudentService) {}
 
   @Get()
-  @ApiOperation({ summary: 'List students who have been captured, grouped by subjectCode' })
+  @ApiOperation({
+    summary: 'List students who have been captured, grouped by subjectCode',
+  })
   @ApiResponsePaginatedDecorator(StudentListItemDao)
   listStudents(@Query() query: ListStudentsQueryDto) {
     return this.studentService.listStudents(query);
   }
 
   @Get(':code')
-  @ApiOperation({ summary: 'One student, every session across every campaign, with photos/videos and view-links' })
+  @ApiOperation({
+    summary:
+      'One student, every session across every campaign, with photos/videos and view-links',
+  })
   @ApiResponseDecorator(StudentDetailDao)
   getStudent(@Param('code') code: string): Promise<StudentDetailDao> {
     return this.studentService.getStudentDetail(code);

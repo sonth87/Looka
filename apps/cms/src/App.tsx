@@ -6,7 +6,11 @@ import { CampaignList } from './components/CampaignList';
 import { CreateCampaignPage } from './components/CreateCampaignPage';
 import { CampaignDetail } from './components/CampaignDetail';
 import { EditCampaignPage } from './components/EditCampaignPage';
-import { StudentsPage } from './components/StudentsPage';
+import { AnglePresetsPage } from './components/AnglePresetsPage';
+import { PhotoKindsPage } from './components/PhotoKindsPage';
+import { ReviewListPage } from './photo-review/ReviewListPage';
+import { ReviewDetailPage } from './photo-review/ReviewDetailPage';
+import { DesktopCallbackPage } from './components/DesktopCallbackPage';
 
 /**
  * `react-router-dom` (2026-09-07) — this app previously used a hand-rolled
@@ -46,7 +50,11 @@ export default function App() {
             <Route path="/campaigns/new" element={<CreateCampaignPage />} />
             <Route path="/campaigns/:id" element={<CampaignDetail />} />
             <Route path="/campaigns/:id/edit" element={<EditCampaignPage />} />
-            <Route path="/students" element={<StudentsPage />} />
+            <Route path="/angle-presets" element={<AnglePresetsPage />} />
+            <Route path="/config" element={<PhotoKindsPage />} />
+            <Route path="/review" element={<ReviewListPage />} />
+            <Route path="/review/:id" element={<ReviewDetailPage />} />
+            <Route path="/desktop-callback" element={<DesktopCallbackPage />} />
           </Routes>
         </Layout>
       </BrowserRouter>

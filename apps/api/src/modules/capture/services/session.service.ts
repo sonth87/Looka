@@ -1,6 +1,7 @@
 import { toDao } from '@app/common/helpers';
 import { CustomException, ERROR_CODE } from '@app/common/errors';
 import { FileStorageService } from '@app/modules/file-storage/services/file-storage.service';
+import { PhotoReviewService } from '@app/modules/photo-review/services/photo-review.service';
 import { CommonService } from '@app/modules/shared/common/common.service';
 import { Pagination } from '@app/modules/shared/common/pagination';
 import { HttpStatus, Injectable, Logger } from '@nestjs/common';
@@ -21,6 +22,7 @@ export class SessionService extends CommonService<Session> {
     @InjectDataSource()
     private readonly dataSource: DataSource,
     private readonly fileStorage: FileStorageService,
+    private readonly photoReview: PhotoReviewService,
   ) {
     super(repository);
   }
@@ -31,6 +33,7 @@ export class SessionService extends CommonService<Session> {
       subjectName: dto.subjectName,
       status: SessionStatus.IN_PROGRESS,
       metadata: dto.metadata ?? {},
+      operatorUserId: dto.operatorUserId,
     });
 
     return toDao(SessionDao, session);
@@ -136,6 +139,19 @@ export class SessionService extends CommonService<Session> {
           );
         });
       }
+
+      // Best-effort, outside the transaction, same reasoning as the
+      // superseded-file cleanup above: a photo-review hiccup must never
+      // roll back (or even delay the response for) a completion the
+      // operator already confirmed. Only fires for a session that actually
+      // has both a subject and a campaign — see
+      // `PhotoReviewService.ensureSetForApprovedSession`'s own doc comment
+      // for why it's safe to call unconditionally.
+      await this.photoReview.ensureSetForApprovedSession(id).catch((err) => {
+        this.logger.warn(
+          `best-effort photo-review set creation failed for session ${id}: ${(err as Error).message}`,
+        );
+      });
     }
 
     return toDao(SessionDao, session);
@@ -166,7 +182,7 @@ export class SessionService extends CommonService<Session> {
       WITH agg AS (
         SELECT
           s.id, s.source, s.device_id, d.name AS device_name, s.campaign_id,
-          s.subject_code, s.subject_name, s.status,
+          s.subject_code, s.subject_name, s.status, s.operator_user_id,
           s.captured_at, s.completed_at, s.approved_at, s.created_at,
           COUNT(p.id)::int AS photo_count,
           COUNT(*) FILTER (WHERE p.fs_status = 'READY')::int AS photos_ready,
@@ -214,7 +230,7 @@ export class SessionService extends CommonService<Session> {
     const rows: Record<string, unknown>[] = await this.dataSource.query(
       `SELECT
           s.id, s.source, s.device_id, d.name AS device_name, s.campaign_id,
-          s.subject_code, s.subject_name, s.status,
+          s.subject_code, s.subject_name, s.status, s.operator_user_id,
           s.captured_at, s.completed_at, s.approved_at,
           COUNT(p.id)::int AS photo_count,
           COUNT(*) FILTER (WHERE p.fs_status = 'READY')::int AS photos_ready,
@@ -241,7 +257,8 @@ export class SessionService extends CommonService<Session> {
       await this.dataSource.query(
         `SELECT id, step_id, step_type, camera_role, attempt, mime_type, bytes,
               fs_file_id, fs_status, local_status, virtual_path,
-              captured_at, uploaded_at, ready_at, upload_error
+              captured_at, uploaded_at, ready_at, upload_error,
+              trigger_source, capture_mode
          FROM photos
         WHERE session_id = $1
         ORDER BY step_id, attempt`,
@@ -266,6 +283,8 @@ export class SessionService extends CommonService<Session> {
         stepId: p.step_id,
         stepType: p.step_type ?? undefined,
         cameraRole: p.camera_role ?? undefined,
+        triggerSource: p.trigger_source ?? undefined,
+        captureMode: p.capture_mode ?? undefined,
         attempt: p.attempt,
         mimeType: p.mime_type,
         bytes: p.bytes,
@@ -306,6 +325,7 @@ export class SessionService extends CommonService<Session> {
       subjectCode: row.subject_code ?? undefined,
       subjectName: row.subject_name ?? undefined,
       status: row.status,
+      operatorUserId: row.operator_user_id ?? undefined,
       capturedAt: row.captured_at ?? undefined,
       completedAt: row.completed_at ?? undefined,
       approvedAt: row.approved_at ?? undefined,

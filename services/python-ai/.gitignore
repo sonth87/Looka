@@ -1,0 +1,7 @@
+# Local virtualenv created for this service (uv venv --python 3.12 .venv).
+# ~1.5 GB with the ML deps (torch/mediapipe/opencv) installed -- never commit.
+.venv/
+.venv2/
+
+__pycache__/
+*.pyc

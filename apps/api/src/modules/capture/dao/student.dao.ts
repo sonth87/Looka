@@ -3,6 +3,30 @@ import { Expose, Type } from 'class-transformer';
 import { SessionSource, SessionStatus } from '../capture.constants';
 
 /**
+ * The student's most recent session within the (optionally
+ * campaign-filtered) result set of `GET /v1/students` — added 2026-09-08 for
+ * the CMS/kiosk "Đang chụp" panel (§3.8.2/Q19 of the discussion doc), which
+ * needs to know where and when, not just that a student was captured.
+ * `deviceName` reuses the exact `devices` join `StudentService.getStudentDetail()`
+ * already does per-session, just applied to the single latest one here.
+ */
+export class StudentLastSessionDao {
+  @ApiPropertyOptional({
+    description: 'Tên thiết bị đã chụp, nếu là phiên kiosk',
+  })
+  @Expose()
+  deviceName?: string;
+
+  @ApiPropertyOptional({ description: 'Thời điểm chụp của phiên gần nhất' })
+  @Expose()
+  capturedAt?: Date;
+
+  @ApiProperty({ description: 'Số ảnh của phiên gần nhất' })
+  @Expose()
+  photoCount: number;
+}
+
+/**
  * One row of `GET /v1/students` — one per distinct `subject_code`, not one
  * per session (a student may have several, across campaigns/days) — see
  * `StudentService.listStudents()` for the grouping query.
@@ -28,9 +52,20 @@ export class StudentListItemDao {
   @Expose()
   lastCapturedAt?: Date;
 
-  @ApiProperty({ type: [String], description: 'Các campaign sinh viên này đã xuất hiện' })
+  @ApiProperty({
+    type: [String],
+    description: 'Các campaign sinh viên này đã xuất hiện',
+  })
   @Expose()
   campaignIds: string[];
+
+  @ApiProperty({
+    type: StudentLastSessionDao,
+    description: 'Phiên chụp gần nhất của sinh viên này',
+  })
+  @Expose()
+  @Type(() => StudentLastSessionDao)
+  lastSession: StudentLastSessionDao;
 }
 
 /**
@@ -56,7 +91,10 @@ export class StudentSessionPhotoDao {
   @Expose()
   fsStatus?: string;
 
-  @ApiPropertyOptional({ description: 'Link xem trực tiếp, có sẵn khi ảnh đã READY trên file-service' })
+  @ApiPropertyOptional({
+    description:
+      'Link xem trực tiếp, có sẵn khi ảnh đã READY trên file-service',
+  })
   @Expose()
   viewUrl?: string;
 
@@ -87,7 +125,10 @@ export class StudentSessionVideoDao {
   @Expose()
   fsStatus?: string;
 
-  @ApiPropertyOptional({ description: 'Link xem trực tiếp, có sẵn khi video đã READY trên file-service' })
+  @ApiPropertyOptional({
+    description:
+      'Link xem trực tiếp, có sẵn khi video đã READY trên file-service',
+  })
   @Expose()
   viewUrl?: string;
 

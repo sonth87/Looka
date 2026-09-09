@@ -17,6 +17,8 @@ import { DesktopCaptureView } from "./views/DesktopCaptureView.js";
 import { MobileCaptureView } from "./views/MobileCaptureView.js";
 import { SharedCaptureViewProps, MultiFrameViewProps } from "./views/types.js";
 import type { CameraScale } from "./views/types.js";
+import type { StudentSubjectInfo } from "../../lib/CaptureSink.js";
+import type { CapturedListCurrent, CapturedListRecentEntry } from "../workflow/CapturedListPanel.js";
 
 export type { CameraScale };
 
@@ -78,6 +80,22 @@ export interface GuidedCaptureScreenProps {
   latestCapturedImage?: { stepId: string; imagePath: string } | null;
   /** See MultiFrameViewProps. Absent (undefined) on the sequential single-camera path. */
   multiFrame?: MultiFrameViewProps;
+  /** See SharedCaptureViewProps.recordingFailed (views/types.ts) — §3.10 layer 2. */
+  recordingFailed?: Record<string, boolean>;
+  /** See SharedCaptureViewProps.subjectInfo (views/types.ts) — S5 left zone. */
+  subjectInfo?: {
+    subject: StudentSubjectInfo | null;
+    round: number;
+    roundCount: number;
+    photoCount: number;
+    photoTotal: number;
+  } | null;
+  /** See SharedCaptureViewProps.capturedList (views/types.ts) — S5 right zone. */
+  capturedList?: {
+    current: CapturedListCurrent | null;
+    recent: CapturedListRecentEntry[];
+    onOpenSession: (subjectCode: string) => void;
+  };
 }
 
 export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (
@@ -125,6 +143,9 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (
     onAutoHoldMsChange: externalOnAutoHoldMsChange,
     latestCapturedImage,
     multiFrame,
+    recordingFailed,
+    subjectInfo,
+    capturedList,
   } = props;
 
   const viewportRef = React.useRef<HTMLDivElement>(null);
@@ -526,6 +547,9 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (
     activeSensitivity,
     handleSensitivityChange,
     multiFrame,
+    recordingFailed,
+    subjectInfo,
+    capturedList,
   };
 
   return (

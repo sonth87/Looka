@@ -15,6 +15,12 @@ export class SessionDao {
   @Expose()
   subjectName?: string;
 
+  @ApiPropertyOptional({
+    description: 'Id người vận hành đã tạo phiên này, nếu có',
+  })
+  @Expose()
+  operatorUserId?: string;
+
   @ApiProperty({ enum: SessionStatus })
   @Expose()
   status: SessionStatus;

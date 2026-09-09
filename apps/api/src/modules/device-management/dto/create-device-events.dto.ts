@@ -1,6 +1,13 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsArray, IsDateString, IsEnum, IsObject, IsOptional, ValidateNested } from 'class-validator';
+import {
+  IsArray,
+  IsDateString,
+  IsEnum,
+  IsObject,
+  IsOptional,
+  ValidateNested,
+} from 'class-validator';
 import { DeviceEventType } from '../entities/device-event.entity';
 
 export class DeviceEventInput {

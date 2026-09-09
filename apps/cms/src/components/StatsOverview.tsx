@@ -103,6 +103,27 @@ export function StatsOverview() {
   const uploadsFailedSpark = timeseries?.points.map((p) => p.uploadsFailed);
   const retakesSpark = timeseries?.points.map((p) => p.retakes);
 
+  /**
+   * Cross-campaign "Tự động"/"Thủ công" totals (ui-redesign-plan.md C1) —
+   * `AllCampaignsStats` has no dedicated total field for this (it wasn't
+   * part of the original stats/summary shape), so this sums each campaign's
+   * own optional `byTrigger` client-side. `null` — not zeros — when not a
+   * single campaign carries `byTrigger` yet, so the tiles below can hide
+   * entirely rather than show a misleading "0" against an unshipped field.
+   */
+  const triggerTotals = stats?.campaigns.reduce<
+    { AUTO: number; GESTURE: number; SHUTTER: number; EXTERNAL: number } | null
+  >((acc, c) => {
+    if (!c.byTrigger) return acc;
+    const base = acc ?? { AUTO: 0, GESTURE: 0, SHUTTER: 0, EXTERNAL: 0 };
+    return {
+      AUTO: base.AUTO + c.byTrigger.AUTO,
+      GESTURE: base.GESTURE + c.byTrigger.GESTURE,
+      SHUTTER: base.SHUTTER + c.byTrigger.SHUTTER,
+      EXTERNAL: base.EXTERNAL + c.byTrigger.EXTERNAL,
+    };
+  }, null) ?? null;
+
   return (
     <div>
       <h1 className="text-2xl font-bold text-gray-900 mb-6">Tổng quan</h1>
@@ -147,6 +168,15 @@ export function StatsOverview() {
                   count - see CampaignPhotoStats in api.ts - so the tile shows its .total; the
                   breakdown itself is the status panel below. */}
               <KpiCard label="Ảnh" value={stats.totalPhotos.total} color={NEUTRAL_ACCENT} />
+              {triggerTotals && (
+                <>
+                  {/* NEUTRAL_ACCENT reused for both — every categorical hue in chartTheme.ts's
+                      fixed 6-slot palette is already claimed by another tracked metric, and
+                      reusing a STATUS color here would wrongly imply "Thủ công" is a bad state. */}
+                  <KpiCard label="Tự động" value={triggerTotals.AUTO} color={NEUTRAL_ACCENT} />
+                  <KpiCard label="Thủ công" value={triggerTotals.GESTURE + triggerTotals.SHUTTER} color={NEUTRAL_ACCENT} />
+                </>
+              )}
             </div>
           </section>
 

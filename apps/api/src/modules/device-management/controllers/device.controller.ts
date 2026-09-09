@@ -1,10 +1,25 @@
-import { ApiResponseArrayDecorator, ApiResponseDecorator } from '@app/common/decorators';
+import {
+  ApiResponseArrayDecorator,
+  ApiResponseDecorator,
+} from '@app/common/decorators';
+import { CustomException, ERROR_CODE } from '@app/common/errors';
 import { SsoAuthGuard } from '@app/common/guards';
-import { Controller, Get, Header, Param, Post, Body, Req, StreamableFile, UseGuards } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Header,
+  HttpStatus,
+  Param,
+  Post,
+  Body,
+  Req,
+  StreamableFile,
+  UseGuards,
+} from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Request } from 'express';
-import { DeviceDao } from '../dao';
-import { CreateDeviceDto, ReissueDeviceDto } from '../dto';
+import { DeviceDao, SelfEnrollDeviceDao } from '../dao';
+import { CreateDeviceDto, ReissueDeviceDto, SelfEnrollDeviceDto } from '../dto';
 import { ActivationPackageService } from '../services/activation-package.service';
 import { CampaignService } from '../services/campaign.service';
 import { DeviceService } from '../services/device.service';
@@ -52,15 +67,28 @@ export class DeviceController {
    */
   @Post('campaigns/:campaignId/devices')
   @Header('Content-Type', 'application/zip')
-  @ApiOperation({ summary: 'Register a device under a campaign and download its activation package' })
+  @ApiOperation({
+    summary:
+      'Register a device under a campaign and download its activation package',
+  })
   async registerDevice(
     @Param('campaignId') campaignId: string,
     @Body() dto: CreateDeviceDto,
     @Req() req: Request,
   ): Promise<StreamableFile> {
-    const campaign = await this.campaignService.findCampaignEntityOrFail(campaignId);
-    const { device, plainSecret } = await this.deviceService.registerDevice(campaignId, dto, deriveApiBaseUrl(req));
-    const zip = await this.activationPackageService.buildActivationZip(device, campaign, plainSecret, dto.os);
+    const campaign =
+      await this.campaignService.findCampaignEntityOrFail(campaignId);
+    const { device, plainSecret } = await this.deviceService.registerDevice(
+      campaignId,
+      dto,
+      deriveApiBaseUrl(req),
+    );
+    const zip = await this.activationPackageService.buildActivationZip(
+      device,
+      campaign,
+      plainSecret,
+      dto.os,
+    );
 
     return new StreamableFile(zip, {
       disposition: `attachment; filename="looka-kiosk-${device.id}.zip"`,
@@ -110,9 +138,32 @@ export class DeviceController {
     @Body() dto: ReissueDeviceDto,
     @Req() req: Request,
   ): Promise<StreamableFile> {
-    const { device, plainSecret } = await this.deviceService.reissueDevice(id, dto, deriveApiBaseUrl(req));
-    const campaign = await this.campaignService.findCampaignEntityOrFail(device.campaignId);
-    const zip = await this.activationPackageService.buildActivationZip(device, campaign, plainSecret, dto.os);
+    const { device, plainSecret } = await this.deviceService.reissueDevice(
+      id,
+      dto,
+      deriveApiBaseUrl(req),
+    );
+    // 2026-09-08: campaignId is now nullable (self-enrolled devices, §3.3) —
+    // this admin zip-reissue endpoint is only ever meaningful for a device
+    // that has one (every admin-registered device still does; a
+    // self-enrolled device was never given a zip in the first place, so
+    // there is nothing to reissue here for it).
+    if (!device.campaignId) {
+      throw new CustomException(
+        'This device has no campaign (self-enrolled) — it cannot be reissued an activation zip',
+        ERROR_CODE.DEVICE_HAS_NO_CAMPAIGN,
+        HttpStatus.CONFLICT,
+      );
+    }
+    const campaign = await this.campaignService.findCampaignEntityOrFail(
+      device.campaignId,
+    );
+    const zip = await this.activationPackageService.buildActivationZip(
+      device,
+      campaign,
+      plainSecret,
+      dto.os,
+    );
 
     return new StreamableFile(zip, {
       disposition: `attachment; filename="looka-kiosk-${device.id}.zip"`,
@@ -129,7 +180,9 @@ export class DeviceController {
    * `DeviceService.revokeDevice`'s own doc comment.
    */
   @Post('devices/:id/revoke')
-  @ApiOperation({ summary: "Revoke a device's credentials immediately (no overlap)" })
+  @ApiOperation({
+    summary: "Revoke a device's credentials immediately (no overlap)",
+  })
   @ApiResponseDecorator(DeviceDao)
   revokeDevice(@Param('id') id: string): Promise<DeviceDao> {
     return this.deviceService.revokeDevice(id);
@@ -154,8 +207,42 @@ export class DeviceController {
   @Get('campaigns/:campaignId/devices')
   @ApiOperation({ summary: 'List devices registered under a campaign' })
   @ApiResponseArrayDecorator(DeviceDao)
-  listDevicesByCampaign(@Param('campaignId') campaignId: string): Promise<DeviceDao[]> {
+  listDevicesByCampaign(
+    @Param('campaignId') campaignId: string,
+  ): Promise<DeviceDao[]> {
     return this.deviceService.findAllByCampaign(campaignId);
+  }
+
+  /**
+   * `POST /v1/devices/self-enroll` (§3.3) — the new, additional
+   * "cài app một lần, đăng nhập, tự đăng ký" path: any logged-in user (not
+   * just an admin — this class's `SsoAuthGuard` at the class level is
+   * already the only gate any of its routes need) can call this from a
+   * kiosk to get itself a device identity, no CMS registration step, no
+   * zip. Looks the calling machine up by `fingerprint`; see
+   * `DeviceService.selfEnroll`'s own doc comment for the found/not-found
+   * behavior. Deliberately does NOT remove or touch
+   * `POST campaigns/:campaignId/devices`/`POST devices/:id/reissue` above —
+   * both admin paths stay fully intact; removing them is an explicit,
+   * separate later cleanup once self-enroll is confirmed working on real
+   * hardware (task brief, "no giai đoạn chuyển tiếp" applies to which path
+   * NEW kiosks use, not a removal of the old one this pass).
+   */
+  @Post('devices/self-enroll')
+  @ApiOperation({
+    summary:
+      'Self-enroll this machine as a device (user token, no campaign) — returns { deviceId, deviceSecret, apiBaseUrl }',
+  })
+  @ApiResponseDecorator(SelfEnrollDeviceDao)
+  selfEnroll(
+    @Body() dto: SelfEnrollDeviceDto,
+    @Req() req: Request,
+  ): Promise<SelfEnrollDeviceDao> {
+    return this.deviceService.selfEnroll(
+      dto,
+      req.user!.id,
+      deriveApiBaseUrl(req),
+    );
   }
 
   // A bare `:id` here would match the literal strings `config`/`events` too

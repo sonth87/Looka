@@ -2,19 +2,35 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Expose } from 'class-transformer';
 import { DeviceStatus } from '../entities/device.entity';
 
-/** Never exposes `deviceSecretHash` — the secret itself is only ever handed out once, inside the activation zip. */
+/** Never exposes `deviceSecretHash` — the secret itself is only ever handed out once, inside the activation zip / self-enroll response. */
 export class DeviceDao {
   @ApiProperty({ description: 'Device id (uuid)' })
   @Expose()
   id: string;
 
-  @ApiProperty()
+  @ApiPropertyOptional({
+    description: 'null nếu tự đăng ký và chưa chọn campaign (§3.3)',
+  })
   @Expose()
-  campaignId: string;
+  campaignId?: string | null;
 
   @ApiProperty()
   @Expose()
   name: string;
+
+  @ApiPropertyOptional({ description: 'Tên máy — chỉ có khi tự đăng ký' })
+  @Expose()
+  hostname?: string | null;
+
+  @ApiPropertyOptional({ description: 'Người tự đăng ký thiết bị này lần đầu' })
+  @Expose()
+  enrolledByUserId?: string | null;
+
+  @ApiPropertyOptional({
+    description: 'Người đăng nhập gần nhất trên thiết bị này',
+  })
+  @Expose()
+  lastUserId?: string | null;
 
   @ApiPropertyOptional()
   @Expose()
@@ -28,7 +44,10 @@ export class DeviceDao {
   @Expose()
   activatedAt?: Date | null;
 
-  @ApiPropertyOptional({ description: 'Thời điểm cấp lại mã gần nhất, còn đang chờ kiosk nạp gói mới' })
+  @ApiPropertyOptional({
+    description:
+      'Thời điểm cấp lại mã gần nhất, còn đang chờ kiosk nạp gói mới',
+  })
   @Expose()
   secretRotatedAt?: Date | null;
 
@@ -55,4 +74,30 @@ export class DeviceDao {
   @ApiProperty()
   @Expose()
   updatedAt: Date;
+}
+
+/**
+ * `POST /v1/devices/self-enroll` response (§3.3) — plain JSON, no zip: the
+ * plaintext secret is handed back exactly once, same "never stored, never
+ * retrievable again" rule as the admin zip flow's `activation.json`, just
+ * without a file download wrapper around it.
+ */
+export class SelfEnrollDeviceDao {
+  @ApiProperty()
+  @Expose()
+  deviceId: string;
+
+  @ApiProperty({ description: 'Chỉ trả về đúng một lần' })
+  @Expose()
+  deviceSecret: string;
+
+  @ApiProperty()
+  @Expose()
+  apiBaseUrl: string;
+
+  @ApiPropertyOptional({
+    description: 'null nếu request không gửi campaignId — thiết bị chưa gắn campaign nào',
+  })
+  @Expose()
+  campaignId: string | null;
 }

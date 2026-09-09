@@ -24,6 +24,16 @@ export class SessionPhotoDao {
   @Expose()
   cameraRole?: string;
 
+  @ApiPropertyOptional({
+    description: 'Nguồn kích hoạt chụp: AUTO/GESTURE/SHUTTER/EXTERNAL',
+  })
+  @Expose()
+  triggerSource?: string;
+
+  @ApiPropertyOptional({ description: 'Chế độ chụp: AUTO/MANUAL/OFF' })
+  @Expose()
+  captureMode?: string;
+
   @ApiProperty()
   @Expose()
   attempt: number;
@@ -104,6 +114,12 @@ export class SessionListItemDao {
   @ApiPropertyOptional()
   @Expose()
   subjectName?: string;
+
+  @ApiPropertyOptional({
+    description: 'Id người vận hành đã chụp phiên này, nếu có',
+  })
+  @Expose()
+  operatorUserId?: string;
 
   @ApiProperty({ enum: SessionStatus })
   @Expose()

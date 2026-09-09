@@ -11,6 +11,8 @@ import {
 import { StepItem } from "../../workflow/StepProgress.js";
 import { RectBounds } from "../../face/FlyingThumbnail.js";
 import { FramePreflight } from "../../../lib/multiFrame.js";
+import { StudentSubjectInfo } from "../../../lib/CaptureSink.js";
+import { CapturedListCurrent, CapturedListRecentEntry } from "../../workflow/CapturedListPanel.js";
 
 export type CameraScale = "compact" | "standard" | "large";
 
@@ -145,4 +147,45 @@ export interface SharedCaptureViewProps {
   handleSensitivityChange: (sens: CaptureSensitivity) => void;
   /** See MultiFrameViewProps. Absent (undefined) on the sequential single-camera path. */
   multiFrame?: MultiFrameViewProps;
+  /**
+   * §3.10 layer 2 ("Trong phiên") — recording channels the byte-liveness
+   * monitor in FaceCaptureApp's two recording effects has declared failed
+   * (a 3s data gap, one automatic restart attempt, then another 3s gap with
+   * still no data — see `packages/ui/src/lib/recordingLiveness.ts`). Keyed
+   * by camera id: `selectedDeviceId || 'default'` on the sequential
+   * single-stream path, each mapped device id on the multi-channel path.
+   * Not yet rendered by DesktopCaptureView/MobileCaptureView — exposed here
+   * so a later UI pass can add the "● REC" / failure indicators
+   * ui-redesign-plan.md's S5 mockup calls for ("Video CENTER không ghi
+   * được — phiên này sẽ phải chụp lại") without this reliability fix
+   * waiting on that UI work.
+   */
+  recordingFailed?: Record<string, boolean>;
+  /**
+   * ui-redesign-plan.md S5 left zone ("NGƯỜI ĐƯỢC CHỤP") — see
+   * `SubjectInfoBadge`. `null`/absent renders nothing (no code entered yet,
+   * or this pass's caller has no round-plan/subject data to hand it — see
+   * `SubjectInfoBadge`'s own props doc). `round`/`roundCount` come from the
+   * §3.1.5 round-planning function (`planCaptureRounds` in
+   * `lib/multiFrame.ts`), not yet wired into a live session — see the TODO
+   * at FaceCaptureApp.tsx's `runSimultaneousCaptureGate`.
+   */
+  subjectInfo?: {
+    subject: StudentSubjectInfo | null;
+    round: number;
+    roundCount: number;
+    photoCount: number;
+    photoTotal: number;
+  } | null;
+  /**
+   * ui-redesign-plan.md S5 right zone ("ĐÃ CHỤP · ĐANG CHỤP") — see
+   * `CapturedListPanel`. Absent renders an empty panel; real data (Q19:
+   * whole campaign online, this device only offline) is a later
+   * integration pass, not this one.
+   */
+  capturedList?: {
+    current: CapturedListCurrent | null;
+    recent: CapturedListRecentEntry[];
+    onOpenSession: (subjectCode: string) => void;
+  };
 }
