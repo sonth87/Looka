@@ -3,20 +3,20 @@ import { toDao } from '@app/common/helpers';
 import { CommonService } from '@app/modules/shared/common/common.service';
 import type { Visibility } from '@face/core';
 import { HttpStatus, Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
-import { createHash } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { DataSource, Repository } from 'typeorm';
-import {
-  ALLOWED_PHOTO_MIME_TYPES,
-  MAX_PHOTO_BYTES,
-  SessionSource,
-} from '../capture.constants';
+import { ALLOWED_PHOTO_MIME_TYPES, MAX_PHOTO_BYTES } from '../capture.constants';
 import { PhotoDao } from '../dao';
-import { AddPhotoDto } from '../dto';
+import { AddDevicePhotoDto, AddPhotoDto } from '../dto';
 import { Photo } from '../entities/photo.entity';
 import { SessionService } from './session.service';
 
 const DATA_URL_PATTERN = /^data:(image\/[a-z+]+);base64,(.+)$/i;
+
+/** How long a signed `local-content` link stays valid — see `issueLocalViewLink`'s own doc comment. */
+const LOCAL_VIEW_TTL_SECONDS = 600;
 
 @Injectable()
 export class PhotoService extends CommonService<Photo> {
@@ -26,25 +26,18 @@ export class PhotoService extends CommonService<Photo> {
     @InjectDataSource()
     private readonly dataSource: DataSource,
     private readonly sessionService: SessionService,
+    private readonly configService: ConfigService,
   ) {
     super(repository);
   }
 
   /**
-   * Record a capture and queue it for the file-service.
-   *
-   * The photo row and its outbox entry are written together, in one
-   * transaction. Accepting bytes, telling the client they are saved, and then
-   * failing to record the intent to upload them is the one outcome worth
-   * engineering against - the browser has already discarded its copy by then.
+   * Shared by `addPhoto` (web) and `addDevicePhoto` (kiosk, A.1 of the
+   * capture-routing work) — both accept the exact same base64 data-URL
+   * shape and must reject the exact same way.
    */
-  async addPhoto(
-    sessionId: string,
-    dto: AddPhotoDto,
-  ): Promise<{ photoId: string }> {
-    await this.sessionService.findByIdOrFail(sessionId);
-
-    const match = DATA_URL_PATTERN.exec(dto.dataUrl);
+  private decodeDataUrl(dataUrl: string): { mimeType: string; data: Buffer } {
+    const match = DATA_URL_PATTERN.exec(dataUrl);
     if (!match) {
       throw new CustomException(
         'Expected dataUrl to be a base64 image data URL',
@@ -78,6 +71,24 @@ export class PhotoService extends CommonService<Photo> {
       );
     }
 
+    return { mimeType, data };
+  }
+
+  /**
+   * Record a capture and queue it for the file-service.
+   *
+   * The photo row and its outbox entry are written together, in one
+   * transaction. Accepting bytes, telling the client they are saved, and then
+   * failing to record the intent to upload them is the one outcome worth
+   * engineering against - the browser has already discarded its copy by then.
+   */
+  async addPhoto(
+    sessionId: string,
+    dto: AddPhotoDto,
+  ): Promise<{ photoId: string }> {
+    await this.sessionService.findByIdOrFail(sessionId);
+
+    const { mimeType, data } = this.decodeDataUrl(dto.dataUrl);
     const sha256 = createHash('sha256').update(data).digest('hex');
     // Deterministic, so every retry of this exact capture carries the same
     // key and the file-service recognises a repeat instead of storing a
@@ -138,6 +149,127 @@ export class PhotoService extends CommonService<Photo> {
     });
 
     return { photoId };
+  }
+
+  /**
+   * The kiosk-path twin of `addPhoto` above (Part A of the "route kiosk
+   * photo uploads through apps/api" work) — a device pushes one captured
+   * photo's actual bytes here, authenticated via `DeviceCredentialsGuard`
+   * instead of the web path's session-scoped call. Writes into the exact
+   * same `photos`/`upload_outbox` tables, through the exact same
+   * `UploadWorkerService` cron, so a kiosk-sourced photo is viewable from
+   * this API's own Postgres the instant it is captured — never only after
+   * fs-core has it — the same guarantee the web path already had.
+   *
+   * Two differences from `addPhoto`, both because the caller is a kiosk
+   * reporting an ALREADY-LOCALLY-APPROVED capture (see this module's own
+   * task brief — this is called at the same moment
+   * `apps/desktop/src/main/uploads.ts`'s `approveSessionUpload()` already
+   * builds SESSION_REPORT from, not at raw capture time):
+   *
+   *  1. `id` is the CALLER's id, not one this method generates — the kiosk's
+   *     own local outbox job id, the same id `SESSION_REPORT`/`PHOTO_STATUS`
+   *     already report under (see `CaptureReportService.applySessionReport`).
+   *     Keeping one id across the whole lifecycle is what lets a
+   *     SESSION_REPORT that still arrives after this call (some kiosk builds
+   *     may keep sending it) upsert the very same row instead of fighting
+   *     this one for a second id — its own `ON CONFLICT (session_id,
+   *     step_id, attempt) DO UPDATE` only ever touches the static identity
+   *     columns (see that method's own doc comment), never
+   *     `local_status`/`fs_file_id`/`fs_status`, so re-applying it after this
+   *     method already created the row is a harmless no-op, not a race.
+   *  2. The outbox row is written already `approved_at = now()` — this
+   *     endpoint's caller reports only after the kiosk's own local approval,
+   *     so there is no separate staged-then-approved window the way the web
+   *     path's `PhotoService.addPhoto` → `SessionService.completeSession`
+   *     two-step has.
+   *
+   * A minimal `sessions` row is upserted first (IN_PROGRESS, `ON CONFLICT
+   * DO NOTHING`) so `photos.session_id`'s FK is satisfied even if this call
+   * lands before (or interleaved with) that session's own SESSION_REPORT —
+   * identical reasoning to `CaptureReportService.applyPhotoStatus`'s own
+   * create-if-missing-session step.
+   */
+  async addDevicePhoto(
+    deviceId: string,
+    campaignId: string,
+    dto: AddDevicePhotoDto,
+  ): Promise<{ photoId: string }> {
+    const { mimeType, data } = this.decodeDataUrl(dto.dataUrl);
+    const sha256 = createHash('sha256').update(data).digest('hex');
+    const idemKey = `${dto.sessionId}:${dto.stepId}:${dto.attempt}`;
+    const ext = mimeType === 'image/png' ? 'png' : 'jpg';
+    // 2026-09-09 ("lưu sang file server sẽ lấy căn cước để lưu ảnh, dễ truy
+    // xuất") — nests every session's photos under a per-student top-level
+    // folder on the file-service, keyed by CCCD, so a student's whole
+    // history is browsable there directly instead of only through this
+    // API's own DB search. Stripped to `\w` only (never trusted verbatim
+    // as a path segment — the exact class of bug a raw, unsanitized
+    // campaign display name caused elsewhere, landing literal `/`
+    // characters in a virtual path from a name like "test night 9/9") and
+    // falls back to the plain `sessions/<id>/...` shape when the kiosk
+    // sends no identity number at all (manual "nhập mã sinh viên" path, or
+    // an older kiosk build).
+    const safeIdentity = dto.identityNumber?.replace(/[^\w-]/g, '');
+    // No `sessions/<id>` segment (2026-09-09, explicit product request) —
+    // every one of a student's photos, across every session they ever sit
+    // for, lands flat under their own CCCD folder. This means a retake
+    // session's `step-0-FRONT-1.jpg` silently overwrites an earlier
+    // session's file of the same name on the file-service (attempt numbers
+    // restart at 1 within each new session) — accepted deliberately here,
+    // not an oversight.
+    const virtualPath = safeIdentity
+      ? `students/${safeIdentity}/${dto.stepId}-${dto.attempt}.${ext}`
+      : `sessions/${dto.sessionId}/${dto.stepId}-${dto.attempt}.${ext}`;
+
+    await this.dataSource.transaction(async (manager) => {
+      await manager.query(
+        `INSERT INTO sessions (id, source, device_id, campaign_id, status)
+         VALUES ($1, 'KIOSK', $2, $3, 'IN_PROGRESS')
+         ON CONFLICT (id) DO NOTHING`,
+        [dto.sessionId, deviceId, campaignId],
+      );
+
+      await manager.query(
+        `INSERT INTO photos (id, session_id, step_id, attempt, step_type, camera_role, mime_type, bytes, sha256, virtual_path, trigger_source, capture_mode)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         ON CONFLICT (session_id, step_id, attempt) DO UPDATE
+           SET step_type = EXCLUDED.step_type,
+               camera_role = EXCLUDED.camera_role,
+               mime_type = EXCLUDED.mime_type,
+               bytes = EXCLUDED.bytes,
+               sha256 = EXCLUDED.sha256,
+               virtual_path = EXCLUDED.virtual_path,
+               trigger_source = EXCLUDED.trigger_source,
+               capture_mode = EXCLUDED.capture_mode`,
+        [
+          dto.photoId,
+          dto.sessionId,
+          dto.stepId,
+          dto.attempt,
+          dto.stepType ?? null,
+          dto.cameraRole ?? null,
+          mimeType,
+          data.byteLength,
+          sha256,
+          virtualPath,
+          dto.triggerSource ?? null,
+          dto.captureMode ?? null,
+        ],
+      );
+
+      // Same "this is biometric data" reasoning as addPhoto() above.
+      const visibility: Visibility = 'private';
+
+      await manager.query(
+        `INSERT INTO upload_outbox (photo_id, idem_key, virtual_path, mime_type, content, visibility, approved_at)
+         VALUES ($1, $2, $3, $4, $5, $6, now())
+         ON CONFLICT (idem_key) DO NOTHING`,
+        [dto.photoId, idemKey, virtualPath, mimeType, data, visibility],
+      );
+    });
+
+    return { photoId: dto.photoId };
   }
 
   async listBySession(sessionId: string): Promise<PhotoDao[]> {
@@ -213,11 +345,34 @@ export class PhotoService extends CommonService<Photo> {
 
   /**
    * Which file-service client should serve this photo's view-link (A.7).
-   * A kiosk photo lives under its device's own tenant namespace (see
-   * `FileStorageService.clientForTenant` - the tenant name is the device
-   * id, the same self-service provisioning the kiosk itself used); a web
-   * photo stays on this API's own default tenant, so `tenantName` is
-   * `undefined` for it.
+   *
+   * Always `undefined` (this API's own default tenant) — including for a
+   * KIOSK-sourced photo. This used to resolve the device id as a per-device
+   * tenant name (the idea being that a kiosk photo lives under its own
+   * device's tenant namespace, the same self-service provisioning the kiosk
+   * itself used), but that has never matched where the bytes actually are:
+   * `UploadWorkerService.send()` (the ONLY thing that ever pushes a captured
+   * photo — web or kiosk — to fs-core, since the "route kiosk photo uploads
+   * through apps/api" local-first work landed) always uses this service's
+   * single, already-configured default-tenant client; `upload_outbox` has no
+   * `tenant_name` column for `send()` to even read one from. Worse, fs-core's
+   * real `/api/v1/self-service/provision` only ever returns an `api_key` the
+   * very first time a tenant is created (confirmed live 2026-09-09) — every
+   * later call, which is the ONLY case that matters once a device has
+   * already self-provisioned (as every real kiosk does at first boot, see
+   * `apps/desktop/src/main/secrets.ts`), returns `created: false` with no
+   * `api_key` at all, and apps/api has nowhere it durably stores a
+   * per-device key to fall back on. So resolving a device tenant here was
+   * guaranteed to either look in the wrong namespace or throw "provision
+   * succeeded but returned no api_key" — the exact `FILE_STORAGE_UPSTREAM_ERROR`
+   * ("File server không phản hồi" in the CMS) this method's callers used to
+   * surface for every KIOSK session's photos.
+   *
+   * Superseded by `resolveViewSource` below (Part A of the
+   * capture-routing work) for `PhotoController.viewLink`'s own use — kept
+   * as a separate, still-throws-if-not-on-fs-core method since nothing else
+   * in this codebase needs the "no local fallback" variant, but removing it
+   * outright was not worth the risk this pass.
    */
   async resolveViewContext(
     photoId: string,
@@ -238,12 +393,156 @@ export class PhotoService extends CommonService<Photo> {
       );
     }
 
-    const session = await this.sessionService.findById(photo.sessionId);
-    const tenantName =
-      session?.source === SessionSource.KIOSK && session.deviceId
-        ? session.deviceId
-        : undefined;
+    return { fsFileId: photo.fsFileId, tenantName: undefined };
+  }
 
-    return { fsFileId: photo.fsFileId, tenantName };
+  /**
+   * Where to load this photo from for viewing (`PhotoController`'s `POST
+   * :id/view-link`, A.3 of the capture-routing work): the real fs-core link
+   * once `fs_file_id` is set, or a signal to fall back to this API's own
+   * locally held bytes (`upload_outbox.content`) when it is not — "a
+   * captured photo that hasn't reached the file server yet must still be
+   * shown to the user" (the user's own framing of this requirement, see
+   * that work's task brief). Throws only when NEITHER is available — a
+   * photo whose row exists (e.g. from SESSION_REPORT metadata alone, an
+   * older kiosk build, or a row this API created before its bytes ever
+   * arrived) but whose bytes never reached either place.
+   *
+   * `fsFileId` alone is NOT enough to trust the remote copy (2026-09-09
+   * fix) — `UploadWorkerService.send()` assigns it from the upload
+   * response BEFORE the file has actually survived fs-core's own scan, and
+   * this real fs-core deployment has been observed purging a file during
+   * that scan and later answering `getFile` with 404 (see that service's
+   * `pollScans` doc comment) — `fs_status` is what `pollScans` sets to
+   * `'FAILED'` once that happens, and it is the one field that actually
+   * tracks whether the remote copy still exists. A non-`'READY'` (and, in
+   * particular, `'FAILED'`/`'QUARANTINED'`) status must fall through to
+   * the same local-content check a missing `fsFileId` already gets —
+   * otherwise a photo whose remote copy fs-core discarded keeps trying
+   * (and failing) that dead link forever, exactly the "File server không
+   * phản hồi" symptom this closes, even though `UploadWorkerService` never
+   * clears the local copy on that same failure specifically so this path
+   * could fall back to it.
+   */
+  async resolveViewSource(
+    photoId: string,
+  ): Promise<
+    | { kind: 'remote'; fsFileId: string; tenantName?: string }
+    | { kind: 'local' }
+  > {
+    const photo = await this.findById(photoId);
+    if (!photo) {
+      throw new CustomException(
+        'Photo not found',
+        ERROR_CODE.PHOTO_NOT_FOUND,
+        HttpStatus.NOT_FOUND,
+      );
+    }
+
+    if (photo.fsFileId && photo.fsStatus !== 'FAILED' && photo.fsStatus !== 'QUARANTINED') {
+      // Always the default tenant — see `resolveViewContext`'s doc comment
+      // just above for why a KIOSK session's device id must never be used
+      // here (the photo was never actually stored under it, and fs-core
+      // cannot hand that tenant's key back out a second time regardless).
+      return { kind: 'remote', fsFileId: photo.fsFileId, tenantName: undefined };
+    }
+
+    const rows: Array<{ has_content: boolean }> = await this.dataSource.query(
+      `SELECT (content IS NOT NULL AND length(content) > 0) AS has_content
+         FROM upload_outbox WHERE photo_id = $1
+        ORDER BY created_at DESC LIMIT 1`,
+      [photoId],
+    );
+    if (rows[0]?.has_content) {
+      return { kind: 'local' };
+    }
+
+    throw new CustomException(
+      'This photo has not reached the file-service yet and has no locally stored bytes either',
+      ERROR_CODE.FILE_STORAGE_NOT_READY,
+      HttpStatus.SERVICE_UNAVAILABLE,
+    );
+  }
+
+  /**
+   * A signed, short-lived URL for `PhotoContentController`'s unauthenticated
+   * `GET :id/local-content` — the local-bytes counterpart of
+   * `FileStorageService.issueViewLink`'s fs-core link, for a photo that
+   * has not reached fs-core yet (see `resolveViewSource`). Signed with an
+   * HMAC over `photoId:expiry`, keyed by this API's own `API_KEY` (a secret
+   * already required to exist and already never sent to a browser), rather
+   * than a new persisted token table — the same "unguessable, self-
+   * expiring, no separate auth header" property a real fs-core link has,
+   * without new infrastructure for what is only ever a short transitional
+   * window (until the upload worker's next successful send to fs-core).
+   *
+   * `apiBaseUrl` is the origin the calling browser actually used to reach
+   * THIS request (see `PhotoController.viewLink`'s own comment) — not a
+   * configured public URL, so this works unmodified for both a local dev
+   * setup and a real LAN deployment.
+   */
+  issueLocalViewLink(
+    photoId: string,
+    apiBaseUrl: string,
+  ): { url: string; expiresAt: string } {
+    const exp = Math.floor(Date.now() / 1000) + LOCAL_VIEW_TTL_SECONDS;
+    const sig = this.signLocalViewToken(photoId, exp);
+    const url = `${apiBaseUrl.replace(/\/$/, '')}/v1/photos/${photoId}/local-content?exp=${exp}&sig=${sig}`;
+    return { url, expiresAt: new Date(exp * 1000).toISOString() };
+  }
+
+  /** Throws `PHOTO_LOCAL_TOKEN_INVALID` unless `sig`/`exp` are a valid, unexpired pair for `photoId` — see `issueLocalViewLink`. */
+  verifyLocalViewTokenOrFail(
+    photoId: string,
+    expRaw: string,
+    sigRaw: string,
+  ): void {
+    const exp = Number(expRaw);
+    const expectedBuf = Buffer.from(
+      this.signLocalViewToken(photoId, exp),
+      'hex',
+    );
+    const gotBuf = sigRaw ? Buffer.from(sigRaw, 'hex') : Buffer.alloc(0);
+    const valid =
+      Number.isFinite(exp) &&
+      exp >= Math.floor(Date.now() / 1000) &&
+      expectedBuf.length === gotBuf.length &&
+      expectedBuf.length > 0 &&
+      timingSafeEqual(expectedBuf, gotBuf);
+    if (!valid) {
+      throw new CustomException(
+        'This local-content link is invalid or has expired — request a fresh one via POST :id/view-link',
+        ERROR_CODE.PHOTO_LOCAL_TOKEN_INVALID,
+        HttpStatus.UNAUTHORIZED,
+      );
+    }
+  }
+
+  private signLocalViewToken(photoId: string, exp: number): string {
+    const secret = this.configService.get<string>('security.apiKey') ?? '';
+    return createHmac('sha256', secret)
+      .update(`${photoId}:${exp}`)
+      .digest('hex');
+  }
+
+  /** Streams straight from `upload_outbox.content` — see `resolveViewSource`'s 'local' branch. */
+  async readLocalContent(
+    photoId: string,
+  ): Promise<{ data: Buffer; mimeType: string }> {
+    const rows: Array<{ content: Buffer | null; mime_type: string }> =
+      await this.dataSource.query(
+        `SELECT content, mime_type FROM upload_outbox
+          WHERE photo_id = $1 AND content IS NOT NULL AND length(content) > 0
+          ORDER BY created_at DESC LIMIT 1`,
+        [photoId],
+      );
+    if (!rows[0]?.content) {
+      throw new CustomException(
+        'No locally stored bytes for this photo',
+        ERROR_CODE.FILE_STORAGE_NOT_READY,
+        HttpStatus.NOT_FOUND,
+      );
+    }
+    return { data: rows[0].content, mimeType: rows[0].mime_type };
   }
 }

@@ -27,7 +27,8 @@ export { MultiFrameGrid } from './components/camera/MultiFrameGrid.js';
 export type { MultiFrameGridFrame, MultiFrameGridProps } from './components/camera/MultiFrameGrid.js';
 export { FramesBlockedPanel } from './components/camera/FramesBlockedPanel.js';
 export type { FramesBlockedPanelProps } from './components/camera/FramesBlockedPanel.js';
-export { CAMERA_ROLE_LABELS_VI } from './lib/multiFrame.js';
+export { CAMERA_ROLE_LABELS_VI, DEFAULT_PHYSICAL_ANGLES } from './lib/multiFrame.js';
+export type { PhysicalCameraAngles, PhysicalAngleMap } from './lib/multiFrame.js';
 
 // Face
 export { FaceOverlay } from './components/face/FaceOverlay.js';

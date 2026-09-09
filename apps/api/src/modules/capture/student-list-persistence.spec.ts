@@ -89,10 +89,11 @@ describeDb(
       deviceId?: string | null;
       capturedAt: Date;
       source?: 'WEB' | 'KIOSK';
+      metadata?: Record<string, unknown>;
     }): Promise<string> => {
       const [row] = await dataSource.query(
-        `INSERT INTO sessions (subject_code, campaign_id, device_id, captured_at, source, status)
-       VALUES ($1, $2, $3, $4, $5, 'COMPLETED')
+        `INSERT INTO sessions (subject_code, campaign_id, device_id, captured_at, source, status, metadata)
+       VALUES ($1, $2, $3, $4, $5, 'COMPLETED', $6)
        RETURNING id`,
         [
           opts.subjectCode,
@@ -100,6 +101,7 @@ describeDb(
           opts.deviceId ?? null,
           opts.capturedAt,
           opts.source ?? (opts.deviceId ? 'KIOSK' : 'WEB'),
+          JSON.stringify(opts.metadata ?? {}),
         ],
       );
       return row.id;
@@ -203,6 +205,37 @@ describeDb(
       expect(row).toBeDefined();
       expect(row?.lastSession.deviceName).toBeUndefined();
       expect(row?.lastSession.photoCount).toBe(0);
+    });
+
+    // 2026-09-09, CCCD-scan capture-identification feature: `identityNumber`/
+    // `className` have no dedicated column (see `StudentSubjectInfo`'s own
+    // doc comment in packages/ui) - `q` matching them inside `metadata` is
+    // what makes a session findable in the CMS by CCCD number or class name
+    // ("sau có thể lên cms tìm theo cccd, tên lớp").
+    test('q also matches identityNumber/className inside sessions.metadata, not just subjectCode/subjectName', async () => {
+      const subjectCode = `LS-META-${randomUUID()}`;
+      const identityNumber = `01420${randomUUID().replace(/-/g, '').slice(0, 7)}`;
+      await insertSession({
+        subjectCode,
+        capturedAt: hoursAgo(0.1),
+        source: 'WEB',
+        metadata: { identityNumber, className: 'CNTT01-META' },
+      });
+
+      const byIdentityNumber = await studentService.listStudents({ q: identityNumber });
+      expect(
+        byIdentityNumber.items.some((i) => i.subjectCode === subjectCode),
+      ).toBe(true);
+
+      const byClassName = await studentService.listStudents({ q: 'CNTT01-META' });
+      expect(
+        byClassName.items.some((i) => i.subjectCode === subjectCode),
+      ).toBe(true);
+
+      const noMatch = await studentService.listStudents({ q: `no-such-value-${randomUUID()}` });
+      expect(noMatch.items.some((i) => i.subjectCode === subjectCode)).toBe(
+        false,
+      );
     });
   },
 );

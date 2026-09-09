@@ -33,6 +33,7 @@ export const ERROR_CODE = {
   PHOTO_UNSUPPORTED_MIME_TYPE: 2002,
   PHOTO_TOO_LARGE: 2003,
   PHOTO_STATUS_INVALID_PAYLOAD: 2004,
+  PHOTO_LOCAL_TOKEN_INVALID: 2005,
 
   // FILE STORAGE / file-service integration (3xxx)
   FILE_STORAGE_NOT_READY: 3000,
@@ -58,10 +59,25 @@ export const ERROR_CODE = {
   CAMPAIGN_MEMBER_NOT_FOUND: 5012,
   DEVICE_HAS_NO_CAMPAIGN: 5013,
   DEVICE_FINGERPRINT_REVOKED: 5014,
+  CAPTURE_CONFIGURATION_NOT_FOUND: 5015,
 
   // VIDEO — kiosk video upload reporting (6xxx)
   VIDEO_NOT_FOUND: 6000,
   VIDEO_STATUS_INVALID_PAYLOAD: 6001,
+  // The file-service copy is known-bad (FAILED/QUARANTINED) or has sat in a
+  // non-terminal scan state so long it is presumed lost — see
+  // `SessionVideoService.resolveViewContext`. Distinct from
+  // `FILE_STORAGE_NOT_READY` (3000, "not there yet, try later" — retryable)
+  // because this one never will be.
+  VIDEO_PROCESSING_FAILED: 6002,
+  // 2026-09-09 ("route kiosk video uploads through apps/api", mirroring the
+  // photo pipeline's PHOTO_INVALID_DATA_URL/PHOTO_UNSUPPORTED_MIME_TYPE/
+  // PHOTO_TOO_LARGE/PHOTO_LOCAL_TOKEN_INVALID — see PhotoService.decodeDataUrl/
+  // issueLocalViewLink for the twin codes these mirror).
+  VIDEO_INVALID_DATA_URL: 6003,
+  VIDEO_UNSUPPORTED_MIME_TYPE: 6004,
+  VIDEO_TOO_LARGE: 6005,
+  VIDEO_LOCAL_TOKEN_INVALID: 6006,
 
   // STUDENT — "sinh viên đã chụp" gallery (7xxx)
   STUDENT_NOT_FOUND: 7000,

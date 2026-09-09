@@ -24,8 +24,8 @@ export class SessionVideo extends BaseEntity {
   @JoinColumn({ name: 'session_id' })
   session?: Session;
 
-  /** e.g. CENTER/LEFT/RIGHT, or the physical camera id when no role mapping applies. */
-  @Column('varchar', { length: 20, nullable: true, name: 'camera_role' })
+  /** e.g. CENTER/LEFT/RIGHT, or the physical camera id when no role mapping applies — a Chromium device id can run 60-100+ chars, hence 255 (2026-09-09 fix; see migration 1805000000000). */
+  @Column('varchar', { length: 255, nullable: true, name: 'camera_role' })
   @ApiPropertyOptional({ description: 'Camera đã quay video này' })
   cameraRole?: string;
 

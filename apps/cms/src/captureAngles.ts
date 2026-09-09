@@ -85,6 +85,32 @@ export const CAMERA_ROLE_LABELS: Record<CameraRole, string> = {
   DOWN: 'Camera dưới',
 };
 
+/**
+ * Physical camera mounting angle, per role — a deliberate duplicate of
+ * `DEFAULT_PHYSICAL_ANGLES` in packages/ui/src/lib/multiFrame.ts (same
+ * reasoning as every other value copied across the desktop/CMS boundary in
+ * this file: this app has no dependency on that package). Used by
+ * `CaptureAnglesTable`'s camera-role picker to auto-fill a row's pose target
+ * (2026-09-09 fix, "chụp đồng thời 3 cam") — see that component's own
+ * comment for the exact bug this closes: a row's `pose.yaw.target` must
+ * equal its assigned camera's OWN physical angle for `planCaptureRounds` to
+ * ever group it into a simultaneous round with other cameras; the old fixed
+ * angles here (LEFT -22.5°/RIGHT 22.5°) describe how far the *subject*
+ * should turn for a single-camera sequential shot, a different thing
+ * entirely, and never match a mounted side camera's angle. This assumes a
+ * kiosk's own `camera.physicalAngles` setting is left at these same
+ * defaults — a kiosk that customises them individually needs its angle
+ * targets adjusted to match by hand; there is no way for this campaign-level
+ * editor to know a specific kiosk's own override.
+ */
+export const DEFAULT_PHYSICAL_ANGLES: Record<CameraRole, { yaw: number; pitch: number }> = {
+  CENTER: { yaw: 0, pitch: 0 },
+  LEFT: { yaw: -30, pitch: 0 },
+  RIGHT: { yaw: 30, pitch: 0 },
+  UP: { yaw: 0, pitch: 25 },
+  DOWN: { yaw: 0, pitch: -25 },
+};
+
 /** The camera role a given step type defaults to (see `CAPTURE_STEP_DEFS`). */
 export function cameraRoleForStep(type: StepType): CameraRole {
   return CAPTURE_STEP_DEFS[type].cameraRole as CameraRole;

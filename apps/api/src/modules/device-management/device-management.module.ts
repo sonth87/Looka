@@ -7,12 +7,14 @@ import { CampaignController } from './controllers/campaign.controller';
 import { CampaignConfigController } from './controllers/campaign-config.controller';
 import { CampaignMemberController } from './controllers/campaign-member.controller';
 import { CaptureAnglePresetController } from './controllers/capture-angle-preset.controller';
+import { CaptureConfigurationController } from './controllers/capture-configuration.controller';
 import { DeviceController } from './controllers/device.controller';
 import { DeviceSelfController } from './controllers/device-self.controller';
 import { MeController } from './controllers/me.controller';
 import { Campaign } from './entities/campaign.entity';
 import { CampaignMember } from './entities/campaign-member.entity';
 import { CaptureAnglePreset } from './entities/capture-angle-preset.entity';
+import { CaptureConfiguration } from './entities/capture-configuration.entity';
 import { Device } from './entities/device.entity';
 import { DeviceEvent } from './entities/device-event.entity';
 import { AdminRoleGuard } from './guards/admin-role.guard';
@@ -22,6 +24,7 @@ import { ActivationPackageService } from './services/activation-package.service'
 import { CampaignService } from './services/campaign.service';
 import { CampaignMemberService } from './services/campaign-member.service';
 import { CaptureAnglePresetService } from './services/capture-angle-preset.service';
+import { CaptureConfigurationService } from './services/capture-configuration.service';
 import { DeviceService } from './services/device.service';
 import { DeviceEventService } from './services/device-event.service';
 
@@ -32,6 +35,7 @@ import { DeviceEventService } from './services/device-event.service';
       Device,
       DeviceEvent,
       CaptureAnglePreset,
+      CaptureConfiguration,
       CampaignMember,
     ]),
     CaptureModule,
@@ -69,6 +73,7 @@ import { DeviceEventService } from './services/device-event.service';
     CampaignConfigController,
     CampaignMemberController,
     CaptureAnglePresetController,
+    CaptureConfigurationController,
     MeController,
   ],
   providers: [
@@ -77,6 +82,7 @@ import { DeviceEventService } from './services/device-event.service';
     DeviceEventService,
     CampaignMemberService,
     CaptureAnglePresetService,
+    CaptureConfigurationService,
     ActivationPackageService,
     DeviceCredentialsGuard,
     // `@UseGuards()` on CampaignController/DeviceController/etc - see those
@@ -91,6 +97,7 @@ import { DeviceEventService } from './services/device-event.service';
     DeviceEventService,
     CampaignMemberService,
     CaptureAnglePresetService,
+    CaptureConfigurationService,
   ],
 })
 export class DeviceManagementModule {}

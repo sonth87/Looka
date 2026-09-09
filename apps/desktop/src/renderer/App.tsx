@@ -1,7 +1,7 @@
 import { DeviceLayout, AppConfig, AppContentProps } from '@sonth87/device-layout';
 // import { UserCheck } from 'lucide-react'; // only used by the commented-out attendance app entry below
 import { ElectronCaptureSink, FaceCaptureApp, /* KioskAttendanceApp, */ LookaIcon } from '@face/ui';
-import { CampaignGate } from './CampaignGate';
+import { CampaignGate, authClient } from './CampaignGate';
 
 const electronCaptureSink = new ElectronCaptureSink();
 
@@ -29,11 +29,37 @@ const electronCaptureSink = new ElectronCaptureSink();
  * check at all) instead of its legacy `window.faceAPI.getDeviceAccessStatus()`
  * fallback. See `FaceCaptureApp`'s `resolveActiveWorkflow` for what each
  * path does.
+ *
+ * `operatorUserId` (2026-09-09, "thống kê phần giảng viên chụp" — see
+ * `FaceCaptureAppProps.operatorUserId`'s own doc comment): read straight
+ * from `authClient` rather than threaded through `CampaignGate`'s own
+ * `children` callback, since — unlike `campaignConfig` — it doesn't change
+ * per campaign selection; it's set once at login and stable for the whole
+ * kiosk session.
+ *
+ * `campaignId`/`authClient` (2026-09-09, CCCD-scan capture-identification
+ * feature): `campaignId` comes through `CampaignGate`'s `children` callback
+ * (see that prop's own doc comment there); `authClient` is the same
+ * already-imported SSO singleton `operatorUserId` above reads from. Passed
+ * straight through purely so `FaceCaptureApp.tsx` can tell this
+ * campaign+login kiosk path apart from `apps/web`/the legacy path — the
+ * actual CCCD roster check no longer goes through either of these (it's a
+ * direct main-process file lookup, no API call, no campaign scoping — see
+ * `apps/desktop/src/main/cccdRosterWatcher.ts`).
  */
 function FaceCaptureAppWithFsSink(props: AppContentProps) {
   return (
     <CampaignGate contentProps={props}>
-      {(p, campaignConfig) => <FaceCaptureApp {...p} sink={electronCaptureSink} campaignConfig={campaignConfig} />}
+      {(p, campaignConfig, campaignId) => (
+        <FaceCaptureApp
+          {...p}
+          sink={electronCaptureSink}
+          campaignConfig={campaignConfig}
+          campaignId={campaignId}
+          authClient={authClient}
+          operatorUserId={authClient.getOperatorUserId()}
+        />
+      )}
     </CampaignGate>
   );
 }

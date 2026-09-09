@@ -61,7 +61,7 @@ export function CampaignStudentsPanel({ campaignId }: { campaignId: string }) {
             setQ(e.target.value);
             setPage(1);
           }}
-          placeholder="Tìm theo mã hoặc tên sinh viên..."
+          placeholder="Tìm theo mã, tên, số CCCD, hoặc tên lớp..."
           className="w-full max-w-sm bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900"
         />
 

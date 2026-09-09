@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
-import { SlidersHorizontal, Camera, Monitor } from 'lucide-react';
+import { Camera, Monitor } from 'lucide-react';
 import {
   CameraDevice,
   CameraRole,
@@ -74,10 +74,11 @@ const VIDEO_BITRATE_BPS = 1_000_000;
 import type { MultiFrameViewProps, MultiFrameViewFrame } from './views/types.js';
 import { GuidedCaptureScreen } from './GuidedCaptureScreen.js';
 import { StudentIdEntryScreen } from './StudentIdEntryScreen.js';
-import { lookupStudent } from '../../lib/studentLookup.js';
+import { CccdScanWaitingScreen, type CccdRosterLookupResult } from './CccdScanWaitingScreen.js';
+import { lookupStudent, type StudentLookupResult } from '../../lib/studentLookup.js';
+import type { AuthClient } from '../../lib/authClient.js';
 import { SessionReviewModal } from '../workflow/SessionReviewModal.js';
 import { CAPTURE_MIRRORED } from '../camera/CameraPreview.js';
-import { SimulationSliders, SimulationSettings } from '../debug/SimulationSliders.js';
 import { StepItem } from '../workflow/StepProgress.js';
 import { TooltipProvider, Tooltip, TooltipTrigger, TooltipContent } from '../ui/tooltip.js';
 import { getSettings, updateSettings } from '../../lib/settingsStore.js';
@@ -392,6 +393,38 @@ interface CbHelpPublishState {
    * `phase`, as "show the full-screen greeting."
    */
   greeting: CbHelpGreeting | null;
+  /**
+   * Item 12b (2026-09-09): `CbHelpFrames.tsx` used to open its own
+   * independent `getUserMedia` for CENTER, alongside this window's own
+   * already-open CENTER stream (`cameraServiceRef`) — a known field bug
+   * (2026-09-08 report: CB Help's CENTER tile stays blank even though the
+   * main window's CENTER camera is clearly live), most likely the OS/driver
+   * refusing a second concurrent reader of one physical camera. Fixed by
+   * feeding that tile from THIS window's own live feed instead of a second
+   * competing stream: a periodic still (see the `centerPreviewInterval`
+   * effect below), refreshed a few times a second — plenty for an "extended
+   * monitor," not a full second video pipeline. `null`/absent outside
+   * `phase: 'live'`, or when `cameraServiceRef` has nothing to snapshot yet.
+   */
+  centerPreviewDataUrl?: string | null;
+  /**
+   * CCCD-scan capture-identification (2026-09-09) — set only for the brief
+   * window between a scanned CCCD number failing to match the (campaign-
+   * agnostic) roster and the next scan attempt (`handleCccdScan` below). Same
+   * "presence, not `phase`, is what the renderer branches on" convention as
+   * `greeting`: the CB Help window shows this as a full-screen error
+   * overlay regardless of `phase`, since capture must not proceed while it
+   * is up. `null`/absent the rest of the time.
+   */
+  errorMessage?: string | null;
+  /**
+   * Post-save "Cảm ơn" overlay (2026-09-09, "cảm ơn phải hiển thị trên màn
+   * extend") — same "presence, not `phase`" convention as `greeting`/
+   * `errorMessage`. Set only for the fixed window right after `onAccept`
+   * succeeds (see `thankYouStudent`'s own doc comment). `null`/absent the
+   * rest of the time.
+   */
+  thankYou?: { name: string } | null;
 }
 
 /**
@@ -425,7 +458,8 @@ function buildCbHelpFrames(
   currentStepIndex: number,
   simultaneous: boolean,
   roleMapping: Record<string, string>,
-  currentDeviceId: string
+  currentDeviceId: string,
+  connectedDevices: CameraDevice[]
 ): CbHelpFrame[] {
   return framesForWorkflow(workflow).map((frame, idx) => {
     const sessionStep = session?.steps.find((st) => st.stepId === frame.stepId);
@@ -438,8 +472,22 @@ function buildCbHelpFrames(
       : sessionStep?.status === 'FAILED'
       ? 'FAILED'
       : 'PENDING';
+    // A role-mapped device id is only worth forwarding if it's actually
+    // connected right now — same check `isFrameMissingDevice` already does
+    // for the main window (see this function's own doc comment, 2026-09-09
+    // fix). A camera unplugged since `roleMapping` was last set must not be
+    // reported as this frame's device — CbHelpFrames.tsx would then keep
+    // trying (and failing) to open a stream for it every time this frame
+    // becomes live again.
+    const roleMappedDeviceId = roleMapping[frame.role];
+    const roleMappedDeviceConnected =
+      !!roleMappedDeviceId && connectedDevices.some((d) => d.id === roleMappedDeviceId);
     const mappedDeviceId =
-      frame.role === 'CENTER' ? currentDeviceId || null : roleMapping[frame.role] ?? null;
+      frame.role === 'CENTER'
+        ? currentDeviceId || null
+        : roleMappedDeviceConnected
+        ? roleMappedDeviceId
+        : null;
 
     return {
       stepId: frame.stepId,
@@ -513,11 +561,53 @@ export interface FaceCaptureAppProps {
    * presses "Thực hiện chụp ảnh" and passes it through here.
    */
   campaignConfig?: CampaignWorkflowConfig | null;
+  /**
+   * The logged-in operator's server-side `users.id` (2026-09-09,
+   * "thống kê phần giảng viên chụp" — `apps/api`'s
+   * `DeviceEventService.campaignOperatorStats()` groups completed sessions
+   * by this), passed straight through to `CaptureSink.approveUpload`'s
+   * `operatorUserId` option at the moment a session is approved
+   * ("Xác nhận & Lưu hồ sơ"). `apps/desktop/src/renderer/App.tsx` reads it
+   * from `authClient.getOperatorUserId()`. `undefined`/`null` on the legacy
+   * device-secret path or `apps/web` (no SSO identity at all) — a session
+   * with no operator id just reports under the server's "Không rõ" bucket,
+   * never blocks approval.
+   */
+  operatorUserId?: string | null;
+  /**
+   * The selected campaign's id (2026-09-09, CCCD-scan capture-identification
+   * feature) — `apps/desktop/src/renderer/CampaignGate.tsx` threads this
+   * through the same `children(props, campaignConfig, campaignId)` callback
+   * `campaignConfig` already comes through, since it is only known inside
+   * that gate's own closure (the `campaign` it fetched, chosen, and joined).
+   * Together with `authClient` below, its mere presence is only used to
+   * decide which pre-session identification screen to render below
+   * (`CccdScanWaitingScreen` vs. `StudentIdEntryScreen`'s manual form) — NOT
+   * to scope a roster lookup. A same-day architecture correction removed
+   * the earlier campaign-scoped `GET /v1/campaigns/:id/roster/lookup` call
+   * this doc comment used to describe: the real roster
+   * (`D:\Work\camera_server\response.json`) is one campaign-agnostic file,
+   * checked entirely inside the desktop app's main process (see
+   * `apps/desktop/src/main/cccdRosterWatcher.ts`), never through this API.
+   * `undefined`/`null` on the legacy device-secret path or `apps/web` —
+   * both of those keep using `StudentIdEntryScreen`'s manual "nhập mã sinh
+   * viên" form instead (see `handleCccdScan`'s own doc comment for why this
+   * couldn't just be dropped as dead code).
+   */
+  campaignId?: string | null;
+  /**
+   * Same `AuthClient` `CampaignPickerScreen`/`CampaignHomeScreen` already
+   * take as a prop — reused here (not a new, narrower "just give me a
+   * header" abstraction) purely so its presence, alongside `campaignId`
+   * above, marks this as the kiosk's campaign+login build. `apps/desktop/
+   * src/renderer/App.tsx` passes the same `authClient` singleton
+   * `CampaignGate.tsx` exports.
+   */
+  authClient?: AuthClient;
 }
 
 export function FaceCaptureApp(props: FaceCaptureAppProps) {
   const sink = props.sink ?? null;
-  const [mode, setMode] = useState<'simulation' | 'live'>('live');
 
   const [theme, setTheme] = useState<'dark' | 'light'>(() => getSettings().theme || 'light');
 
@@ -540,7 +630,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
 
   const initialGuidance: GuidanceState = {
     status: 'INITIALIZING',
-    primaryInstruction: 'Hãy điều chỉnh slider để mô phỏng tư thế...',
+    primaryInstruction: 'Đang khởi tạo camera...',
     primaryReason: 'NO_FACE',
     progress: 0,
     hints: [],
@@ -550,11 +640,23 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     stepType: 'FRONT',
   };
 
-  const [simGuidance, setSimGuidance] = useState<GuidanceState>(initialGuidance);
   const [liveGuidance, setLiveGuidance] = useState<GuidanceState>(initialGuidance);
 
   const [session, setSession] = useState<CaptureSession | null>(null);
   const [showReviewModal, setShowReviewModal] = useState(false);
+  /**
+   * True while `SessionReviewModal`'s `onAccept` handler is mid-flight — see
+   * `SessionReviewModal.tsx`'s own `isAccepting` doc comment for the exact
+   * field bug this guards against (a double-tap re-entering `onAccept` while
+   * the first tap's approve call was still settling, which threw a scary but
+   * spurious "no photos found" error on the already-succeeded second call).
+   * `isAcceptingRef` is the actual re-entrancy guard (checked synchronously
+   * at the top of the handler, before React has committed the state update
+   * this triggers); the state twin only drives the button's disabled/label
+   * UI.
+   */
+  const [isAcceptingSession, setIsAcceptingSession] = useState(false);
+  const isAcceptingRef = useRef(false);
   const [cameraFps] = useState(30);
   const [cvFps, setCvFps] = useState(0);
   const [latestCapturedImage, setLatestCapturedImage] = useState<{ stepId: string; imagePath: string } | null>(null);
@@ -613,6 +715,37 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   const [awaitingStudent, setAwaitingStudent] = useState(true);
   const [studentSubmitting, setStudentSubmitting] = useState(false);
   const [studentLookupError, setStudentLookupError] = useState<string | null>(null);
+  /**
+   * The just-saved student, while the post-save "Cảm ơn" overlay is up
+   * (2026-09-09, product request — "chụp xong chưa có lời cảm ơn"). Set by
+   * `onAccept` right after a successful save, alongside keeping
+   * `awaitingStudent` false for the same few seconds — the CCCD scanner
+   * screen is gated on `awaitingStudent` (see its own render below), so this
+   * doubles as the fix for "don't scan a new card while this student's
+   * confirmation is still on screen." Non-null only for that fixed window;
+   * `null` the rest of the time, including the whole active-capture session
+   * (this is not the same thing as the pre-session greeting, which lives in
+   * `handleLookupResult`/CB Help's own `greeting` field). Mirrored onto the
+   * CB Help extended display too, via `publishCbHelpState({ thankYou })` —
+   * see that field's own doc comment in `cbHelpWindow.ts`.
+   */
+  const [thankYouStudent, setThankYouStudent] = useState<StudentSubjectInfo | null>(null);
+  /**
+   * Ref mirror of `awaitingStudent` — read from `handleCccdScan`, which
+   * `CccdScanWaitingScreen`'s `onScanResult` prop calls as a plain closure
+   * captured once at render time inside a JSX callback, not from a
+   * `useCallback`, so it cannot rely on the `awaitingStudent` state
+   * variable staying fresh across renders either way. Guards against a
+   * scan result arriving while a session is already in progress (or
+   * another scan result is already being processed) from wrongly starting
+   * a second session.
+   */
+  const awaitingStudentRef = useRef(awaitingStudent);
+  useEffect(() => {
+    awaitingStudentRef.current = awaitingStudent;
+  }, [awaitingStudent]);
+  /** Reentrancy guard for `handleCccdScan` — see its own doc comment. */
+  const processingCccdScanRef = useRef(false);
 
   /**
    * Ref mirror of `activeWorkflow`, readable from inside the live engine's
@@ -852,6 +985,15 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     try {
       devs = (await cameraServiceRef.current?.enumerateDevices()) ?? devices;
       setDevices(devs);
+      // Keep `devicesRef` in lockstep synchronously (2026-09-09 fix) — the
+      // effect that normally mirrors `devices` into it only runs after
+      // `setDevices` above actually commits a render, which is too late for
+      // `buildRoundPlan` right below (same call chain, same tick): it needs
+      // this function's own freshly-enumerated list, not last render's, to
+      // correctly tell a stale/hidden `cameraRoleMapping` entry apart from a
+      // genuinely connected camera — see `planCaptureRounds`'s
+      // `connectedDeviceIds` doc comment for why that distinction matters.
+      devicesRef.current = devs;
     } catch (err) {
       console.error('[FaceCaptureApp] runFramePreflight enumerateDevices failed:', err);
     }
@@ -871,6 +1013,19 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    * to the same mapping never double-opens a physical camera — the same
    * kind of USB/driver contention this file's other multi-camera effects
    * already warn about.
+   *
+   * Same double-open fix as the multi-channel recording effect's own
+   * `reusedCvStream` (2026-09-09, hardware-confirmed: the CB Help window hit
+   * the identical conflict cross-process — see `CbHelpFrames.tsx`'s
+   * `isFrameLive`/`centerDeviceId` doc comment — for a role that resolves to
+   * the exact same physical device as CENTER's, the "1 camera covers
+   * multiple roles" fallback (`planCaptureRounds`, lib/multiFrame.ts) this
+   * function had no equivalent for): a fresh `getUserMedia` for a device
+   * that is *also* the CV pipeline's own already-open CENTER stream clones
+   * that stream instead of opening a second one, since a UVC driver that
+   * only serves one exclusive capture session (this kiosk's actual
+   * hardware) can reject the second independent open with `NotReadableError:
+   * Device in use` even from within the same renderer.
    */
   const openFrameStreams = async (frames: FrameReadiness[]): Promise<boolean> => {
     for (const frame of frames) {
@@ -880,15 +1035,20 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
       if (existing && existing.getTracks().some((t) => t.readyState === 'live')) continue;
 
       try {
-        const mediaStream = await navigator.mediaDevices.getUserMedia({
-          audio: false,
-          // 1280x720, not 1920x1080: these are process-evidence frames, not
-          // the printed/matched photo (§2.8's resolution floor is FRONT-only
-          // by product decision 2026-09-05), and three cameras sharing one
-          // USB bus need the FRONT camera to keep the bandwidth for its own
-          // 1080p capture rather than splitting it three ways.
-          video: { deviceId: { exact: frame.deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } },
-        });
+        const cvService = cameraServiceRef.current;
+        const reusedCvStream =
+          cvService?.getSelectedDevice()?.id === frame.deviceId ? cvService.getActiveStream() : null;
+        const mediaStream = reusedCvStream
+          ? reusedCvStream.clone()
+          : await navigator.mediaDevices.getUserMedia({
+              audio: false,
+              // 1280x720, not 1920x1080: these are process-evidence frames, not
+              // the printed/matched photo (§2.8's resolution floor is FRONT-only
+              // by product decision 2026-09-05), and three cameras sharing one
+              // USB bus need the FRONT camera to keep the bandwidth for its own
+              // 1080p capture rather than splitting it three ways.
+              video: { deviceId: { exact: frame.deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } },
+            });
         frameStreamsRef.current[frame.stepId] = mediaStream;
 
         // 2026-09-05 black-frame fix: a genuinely new stream starts "not
@@ -982,9 +1142,21 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   const buildRoundPlan = (
     workflow: CaptureWorkflow,
     mapping: Record<string, string>,
-    sequencing: 'sequential' | 'simultaneous'
+    sequencing: 'sequential' | 'simultaneous',
+    physicalAngles?: Record<string, { yaw: number; pitch: number }>
   ): { plan: CapturePlan; workflow: CaptureWorkflow } => {
-    const plan = planCaptureRounds(workflow.steps, mapping, { sequencing });
+    // `devicesRef.current`, not `devices` state: the caller
+    // (`runSimultaneousCaptureGate`) runs this synchronously right after
+    // `runFramePreflight`'s own fresh `enumerateDevices()` call, and
+    // `devices` state from that call may not have re-rendered into this
+    // closure yet — see `planCaptureRounds`'s `connectedDeviceIds` doc
+    // comment for why routing a step to a stale/disconnected device instead
+    // of falling back is exactly the bug this closes.
+    const plan = planCaptureRounds(workflow.steps, mapping, {
+      sequencing,
+      physicalAngles,
+      connectedDeviceIds: devicesRef.current.map((d) => d.id),
+    });
     stepRoundIndexRef.current = new Map();
     roundDrivingStepRef.current = new Map();
 
@@ -1054,9 +1226,9 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   };
 
   /**
-   * The simultaneous-capture gate every live-engine session start goes
-   * through (handleStartWorkflow, handleRestart, handleCancelWorkflow, and
-   * the initial mount-effect start below). Per §3.1.5's product decision
+   * The simultaneous-capture gate every engine session start goes through
+   * (handleStartWorkflow, handleRestart, handleCancelWorkflow, and the
+   * initial mount-effect start below). Per §3.1.5's product decision
    * (2026-09-08), a session is only ever refused for *zero* cameras mapped
    * at all (`plan.blocked`) — a kiosk with fewer cameras than the campaign
    * has steps still runs, in as many simultaneous rounds as its camera count
@@ -1065,17 +1237,16 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    *
    * Returns the round-ordered, pose-adjusted workflow the caller must
    * actually pass to `engine.startSession(...)` (not the original `workflow`
-   * argument) — `null` only when `plan.blocked`. Simulation mode and
-   * sequential mode skip round planning entirely and return `workflow`
-   * unchanged, same as before this existed.
+   * argument) — `null` only when `plan.blocked`. Sequential mode skips round
+   * planning entirely and returns `workflow` unchanged, same as before this
+   * existed.
    */
   const runSimultaneousCaptureGate = async (
-    isLive: boolean,
     simultaneous: boolean,
     workflow: CaptureWorkflow
   ): Promise<CaptureWorkflow | null> => {
     setSimultaneousCapture(simultaneous);
-    if (!isLive || !simultaneous) {
+    if (!simultaneous) {
       closeFrameStreams();
       capturePlanRef.current = null;
       stepRoundIndexRef.current = new Map();
@@ -1091,13 +1262,26 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
       /* no bridge, or no mapping saved yet — stay on {} */
     }
     setCameraRoleMapping(mapping);
+    // Per-role physical mounting angle override (§3.9, item 2 2026-09-09) —
+    // set from CameraSetupScreen, consumed here so a step's subject-facing
+    // pose target gets translated into the correct gate pose for whichever
+    // physical camera actually resolves it, instead of always assuming
+    // `DEFAULT_PHYSICAL_ANGLES`. Absent/unreachable bridge falls back to
+    // `undefined`, which `planCaptureRounds` already treats as "use the
+    // defaults for every role" — same fail-open reasoning as `mapping` above.
+    let physicalAngles: Record<string, { yaw: number; pitch: number }> | undefined;
+    try {
+      physicalAngles = (await faceAPI?.getCameraPhysicalAngles?.()) ?? undefined;
+    } catch {
+      /* no bridge, or none saved yet — stay on undefined (defaults) */
+    }
     // checkFramesReadiness still runs (unchanged) purely for the hot-unplug
     // diagnostics UI (`framePreflight`) — its stricter "every step needs its
     // own distinct camera" verdict is no longer what decides whether the
     // session may start; `plan.blocked` below is.
     await runFramePreflight(workflow);
 
-    const { plan, workflow: roundWorkflow } = buildRoundPlan(workflow, mapping, 'simultaneous');
+    const { plan, workflow: roundWorkflow } = buildRoundPlan(workflow, mapping, 'simultaneous', physicalAngles);
     capturePlanRef.current = plan;
     if (plan.blocked) return null;
     currentRoundIdxRef.current = 0;
@@ -1192,24 +1376,39 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
 
   /** How long the greeting stays on the CB Help window before the capture session (and recording) starts — picked from the requested 2-5s range. */
   const GREETING_DURATION_MS = 3000;
+  /** How long the post-save "Cảm ơn" overlay stays up before the screen falls back to awaiting the next student — see `thankYouStudent`'s own doc comment. */
+  const THANK_YOU_DURATION_MS = 3000;
 
   /**
-   * Handles a submit from `StudentIdEntryScreen` — the pre-session step
-   * (2026-09-07 product request). `lookupStudent()` is currently simulated
-   * (see that function's own doc comment); everything downstream of it is
-   * real and will not need to change once it calls a real API instead.
-   *
-   * NOT_FOUND: surfaces an on-screen message and leaves `awaitingStudent`
-   * true — the operator/student can retry immediately from the same screen.
-   *
-   * FOUND: publishes the greeting to the CB Help window, waits
-   * `GREETING_DURATION_MS` so it is actually seen before anything else
-   * happens (§ requirement: capture, and recording, must start only after
-   * the greeting — not before), then starts the session via the existing,
-   * unmodified `handleStartWorkflow` — which already arms recording in the
-   * same call (`setRecordVideo` + `startSession`), so capture and recording
-   * start together with no separate wiring needed here — and only THEN
-   * closes this screen.
+   * NOT_FOUND branch of `handleLookupResult` below, for the manual "nhập mã
+   * sinh viên" path (`StudentIdEntryScreen`, `apps/web`/legacy only as of
+   * 2026-09-09 — see `handleCccdScan`'s own doc comment).
+   */
+  const MANUAL_ENTRY_NOT_FOUND_MESSAGE =
+    'Không tìm thấy mã sinh viên này. Vui lòng liên hệ giáo viên hướng dẫn.';
+
+  /**
+   * Exact copy required by the CCCD-scan NOT_FOUND branch (product spec,
+   * 2026-09-09) — shown identically on this kiosk's own "waiting for scan"
+   * screen (via `studentLookupError`) and on the CB Help extended display
+   * (via `publishCbHelpState`'s `errorMessage`). Do not reword — the product
+   * brief specifies this string verbatim.
+   */
+  const CCCD_SCAN_NOT_FOUND_MESSAGE =
+    'Thông tin của bạn không có trong dữ liệu, hãy báo với giáo viên hướng dẫn để xử lý';
+
+  /**
+   * The shared tail of both `handleStudentSubmit` (manual "nhập mã sinh
+   * viên", `lookupStudent()`) and `handleCccdScan` (CCCD scan, roster
+   * lookup) — extracted 2026-09-09 so the file-watch-driven flow fires
+   * through the *exact same* FOUND/NOT_FOUND branching the manual flow
+   * already had, per the task's own requirement ("make this same downstream
+   * flow fire from a file-watch event instead of a manual form submit").
+   * Only the NOT_FOUND message (and whether it also needs to be echoed to
+   * the CB Help window) differs by source — everything else, including the
+   * post-save-retake short-circuit and the exact `setAwaitingStudent(false)`
+   * ordering, is identical regardless of how `result` was obtained. See the
+   * original (pre-refactor) doc comment below for why that ordering matters.
    *
    * `setAwaitingStudent(false)` deliberately runs AFTER `handleStartWorkflow`
    * resolves, not before it (2026-09-08 audit fix — was the other way
@@ -1227,92 +1426,211 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    * first means every one of those pieces is already fresh by the time this
    * screen actually disappears.
    */
+  const handleLookupResult = async (
+    result: StudentLookupResult,
+    options: { notFoundMessage: string; publishNotFoundToCbHelp?: boolean }
+  ): Promise<void> => {
+    if (result.status === 'NOT_FOUND') {
+      setStudentLookupError(options.notFoundMessage);
+      if (options.publishNotFoundToCbHelp) {
+        publishCbHelpState({ errorMessage: options.notFoundMessage });
+      }
+      return;
+    }
+    const subject: StudentSubjectInfo = {
+      subjectCode: result.code,
+      subjectName: result.name,
+      className: result.className,
+      major: result.major,
+      academicYear: result.academicYear,
+      identityNumber: result.identityNumber,
+    };
+    // Cached for RunScopedCaptureSession's own startSession()/approveUpload()
+    // calls, made further down inside handleStartWorkflow()/onAccept — see
+    // setSubject()'s own doc comment. This is the only place a real (not
+    // simulated) student identity ever enters the capture pipeline; without
+    // it every session's subjectCode/subjectName stays NULL centrally.
+    runSessionRef.current.setSubject(subject);
+    // Kept alongside (not just inside RunScopedCaptureSession) so onAccept
+    // can stash it on lastCompletedSessionRef without re-deriving it — see
+    // that ref's own doc comment.
+    currentStudentRef.current = subject;
+
+    // Post-save retake (2026-09-08): same mã SV re-entered/re-scanned, same
+    // kiosk sitting, before anyone else used the machine — reopen the review
+    // for the session just saved instead of starting a brand-new one. See
+    // the plan's §2 for why this branch skips the greeting/handleStartWorkflow
+    // path entirely: the engine's own session/workflow were never torn
+    // down after that save (see lastCompletedSessionRef's own doc comment),
+    // so there is nothing to "start" — only to resume and reopen.
+    const lastCompleted = lastCompletedSessionRef.current;
+    if (lastCompleted && lastCompleted.subjectCode === result.code) {
+      // setSubject() was already called with this fresh lookup's `subject`
+      // above — not re-set here from `lastCompleted.subject`, so a
+      // name/class correction made between the two lookups (however
+      // unlikely within one kiosk sitting) is what actually gets approved.
+      runSessionRef.current.resume(lastCompleted.outboxSessionId);
+      setIsWorkflowStarted(true);
+      isWorkflowStartedRef.current = true;
+      retookSinceReopenRef.current = false;
+      setIsPostSaveReview(true);
+      setSession(lastCompleted.session);
+      setShowReviewModal(true);
+      setAwaitingStudent(false);
+      return;
+    }
+    // A genuinely different student's session is starting — the previous
+    // one can no longer be reopened via this path (see this ref's own doc
+    // comment on why staleness is only a concern once the NEXT session
+    // actually begins, not merely once the code differs at lookup time).
+    // Also clears any post-save-review flags left over from a reopened
+    // review the operator closed (SessionReviewModal's onClose) without
+    // confirming — without this, this brand-new session's own review
+    // would wrongly route "chụp lại toàn bộ" through
+    // `handlePostSaveRetakeAll` instead of the normal `handleRestart`.
+    lastCompletedSessionRef.current = null;
+    setIsPostSaveReview(false);
+    retookSinceReopenRef.current = false;
+
+    publishCbHelpState({
+      greeting: {
+        code: result.code,
+        name: result.name,
+        className: result.className,
+        major: result.major,
+        academicYear: result.academicYear,
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, GREETING_DURATION_MS));
+    await handleStartWorkflow(true);
+    setAwaitingStudent(false);
+  };
+
+  /**
+   * Handles a submit from `StudentIdEntryScreen` — the pre-session step
+   * (2026-09-07 product request). `lookupStudent()` is currently simulated
+   * (see that function's own doc comment); everything downstream of it is
+   * real (`handleLookupResult` above) and will not need to change once it
+   * calls a real API instead.
+   *
+   * As of 2026-09-09 this manual-entry path only matters for the
+   * non-kiosk/legacy build (`apps/web`, or the legacy per-device-secret
+   * desktop path) — see `handleCccdScan`'s own doc comment for why the
+   * kiosk's own campaign+login path replaces this outright with CCCD
+   * scanning instead of running both side by side.
+   */
   const handleStudentSubmit = async (code: string) => {
     setStudentSubmitting(true);
     setStudentLookupError(null);
     try {
       const result = await lookupStudent(code);
-      if (result.status === 'NOT_FOUND') {
-        setStudentLookupError(
-          'Không tìm thấy mã sinh viên này. Vui lòng liên hệ giáo viên hướng dẫn.'
-        );
-        return;
-      }
-      const subject: StudentSubjectInfo = {
-        subjectCode: result.code,
-        subjectName: result.name,
-        className: result.className,
-        major: result.major,
-        academicYear: result.academicYear,
-      };
-      // Cached for RunScopedCaptureSession's own startSession()/approveUpload()
-      // calls, made further down inside handleStartWorkflow()/onAccept — see
-      // setSubject()'s own doc comment. This is the only place a real (not
-      // simulated) student identity ever enters the capture pipeline; without
-      // it every session's subjectCode/subjectName stays NULL centrally.
-      runSessionRef.current.setSubject(subject);
-      // Kept alongside (not just inside RunScopedCaptureSession) so onAccept
-      // can stash it on lastCompletedSessionRef without re-deriving it — see
-      // that ref's own doc comment.
-      currentStudentRef.current = subject;
-
-      // Post-save retake (2026-09-08): same mã SV re-entered, same kiosk
-      // sitting, before anyone else used the machine — reopen the review for
-      // the session just saved instead of starting a brand-new one. See the
-      // plan's §2 for why this branch skips the greeting/handleStartWorkflow
-      // path entirely: the engine's own session/workflow were never torn
-      // down after that save (see lastCompletedSessionRef's own doc comment),
-      // so there is nothing to "start" — only to resume and reopen.
-      const lastCompleted = lastCompletedSessionRef.current;
-      if (lastCompleted && lastCompleted.subjectCode === result.code) {
-        // setSubject() was already called with this fresh lookup's `subject`
-        // above (line ~943) — not re-set here from `lastCompleted.subject`,
-        // so a name/class correction made between the two lookups (however
-        // unlikely within one kiosk sitting) is what actually gets approved.
-        runSessionRef.current.resume(lastCompleted.outboxSessionId);
-        setIsWorkflowStarted(true);
-        isWorkflowStartedRef.current = true;
-        retookSinceReopenRef.current = false;
-        setIsPostSaveReview(true);
-        setSession(lastCompleted.session);
-        setShowReviewModal(true);
-        setAwaitingStudent(false);
-        return;
-      }
-      // A genuinely different student's session is starting — the previous
-      // one can no longer be reopened via this path (see this ref's own doc
-      // comment on why staleness is only a concern once the NEXT session
-      // actually begins, not merely once the code differs at lookup time).
-      // Also clears any post-save-review flags left over from a reopened
-      // review the operator closed (SessionReviewModal's onClose) without
-      // confirming — without this, this brand-new session's own review
-      // would wrongly route "chụp lại toàn bộ" through
-      // `handlePostSaveRetakeAll` instead of the normal `handleRestart`.
-      lastCompletedSessionRef.current = null;
-      setIsPostSaveReview(false);
-      retookSinceReopenRef.current = false;
-
-      publishCbHelpState({
-        greeting: {
-          code: result.code,
-          name: result.name,
-          className: result.className,
-          major: result.major,
-          academicYear: result.academicYear,
-        },
-      });
-      await new Promise((resolve) => setTimeout(resolve, GREETING_DURATION_MS));
-      await handleStartWorkflow();
-      setAwaitingStudent(false);
+      await handleLookupResult(result, { notFoundMessage: MANUAL_ENTRY_NOT_FOUND_MESSAGE });
     } finally {
       setStudentSubmitting(false);
     }
   };
 
-  const handleStartWorkflow = async () => {
+  /**
+   * `onScanResult` passed down to `CccdScanWaitingScreen` -> `ScanMonitorCorner`
+   * (2026-09-09 architecture correction) — the kiosk's CCCD-scan replacement
+   * for `handleStudentSubmit` above. The corner already did the actual
+   * lookup itself (`faceAPI.lookupCccdByIdentityNumber`, against the WHOLE
+   * external roster, no campaign-scoping — see that IPC handler's own doc
+   * comment in `apps/desktop/src/main/index.ts`) before calling this; this
+   * function's only job is mapping its result onto the exact
+   * `StudentLookupResult` shape `handleLookupResult` already expects, then
+   * running that same tail `handleStudentSubmit` already uses — FOUND
+   * behaves identically either way; NOT_FOUND shows the product-specified
+   * message on both this screen AND the CB Help extended display
+   * (`publishNotFoundToCbHelp: true`), which the manual path never needed
+   * to do.
+   *
+   * This used to be an IPC-push subscription (`faceAPI.onCccdScan`) that
+   * ALSO made its own `GET /v1/campaigns/:id/roster/lookup` call — both
+   * gone the same day: there is no push anymore (the corner calls this
+   * directly as a plain callback prop once it has a result), and no
+   * campaign-scoped API roster either (the corrected product decision is a
+   * single, campaign-agnostic external file, checked entirely inside the
+   * desktop app's main process).
+   */
+  const handleCccdScan = async (scanResult: CccdRosterLookupResult) => {
+    if (!awaitingStudentRef.current) return; // a session is already in progress
+    if (processingCccdScanRef.current) return; // already handling a previous result
+    processingCccdScanRef.current = true;
+    setStudentSubmitting(true);
+    setStudentLookupError(null);
+    // Clears any error/greeting left over on the CB Help window from a
+    // previous attempt now that a fresh one is starting. Must be an explicit
+    // `{ greeting: null, errorMessage: null }`, not a bare call — see
+    // `cbHelpOverlayRef`'s own doc comment on why a bare `publishCbHelpState()`
+    // now preserves these fields instead of blanking them.
+    publishCbHelpState({ greeting: null, errorMessage: null });
+    try {
+      const result: StudentLookupResult = scanResult.found
+        ? {
+            status: 'FOUND',
+            code: scanResult.record.studentCode ?? '',
+            name: scanResult.record.fullName ?? '',
+            className: scanResult.record.className ?? '',
+            major: scanResult.record.majorName ?? '',
+            // `course_year` is the closest thing the real roster has to an
+            // "academic year" — not the same thing, but the best available;
+            // see `apps/desktop/src/main/cccdRoster.ts`'s own doc comment.
+            academicYear: scanResult.record.courseYear ?? '',
+            identityNumber: scanResult.record.identityNumber,
+          }
+        : { status: 'NOT_FOUND', code: '' };
+      await handleLookupResult(result, {
+        notFoundMessage: CCCD_SCAN_NOT_FOUND_MESSAGE,
+        publishNotFoundToCbHelp: true,
+      });
+    } catch (err) {
+      console.error('[FaceCaptureApp] handling CCCD scan result failed:', err);
+      setStudentLookupError('Không thể xử lý thông tin lúc này. Vui lòng thử quét lại.');
+    } finally {
+      setStudentSubmitting(false);
+      processingCccdScanRef.current = false;
+    }
+  };
+
+  /**
+   * `fromIdentification` (2026-09-09 fix, "quét căn cước công dân xong mới
+   * được ấn bắt đầu"): a plain manual click on the "Bắt đầu" button
+   * (`onStartWorkflow={handleStartWorkflow}` below) — while
+   * `awaitingStudentRef.current` is still true (no student identified yet
+   * this sitting) — must be a no-op instead of starting a session. The one
+   * legitimate internal caller, `handleLookupResult`'s FOUND branch, passes
+   * `true`: it calls this WHILE `awaitingStudent` is still true (only set
+   * false right after this call resolves — see that function's own doc
+   * comment on why), so a plain `awaitingStudentRef.current` check alone
+   * cannot tell "the real auto-start" apart from "operator clicked early".
+   *
+   * The check below is `fromIdentification !== true`, NOT `!fromIdentification`
+   * — a real bug this exact shape caused (2026-09-09, caught by testing):
+   * `onClick={onStartWorkflow}` passes the DOM click event as the button's
+   * onClick handler's first argument, which lands right in this function's
+   * first parameter. A `MouseEvent` is truthy, so a plain `!fromIdentification`
+   * check was always `false` for a real click — the guard below it never
+   * actually ran, and Start worked regardless of identification the entire
+   * time this fix was "in place". Strict `!== true` means only the literal
+   * `handleStartWorkflow(true)` call site bypasses the gate; anything else
+   * passed here (an event object, `undefined`, garbage) is treated as "not
+   * identification" and blocked while awaiting.
+   *
+   * This was previously attempted as a CSS pointer-events block on the
+   * whole "Quét thẻ CCCD" overlay (`CccdScanWaitingScreen.tsx`) — reverted
+   * (2026-09-09) because that also silently ate clicks meant for the
+   * always-available "Màn hình mở rộng"/"Cài đặt camera" toolbar buttons,
+   * which sit in the same overlay region but must stay usable at any time
+   * (operator/admin controls, not gated on identification) — see that
+   * file's own comment. Gating the actual function instead of a screen
+   * region avoids that collateral blocking entirely.
+   */
+  const handleStartWorkflow = async (fromIdentification?: true) => {
+    if (fromIdentification !== true && awaitingStudentRef.current) return;
     setIsWorkflowStarted(true);
     isWorkflowStartedRef.current = true;
-    const activeEngine = mode === 'live' ? liveWorkflowEngineRef.current : simWorkflowEngineRef.current;
+    const activeEngine = liveWorkflowEngineRef.current;
     if (activeEngine) {
       const {
         workflow,
@@ -1337,7 +1655,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
       // `runSimultaneousCaptureGate` returns the round-ordered, pose-adjusted
       // workflow to actually run — not the original `workflow` above — or
       // `null` only when this kiosk has zero cameras mapped at all (§3.1.5).
-      const preparedWorkflow = await runSimultaneousCaptureGate(mode === 'live', campaignSimultaneous, workflow);
+      const preparedWorkflow = await runSimultaneousCaptureGate(campaignSimultaneous, workflow);
       if (!preparedWorkflow) {
         setIsWorkflowStarted(false);
         isWorkflowStartedRef.current = false;
@@ -1352,15 +1670,84 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
       // previous session's id.
       const startedSession = await activeEngine.startSession(preparedWorkflow);
       setRecordingSessionKey(startedSession.id);
+
+      // Clears the CB Help overlay's sticky `greeting` now that the session
+      // has actually started (2026-09-09 bug: the `cbHelpOverlayRef` sticky
+      // pattern — added so a CCCD NOT_FOUND message survives the 800ms
+      // heartbeat — made `greeting` sticky too, with nothing left to null it
+      // back out once real capture begins. `CbHelpFrames.tsx`'s own doc
+      // comment on `greeting` says it "goes back to null once the real
+      // session starts publishing" — true before that fix, no longer true
+      // after it. A non-null `greeting` keeps arriving as a *new* object
+      // every push (IPC re-serializes it each time even though the
+      // underlying ref never changes), which re-triggers CbHelpFrames.tsx's
+      // greeting-received effect on every single heartbeat tick and
+      // force-uncollapses the full-screen greeting — fighting the one-shot
+      // "collapse once real frames arrive" effect, whose own dependency
+      // (`frames.length`) stops changing after the first push. Net field
+      // symptom: the extend screen collapses to the corner badge for an
+      // instant, then snaps back to the full-screen greeting within under a
+      // second and stays there for the rest of the session, even though the
+      // main kiosk window (which never depended on this field) captures
+      // normally. This call is placed after `startSession()` specifically —
+      // not before — because `showFrames`/`phase` in `publishCbHelpState`
+      // already read `session.status === 'RUNNING'` by this point, so this
+      // push carries the real frames immediately alongside `greeting: null`
+      // instead of a transient idle/empty snapshot that would also wipe
+      // `CbHelpFrames.tsx`'s locally-remembered corner badge.
+      publishCbHelpState({ greeting: null });
     }
   };
 
   const cameraServiceRef = useRef<BrowserCameraService | null>(null);
-  const mockEngineRef = useRef<MockCVEngine | null>(null);
-  const simWorkflowEngineRef = useRef<WorkflowEngine | null>(null);
   const liveWorkflowEngineRef = useRef<WorkflowEngine | null>(null);
-  const simPipelineRef = useRef<FramePipeline | null>(null);
+  /**
+   * The CB Help window's greeting/errorMessage are "sticky, until explicitly
+   * changed" overlays, not a snapshot of this render — most `publishCbHelpState()`
+   * call sites throughout this file (the 800ms heartbeat below, step-change/
+   * capture-trigger progress refreshes, `{ phase: 'idle'|'review'|'done' }`
+   * calls) pass neither field, and must NOT blank out a greeting or a CCCD
+   * NOT_FOUND message that's currently showing just because they happened to
+   * fire afterward (2026-09-09 bug: the extend screen's NOT_FOUND message was
+   * visible for well under a second before the next 800ms heartbeat tick — the
+   * one call site that always ran with no `opts` at all — silently reset it to
+   * null; `greeting` had the same latent exposure). `publishCbHelpState` below
+   * only ever updates this ref when a call explicitly names the field (`'foo'
+   * in opts`, so an explicit `{ errorMessage: null }` clear still works) — see
+   * `handleCccdScan`'s reset call for the one place that means it.
+   */
+  const cbHelpOverlayRef = useRef<{
+    greeting: CbHelpGreeting | null;
+    errorMessage: string | null;
+    /** Post-save "Cảm ơn" overlay (2026-09-09) — same sticky reasoning as `greeting`/`errorMessage` above. */
+    thankYou: { name: string } | null;
+  }>({
+    greeting: null,
+    errorMessage: null,
+    thankYou: null,
+  });
+  /**
+   * Same "sticky until explicitly changed" reasoning as `cbHelpOverlayRef`
+   * above, for `phase` specifically — see `publishCbHelpState`'s own comment
+   * at its `phase` computation for the exact 2026-09-09 bug this closes
+   * (the 800ms heartbeat's bare calls used to snap `review`/`done` back to
+   * `idle` within under a second). `null` means "no explicit override in
+   * effect" — the session's own `RUNNING` status alone decides `live` vs
+   * `idle` in that case, same as before this ref existed.
+   */
+  const cbHelpPhaseOverrideRef = useRef<'idle' | 'review' | 'done' | null>(null);
   const livePipelineRef = useRef<FramePipeline | null>(null);
+  /**
+   * Fallback CV engine for LIVE mode itself — NOT simulation mode (removed,
+   * item 8 2026-09-09). `startLiveMode`'s CV-init step falls back to this
+   * when `MediaPipeCVEngine` fails or times out to initialize (bad GPU/WASM
+   * environment), so the live pipeline still has *something* to drive the
+   * capture screen with (no face ever detected, effectively a degraded/no-op
+   * CV reading) instead of `livePipelineRef.current` staying null and the
+   * whole guidance UI never coming alive. Lazily created once, on first use
+   * — see `startLiveMode`'s own CV-init block.
+   */
+  const mockEngineRef = useRef<MockCVEngine | null>(null);
   /** Set when a capture could not be stored; surfaced, never swallowed. */
   const [storeError, setStoreError] = useState<string | null>(null);
   /**
@@ -1514,7 +1901,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     // hand.
     console.warn('[FaceCaptureApp] onAccept: approving sessionId=', runSessionRef.current.cachedSessionId);
     try {
-      await runSessionRef.current.approve(steps, videoSessionId);
+      await runSessionRef.current.approve(steps, videoSessionId, props.operatorUserId);
       setStoreError(null);
       return true;
     } catch (err) {
@@ -1558,92 +1945,6 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
       }
 
       try {
-
-        const simEngine = new WorkflowEngine();
-        simEngine.setSensitivity(sensitivity);
-        // Without this, autoHoldMs stays null until the operator touches the
-        // hold-time slider, and the engine's own fallback default silently
-        // took over instead — see the comment on WorkflowEngine.processFrame.
-        simEngine.setCaptureTriggerConfig({
-          mode: getSettings().captureMode || 'MANUAL',
-          autoHoldMs: getSettings().autoHoldMs || 2000,
-        });
-        simEngine.setSnapshotProvider(() => {
-          const canvas = document.createElement('canvas');
-          canvas.width = 640;
-          canvas.height = 480;
-          const ctx = canvas.getContext('2d');
-          if (!ctx) return null;
-          ctx.fillStyle = '#0f172a';
-          ctx.fillRect(0, 0, 640, 480);
-          ctx.fillStyle = '#10b981';
-          ctx.beginPath();
-          ctx.arc(320, 240, 120, 0, Math.PI * 2);
-          ctx.fill();
-          return canvas.toDataURL('image/jpeg', 0.85);
-        });
-        simWorkflowEngineRef.current = simEngine;
-
-        simEngine.on('state-change', (state: GuidanceState) => {
-          setSimGuidance({ ...state });
-        });
-
-        simEngine.on('capture-trigger', (data: { stepId: string; imagePath: string }) => {
-          setLatestCapturedImage({ ...data });
-
-          // Mirrors liveEngine's identical handler below — without this,
-          // simulated captures only ever update the flash-preview state and
-          // never reach runSessionRef, so RunScopedCaptureSession.sessionId
-          // stays null for the whole run and the review screen's "Xác nhận"
-          // button fails with "no active session to approve" even though
-          // every step visibly completed.
-          const step = simEngine.currentSession?.steps.find((st) => st.stepId === data.stepId);
-          void storePhoto(data.stepId, data.imagePath, (step?.attempts ?? 0) + 1);
-        });
-
-        simEngine.on('completed', (completedSession: CaptureSession) => {
-          setSession(completedSession);
-          setShowReviewModal(true);
-          if (repoRef.current) void repoRef.current.saveSession(completedSession);
-          // finishSession() is NOT called here — see the identical comment on
-          // liveEngine's 'completed' handler below for why.
-          // Stop-recording hook (§3.1 fix, 2026-09-05) — see
-          // `recordingSessionKey`'s own doc comment; included here too even
-          // though simulation mode has no physical camera to record, for
-          // symmetry with liveEngine's identical handler.
-          setRecordingSessionKey(null);
-        });
-
-        const mockCv = new MockCVEngine({ simulatedDelayMs: 10 });
-        mockCv.updateSettings({ detected: false, faceCount: 0 });
-        await mockCv.initialize();
-        mockEngineRef.current = mockCv;
-
-        const simPipeline = new FramePipeline(mockCv);
-        simPipelineRef.current = simPipeline;
-
-        simPipeline.onResult(async (state: FaceState, fps: number) => {
-          if (mode === 'simulation') {
-            setFaceState(state);
-            setCvFps(fps);
-          }
-          await simEngine.processFrame(state);
-        });
-
-        const {
-          workflow: simWorkflow,
-          triggerConfig: simTriggerConfig,
-          blockedReason: simBlockedReason,
-          rejectReason: simRejectReason,
-        } = await resolveActiveWorkflow(props.campaignConfig);
-        setDeviceBlockedReason(simBlockedReason);
-        setDeviceRejectReason(simRejectReason);
-        setActiveWorkflow(simWorkflow);
-        simEngine.setCaptureTriggerConfig(simTriggerConfig);
-        setEffectiveTriggerConfig(simTriggerConfig);
-        captureTriggerRef.current.updateConfig({ mode: simTriggerConfig.mode, autoHoldMs: simTriggerConfig.autoHoldMs });
-        if (!simBlockedReason) await simEngine.startSession(simWorkflow);
-
         const liveEngine = new WorkflowEngine();
         liveEngine.setSensitivity(sensitivity);
         liveEngine.setCaptureTriggerConfig({
@@ -1666,6 +1967,31 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           // physical cameras are streaming to match. See
           // `advanceRoundStreamsForStep`'s own doc comment.
           if (state.stepId) advanceRoundStreamsForStep(state.stepId);
+
+          // Round planning bug fix (2026-09-09, item 5): a round's driving
+          // step is not always CENTER-resolved — once an earlier round has
+          // used up the campaign's one CENTER step, a later round can be
+          // driven entirely by a non-CENTER step (e.g. a second LEFT-angle
+          // shot). `WorkflowEngine.processFrame`'s AUTO branch only skips its
+          // own CENTER-only snapshot path when `externalCaptureOnly` is
+          // armed, which used to happen only for an explicit retake
+          // (`retakeStep`) — a *first* pass through such a round silently
+          // captured the CENTER feed and stored it mislabeled as the
+          // non-CENTER step. `setExternalCaptureOnly` (see its own doc
+          // comment) is the fix: re-armed on every step change here, from the
+          // same resolved `cameraRole` `captureRetakingSideFrame` already
+          // trusts, so AUTO mode routes through `external-capture-ready` (and
+          // MANUAL/gesture through `captureRetakingSideFrame`'s existing
+          // check) for ANY non-CENTER current step, not just a retaken one.
+          // Sequential mode never builds a round plan, and its own
+          // role-switch effect keeps `cameraServiceRef`'s single stream
+          // pointed at whichever physical camera the current step actually
+          // needs — so the engine's own snapshot provider is always correct
+          // there, and this must stay a no-op outside simultaneous mode.
+          if (state.stepId && simultaneousCaptureRef.current) {
+            const frame = framesForWorkflow(activeWorkflowRef.current).find((f) => f.stepId === state.stepId);
+            liveEngine.setExternalCaptureOnly(!!frame && frame.role !== 'CENTER');
+          }
 
           // CB Help "step change" (§3.5) — de-duped against this event's
           // real firing rate (once per processed frame) via
@@ -1800,7 +2126,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         setRecordVideo(liveRecordVideo);
         const preparedLiveWorkflow = liveBlockedReason
           ? null
-          : await runSimultaneousCaptureGate(true, liveSimultaneous, liveWorkflow);
+          : await runSimultaneousCaptureGate(liveSimultaneous, liveWorkflow);
         setActiveWorkflow(preparedLiveWorkflow ?? liveWorkflow);
         if (preparedLiveWorkflow) await liveEngine.startSession(preparedLiveWorkflow);
 
@@ -1824,22 +2150,9 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
 
   useEffect(() => {
     let animId: number;
-    let lastSimTime = 0;
 
     const processFrameLoop = () => {
-      if (mode === 'simulation' && simPipelineRef.current) {
-        const now = Date.now();
-        if (now - lastSimTime >= 80) {
-          lastSimTime = now;
-          const dummyFrame = {
-            data: new Uint8ClampedArray(640 * 480 * 4),
-            width: 640,
-            height: 480,
-            timestamp: now,
-          };
-          simPipelineRef.current.pushFrame(dummyFrame);
-        }
-      } else if (mode === 'live' && cameraServiceRef.current && livePipelineRef.current) {
+      if (cameraServiceRef.current && livePipelineRef.current) {
         const frame = cameraServiceRef.current.getFrame();
         if (frame) {
           // Reading pixels back from the GPU is the expensive part of a frame,
@@ -1856,17 +2169,9 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     return () => {
       if (animId) cancelAnimationFrame(animId);
     };
-  }, [mode]);
+  }, []);
 
   useEffect(() => {
-    if (mode !== 'live') {
-      if (gestureAnimRef.current) cancelAnimationFrame(gestureAnimRef.current);
-      setGestureState(null);
-      setGestureProgress(0);
-      captureTriggerRef.current.reset();
-      return;
-    }
-
     let lastGestureTime = 0;
     const gestureLoop = async () => {
       if (cameraServiceRef.current && gestureEngineRef.current?.isInitialized) {
@@ -1932,7 +2237,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     return () => {
       if (gestureAnimRef.current) cancelAnimationFrame(gestureAnimRef.current);
     };
-  }, [mode]);
+  }, []);
 
   const handleShutterCapture = useCallback(() => {
     const engine = liveWorkflowEngineRef.current;
@@ -1961,10 +2266,8 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
 
   const handleSensitivityChange = useCallback((newSensitivity: CaptureSensitivity) => {
     setSensitivity(newSensitivity);
-    simWorkflowEngineRef.current?.setSensitivity(newSensitivity);
     liveWorkflowEngineRef.current?.setSensitivity(newSensitivity);
     mediaPipeCvRef.current?.setSensitivity?.(newSensitivity);
-    mockEngineRef.current?.setSensitivity?.(newSensitivity);
   }, []);
 
   const handleCaptureModeChange = useCallback((newMode: CaptureTriggerMode) => {
@@ -1974,101 +2277,17 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     // can never again silently drift from what the engine actually honours.
     if (effectiveTriggerConfig.fromCampaign) return;
     captureTriggerRef.current.updateConfig({ mode: newMode });
-    simWorkflowEngineRef.current?.setCaptureTriggerConfig({ mode: newMode });
     liveWorkflowEngineRef.current?.setCaptureTriggerConfig({ mode: newMode });
     setEffectiveTriggerConfig((prev) => ({ ...prev, mode: newMode, fromCampaign: false }));
   }, [effectiveTriggerConfig.fromCampaign]);
 
   const handleAutoHoldMsChange = useCallback((newMs: number) => {
     captureTriggerRef.current.updateConfig({ autoHoldMs: newMs });
-    simWorkflowEngineRef.current?.setCaptureTriggerConfig({ autoHoldMs: newMs });
     liveWorkflowEngineRef.current?.setCaptureTriggerConfig({ autoHoldMs: newMs });
     setEffectiveTriggerConfig((prev) => ({ ...prev, autoHoldMs: newMs }));
   }, []);
 
-  const handleSimulationChange = async (settings: SimulationSettings) => {
-    if (!mockEngineRef.current || !simPipelineRef.current) return;
-
-    mockEngineRef.current.updateSettings({
-      detected: settings.presence !== 'NO_FACE',
-      faceCount: settings.presence === 'MULTIPLE_FACES' ? 2 : settings.presence === 'SINGLE_FACE' ? 1 : 0,
-      pose: { yaw: settings.yaw, pitch: settings.pitch, roll: settings.roll },
-      quality: {
-        faceSizeRatio: settings.faceSizeRatio,
-        overallScore: settings.qualityScore,
-        accepted: settings.qualityScore >= 0.7,
-      },
-    });
-
-    const dummyFrame = {
-      data: new Uint8ClampedArray(640 * 480 * 4),
-      width: 640,
-      height: 480,
-      timestamp: Date.now(),
-    };
-
-    const detected = settings.presence !== 'NO_FACE';
-    const faceCount = settings.presence === 'MULTIPLE_FACES' ? 2 : settings.presence === 'SINGLE_FACE' ? 1 : 0;
-
-    const primaryBox = {
-      x: 160,
-      y: 72,
-      width: 320,
-      height: 336,
-    };
-
-    const allDetections = Array.from({ length: faceCount }, (_, idx) => {
-      if (idx === 0) return { boundingBox: primaryBox, confidence: 0.98 };
-      return {
-        boundingBox: { x: 40 + idx * 115, y: 120, width: 180, height: 216 },
-        confidence: 0.92,
-      };
-    });
-
-    simPipelineRef.current.pushFrame(dummyFrame);
-    if (!detected) {
-      setFaceState({
-        timestamp: Date.now(),
-        detected: false,
-        faceCount: 0,
-        presence: 'NO_FACE',
-      });
-    } else {
-      setFaceState({
-        detected: true,
-        faceCount,
-        presence: settings.presence,
-        detection: allDetections[0],
-        allDetections,
-        pose: { yaw: settings.yaw, pitch: settings.pitch, roll: settings.roll },
-        quality: {
-          faceSizeRatio: settings.faceSizeRatio,
-          overallScore: settings.qualityScore,
-          accepted: settings.qualityScore >= 0.7,
-          sharpness: 1,
-          brightness: 0.5,
-          centerXOffset: 0,
-          centerYOffset: 0,
-          eyeOpenScore: 1,
-          smileScore: 0,
-          eyesVisible: true,
-          mouthVisible: true,
-          occluded: false,
-          neutralExpression: true,
-          // Matches primaryBox below (320x336 on the 640x480 dummyFrame) —
-          // simulation mode's synthetic box, not driven by the faceSizeRatio
-          // slider, same as the rest of this mock quality reading.
-          faceWidthPx: 320,
-          faceHeightPx: 336,
-          reasons: [],
-        },
-        timestamp: Date.now(),
-      });
-    }
-  };
-
   const startLiveMode = async () => {
-    setMode('live');
     updateSettings({ engineMode: 'live' });
     setFaceState(null);
     setCameraError(null);
@@ -2101,8 +2320,31 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     // starts pushing frames the moment `livePipelineRef.current` is assigned
     // below, whenever that happens relative to `setStream`.
     try {
+      const isNewCameraService = !cameraServiceRef.current;
       const camera = cameraServiceRef.current || new BrowserCameraService();
       cameraServiceRef.current = camera;
+
+      if (isNewCameraService) {
+        // Hot-plug detection (item 12a, 2026-09-09): `BrowserCameraService`'s
+        // own constructor already wires up `navigator.mediaDevices.
+        // ondevicechange` and emits `'device-change'` with a fresh
+        // `enumerateDevices()` result on every plug/unplug (see
+        // `setupDeviceChangeMonitoring` in packages/camera) — this file
+        // simply never listened for it, so `devices` (the camera picker;
+        // also what `multiChannelDeviceIds`/the recording gate and
+        // `runFramePreflight` read) stayed frozen at whatever was connected
+        // when the app launched until a full restart. Registered once per
+        // camera instance (this function reuses `cameraServiceRef.current`
+        // on a later call, see the `isNewCameraService` guard) rather than
+        // re-attaching a duplicate listener every time `startLiveMode` runs.
+        // Deliberately does not touch `selectedDeviceId` — a newly plugged
+        // camera should show up as an option, not silently steal the active
+        // selection out from under whatever the operator/CameraSetupScreen
+        // already chose.
+        camera.on('device-change', (devs: CameraDevice[]) => {
+          setDevices(devs);
+        });
+      }
 
       const devs = await camera.enumerateDevices().catch(() => []);
       setDevices(devs);
@@ -2166,6 +2408,18 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         gestureEngineRef.current = ge;
       }
 
+      // Lazy fallback: only actually created if MediaPipe above never
+      // initialized — see `mockEngineRef`'s own doc comment for why this
+      // exists post-item-8 (it is not simulation mode's old sliders-driven
+      // engine, which is gone; this is purely "keep the live pipeline from
+      // having nothing at all to drive it").
+      if (!mediaPipeCvRef.current?.isInitialized && !mockEngineRef.current) {
+        const mockCv = new MockCVEngine({ simulatedDelayMs: 10 });
+        mockCv.updateSettings({ detected: false, faceCount: 0 });
+        await mockCv.initialize();
+        mockEngineRef.current = mockCv;
+      }
+
       const engineToUse =
         mediaPipeCvRef.current && mediaPipeCvRef.current.isInitialized
           ? mediaPipeCvRef.current
@@ -2185,26 +2439,6 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     } catch (e: any) {
       console.warn('[FaceCaptureApp] CV engine initialization failed, continuing with camera preview only:', e);
     }
-  };
-
-  const switchToSimulationMode = async () => {
-    if (cameraServiceRef.current) {
-      await cameraServiceRef.current.stop();
-      setStream(null);
-    }
-    closeFrameStreams();
-    setFaceState(null);
-    setIsCameraLoading(false);
-    setCameraError(null);
-    setIsWorkflowStarted(false);
-    isWorkflowStartedRef.current = false;
-    // Stop-recording hook (§3.1 fix, 2026-09-05) — see `recordingSessionKey`'s
-    // own doc comment. The single-stream effect's own `!stream` guard would
-    // already cover this (the camera stream is stopped above), but the
-    // multi-channel effect does not depend on `stream`.
-    setRecordingSessionKey(null);
-    setMode('simulation');
-    updateSettings({ engineMode: 'simulation' });
   };
 
   const handleSelectCamera = async (devId: string) => {
@@ -2347,7 +2581,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     // reset (a run that finished naturally clears it via finishSession) is a
     // harmless no-op here.
     runSessionRef.current.reset();
-    const activeEngine = mode === 'live' ? liveWorkflowEngineRef.current : simWorkflowEngineRef.current;
+    const activeEngine = liveWorkflowEngineRef.current;
     if (activeEngine) {
       const {
         workflow,
@@ -2364,7 +2598,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
       captureTriggerRef.current.updateConfig({ mode: triggerConfig.mode, autoHoldMs: triggerConfig.autoHoldMs });
       setRecordVideo(campaignRecordVideo);
       if (!blockedReason) {
-        const preparedWorkflow = await runSimultaneousCaptureGate(mode === 'live', campaignSimultaneous, workflow);
+        const preparedWorkflow = await runSimultaneousCaptureGate(campaignSimultaneous, workflow);
         if (preparedWorkflow) {
           setActiveWorkflow(preparedWorkflow);
           await activeEngine.startSession(preparedWorkflow);
@@ -2372,10 +2606,6 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
       } else {
         setActiveWorkflow(workflow);
       }
-    }
-    if (mode === 'simulation') {
-      setFaceState(null);
-      if (mockEngineRef.current) mockEngineRef.current.updateSettings({ detected: false, faceCount: 0 });
     }
   };
 
@@ -2431,8 +2661,8 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     publishCbHelpState();
   };
 
-  const activeGuidance = mode === 'live' ? liveGuidance : simGuidance;
-  const activeEngine = mode === 'live' ? liveWorkflowEngineRef.current : simWorkflowEngineRef.current;
+  const activeGuidance = liveGuidance;
+  const activeEngine = liveWorkflowEngineRef.current;
   const activeSession = activeEngine?.currentSession;
 
   /**
@@ -2498,6 +2728,25 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   }, [selectedDeviceId]);
 
   /**
+   * Ref mirror of `devices` (2026-09-09 fix), same reason as
+   * `cameraRoleMappingRef` above — `buildCbHelpFrames` needs to know which
+   * role-mapped device ids are ACTUALLY connected right now, the same
+   * `devices.some((d) => d.id === ...)` check `isFrameMissingDevice` already
+   * does for the main window. Without this, a camera unplugged after
+   * `cameraRoleMapping` was set (persisted from an earlier setup session)
+   * kept getting forwarded to the CB Help window as a real device id — which
+   * then endlessly tried and failed to open it, the "màn extend vẫn lặp lỗi
+   * camera" field report this fixes. The main window already avoided this
+   * (see `isFrameMissingDevice`'s own doc comment); this brings CB Help's
+   * own frame-building up to the same standard instead of blindly trusting
+   * a stale role mapping.
+   */
+  const devicesRef = useRef<CameraDevice[]>([]);
+  useEffect(() => {
+    devicesRef.current = devices;
+  }, [devices]);
+
+  /**
    * De-dupes the CB Help "step change" publish (see the live engine's
    * `state-change` handler below) against that event's real firing rate —
    * once per processed video frame, many times a second — so only an actual
@@ -2540,14 +2789,50 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    * extended display.
    */
   const publishCbHelpState = useCallback(
-    (opts?: { phase?: 'idle' | 'review' | 'done'; greeting?: CbHelpGreeting | null }) => {
+    (opts?: {
+      phase?: 'idle' | 'review' | 'done';
+      greeting?: CbHelpGreeting | null;
+      /** CCCD-scan NOT_FOUND message (2026-09-09) — see `CbHelpPublishState.errorMessage`'s own doc comment. */
+      errorMessage?: string | null;
+      /** Post-save "Cảm ơn" overlay (2026-09-09) — see `CbHelpPublishState.thankYou`'s own doc comment. */
+      thankYou?: { name: string } | null;
+    }) => {
       const faceAPI = (window as any).faceAPI;
       if (!faceAPI?.publishCbHelpState) return; // web build, or no bridge
 
+      // See `cbHelpOverlayRef`'s own doc comment: only touch the sticky
+      // greeting/errorMessage/thankYou overlay when the caller explicitly
+      // names the field (`in`, not `?.`, so an explicit `{ errorMessage:
+      // null }` clear still works) — every other call just republishes
+      // whatever is currently set, unchanged.
+      if (opts && 'greeting' in opts) cbHelpOverlayRef.current.greeting = opts.greeting ?? null;
+      if (opts && 'errorMessage' in opts) cbHelpOverlayRef.current.errorMessage = opts.errorMessage ?? null;
+      if (opts && 'thankYou' in opts) cbHelpOverlayRef.current.thankYou = opts.thankYou ?? null;
+
       const engine = liveWorkflowEngineRef.current;
       const session = engine?.currentSession ?? null;
+      // `phase` needs the exact same "sticky until explicitly changed"
+      // handling as `greeting`/`errorMessage` above (2026-09-09 bug): the
+      // 800ms heartbeat's own bare `publishCbHelpState()` calls (no `opts`
+      // at all) used to fall through to `session?.status === 'RUNNING' ?
+      // 'live' : 'idle'` unconditionally, which meant the very first
+      // heartbeat tick after the 'completed' handler's explicit `{ phase:
+      // 'review' }` (session.status is 'COMPLETED', not 'RUNNING') snapped
+      // it straight back to 'idle' — wiping the frame grid back to "Chưa có
+      // phiên chụp nào đang diễn ra" within under a second, contradicting
+      // this function's own doc comment ("review/done still build frames…
+      // only an explicit phase: 'idle' forces empty frames"). A genuinely
+      // `RUNNING` session always wins outright (a fresh `startSession()` is
+      // real news, not staleness to guard against) — only once it is NOT
+      // running does a bare call fall back to whatever was last explicitly
+      // set, rather than recomputing from scratch.
+      if (session?.status === 'RUNNING') {
+        cbHelpPhaseOverrideRef.current = null;
+      } else if (opts && 'phase' in opts) {
+        cbHelpPhaseOverrideRef.current = opts.phase ?? null;
+      }
       const phase: 'idle' | 'live' | 'review' | 'done' =
-        opts?.phase ?? (session?.status === 'RUNNING' ? 'live' : 'idle');
+        session?.status === 'RUNNING' ? 'live' : cbHelpPhaseOverrideRef.current ?? 'idle';
       const running = phase === 'live';
       const showFrames = phase !== 'idle';
 
@@ -2563,20 +2848,43 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
               engine?.currentState.currentStepIndex ?? 0,
               simultaneousCaptureRef.current,
               cameraRoleMappingRef.current,
-              selectedDeviceIdRef.current
+              selectedDeviceIdRef.current,
+              devicesRef.current
             )
           : [],
-        greeting: opts?.greeting ?? null,
+        greeting: cbHelpOverlayRef.current.greeting,
+        // Item 12b: only meaningful while genuinely live — `captureController`'s
+        // own snapshot path (reused here, not a second implementation) already
+        // no-ops safely to `null` if the video element isn't ready yet.
+        centerPreviewDataUrl: running ? cameraServiceRef.current?.captureBase64Snapshot() ?? null : null,
+        errorMessage: cbHelpOverlayRef.current.errorMessage,
+        thankYou: cbHelpOverlayRef.current.thankYou,
       };
       void faceAPI.publishCbHelpState(state);
     },
     []
   );
 
-  /** Leaving live mode (or never having entered it) must not leave a stale live snapshot on the CB Help window. */
+  /**
+   * Item 12b (2026-09-09): periodically refreshes `centerPreviewDataUrl`
+   * (see that field's own doc comment) independent of step/session-change
+   * driven publishes — a single step can run for many seconds (posing,
+   * holding), during which nothing else would trigger a republish, leaving
+   * CB Help's CENTER tile frozen on a stale still. 800ms is "a few times a
+   * second," plenty for an extended-monitor preview without building a real
+   * second video pipeline over IPC. Reuses the exact same `publishCbHelpState`
+   * every other call site already uses (cheap: one JPEG encode of a frame
+   * already being decoded for the live preview, plus one local IPC send),
+   * rather than a separate, narrower "just the preview" push path. Runs for
+   * the component's whole lifetime now that live is the only mode — no more
+   * "leaving live mode" case to gate on (cancel/restart already publish
+   * `phase: 'idle'` themselves, which zeroes out `frames`/`centerPreviewDataUrl`
+   * on the next tick regardless of this timer).
+   */
   useEffect(() => {
-    if (mode !== 'live') publishCbHelpState({ phase: 'idle' });
-  }, [mode, publishCbHelpState]);
+    const id = setInterval(() => publishCbHelpState(), 800);
+    return () => clearInterval(id);
+  }, [publishCbHelpState]);
 
   /**
    * Unique, currently-plugged-in physical devices behind the CENTER/LEFT/
@@ -3150,7 +3458,6 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    * instead (see `openFrameStreams`).
    */
   useEffect(() => {
-    if (mode !== 'live') return;
     if (simultaneousCapture) return;
     const role =
       activeGuidance.stepType === 'LEFT' ? 'LEFT' : activeGuidance.stepType === 'RIGHT' ? 'RIGHT' : 'CENTER';
@@ -3161,7 +3468,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
 
     void handleSelectCamera(mappedDeviceId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, simultaneousCapture, activeGuidance.stepType, activeGuidance.currentStepIndex, cameraRoleMapping]);
+  }, [simultaneousCapture, activeGuidance.stepType, activeGuidance.currentStepIndex, cameraRoleMapping]);
 
   // Annotated on the callback, not just on stepsList: an object literal returned
   // from an unannotated .map() is checked for assignability only, so a misspelt
@@ -3218,7 +3525,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   };
 
   const multiFrameProp: MultiFrameViewProps | undefined =
-    simultaneousCapture && mode === 'live'
+    simultaneousCapture
       ? {
           frames: framesForWorkflow(activeWorkflow).map((frame): MultiFrameViewFrame => {
             const sessionStep = activeSession?.steps.find((st) => st.stepId === frame.stepId);
@@ -3291,49 +3598,17 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         }
       : undefined;
 
+  /*
+   * Item 8 (2026-09-09): "Mô phỏng (Simulation)" / "Live Camera" mode-toggle
+   * pill pair removed — live mode is the only mode now, so there is nothing
+   * left to toggle. `modeButton` itself is kept (name unchanged — it is a
+   * typed prop on DesktopCaptureView/MobileCaptureView) since it still holds
+   * the CB Help / Camera Setup buttons below, which were never
+   * simulation-specific.
+   */
   const modeButton = (
     <TooltipProvider>
       <div className="flex items-center gap-2">
-        <div className="hidden sm:flex items-center bg-slate-900/90 p-1 rounded-xl border border-slate-800 shadow-inner">
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                onClick={switchToSimulationMode}
-                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
-                  mode === 'simulation'
-                    ? 'bg-blue-600 text-white shadow-md'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                <SlidersHorizontal className="w-3.5 h-3.5" />
-                Mô phỏng (Simulation)
-              </button>
-            </TooltipTrigger>
-            <TooltipContent side="bottom" theme={theme}>
-              Chế độ Mô phỏng dữ liệu camera bằng thanh trượt
-            </TooltipContent>
-          </Tooltip>
-
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                onClick={startLiveMode}
-                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
-                  mode === 'live'
-                    ? 'bg-blue-600 text-white shadow-md'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                <Camera className="w-3.5 h-3.5" />
-                Live Camera
-              </button>
-            </TooltipTrigger>
-            <TooltipContent side="bottom" theme={theme}>
-              Chế độ Live Camera thực tế
-            </TooltipContent>
-          </Tooltip>
-        </div>
-
         {/*
           Only rendered under the desktop app (this bridge method does not
           exist on the web build) — see cbHelpOpen's own doc comment above.
@@ -3373,6 +3648,12 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           `CameraSetupScreen.tsx`) without the operator needing to know that
           shortcut — see docs/plans/multi-camera-device-management-discussion.md
           §3.6's "Gán camera cho các góc" decision.
+
+          Deliberately NOT gated on `awaitingStudent` (2026-09-09: briefly
+          was, then reverted per explicit follow-up feedback — "tôi cần là
+          vẫn action được") — these are operator/admin controls an operator
+          legitimately needs before the very first student of the day (initial
+          setup) or mid-day for troubleshooting, not just between students.
         */}
         {Boolean((window as any).faceAPI?.openCameraSetup) && (
           <Tooltip>
@@ -3422,7 +3703,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     closeFrameStreams();
     // CB Help (§3.5): same reasoning as handleRestart's identical call.
     publishCbHelpState({ phase: 'idle' });
-    const activeEngine = mode === 'live' ? liveWorkflowEngineRef.current : simWorkflowEngineRef.current;
+    const activeEngine = liveWorkflowEngineRef.current;
     if (activeEngine) {
       const {
         workflow,
@@ -3439,7 +3720,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
       captureTriggerRef.current.updateConfig({ mode: triggerConfig.mode, autoHoldMs: triggerConfig.autoHoldMs });
       setRecordVideo(campaignRecordVideo);
       if (!blockedReason) {
-        const preparedWorkflow = await runSimultaneousCaptureGate(mode === 'live', campaignSimultaneous, workflow);
+        const preparedWorkflow = await runSimultaneousCaptureGate(campaignSimultaneous, workflow);
         if (preparedWorkflow) {
           setActiveWorkflow(preparedWorkflow);
           await activeEngine.startSession(preparedWorkflow);
@@ -3450,10 +3731,10 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     }
     // recordingSessionKey added for the video-discard block above: without it
     // in deps, this callback would memoize on whatever recordingSessionKey
-    // was at the FIRST render where `mode` had its current value, and every
-    // cancel after that would read that stale (often null) snapshot instead
-    // of the run actually being cancelled.
-  }, [mode, recordingSessionKey]);
+    // was at the FIRST render, and every cancel after that would read that
+    // stale (often null) snapshot instead of the run actually being
+    // cancelled.
+  }, [recordingSessionKey]);
 
   return (
     <div className="relative h-full w-full overflow-hidden flex flex-col bg-slate-950 text-slate-100">
@@ -3479,20 +3760,54 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         </div>
       )}
       {/*
-        Pre-session "nhập mã sinh viên" step (2026-09-07) — shown whenever no
-        session is in flight, including automatically again after one
-        finishes (see SessionReviewModal's onAccept below). One z-index below
-        the device-blocked overlay above: a blocked device must still win if
+        Pre-session identification step — shown whenever no session is in
+        flight, including automatically again after one finishes (see
+        SessionReviewModal's onAccept below). One z-index below the
+        device-blocked overlay above: a blocked device must still win if
         both were ever true at once, which can't really happen in practice
         (blockedReason only surfaces once a session actually tries to start)
         but costs nothing to order correctly.
+
+        Two mutually-exclusive screens depending on which access model this
+        build has (see `FaceCaptureAppProps.campaignId`'s own doc comment):
+        the kiosk's campaign+login path (2026-09-09, CCCD-scan feature) shows
+        `CccdScanWaitingScreen` — `StudentIdEntryScreen`'s manual "nhập mã
+        sinh viên" form is fully replaced there, not shown alongside it, per
+        the product decision. Every other build (apps/web, the legacy
+        per-device-secret desktop path — neither has a CCCD scanner attached)
+        keeps the original manual-entry screen (2026-09-07) unchanged.
       */}
+      {/*
+        Post-save "Cảm ơn" overlay (2026-09-09 product request) — see
+        `thankYouStudent`'s own doc comment. Rendered ahead of the CCCD
+        screen below on purpose: `awaitingStudent` is still false for this
+        whole window, so the two are already mutually exclusive, but this
+        keeps that invariant visible here too rather than relying solely on
+        state timing.
+      */}
+      {thankYouStudent && (
+        <div className="absolute inset-0 z-[90] bg-slate-950 text-slate-100 flex flex-col items-center justify-center gap-3 text-center px-8">
+          <span className="text-6xl">✅</span>
+          <h1 className="text-4xl sm:text-5xl font-bold tracking-wide">
+            Cảm ơn {thankYouStudent.subjectName || 'bạn'}!
+          </h1>
+          <p className="text-lg text-slate-400">Hồ sơ ảnh đã được lưu thành công.</p>
+        </div>
+      )}
       {awaitingStudent && !deviceBlockedReason && (
-        <StudentIdEntryScreen
-          onSubmit={(code) => void handleStudentSubmit(code)}
-          submitting={studentSubmitting}
-          error={studentLookupError}
-        />
+        props.campaignId && props.authClient ? (
+          <CccdScanWaitingScreen
+            submitting={studentSubmitting}
+            error={studentLookupError}
+            onScanResult={(result) => void handleCccdScan(result)}
+          />
+        ) : (
+          <StudentIdEntryScreen
+            onSubmit={(code) => void handleStudentSubmit(code)}
+            submitting={studentSubmitting}
+            error={studentLookupError}
+          />
+        )
       )}
       {/*
         A capture that was not stored has to be visible while the person is
@@ -3525,7 +3840,15 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         stabilityProgress={activeGuidance.status === 'STABILIZING' ? activeGuidance.progress : 0}
         countdownValue={activeGuidance.status === 'COUNTDOWN' ? activeGuidance.countdownValue || 3 : 0}
         showDebugPanel={true}
-        mode={mode}
+        // Item 8 (2026-09-09): FaceCaptureApp no longer has its own `mode`
+        // state (live is the only mode) — passed as a literal rather than
+        // dropped entirely, since GuidedCaptureScreen/DesktopCaptureView's
+        // own `mode` prop defaults to `"simulation"` when omitted and still
+        // branches on it in a couple of places (e.g. the "no stream yet"
+        // placeholder). This preserves exactly the rendering this app
+        // already got when its own `mode` state was 'live', its only real
+        // value since `switchToSimulationMode` no longer exists to change it.
+        mode="live"
         theme={theme}
         onToggleTheme={toggleTheme}
         modeButton={modeButton}
@@ -3570,10 +3893,6 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         capturedList={{ current: null, recent: [], onOpenSession: () => {} }}
       />
 
-      {mode === 'simulation' && (
-        <SimulationSliders onChange={handleSimulationChange} theme={theme} />
-      )}
-
       {showReviewModal && (
         <SessionReviewModal
           // activeSession is the engine's own live session object — it already
@@ -3599,7 +3918,21 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           // failed approval leaves the review open so the operator can retry
           // without losing anything (the photos stay safely staged either
           // way; see approveUpload's own doc comment).
+          isAccepting={isAcceptingSession}
           onAccept={async () => {
+            // Re-entrancy guard (2026-09-09 field bug) — see `isAcceptingRef`'s
+            // own doc comment. A second invocation while one is already
+            // running (double-tap, or a retry the operator fires before the
+            // button's disabled state has visibly updated) must be a pure
+            // no-op, not a second real attempt: the first call may have
+            // already released this run's staged photos, and a second
+            // `approveUpload` against the same session finds nothing left to
+            // approve and throws a spurious "no photos found" error even
+            // though the save already succeeded.
+            if (isAcceptingRef.current) return;
+            isAcceptingRef.current = true;
+            setIsAcceptingSession(true);
+            try {
             const completedSession = activeSession ?? session;
             if (completedSession && repoRef.current) {
               void repoRef.current.saveSession(completedSession);
@@ -3691,7 +4024,31 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
             setStudentLookupError(null);
             setIsPostSaveReview(false);
             retookSinceReopenRef.current = false;
-            setAwaitingStudent(true);
+            // "Cảm ơn" overlay (2026-09-09 product request) — holds the
+            // walk-up-kiosk loop's own reset above (everything except
+            // `awaitingStudent`) for a fixed window before the screen falls
+            // back to "chưa quét căn cước", so the student who just sat for
+            // this actually sees a confirmation instead of the screen
+            // snapping straight to the next person's waiting state.
+            // `awaitingStudent` deliberately stays false for this same
+            // window — the CCCD scan screen is gated on it (see its render
+            // below), so this doubles as "don't scan a new card while this
+            // student's confirmation is still up."
+            setThankYouStudent(currentStudentRef.current);
+            // Also on the CB Help extended display (2026-09-09, "cảm ơn
+            // phải hiển thị trên màn extend") — same overlay, same fixed
+            // window, published the sticky way so the 800ms heartbeat can't
+            // clear it early (see `cbHelpOverlayRef`'s own doc comment).
+            publishCbHelpState({ thankYou: { name: currentStudentRef.current?.subjectName ?? '' } });
+            setTimeout(() => {
+              setThankYouStudent(null);
+              publishCbHelpState({ thankYou: null });
+              setAwaitingStudent(true);
+            }, THANK_YOU_DURATION_MS);
+            } finally {
+              isAcceptingRef.current = false;
+              setIsAcceptingSession(false);
+            }
           }}
           onRetake={isPostSaveReview ? handlePostSaveRetakeAll : handleRestart}
           onRetakeStep={handleRetakeStep}

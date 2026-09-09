@@ -20,6 +20,19 @@ export interface SessionReviewModalProps {
    * unmirrored sensor image.
    */
   mirrored?: boolean;
+  /**
+   * `onAccept` is mid-flight (2026-09-09 field bug: a kiosk operator's
+   * double-tap fired `onAccept` a second time while — or immediately after —
+   * the first call's IPC round-trip to `approveSessionUpload` was still
+   * settling; the first call had already released this run's staged photos,
+   * so the second one legitimately found nothing left to approve and surfaced
+   * a scary "no photos found" error even though the save had actually
+   * succeeded). Disables the button so a second tap cannot re-enter
+   * `onAccept` while one is already in progress, and swaps the label so a
+   * slow save reads as "in progress," not "did my tap register at all" —
+   * that ambiguity is what invited the second tap in the first place.
+   */
+  isAccepting?: boolean;
 }
 
 export const SessionReviewModal: React.FC<SessionReviewModalProps> = ({
@@ -30,6 +43,7 @@ export const SessionReviewModal: React.FC<SessionReviewModalProps> = ({
   onClose,
   className,
   mirrored = false,
+  isAccepting = false,
 }) => {
   const [exportNotice, setExportNotice] = useState<{ path: string; count: number } | null>(null);
 
@@ -205,13 +219,13 @@ export const SessionReviewModal: React.FC<SessionReviewModalProps> = ({
 
             <button
               onClick={onAccept}
-              disabled={!isComplete}
+              disabled={!isComplete || isAccepting}
               className="px-4 sm:px-6 py-2.5 bg-blue-600 hover:bg-blue-500 active:scale-95 text-white font-bold text-xs sm:text-sm rounded-xl shadow-lg shadow-blue-500/25 transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:active:scale-100"
               title={isComplete ? 'Lưu hồ sơ khuôn mặt' : 'Cần chụp đủ tất cả các góc trước khi lưu hồ sơ'}
             >
               <Send className="w-4 h-4 fill-white" />
-              <span className="hidden sm:inline">Xác nhận & Lưu hồ sơ</span>
-              <span className="sm:hidden">Gửi hồ sơ</span>
+              <span className="hidden sm:inline">{isAccepting ? 'Đang lưu...' : 'Xác nhận & Lưu hồ sơ'}</span>
+              <span className="sm:hidden">{isAccepting ? 'Đang lưu...' : 'Gửi hồ sơ'}</span>
             </button>
           </div>
         </div>

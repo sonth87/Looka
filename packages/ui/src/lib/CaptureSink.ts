@@ -31,9 +31,9 @@ export interface ApprovalStepInfo {
  * run in progress — see its `setSubject()`'s own doc comment for why one
  * setter feeds both `startSession` (web path) and `approveUpload` (kiosk
  * path) instead of each call site threading these fields separately.
- * `className`/`major`/`academicYear` have no dedicated column anywhere
- * server-side; they ride along as free-form `metadata` wherever a sink
- * accepts it.
+ * `className`/`major`/`academicYear`/`identityNumber` have no dedicated
+ * column anywhere server-side; they ride along as free-form `metadata`
+ * wherever a sink accepts it.
  */
 export interface StudentSubjectInfo {
   subjectCode?: string;
@@ -41,6 +41,14 @@ export interface StudentSubjectInfo {
   className?: string;
   major?: string;
   academicYear?: string;
+  /**
+   * The CCCD number this subject was matched by (2026-09-09 CCCD-scan
+   * feature) — `undefined` for the manual "nhập mã sinh viên" path. Rides
+   * along in `metadata` purely so the CMS can search/filter a session by
+   * the citizen id it was captured under; see
+   * `FaceCaptureApp.tsx`'s `handleLookupResult`.
+   */
+  identityNumber?: string;
 }
 
 export interface CaptureSink {
@@ -62,6 +70,18 @@ export interface CaptureSink {
     stepId: string;
     attempt: number;
     dataUrl: string;
+    /**
+     * The subject's CCCD number, when known (2026-09-09, "lưu sang file
+     * server sẽ lấy căn cước để lưu ảnh, dễ truy xuất") — threaded through
+     * from `RunScopedCaptureSession.setSubject()`'s cached
+     * `StudentSubjectInfo` so `ElectronCaptureSink` can forward it into the
+     * virtual path the kiosk's photo actually gets organized under on the
+     * file-service, instead of only the session id. Omitted for the
+     * manual "nhập mã sinh viên" path (no CCCD involved) or the web sink
+     * (`HttpCaptureSink` ignores it — no per-device tenant/path concept
+     * there).
+     */
+    identityNumber?: string;
   }): Promise<void>;
 
   /** Mark the run finished. */
@@ -97,7 +117,16 @@ export interface CaptureSink {
     sessionId: string,
     steps?: ApprovalStepInfo[],
     videoSessionId?: string,
-    subject?: StudentSubjectInfo
+    subject?: StudentSubjectInfo,
+    /**
+     * The logged-in operator's server-side `users.id` (2026-09-09,
+     * "thống kê phần giảng viên chụp") — see
+     * `FaceCaptureAppProps.operatorUserId`'s own doc comment in
+     * `FaceCaptureApp.tsx`. `ElectronCaptureSink` forwards it into the
+     * SESSION_REPORT the kiosk builds; `HttpCaptureSink` ignores it (a
+     * no-op sink, same as `videoSessionId`/`subject`).
+     */
+    operatorUserId?: string | null
   ): Promise<void>;
 }
 
@@ -199,9 +228,10 @@ export class HttpCaptureSink implements CaptureSink {
     _sessionId?: string,
     _steps?: ApprovalStepInfo[],
     _videoSessionId?: string,
-    _subject?: StudentSubjectInfo
+    _subject?: StudentSubjectInfo,
+    _operatorUserId?: string | null
   ): Promise<void> {
-    // Intentionally does nothing, including with `_steps`/`_videoSessionId`/`_subject` — see method doc comment.
+    // Intentionally does nothing, including with `_steps`/`_videoSessionId`/`_subject`/`_operatorUserId` — see method doc comment.
   }
 }
 
@@ -237,6 +267,7 @@ export class ElectronCaptureSink implements CaptureSink {
     stepId: string;
     attempt: number;
     dataUrl: string;
+    identityNumber?: string;
   }): Promise<void> {
     const faceAPI = (window as any).faceAPI;
     if (!faceAPI?.queueCapture) {
@@ -250,6 +281,12 @@ export class ElectronCaptureSink implements CaptureSink {
       stepId: input.stepId,
       attempt: input.attempt,
       dataUrl: input.dataUrl,
+      // Carried in `metadata` (2026-09-09) — the main process's own
+      // `QueueCaptureInput` has no dedicated field for this, and `metadata`
+      // already rides along the local outbox row unchanged for exactly
+      // this kind of pass-through value; see `ApiPhotoUploadClient
+      // .routeUpload`'s own doc comment for where it re-emerges.
+      metadata: input.identityNumber ? { identityNumber: input.identityNumber } : undefined,
     });
     if (!result?.ok) {
       throw new Error(result?.error ?? 'queueCapture failed');
@@ -289,7 +326,8 @@ export class ElectronCaptureSink implements CaptureSink {
     sessionId: string,
     steps?: ApprovalStepInfo[],
     videoSessionId?: string,
-    subject?: StudentSubjectInfo
+    subject?: StudentSubjectInfo,
+    operatorUserId?: string | null
   ): Promise<void> {
     const faceAPI = (window as any).faceAPI;
     if (!faceAPI?.approveSessionUpload) {
@@ -302,8 +340,14 @@ export class ElectronCaptureSink implements CaptureSink {
       subjectCode: subject?.subjectCode,
       subjectName: subject?.subjectName,
       metadata: subject
-        ? { className: subject.className, major: subject.major, academicYear: subject.academicYear }
+        ? {
+            className: subject.className,
+            major: subject.major,
+            academicYear: subject.academicYear,
+            identityNumber: subject.identityNumber,
+          }
         : undefined,
+      operatorUserId: operatorUserId ?? undefined,
     });
     if (!result?.ok) {
       throw new Error(result?.error ?? 'approveSessionUpload failed');
@@ -430,7 +474,12 @@ export class RunScopedCaptureSession {
         .startSession({
           subjectCode: subject.subjectCode,
           subjectName: subject.subjectName,
-          metadata: { className: subject.className, major: subject.major, academicYear: subject.academicYear },
+          metadata: {
+            className: subject.className,
+            major: subject.major,
+            academicYear: subject.academicYear,
+            identityNumber: subject.identityNumber,
+          },
         })
         .catch((err) => {
           // A failed startSession must not stay memoised forever — the next
@@ -451,7 +500,11 @@ export class RunScopedCaptureSession {
     if (!this.sink) throw new Error('No CaptureSink configured.');
     const sessionId = await this.ensure();
     if (!sessionId) throw new Error('No CaptureSink configured.');
-    await this.sink.savePhoto({ sessionId, ...input });
+    // `pendingSubject` is already cached by `setSubject()` before the first
+    // capture of a real (non-manual) run — see `savePhoto`'s own interface
+    // doc comment for why this rides along per-photo rather than only at
+    // approval time.
+    await this.sink.savePhoto({ sessionId, identityNumber: this.pendingSubject.identityNumber, ...input });
   }
 
   /**
@@ -475,7 +528,11 @@ export class RunScopedCaptureSession {
    * component mid-run; surfacing that as a real, visible error is what lets
    * an operator notice instead of walking away thinking the upload went out.
    */
-  public async approve(steps?: ApprovalStepInfo[], videoSessionId?: string): Promise<void> {
+  public async approve(
+    steps?: ApprovalStepInfo[],
+    videoSessionId?: string,
+    operatorUserId?: string | null
+  ): Promise<void> {
     if (!this.sink) throw new Error('No CaptureSink configured.');
     const sessionId = this.sessionId;
     if (!sessionId) {
@@ -483,7 +540,7 @@ export class RunScopedCaptureSession {
         'No active capture session to approve — the app may have hot-reloaded mid-session. Please fully reload and recapture.'
       );
     }
-    await this.sink.approveUpload(sessionId, steps, videoSessionId, this.pendingSubject);
+    await this.sink.approveUpload(sessionId, steps, videoSessionId, this.pendingSubject, operatorUserId);
   }
 
   /** The run finished naturally: tell the sink, then drop the cached id. */

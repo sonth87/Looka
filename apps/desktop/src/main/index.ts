@@ -45,6 +45,9 @@ import {
   getCameraRoleMapping,
   setCameraRoleMapping,
   sanitizeCameraRoleMapping,
+  getCameraPhysicalAngles,
+  setCameraPhysicalAngles,
+  sanitizeCameraPhysicalAngles,
   getCaptureSequencing,
   setCaptureSequencing,
   getOrCreateDeviceFingerprint,
@@ -74,6 +77,7 @@ import {
   sanitizeCbHelpState,
 } from './cbHelpWindow.js';
 import { initLogger, installCrashHandlers, closeLogger, logFilePath } from './logger.js';
+import { startCccdRosterWatcher, stopCccdRosterWatcher, lookupCccdByIdentityNumber } from './cccdRosterWatcher.js';
 
 /**
  * Disable Chromium's hardware-accelerated (D3D11/Media Foundation) webcam
@@ -502,6 +506,32 @@ app.whenReady().then(async () => {
    */
   ipcMain.handle('cbhelp:toggle', () => toggleCbHelpWindow(currentMainDisplayId()));
 
+  /**
+   * The kiosk's own embedded CCCD-scan corner (`CccdScanWaitingScreen.tsx`'s
+   * `ScanMonitorCorner`) asking whether a freshly, stably OCR'd citizen id
+   * matches anyone in the external student roster
+   * (`D:\Work\camera_server\response.json`) — 2026-09-09 architecture
+   * correction, replacing the earlier same-day `cccd:writeScanResult`
+   * handler (which wrote the OCR result to a file, on the wrong assumption
+   * that file was a per-scan write target). This process never writes to
+   * that path at all anymore; `cccdRosterWatcher.ts` only reads it, on a
+   * background poll, into an in-memory cache this handler looks up against.
+   *
+   * `found: false` is a normal, expected 200-shaped result (a citizen id
+   * simply not present anywhere in the roster), never a thrown error — see
+   * `cccdRosterWatcher.ts`'s `lookupCccdByIdentityNumber`'s own doc comment.
+   * Defense-in-depth re-check on the input, same reasoning the old handler
+   * had: the renderer already gates on `cccdOcr.ts`'s `extractCitizenId`
+   * before ever offering a stable read, but this main process must never
+   * trust a renderer-supplied string blindly.
+   */
+  ipcMain.handle('cccd:lookupByIdentityNumber', (_, payload: { identityNumber?: unknown }) => {
+    const identityNumber = typeof payload?.identityNumber === 'string' ? payload.identityNumber.trim() : '';
+    if (!identityNumber) return { found: false };
+    const record = lookupCccdByIdentityNumber(identityNumber);
+    return record ? { found: true, record } : { found: false };
+  });
+
   /** Whether the CB Help window is currently open — used to sync the kiosk UI's toggle button on mount. */
   ipcMain.handle('cbhelp:isOpen', () => isCbHelpWindowOpen());
 
@@ -531,6 +561,20 @@ app.whenReady().then(async () => {
   ipcMain.handle('camera:getRoleMapping', () => getCameraRoleMapping());
   ipcMain.handle('camera:setRoleMapping', (_, mapping: unknown) => {
     setCameraRoleMapping(sanitizeCameraRoleMapping(mapping));
+    return true;
+  });
+
+  /**
+   * Per-role physical camera mounting angle (§3.9) — see
+   * `secrets.ts`'s `getCameraPhysicalAngles`/`setCameraPhysicalAngles` own
+   * doc comment. Set from the camera setup screen alongside the role
+   * mapping, read by the main kiosk window's round planning
+   * (`FaceCaptureApp.tsx`'s `runSimultaneousCaptureGate` →
+   * `planCaptureRounds`'s `physicalAngles` option).
+   */
+  ipcMain.handle('camera:getPhysicalAngles', () => getCameraPhysicalAngles());
+  ipcMain.handle('camera:setPhysicalAngles', (_, angles: unknown) => {
+    setCameraPhysicalAngles(sanitizeCameraPhysicalAngles(angles));
     return true;
   });
   ipcMain.handle('camera:openSetup', () => {
@@ -800,6 +844,7 @@ app.whenReady().then(async () => {
         subjectCode?: unknown;
         subjectName?: unknown;
         metadata?: unknown;
+        operatorUserId?: unknown;
       }
     ) => {
       const sessionId = String(payload?.sessionId ?? '');
@@ -815,6 +860,7 @@ app.whenReady().then(async () => {
           payload?.metadata && typeof payload.metadata === 'object'
             ? (payload.metadata as Record<string, unknown>)
             : undefined;
+        const operatorUserId = typeof payload?.operatorUserId === 'string' ? payload.operatorUserId : undefined;
         const { approved, superseded, videosEnqueued } = await approveSessionUpload(sessionId, steps, {
           workflowId,
           startedAt,
@@ -822,6 +868,7 @@ app.whenReady().then(async () => {
           subjectCode,
           subjectName,
           metadata,
+          operatorUserId,
         });
         console.warn(
           `[session:approveUpload] sessionId=${sessionId} approved=${approved} superseded=${superseded} videosEnqueued=${videosEnqueued}`
@@ -927,6 +974,13 @@ app.whenReady().then(async () => {
   createWindow();
   void ensureMacCameraAccess();
 
+  // CCCD-scan capture-identification (2026-09-09, corrected architecture) —
+  // keeps the external student roster file cached in memory, polling for
+  // changes; see cccdRosterWatcher.ts's own doc comment. No window
+  // reference needed at all anymore — lookups are pulled on demand via the
+  // `cccd:lookupByIdentityNumber` IPC handler above, not pushed.
+  startCccdRosterWatcher();
+
   // CB Help's entry point into the camera role-assignment screen (§2.1) —
   // see cameraSetupWindow.ts's own doc comment for why this is a separate
   // window rather than something bolted onto the kiosk UI. A global shortcut
@@ -962,6 +1016,7 @@ app.whenReady().then(async () => {
 app.on('window-all-closed', () => {
   stopUploads();
   stopStatsEventPush();
+  stopCccdRosterWatcher();
   closeDatabase();
   if (process.platform !== 'darwin') app.quit();
 });
@@ -969,6 +1024,7 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   stopUploads();
   stopStatsEventPush();
+  stopCccdRosterWatcher();
   closeDatabase();
   closeLogger();
   globalShortcut.unregisterAll();

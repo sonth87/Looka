@@ -1,0 +1,25 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "jsx": "react-jsx",
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "skipLibCheck": true
+    // No rootDir on purpose: test/responseWriter.test.ts imports
+    // apps/desktop/src/main/cccdScanFile.ts directly (the real parser, per
+    // the task's "don't reimplement/guess its behavior" requirement) rather
+    // than a copy. That file lives outside this package entirely, so a
+    // fixed rootDir here would make tsc reject it with TS6059 ("file is not
+    // under rootDir"). This config exists purely for `tsc --noEmit`
+    // type-checking of the test surface — the real build
+    // (tsconfig.electron.json) only ever compiles src/main + src/preload,
+    // which never touch the cross-package import, so it keeps its normal
+    // rootDir/outDir constraints untouched.
+  },
+  "include": ["src/**/*", "test/**/*", "../desktop/src/main/cccdScanFile.ts"]
+}

@@ -109,6 +109,39 @@ export class WorkflowEngine implements IWorkflowEngine {
     return this.activeWorkflow.steps[this.currentStepIdx]?.id ?? null;
   }
 
+  /**
+   * Lets a caller arm/disarm `externalCaptureOnly` for the step currently
+   * being gated, outside of an actual retake (`retakeStep`'s own
+   * `options.externalCapture`) — needed for round-based simultaneous capture
+   * (§3.1.5, `FaceCaptureApp.tsx`'s `buildRoundPlan`/round-advance
+   * mechanism), where a round's *driving* step (the one this engine's own
+   * pose gate/AUTO auto-fire actually drives) is not always CENTER-resolved:
+   * once an earlier round has already used up the campaign's one CENTER
+   * step, a later round can easily be driven entirely by, say, a second
+   * LEFT-angle step. Before this existed, `processFrame`'s AUTO branch had
+   * no way to know that and called `triggerManualCapture` normally for such
+   * a step on its FIRST (non-retake) pass — which snapshots this engine's
+   * own snapshot provider (always the CENTER-analysed camera, see
+   * `setSnapshotProvider`), silently storing a CENTER-framed photo mislabeled
+   * as whatever non-CENTER step was actually current. `retakeStep` already
+   * covered the *retake* half of this (a side frame being explicitly
+   * retaken); this covers the *first-attempt* half, called by the caller
+   * (FaceCaptureApp's `state-change` listener, which already knows each
+   * step's resolved `cameraRole` from the round-ordered workflow
+   * `buildRoundPlan` produces) every time the current step changes, in
+   * simultaneous-capture mode only.
+   *
+   * Deliberately the only thing this touches — no status/attempt/stability
+   * bookkeeping, unlike `retakeStep` — since a first-attempt step transition
+   * has nothing to reset. Does not survive `advanceToNextStep`'s own
+   * unconditional reset (matching `retakeStep`'s flag) or `startSession`/
+   * `cancelSession`/`retakeAllSteps`, so the caller is expected to call this
+   * again on every step change it needs it for, not merely once per session.
+   */
+  public setExternalCaptureOnly(value: boolean): void {
+    this.externalCaptureOnly = value;
+  }
+
   public async startSession(
     workflow: CaptureWorkflow,
     personId?: string
@@ -260,7 +293,17 @@ export class WorkflowEngine implements IWorkflowEngine {
     faceState?: FaceState | null,
     trigger?: CaptureTriggerInfo
   ): Promise<boolean> {
-    if (this.isCapturing || !this.activeWorkflow || !this._currentSession) return false;
+    // `status !== 'RUNNING'` (2026-09-09 field bug) — mirrors `processFrame`'s
+    // own guard just above, which this method never had: the shutter button
+    // and the gesture loop both call this directly, bypassing `processFrame`
+    // entirely, so between one student's completed session and the next
+    // one's `startSession()` (the whole CCCD-scan-waiting window) `_currentSession`
+    // is still the PREVIOUS student's, non-null but `COMPLETED` — a manual
+    // shutter press or gesture during that window used to still pass the
+    // `!this._currentSession` check below and record a real capture against
+    // that already-finished session.
+    if (this.isCapturing || !this.activeWorkflow || !this._currentSession || this._currentSession.status !== 'RUNNING')
+      return false;
     // Defence in depth: the real gate is FaceCaptureApp's shutter/gesture
     // handlers routing to recordExternalCapture instead of calling this in
     // the first place (see `externalCaptureOnly`'s own doc comment) — this

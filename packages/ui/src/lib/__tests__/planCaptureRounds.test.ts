@@ -258,6 +258,43 @@ test('resolveStepCamera fallback: no CENTER and 2+ mapped roles picks the first 
   assert.equal(plan2.rounds[0].steps[0].cameraRole, 'LEFT');
 });
 
+test('connectedDeviceIds: a role mapped to a device not currently connected falls back exactly like an unmapped role', () => {
+  const steps = tenStepCampaign();
+  // RIGHT is "mapped" in roleMapping (e.g. a stale/persisted value, or a
+  // device this build's own enumerateDevices() now excludes for an
+  // unrelated reason — see planCaptureRounds' own doc comment), but its
+  // device id is absent from connectedDeviceIds, i.e. not actually usable.
+  const mapping = { CENTER: 'dev-center', LEFT: 'dev-left', RIGHT: 'dev-right' };
+  const plan = planCaptureRounds(steps, mapping, {
+    connectedDeviceIds: ['dev-center', 'dev-left'],
+  });
+
+  assert.equal(plan.blocked, false);
+  const allPlanned = plan.rounds.flatMap((r) => r.steps);
+  // Resolved exactly as if RIGHT had never been mapped at all.
+  assertEveryStepResolvedCorrectly(allPlanned, steps, new Set(['CENTER', 'LEFT']));
+  // No step is ever routed to RIGHT's (unreachable) camera.
+  assert.ok(allPlanned.every((p) => p.cameraRole !== 'RIGHT'));
+});
+
+test('connectedDeviceIds: every mapped device disconnected blocks with a distinct reason from "never mapped"', () => {
+  const steps = tenStepCampaign();
+  const plan = planCaptureRounds(steps, { CENTER: 'dev-center' }, { connectedDeviceIds: [] });
+
+  assert.equal(plan.blocked, true);
+  assert.deepEqual(plan.rounds, []);
+  assert.notEqual(plan.reason, planCaptureRounds(steps, {}).reason);
+});
+
+test('connectedDeviceIds omitted (default): unchanged from previous behaviour — roleMapping string presence alone is trusted', () => {
+  const steps = tenStepCampaign();
+  const withoutOption = planCaptureRounds(steps, { CENTER: 'dev-center', LEFT: 'dev-left' });
+  const withUndefined = planCaptureRounds(steps, { CENTER: 'dev-center', LEFT: 'dev-left' }, {});
+
+  assert.deepEqual(withoutOption, withUndefined);
+  assert.equal(withoutOption.blocked, false);
+});
+
 test('physicalAngles override changes the computed gate', () => {
   const steps: CaptureStep[] = [
     { id: 'left-30', type: 'LEFT', instruction: 'a', capture: { enabled: true }, cameraRole: 'LEFT', pose: { yaw: { target: -30, tolerance: 7 } } },

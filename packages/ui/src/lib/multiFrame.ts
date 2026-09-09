@@ -290,6 +290,34 @@ function planStep(
  * role (e.g. once `camera.physicalAngles` — §3.9, `apps/desktop`'s
  * `secrets.ts` — is wired up and read on the renderer side); omitted roles
  * keep the default.
+ *
+ * `connectedDeviceIds` (2026-09-09 fix — "chưa thấy có thể chụp đồng thời
+ * nhiều góc, như trước nữa" + the same session's `NotReadableError: Device
+ * in use` / `NotSupportedError` recording failures): `roleMapping` is a
+ * separate, persisted value (`camera.roleMapping` in secrets.dat) from live
+ * device enumeration, and the two can go stale relative to each other —
+ * a camera unplugged since the mapping was saved, or (the exact trigger
+ * this fixes) a device a newer build's own `enumerateDevices()` now
+ * excludes for an unrelated reason (see `BrowserCameraService.ts`'s Camo
+ * virtual-webcam filter, added the same day) — with nothing to reconcile
+ * `roleMapping` against that change. Before this, a role whose device
+ * string was merely *present* in `roleMapping` counted as "mapped" even
+ * when that device could no longer actually be opened, so this planner kept
+ * routing steps to it: `openFrameStreams`' real `getUserMedia`/
+ * `MediaRecorder` calls then hit exactly that dead camera concurrently with
+ * the kiosk's one genuinely usable camera, which a driver that only serves
+ * one exclusive capture session at a time (typical for the USB2.0 UVC
+ * webcams this kiosk uses, doubly so for a software/virtual camera like
+ * Camo) answers with `NotReadableError: Device in use` — cascading into
+ * `MediaRecorder.start()`'s `NotSupportedError` and the liveness monitor's
+ * repeating "data gap detected, restarting recorder" for that channel.
+ * When given, a role's device must appear in this set to count as
+ * "mapped" — otherwise it is treated exactly like an unmapped role (falls
+ * back to CENTER, or the kiosk's sole other connected camera, per the two
+ * cases above), so a stale/hidden device is never routed to instead of
+ * silently skipped. Omitted (`undefined`, the default) preserves the exact
+ * previous behaviour — trust `roleMapping` string presence alone — so every
+ * existing caller/test that doesn't pass this keeps working unchanged.
  */
 export function planCaptureRounds(
   steps: CaptureStep[],
@@ -299,16 +327,30 @@ export function planCaptureRounds(
     physicalAngles?: PhysicalAngleMap;
     /** Degrees of slack when comparing two steps' gate poses for round-compatibility. Default 0.01°. */
     gateTolerance?: number;
+    /** See this function's own doc comment above. */
+    connectedDeviceIds?: ReadonlySet<string> | string[];
   }
 ): CapturePlan {
+  const connectedDeviceIds = options?.connectedDeviceIds
+    ? options.connectedDeviceIds instanceof Set
+      ? options.connectedDeviceIds
+      : new Set(options.connectedDeviceIds)
+    : null;
   const mappedRoles = new Set<CameraRole>(
-    CAMERA_ROLES.filter((role) => !!roleMapping[role])
+    CAMERA_ROLES.filter((role) => {
+      const id = roleMapping[role];
+      return !!id && (!connectedDeviceIds || connectedDeviceIds.has(id));
+    })
   );
 
   if (mappedRoles.size === 0) {
+    const hasStaleMapping = CAMERA_ROLES.some((role) => !!roleMapping[role]);
     return {
       blocked: true,
-      reason: 'Chưa gán camera nào cho máy này',
+      reason:
+        hasStaleMapping && connectedDeviceIds
+          ? 'Camera đã gán cho máy này hiện không kết nối'
+          : 'Chưa gán camera nào cho máy này',
       rounds: [],
     };
   }

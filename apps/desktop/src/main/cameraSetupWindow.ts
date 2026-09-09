@@ -44,6 +44,18 @@ export function openCameraSetupWindow(): void {
     },
   });
 
+  // Same "this window's own console errors are otherwise invisible" fix
+  // cbHelpWindow.ts already has (2026-09-09 diagnostic gap found while
+  // investigating a live "blank white screen" field report on this exact
+  // window) — forwarded to main.log the same way `attachRendererDiagnostics`
+  // does for the main window.
+  cameraSetupWindow.webContents.on('console-message', (details) => {
+    const level = details.level;
+    if (level === 'warning' || level === 'error') {
+      console.error(`[camera-setup renderer] ${details.message} (${details.sourceId}:${details.lineNumber})`);
+    }
+  });
+
   if (process.env.VITE_DEV_SERVER_URL) {
     cameraSetupWindow.loadURL(`${process.env.VITE_DEV_SERVER_URL}#camera-setup`);
   } else {

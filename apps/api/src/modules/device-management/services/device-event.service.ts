@@ -8,6 +8,7 @@ import {
   AllCampaignsStatsDao,
   CampaignDayStatsDao,
   CampaignDeviceStatsDao,
+  CampaignOperatorStatsDao,
   CampaignPhotoStatsDao,
   CampaignsTimeseriesDao,
   CampaignsTimeseriesPointDao,
@@ -116,12 +117,49 @@ export class DeviceEventService extends CommonService<DeviceEvent> {
     // (see that method's own comment). A `SESSION_REPORT` batch can legally
     // report several sessions at once (a kiosk pushes its queue every
     // 15s — see docs/ROADMAP.md), so this is a small loop, not a single call.
+    //
+    // Auto-triggers the set's first `CARD_AUTO` the moment it lands in
+    // `PENDING_AUTO` — `PhotoReviewService.ensureSetForApprovedSession`'s own
+    // doc comment used to note this pass had no such worker, leaving an
+    // admin to click "reprocess" manually for every single student forever;
+    // this closes that gap by calling the exact same `reprocess()` logic the
+    // manual button already uses, right here, best-effort. Only fires when
+    // `ensureSetForApprovedSession` actually produced/reset a `PENDING_AUTO`
+    // set (`pendingAuto: true`) — an already-`APPROVED` set (R-Q10) must
+    // never have this silently overwrite what a reviewer already accepted.
+    // `reprocess()` itself never throws for a sidecar failure (it resolves
+    // to a clean `AUTO_FAILED` state on its own — see that method's own
+    // comment), so the `.catch()` here only guards against something truly
+    // unexpected (e.g. a DB hiccup) — same belt-and-braces pattern as the
+    // `ensureSetForApprovedSession` call right above it. `actorUserId: null`
+    // marks this as a system-triggered run, same as `reprocess()`'s own
+    // `AUTO_GENERATED`/`AUTO_FAILED` events already do for the sidecar
+    // outcome itself. Once Part A of the capture-routing work has landed,
+    // the source photo's bytes are already in this API's own Postgres by
+    // the time this runs (no upload to fs-core to wait on first) — see
+    // `PhotoReviewService.readSourcePhotoBytes`.
     for (const sessionId of approvedSessionIds) {
-      await this.photoReview.ensureSetForApprovedSession(sessionId).catch((err) => {
+      const result = await this.photoReview.ensureSetForApprovedSession(sessionId).catch((err) => {
         this.logger.warn(
           `best-effort photo-review set creation failed for session ${sessionId}: ${(err as Error).message}`,
         );
+        return null;
       });
+      if (result?.pendingAuto) {
+        // `reprocess()`'s resolved `PhotoVariantDao` is discarded here (this
+        // is a best-effort background trigger, not a request/response flow)
+        // — the `apiBaseUrl` it uses to build a local-content fallback link
+        // (see `PhotoReviewService.toVariantDao`) is therefore never actually
+        // read; there is no incoming HTTP request here to derive a real one
+        // from (unlike `ReviewController`'s own routes), so a placeholder is
+        // passed rather than threading `ConfigService`/a request object into
+        // this service for a value nothing consumes.
+        await this.photoReview.reprocess(result.setId, null, 'http://localhost').catch((err) => {
+          this.logger.warn(
+            `best-effort auto CARD_AUTO reprocess failed for set ${result.setId} (session ${sessionId}): ${(err as Error).message}`,
+          );
+        });
+      }
     }
 
     return savedCount;
@@ -167,6 +205,7 @@ export class DeviceEventService extends CommonService<DeviceEvent> {
     stats.sessions = sessionRow?.count ?? 0;
     stats.photos = await this.campaignPhotoStats(campaignId);
     stats.byDevice = await this.campaignDeviceStats(campaignId);
+    stats.byOperator = await this.campaignOperatorStats(campaignId);
     stats.byDay = await this.campaignDayStats(campaignId);
 
     return stats;
@@ -262,6 +301,13 @@ export class DeviceEventService extends CommonService<DeviceEvent> {
         failed: 0,
       };
       item.byDevice = deviceStatsByCampaign.get(campaign.id) ?? [];
+      // Per-operator breakdown is only computed for the single-campaign
+      // `campaignStats()` (the campaign detail's own Thống kê tab, where it
+      // was actually asked for) — no bulk per-campaign query exists for the
+      // cross-campaign overview page this method backs, so this stays empty
+      // here rather than adding N+1 queries for a summary table that never
+      // asked to show it.
+      item.byOperator = [];
       item.byDay = dayStatsByCampaign.get(campaign.id) ?? [];
 
       summary.totalDevices += item.deviceCount;
@@ -427,6 +473,60 @@ export class DeviceEventService extends CommonService<DeviceEvent> {
     );
 
     return rows.map((r) => this.toDeviceStatsDao(r));
+  }
+
+  /**
+   * Per-operator breakdown (2026-09-09, product request — "thống kê phần
+   * giảng viên chụp" in the campaign detail's own Thống kê tab) — same
+   * shape/query style as `campaignDeviceStats` above, grouped by
+   * `sessions.operator_user_id` instead of `device_id`. A session with no
+   * operator identity (kiosk build/session that predates threading the SSO
+   * user through to capture — see `uploads.ts`'s `operatorUserId` plumbing)
+   * groups under `operator_user_id IS NULL`, reported as one row rather than
+   * silently dropped, so the total across `byOperator` still reconciles with
+   * `stats.sessions`.
+   */
+  private async campaignOperatorStats(
+    campaignId: string,
+  ): Promise<CampaignOperatorStatsDao[]> {
+    const rows = await this.dataSource.query<
+      Array<{
+        operator_user_id: string | null;
+        operator_name: string | null;
+        sessions: number;
+        photos_ready: number;
+        photos_failed: number;
+        last_capture_at: Date | null;
+      }>
+    >(
+      `SELECT
+          s.operator_user_id,
+          COALESCE(u.display_name, u.email) AS operator_name,
+          COUNT(DISTINCT s.id) FILTER (WHERE s.status = 'COMPLETED')::int AS sessions,
+          COUNT(*) FILTER (WHERE p.fs_status = 'READY')::int AS photos_ready,
+          COUNT(*) FILTER (
+            WHERE p.local_status = 'FAILED_PERMANENT' OR p.fs_status IN ('QUARANTINED', 'FAILED')
+          )::int AS photos_failed,
+          MAX(COALESCE(s.captured_at, s.created_at)) AS last_capture_at
+         FROM sessions s
+         LEFT JOIN users u ON u.id = s.operator_user_id
+         LEFT JOIN photos p ON p.session_id = s.id
+        WHERE s.campaign_id = $1
+        GROUP BY s.operator_user_id, u.display_name, u.email
+        ORDER BY operator_name NULLS LAST`,
+      [campaignId],
+    );
+
+    return rows.map((r) => {
+      const dao = new CampaignOperatorStatsDao();
+      dao.operatorUserId = r.operator_user_id;
+      dao.operatorName = r.operator_name ?? 'Không rõ (chưa đăng nhập SSO khi chụp)';
+      dao.sessions = r.sessions;
+      dao.photosReady = r.photos_ready;
+      dao.photosFailed = r.photos_failed;
+      dao.lastCaptureAt = r.last_capture_at ?? undefined;
+      return dao;
+    });
   }
 
   /** Last 30 days, bucketed in the kiosks' own timezone (A.8) — not UTC, so "today" lines up with what an operator in Vietnam actually did today. */

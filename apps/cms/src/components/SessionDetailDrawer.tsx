@@ -70,16 +70,21 @@ function formatDurationMs(ms?: number): string {
   return `${minutes}:${String(seconds).padStart(2, '0')}`;
 }
 
-/** Per-photo state of the fs-core view-link request that backs its `<img>`. */
-type LinkState =
+/**
+ * Per-photo (or per-video) state of an fs-core view-link request that backs
+ * an `<img>`/`<video>` element. Exported so other screens that resolve
+ * view-links the same way (e.g. `ReviewDetailContent`'s "Ảnh gốc" grid)
+ * share this shape and the classifier below instead of redefining them.
+ */
+export type LinkState =
   | { status: 'loading' }
   | { status: 'ready'; url: string; viewUrl?: string }
   | { status: 'not_ready' }
   | { status: 'upstream_error' }
   | { status: 'error'; message: string };
 
-/** Classifies a rejected `issuePhotoViewLink` call by the API's domain error code, not just its HTTP status - both failure modes here return 503. */
-function classifyLinkError(reason: unknown): LinkState {
+/** Classifies a rejected `issuePhotoViewLink`/`issueVideoViewLink` call by the API's domain error code, not just its HTTP status - both failure modes here return 503. Exported for reuse - see `LinkState` above. */
+export function classifyLinkError(reason: unknown): LinkState {
   if (reason instanceof ApiError) {
     if (reason.code === FILE_STORAGE_NOT_READY) return { status: 'not_ready' };
     if (reason.code === FILE_STORAGE_UPSTREAM_ERROR) return { status: 'upstream_error' };

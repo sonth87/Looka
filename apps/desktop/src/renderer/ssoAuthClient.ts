@@ -23,6 +23,18 @@ const STORAGE_KEY = 'looka_sso_identity_v1';
 interface StoredSsoIdentity extends AuthenticatedIdentity {
   accessToken: string;
   refreshToken: string;
+  /**
+   * `MeResponse.id` — the server's own `users.id` (not the SSO `user_code`
+   * or the email `AuthenticatedIdentity` already carries). Threaded through
+   * to `apps/api`'s `sessions.operator_user_id` (2026-09-09, "thống kê phần
+   * giảng viên chụp" — see `apps/desktop/src/main/uploads.ts`'s
+   * `ApproveSessionUploadOptions.operatorUserId`) so the campaign detail's
+   * Thống kê tab can report captures per operator. `undefined` if the
+   * `fetchMe()` call during login failed (non-fatal there — see
+   * `ssoLogin()` below) — a session captured before this resolves just
+   * reports no operator, same as any other pre-this-feature session.
+   */
+  userId?: string;
 }
 
 function readStored(): StoredSsoIdentity | null {
@@ -49,6 +61,11 @@ export class SsoAuthClient implements AuthClient {
     localStorage.removeItem(STORAGE_KEY);
   }
 
+  /** See `StoredSsoIdentity.userId`'s own doc comment. `null` if not logged in, or if `fetchMe()` never resolved during login. */
+  getOperatorUserId(): string | null {
+    return readStored()?.userId ?? null;
+  }
+
   authHeaders(): Record<string, string> {
     const stored = readStored();
     return stored ? { Authorization: `Bearer ${stored.accessToken}` } : {};
@@ -63,13 +80,17 @@ export class SsoAuthClient implements AuthClient {
     // Bearer token this stores below, so if this call 401s (bad/rejected
     // token) surface that now rather than silently "logging in" with junk.
     let displayName = result.userCode || result.email;
+    let userId: string | undefined;
     try {
       const me = await fetchMe({ Authorization: `Bearer ${result.accessToken}` });
       displayName = me.displayName || displayName;
+      userId = me.id;
     } catch {
       // Non-fatal — apps/api might be briefly unreachable; the picker
       // screen's own load() call will surface a clearer error if the token
       // really is bad. The login itself already succeeded against SSO.
+      // userId stays undefined — getOperatorUserId() reports null, same as
+      // any pre-this-feature session; capture is never blocked by this.
     }
 
     const identity: StoredSsoIdentity = {
@@ -77,6 +98,7 @@ export class SsoAuthClient implements AuthClient {
       email: result.email,
       accessToken: result.accessToken,
       refreshToken: result.refreshToken,
+      userId,
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(identity));
     return { displayName: identity.displayName, email: identity.email };

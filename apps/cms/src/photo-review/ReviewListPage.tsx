@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
 import { Lock } from 'lucide-react';
 import {
   ApiError,
@@ -14,6 +13,7 @@ import {
   listReviewSets,
 } from '../api';
 import { REVIEW_STATUS_BADGE_CLASS, REVIEW_STATUS_LABEL, isReviewSetLocked } from './reviewFormat';
+import { ReviewDetailModal } from './ReviewDetailModal';
 
 const PAGE_SIZE = 24;
 const STATUS_OPTIONS: ReviewSetStatus[] = ['PENDING_AUTO', 'AUTO_FAILED', 'READY', 'IN_REVIEW', 'APPROVED', 'REJECTED'];
@@ -41,6 +41,11 @@ export function ReviewListPage() {
 
   const [result, setResult] = useState<Paginated<ReviewSetListItem> | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Which set's detail modal is open, if any — replaces the old
+  // `<Link to={`/review/${id}`}>` page navigation (see ReviewDetailModal's
+  // header comment for why). `null` means the grid is showing with nothing
+  // open.
+  const [openSetId, setOpenSetId] = useState<string | null>(null);
 
   useEffect(() => {
     listCampaigns()
@@ -192,7 +197,7 @@ export function ReviewListPage() {
         <>
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
             {sets.map((s) => (
-              <ReviewSetCard key={s.id} set={s} />
+              <ReviewSetCard key={s.id} set={s} onOpen={() => setOpenSetId(s.id)} />
             ))}
           </div>
 
@@ -219,17 +224,20 @@ export function ReviewListPage() {
           )}
         </>
       )}
+
+      {openSetId && <ReviewDetailModal id={openSetId} onClose={() => setOpenSetId(null)} />}
     </div>
   );
 }
 
-function ReviewSetCard({ set }: { set: ReviewSetListItem }) {
+function ReviewSetCard({ set, onOpen }: { set: ReviewSetListItem; onOpen: () => void }) {
   const locked = isReviewSetLocked(set);
 
   return (
-    <Link
-      to={`/review/${set.id}`}
-      className="block rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden hover:shadow-md transition-shadow"
+    <button
+      type="button"
+      onClick={onOpen}
+      className="block w-full text-left rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden hover:shadow-md transition-shadow"
     >
       <div className="aspect-[3/4] bg-gray-50 flex items-center justify-center relative">
         {locked ? (
@@ -269,6 +277,6 @@ function ReviewSetCard({ set }: { set: ReviewSetListItem }) {
           )}
         </div>
       </div>
-    </Link>
+    </button>
   );
 }

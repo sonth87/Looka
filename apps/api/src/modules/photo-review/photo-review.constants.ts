@@ -29,6 +29,17 @@ export enum PhotoVariantStatus {
   DISCARDED = 'DISCARDED',
 }
 
+/** `variant_upload_outbox.status` — mirrors `capture`'s `OutboxStatus`, see that table's own migration doc comment for why this is a parallel table rather than a shared one. */
+export enum VariantOutboxStatus {
+  PENDING = 'PENDING',
+  SENDING = 'SENDING',
+  UPLOADED = 'UPLOADED',
+  FAILED = 'FAILED',
+}
+
+/** Same cap as `capture`'s `OUTBOX_MAX_RETRY_DELAY_SECONDS` — duplicated rather than imported, see this module's own "no structural dependency on `capture`" rule. */
+export const VARIANT_OUTBOX_MAX_RETRY_DELAY_SECONDS = 300;
+
 /** `photo_review_events.action` — plan §2. Written on every state-changing action in this module. */
 export enum PhotoReviewAction {
   AUTO_GENERATED = 'AUTO_GENERATED',
@@ -111,4 +122,6 @@ export const PHOTO_REVIEW_ERROR_CODE = {
   NOT_ADMIN: 9014,
   SOURCE_PHOTO_NOT_FOUND: 9015,
   SESSION_NOT_FOUND: 9016,
+  VARIANT_LOCAL_TOKEN_INVALID: 9017,
+  VARIANT_NOT_VIEWABLE: 9018,
 } as const;

@@ -202,6 +202,8 @@ export interface CampaignStats {
   sessions: number;
   photos: CampaignPhotoStats;
   byDevice: CampaignDeviceStats[];
+  /** Per-operator ("cán bộ chụp") breakdown — see `CampaignOperatorStats`'s own doc comment. */
+  byOperator: CampaignOperatorStats[];
   byDay: CampaignDayStats[];
   byTrigger?: CaptureTriggerBreakdown;
 }
@@ -257,6 +259,22 @@ export interface CampaignPhotoStats {
 export interface CampaignDeviceStats {
   deviceId: string;
   deviceName: string;
+  sessions: number;
+  photosReady: number;
+  photosFailed: number;
+  lastCaptureAt?: string;
+}
+
+/**
+ * Per-operator ("cán bộ chụp"/giảng viên) row in a campaign's stats
+ * (2026-09-09) — `operatorUserId: null` groups every session with no
+ * operator identity recorded (a kiosk build/session predating this) under
+ * one row rather than dropping those sessions from the count; see
+ * `CampaignOperatorStatsDao`'s own doc comment server-side.
+ */
+export interface CampaignOperatorStats {
+  operatorUserId: string | null;
+  operatorName: string;
   sessions: number;
   photosReady: number;
   photosFailed: number;
@@ -494,6 +512,53 @@ export const createAnglePreset = (input: CreateAnglePresetInput) =>
   request<CaptureAnglePreset>('/v1/capture-angle-presets', { method: 'POST', body: JSON.stringify(input) });
 export const updateAnglePreset = (id: string, input: UpdateAnglePresetInput) =>
   request<CaptureAnglePreset>(`/v1/capture-angle-presets/${id}`, { method: 'PATCH', body: JSON.stringify(input) });
+
+// --- Capture Configurations ("Cấu hình chụp" — reusable template) ----------
+// Item 10 of the 2026-09-09 task brief: a reusable capture template an admin
+// manages independently of any one campaign — "Configuration 1: 3 camera,
+// gán trái/phải/chính giữa, chụp tỉ lệ 4x6, cộng các tham số khác". Deliberately
+// a preset, not a live link: `CampaignForm.tsx`'s "Chọn từ cấu hình có sẵn"
+// copies one of these onto the campaign's own `captureAngles`/`cardSpec`
+// fields ONCE, at creation/edit time — editing this configuration later, or
+// deleting it, never touches any campaign that already copied its values in.
+// Endpoints: `GET/POST/PATCH/DELETE /v1/capture-configurations` (device-management
+// module, apps/api).
+
+export interface CaptureConfiguration {
+  id: string;
+  name: string;
+  description?: string | null;
+  captureAngles: Record<string, unknown>[];
+  cardSpec?: CardSpec | null;
+  /** Read-only "cần tối đa K camera" hint — same derivation as `Campaign.requiredCameraCount`. */
+  requiredCameraCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateCaptureConfigurationInput {
+  name: string;
+  description?: string;
+  captureAngles: Record<string, unknown>[];
+  cardSpec?: CardSpec | null;
+}
+
+export interface UpdateCaptureConfigurationInput {
+  name?: string;
+  description?: string;
+  captureAngles?: Record<string, unknown>[];
+  cardSpec?: CardSpec | null;
+}
+
+export const listCaptureConfigurations = () => request<CaptureConfiguration[]>('/v1/capture-configurations');
+export const getCaptureConfiguration = (id: string) =>
+  request<CaptureConfiguration>(`/v1/capture-configurations/${id}`);
+export const createCaptureConfiguration = (input: CreateCaptureConfigurationInput) =>
+  request<CaptureConfiguration>('/v1/capture-configurations', { method: 'POST', body: JSON.stringify(input) });
+export const updateCaptureConfiguration = (id: string, input: UpdateCaptureConfigurationInput) =>
+  request<CaptureConfiguration>(`/v1/capture-configurations/${id}`, { method: 'PATCH', body: JSON.stringify(input) });
+export const deleteCaptureConfiguration = (id: string) =>
+  request<{ id: string }>(`/v1/capture-configurations/${id}`, { method: 'DELETE' });
 
 // --- Campaign members ("Cán bộ chụp") ----------------------------------------
 // See docs/plans/campaign-config-sso-card-photo-discussion.md §2.3/§3.2.2 for
@@ -828,13 +893,17 @@ export interface ReviewSetListItem {
   updatedAt: string;
 }
 
+/** Mirrors `ReviewOriginalPhotoDao` (apps/api/src/modules/photo-review/dao/review-set.dao.ts) exactly — no `viewUrl` is embedded here, unlike `PhotoVariant`; callers must resolve one per photo via `issuePhotoViewLink`, same as `SessionDetailDrawer` does for `SessionPhoto`. */
 export interface ReviewOriginalPhoto {
   id: string;
+  stepId: string;
   stepType?: string;
   cameraRole?: string;
-  angleLabel?: string;
-  fallback?: boolean;
-  viewUrl?: string;
+  attempt: number;
+  mimeType: string;
+  fsFileId?: string;
+  fsStatus?: string;
+  capturedAt?: string;
 }
 
 export interface ReviewOriginalVideo {
@@ -881,7 +950,7 @@ export interface ReviewSetDetail extends ReviewSetListItem {
   sourceSessionId?: string;
   sourceCapturedAt?: string;
   sourceDeviceName?: string;
-  originals: ReviewOriginalPhoto[];
+  originalPhotos: ReviewOriginalPhoto[];
   videos: ReviewOriginalVideo[];
   variants: PhotoVariant[];
   events: ReviewEvent[];

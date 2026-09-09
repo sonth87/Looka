@@ -14,7 +14,24 @@ import { STUDENT_TEST_DATA } from './studentTestData.js';
  */
 
 export type StudentLookupResult =
-  | { status: 'FOUND'; code: string; name: string; className: string; major: string; academicYear: string }
+  | {
+      status: 'FOUND';
+      code: string;
+      name: string;
+      className: string;
+      major: string;
+      academicYear: string;
+      /**
+       * The CCCD number this match was found by (2026-09-09 CCCD-scan
+       * feature) — `undefined` for the manual "nhập mã sinh viên" path,
+       * which has no citizen id at all. Threaded through to
+       * `StudentSubjectInfo`/`sessions.metadata` (see
+       * `FaceCaptureApp.tsx`'s `handleLookupResult`) purely so the CMS can
+       * later search/filter a session by the CCCD number it was captured
+       * under — never used for matching itself, that already happened.
+       */
+      identityNumber?: string;
+    }
   | { status: 'NOT_FOUND'; code: string };
 
 /**

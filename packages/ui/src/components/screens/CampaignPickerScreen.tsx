@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { Calendar, LogOut, RefreshCw, Search, ArrowRight, Loader2 } from 'lucide-react';
 import type { AuthClient, AuthenticatedIdentity } from '../../lib/authClient.js';
 import {
   CampaignPortalApiError,
@@ -22,12 +23,21 @@ const STATUS_LABEL: Record<CampaignSummary['effectiveStatus'], string> = {
   CLOSED: 'Đã đóng',
 };
 
+/** Dot + text colour for the status badge — kept semantically identical to before (same 5 states), just heavier visual weight for a kiosk display. */
 const STATUS_COLOR: Record<CampaignSummary['effectiveStatus'], string> = {
-  UPCOMING: 'bg-amber-500/20 text-amber-300 border-amber-500/30',
-  OPEN: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30',
-  EXPIRED: 'bg-rose-500/20 text-rose-300 border-rose-500/30',
-  PAUSED: 'bg-slate-500/20 text-slate-300 border-slate-500/30',
-  CLOSED: 'bg-slate-500/20 text-slate-300 border-slate-500/30',
+  UPCOMING: 'bg-amber-500/15 text-amber-300 ring-1 ring-inset ring-amber-500/30',
+  OPEN: 'bg-emerald-500/15 text-emerald-300 ring-1 ring-inset ring-emerald-500/30',
+  EXPIRED: 'bg-rose-500/15 text-rose-300 ring-1 ring-inset ring-rose-500/30',
+  PAUSED: 'bg-slate-500/15 text-slate-300 ring-1 ring-inset ring-slate-500/30',
+  CLOSED: 'bg-slate-500/15 text-slate-300 ring-1 ring-inset ring-slate-500/30',
+};
+
+const STATUS_DOT: Record<CampaignSummary['effectiveStatus'], string> = {
+  UPCOMING: 'bg-amber-400',
+  OPEN: 'bg-emerald-400',
+  EXPIRED: 'bg-rose-400',
+  PAUSED: 'bg-slate-400',
+  CLOSED: 'bg-slate-400',
 };
 
 const MEMBERSHIP_LABEL: Record<CampaignSummary['membership']['status'], string> = {
@@ -36,6 +46,14 @@ const MEMBERSHIP_LABEL: Record<CampaignSummary['membership']['status'], string> 
   APPROVED: 'Đã duyệt',
   REJECTED: 'Từ chối',
   REVOKED: 'Thu hồi',
+};
+
+const MEMBERSHIP_COLOR: Record<CampaignSummary['membership']['status'], string> = {
+  NONE: 'text-slate-500',
+  PENDING: 'text-amber-400',
+  APPROVED: 'text-emerald-400',
+  REJECTED: 'text-rose-400',
+  REVOKED: 'text-rose-400',
 };
 
 function formatDateRange(startsAt?: string | null, expiresAt?: string | null): string {
@@ -53,6 +71,12 @@ function formatDateRange(startsAt?: string | null, expiresAt?: string | null): s
  * (this pass renders "Xem" as a disabled/no-op state rather than a full
  * read-only detail screen, since S3's locked-state rendering already
  * covers that once a campaign is selected).
+ *
+ * Redesigned 2026-09-09 (item 7) — same props/behaviour as before (no
+ * change to `CampaignPickerScreenProps`), a kiosk-appropriate visual pass
+ * only: a wider, multi-column card grid instead of a single narrow list
+ * (this screen typically renders inside a ~1150x780+ window), larger touch
+ * targets throughout, and a clearer status/membership hierarchy per card.
  */
 export function CampaignPickerScreen({
   authClient,
@@ -94,66 +118,118 @@ export function CampaignPickerScreen({
     }
   }
 
+  const initial = (identity.displayName || '?').trim().charAt(0).toUpperCase();
+
   return (
     <div className="w-full h-full flex flex-col bg-slate-950 text-slate-100">
-      <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800">
-        <div className="font-semibold">Looka · Chọn campaign</div>
-        <div className="flex items-center gap-3 text-sm text-slate-400">
-          <span>{identity.displayName}</span>
-          <button onClick={onLogout} className="text-slate-500 hover:text-slate-300 underline">
+      <header className="flex items-center justify-between px-8 py-5 border-b border-slate-800/80 bg-slate-950/80 backdrop-blur">
+        <div>
+          <div className="text-lg font-bold tracking-tight">Looka</div>
+          <div className="text-sm text-slate-500">Chọn chiến dịch để bắt đầu</div>
+        </div>
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2.5 rounded-xl border border-slate-800 bg-slate-900/70 px-3.5 py-2">
+            <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-blue-600 text-xs font-bold text-white">
+              {initial}
+            </div>
+            <span className="text-sm font-medium text-slate-200 max-w-[16rem] truncate">
+              {identity.displayName}
+            </span>
+          </div>
+          <button
+            onClick={onLogout}
+            className="flex items-center gap-1.5 rounded-xl border border-slate-800 px-3.5 py-2 text-sm font-medium text-slate-400 transition-colors hover:border-rose-500/40 hover:text-rose-300"
+          >
+            <LogOut className="h-4 w-4" />
             Đăng xuất
           </button>
         </div>
-      </div>
+      </header>
 
-      <div className="flex-1 overflow-y-auto p-6">
+      <div className="flex-1 overflow-y-auto px-8 py-6">
         {error && (
-          <div className="mb-4 rounded-lg border border-rose-500/30 bg-rose-500/10 text-rose-300 text-sm px-4 py-3 flex items-center justify-between">
+          <div className="mb-5 flex items-center justify-between gap-3 rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">
             <span>{error}</span>
-            <button onClick={() => void load()} className="underline shrink-0 ml-3">
+            <button
+              onClick={() => void load()}
+              className="flex shrink-0 items-center gap-1.5 rounded-lg border border-rose-500/40 px-3 py-1.5 font-medium hover:bg-rose-500/10"
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
               Thử lại
             </button>
           </div>
         )}
 
-        {campaigns === null && !error && <div className="text-slate-400">Đang tải danh sách campaign…</div>}
+        {campaigns === null && !error && (
+          <div className="flex flex-col items-center justify-center gap-3 py-24 text-slate-500">
+            <Loader2 className="h-8 w-8 animate-spin text-blue-500" />
+            <span>Đang tải danh sách chiến dịch…</span>
+          </div>
+        )}
 
-        {campaigns?.length === 0 && <div className="text-slate-400">Chưa có campaign nào. Liên hệ CTSV.</div>}
+        {campaigns?.length === 0 && (
+          <div className="flex flex-col items-center justify-center gap-3 py-24 text-center text-slate-500">
+            <Search className="h-10 w-10 text-slate-700" />
+            <p className="text-base">Chưa có chiến dịch nào.</p>
+            <p className="text-sm">Vui lòng liên hệ CTSV để được thêm vào một chiến dịch.</p>
+          </div>
+        )}
 
-        <div className="flex flex-col gap-3 max-w-2xl">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
           {campaigns?.map((c) => {
             const canEnter = c.effectiveStatus === 'OPEN' && c.membership.status === 'APPROVED';
             const canJoin = c.effectiveStatus === 'OPEN' && c.membership.status === 'NONE';
             return (
-              <div key={c.id} className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <div className="font-medium">
-                      {c.code ? `${c.code} · ` : ''}
-                      {c.name}
+              <div
+                key={c.id}
+                className="flex flex-col justify-between rounded-2xl border border-slate-800 bg-slate-900/60 p-5 shadow-sm transition-colors hover:border-slate-700"
+              >
+                <div>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="truncate text-base font-semibold text-slate-100">
+                        {c.code ? `${c.code} · ` : ''}
+                        {c.name}
+                      </div>
+                      <div className="mt-1.5 flex items-center gap-1.5 text-xs text-slate-500">
+                        <Calendar className="h-3.5 w-3.5 shrink-0" />
+                        {formatDateRange(c.startsAt, c.expiresAt)}
+                      </div>
                     </div>
-                    <div className="text-xs text-slate-400 mt-1">{formatDateRange(c.startsAt, c.expiresAt)}</div>
+                    <span
+                      className={`flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold ${STATUS_COLOR[c.effectiveStatus]}`}
+                    >
+                      <span className={`h-1.5 w-1.5 rounded-full ${STATUS_DOT[c.effectiveStatus]}`} />
+                      {STATUS_LABEL[c.effectiveStatus]}
+                    </span>
                   </div>
-                  <span className={`text-xs rounded-full border px-2 py-0.5 ${STATUS_COLOR[c.effectiveStatus]}`}>
-                    {STATUS_LABEL[c.effectiveStatus]}
-                  </span>
+
+                  {c.quotaPlanned != null && (
+                    <div className="mt-3 text-xs text-slate-500">
+                      Chỉ tiêu: {c.quotaPlanned}
+                      {c.quotaReached ? ' (đã đạt)' : ''}
+                    </div>
+                  )}
                 </div>
 
-                <div className="mt-3 flex items-center justify-between">
-                  <span className="text-xs text-slate-400">{MEMBERSHIP_LABEL[c.membership.status]}</span>
+                <div className="mt-4 flex items-center justify-between border-t border-slate-800/80 pt-3.5">
+                  <span className={`text-xs font-medium ${MEMBERSHIP_COLOR[c.membership.status]}`}>
+                    {MEMBERSHIP_LABEL[c.membership.status]}
+                  </span>
                   {canEnter && (
                     <button
                       onClick={() => onSelectCampaign(c)}
-                      className="rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium px-4 py-1.5"
+                      className="flex items-center gap-1.5 rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-md shadow-blue-950/40 transition-colors hover:bg-blue-500"
                     >
-                      Vào →
+                      Vào
+                      <ArrowRight className="h-4 w-4" />
                     </button>
                   )}
                   {canJoin && (
                     <button
                       onClick={() => void handleJoin(c)}
                       disabled={joiningId === c.id}
-                      className="rounded-lg border border-slate-700 hover:border-slate-500 text-slate-200 text-sm px-4 py-1.5 disabled:opacity-60"
+                      className="rounded-xl border border-slate-700 px-4 py-2 text-sm font-semibold text-slate-200 transition-colors hover:border-slate-500 disabled:opacity-60"
                     >
                       {joiningId === c.id ? 'Đang gửi…' : 'Đăng ký'}
                     </button>
@@ -161,7 +237,7 @@ export function CampaignPickerScreen({
                   {!canEnter && !canJoin && (
                     <button
                       onClick={() => onSelectCampaign(c)}
-                      className="rounded-lg border border-slate-700 text-slate-400 text-sm px-4 py-1.5"
+                      className="rounded-xl border border-slate-800 px-4 py-2 text-sm font-medium text-slate-500 transition-colors hover:border-slate-700 hover:text-slate-400"
                     >
                       Xem
                     </button>

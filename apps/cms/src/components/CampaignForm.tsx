@@ -1,17 +1,19 @@
-import { useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
+import { Link } from 'react-router-dom';
 import {
   ApiError,
   CameraRoleName,
   Campaign,
   CampaignPurpose,
+  CaptureConfiguration,
   CardSpec,
   CreateCampaignInput,
   UpdateCampaignInput,
   createCampaign,
+  listCaptureConfigurations,
   updateCampaign,
 } from '../api';
 import { CAMERA_ROLE_LABELS } from '../captureAngles';
-import { CaptureAngleRow, captureStepToRow, fallbackRowsFromStepDefs, rowToCaptureStep } from '../captureAngleSteps';
 import {
   EFFECTIVE_STATUS_BADGE_CLASS,
   EFFECTIVE_STATUS_LABEL,
@@ -19,7 +21,7 @@ import {
   PURPOSE_LABEL,
   computeEffectiveStatus,
 } from '../campaignFormat';
-import { CaptureAnglesTable, MIN_ROWS } from './CaptureAnglesTable';
+import { DEFAULT_CARD_SPEC } from './CardSpecFields';
 
 const CAMERA_ROLES: CameraRoleName[] = ['CENTER', 'LEFT', 'RIGHT', 'UP', 'DOWN'];
 
@@ -59,33 +61,28 @@ function Section({
 
 const SECTIONS = [
   { id: 'section-info', label: '1. Thông tin' },
-  { id: 'section-capture', label: '2. Ảnh chụp' },
-  { id: 'section-card', label: '3. Ảnh thẻ' },
+  { id: 'section-capture', label: '2. Cấu hình chụp' },
 ] as const;
 
-const CARD_SIZE_OPTIONS = ['3x4', '4x6'];
-const CARD_DPI_OPTIONS = [300, 600];
-const RETOUCH_STRENGTHS: NonNullable<CardSpec['retouch']>['strength'][] = ['LIGHT', 'MEDIUM', 'STRONG'];
-const RETOUCH_STRENGTH_LABEL: Record<string, string> = { LIGHT: 'Nhẹ', MEDIUM: 'Vừa', STRONG: 'Mạnh' };
-
-const DEFAULT_CARD_SPEC: Required<Pick<CardSpec, 'size' | 'dpi' | 'backgroundColor' | 'headHeightRatio' | 'eyeLineRatio'>> & {
-  retouch: NonNullable<CardSpec['retouch']>;
-} = {
-  size: '4x6',
-  dpi: 300,
-  backgroundColor: '#FFFFFF',
-  headHeightRatio: [0.7, 0.8],
-  eyeLineRatio: [0.4, 0.45],
-  retouch: { enabled: true, strength: 'LIGHT' },
-};
-
 /**
- * Shared 3-part campaign form — Thông tin / Ảnh chụp / Ảnh thẻ, with a
- * left-side section nav (ui-redesign-plan.md C2.2's mockup) — merges what
- * used to be two near-duplicate forms (`CreateCampaignPage`'s inline form and
+ * Shared 2-part campaign form — Thông tin / Cấu hình chụp, with a left-side
+ * section nav (ui-redesign-plan.md C2.2's mockup) — merges what used to be
+ * two near-duplicate forms (`CreateCampaignPage`'s inline form and
  * `EditCampaignPage`'s `CampaignSettingsForm`). Capture-mode/simultaneous-
  * capture controls are gone entirely (moved to the kiosk's own Camera Setup
  * screen, per `campaign-config-sso-card-photo-discussion.md` §3.1.1's Q11).
+ *
+ * **2026-09-09 simplification** (product feedback, same day "Cấu hình mẫu
+ * chụp"/`CaptureConfiguration` shipped): a campaign no longer builds its own
+ * angle table / card-spec inline — it just PICKS a saved capture
+ * configuration and uses it as-is. The old inline `CaptureAnglesTable`/
+ * `CardSpecFields` editors moved to `CaptureConfigurationsPage.tsx`, the
+ * only place that shape gets authored now; this form only ever *copies* a
+ * chosen configuration's `captureAngles`/`cardSpec` into the campaign at
+ * save time — see `applyCaptureConfiguration` below. `captureAngles`/
+ * `cardSpec` stay campaign-owned columns (unchanged server-side, still a
+ * one-time copy, never a live link to the configuration), so this is a UI
+ * simplification only, not a data-model change.
  *
  * `mode="create"` calls `createCampaign`; `mode="edit"` calls `updateCampaign`
  * with only the fields this form owns (same partial-PATCH shape the old
@@ -118,12 +115,17 @@ export function CampaignForm({
   const [manualStatus, setManualStatus] = useState<'' | 'PAUSED' | 'CLOSED'>(campaign?.manualStatus ?? '');
   const [consentContent, setConsentContent] = useState(campaign?.consentContent ?? '');
 
-  const [rows, setRows] = useState<CaptureAngleRow[]>(() => {
-    if (campaign?.captureAngles && campaign.captureAngles.length > 0) {
-      return campaign.captureAngles.map(captureStepToRow);
-    }
-    return mode === 'create' ? fallbackRowsFromStepDefs() : [];
-  });
+  // 2026-09-09: no more inline angle-table/card-spec editing here — a
+  // campaign just picks a saved `CaptureConfiguration` and copies its
+  // `captureAngles`/`cardSpec` verbatim. `captureAngles` stays the raw
+  // `Record<string, unknown>[]` shape `CreateCampaignInput`/
+  // `UpdateCampaignInput` already expect — no more round-tripping through
+  // `CaptureAngleRow`/`rowToCaptureStep`, since nothing here builds rows by
+  // hand any more. See `applyCaptureConfiguration` below for the copy, and
+  // `CaptureConfigurationsPage.tsx` for where that shape is actually authored.
+  const [captureAngles, setCaptureAngles] = useState<Record<string, unknown>[]>(
+    () => campaign?.captureAngles ?? []
+  );
   const [recordVideo, setRecordVideo] = useState(campaign?.recordVideo ?? false);
   const [recordVideoRoles, setRecordVideoRoles] = useState<Set<CameraRoleName>>(
     () => new Set((campaign?.recordVideoRoles as CameraRoleName[] | undefined) ?? [])
@@ -131,11 +133,38 @@ export function CampaignForm({
 
   const [cardSpec, setCardSpec] = useState<CardSpec>(() => ({ ...DEFAULT_CARD_SPEC, ...(campaign?.cardSpec ?? {}) }));
 
+  // "Chọn cấu hình mẫu chụp" (item 10, 2026-09-09; required-picker
+  // simplification the same day) — a saved CaptureConfiguration is a
+  // one-time-copy template: picking one below replaces `captureAngles`/
+  // `cardSpec` with its stored values outright. Nothing about the
+  // campaign's own fields becomes a link to the configuration — see
+  // `CaptureConfiguration`'s own doc comment on the API side.
+  const [captureConfigurations, setCaptureConfigurations] = useState<CaptureConfiguration[] | null>(null);
+  const [selectedConfigId, setSelectedConfigId] = useState('');
+
+  useEffect(() => {
+    listCaptureConfigurations()
+      .then(setCaptureConfigurations)
+      .catch(() => setCaptureConfigurations([])); // non-critical — the picker just shows empty rather than blocking the form
+  }, []);
+
+  function applyCaptureConfiguration(configId: string) {
+    setSelectedConfigId(configId);
+    const config = captureConfigurations?.find((c) => c.id === configId);
+    if (!config) return;
+    setCaptureAngles(config.captureAngles);
+    if (config.cardSpec) {
+      setCardSpec((prev) => ({ ...prev, ...config.cardSpec }));
+    }
+  }
+
+  const selectedConfig = captureConfigurations?.find((c) => c.id === selectedConfigId) ?? null;
+
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const cardSourceCount = rows.filter((r) => r.isCardSource).length;
-  const tooFewRows = rows.length < MIN_ROWS;
+  const cardSourceCount = captureAngles.filter((a) => (a as { isCardSource?: boolean }).isCardSource === true).length;
+  const tooFewRows = captureAngles.length < 1;
   const canSubmit = name.trim().length > 0 && !tooFewRows && cardSourceCount === 1;
 
   const effectiveStatus = computeEffectiveStatus({
@@ -160,7 +189,6 @@ export function CampaignForm({
     setSaving(true);
     setError(null);
 
-    const captureAngles = rows.map((row, i) => rowToCaptureStep(row, i));
     const parsedQuota = quotaPlanned.trim() ? Number(quotaPlanned) : null;
 
     try {
@@ -356,10 +384,89 @@ export function CampaignForm({
 
         <Section
           id="section-capture"
-          title="2. Ảnh chụp"
-          subtitle="Bảng góc chụp mục tiêu — kiosk tự lập kế hoạch vòng theo số camera thực tế của máy"
+          title="2. Cấu hình chụp"
+          subtitle="Chọn một mẫu cấu hình có sẵn (góc chụp + chuẩn ảnh thẻ) — quản lý các mẫu ở trang riêng"
         >
-          <CaptureAnglesTable rows={rows} onChange={setRows} />
+          <div>
+            <label className="block text-sm text-gray-700 font-medium mb-1">Cấu hình mẫu chụp</label>
+            <div className="flex items-center gap-3 flex-wrap">
+              <select
+                value={selectedConfigId}
+                onChange={(e) => applyCaptureConfiguration(e.target.value)}
+                className="flex-1 min-w-[12rem] bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
+              >
+                <option value="">— Chọn cấu hình —</option>
+                {captureConfigurations?.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name} ({c.captureAngles.length} ảnh · cần tối đa {c.requiredCameraCount} camera)
+                  </option>
+                ))}
+              </select>
+              <Link
+                to="/capture-configurations"
+                className="text-xs text-blue-700 hover:text-blue-900 underline shrink-0"
+              >
+                Quản lý mẫu cấu hình →
+              </Link>
+            </div>
+            <p className="text-xs text-gray-500 mt-1">
+              Chọn mẫu sẽ điền góc chụp và chuẩn ảnh thẻ ngay bên dưới — chọn mẫu không tạo liên kết lâu dài với
+              campaign này, sửa mẫu sau này không ảnh hưởng campaign đã tạo.
+            </p>
+          </div>
+
+          {captureAngles.length > 0 ? (
+            <div className="p-4 rounded-xl border border-gray-200 bg-gray-50 space-y-3">
+              {!selectedConfig && mode === 'edit' && (
+                <p className="text-xs text-amber-700">
+                  Đang dùng cấu hình đã lưu của campaign này — chọn một mẫu ở trên để thay thế.
+                </p>
+              )}
+              <div>
+                <div className="text-xs text-gray-500 mb-1.5">
+                  {captureAngles.length} góc chụp · cần tối đa{' '}
+                  {new Set(captureAngles.map((a) => (a as { cameraRole?: string }).cameraRole).filter(Boolean)).size ||
+                    1}{' '}
+                  camera
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {captureAngles.map((a, i) => {
+                    const angle = a as { angleCode?: string; cameraRole?: string; isCardSource?: boolean };
+                    return (
+                      <span
+                        key={i}
+                        className={`px-2 py-1 rounded-lg border text-xs ${
+                          angle.isCardSource
+                            ? 'border-blue-300 bg-blue-50 text-blue-700 font-medium'
+                            : 'border-gray-200 bg-white text-gray-600'
+                        }`}
+                      >
+                        {angle.angleCode ?? `Góc ${i + 1}`}
+                        {angle.cameraRole ? ` · ${CAMERA_ROLE_LABELS[angle.cameraRole as CameraRoleName] ?? angle.cameraRole}` : ''}
+                        {angle.isCardSource ? ' · ảnh thẻ' : ''}
+                      </span>
+                    );
+                  })}
+                </div>
+              </div>
+              <div className="flex items-center gap-3 text-xs text-gray-600 pt-2 border-t border-gray-200">
+                <span>
+                  Ảnh thẻ: {cardSpec.size ?? '4x6'} cm · {cardSpec.dpi ?? 300} dpi
+                </span>
+                <span className="flex items-center gap-1.5">
+                  Nền:
+                  <span
+                    className="w-4 h-4 rounded border border-gray-300 inline-block"
+                    style={{ backgroundColor: cardSpec.backgroundColor ?? '#FFFFFF' }}
+                  />
+                  {cardSpec.backgroundColor ?? '#FFFFFF'}
+                </span>
+                {cardSpec.retouch?.enabled && <span>Làm mịn: {cardSpec.retouch.strength ?? 'LIGHT'}</span>}
+              </div>
+            </div>
+          ) : (
+            <p className="text-sm text-gray-500">Chưa chọn cấu hình — chọn một mẫu ở trên để tiếp tục.</p>
+          )}
 
           <div className="pt-3 border-t border-gray-100">
             <label className="flex items-start gap-2 text-sm">
@@ -395,168 +502,6 @@ export function CampaignForm({
           </div>
         </Section>
 
-        <Section id="section-card" title="3. Ảnh thẻ" subtitle="Chuẩn crop/nền/làm mịn cho ảnh thẻ dẫn xuất">
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-sm text-gray-500 mb-1">Cỡ ảnh</label>
-              <select
-                value={cardSpec.size ?? '4x6'}
-                onChange={(e) => setCardSpec((s) => ({ ...s, size: e.target.value }))}
-                className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
-              >
-                {CARD_SIZE_OPTIONS.map((v) => (
-                  <option key={v} value={v}>
-                    {v} cm
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="block text-sm text-gray-500 mb-1">DPI</label>
-              <select
-                value={cardSpec.dpi ?? 300}
-                onChange={(e) => setCardSpec((s) => ({ ...s, dpi: Number(e.target.value) }))}
-                className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
-              >
-                {CARD_DPI_OPTIONS.map((v) => (
-                  <option key={v} value={v}>
-                    {v}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-3">
-            <label className="text-sm text-gray-500">Màu nền</label>
-            <input
-              type="color"
-              value={cardSpec.backgroundColor ?? '#FFFFFF'}
-              onChange={(e) => setCardSpec((s) => ({ ...s, backgroundColor: e.target.value }))}
-              className="w-10 h-8 rounded border border-gray-300"
-            />
-            <span className="text-xs text-gray-500 font-mono">{cardSpec.backgroundColor ?? '#FFFFFF'}</span>
-          </div>
-
-          <div className="flex items-center gap-3">
-            <label className="flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                checked={cardSpec.retouch?.enabled ?? true}
-                onChange={(e) =>
-                  setCardSpec((s) => ({ ...s, retouch: { ...s.retouch, enabled: e.target.checked } }))
-                }
-                className="rounded border-gray-300"
-              />
-              Làm mịn
-            </label>
-            {cardSpec.retouch?.enabled && (
-              <select
-                value={cardSpec.retouch?.strength ?? 'LIGHT'}
-                onChange={(e) =>
-                  setCardSpec((s) => ({
-                    ...s,
-                    retouch: { ...s.retouch, strength: e.target.value as NonNullable<CardSpec['retouch']>['strength'] },
-                  }))
-                }
-                className="bg-white border border-gray-300 rounded-lg px-2 py-1.5 text-sm text-gray-900"
-              >
-                {RETOUCH_STRENGTHS.map((v) => (
-                  <option key={v} value={v}>
-                    {RETOUCH_STRENGTH_LABEL[v as string]}
-                  </option>
-                ))}
-              </select>
-            )}
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-sm text-gray-500 mb-1">Tỉ lệ chiều cao đầu (0–1)</label>
-              <div className="flex items-center gap-2">
-                <input
-                  type="number"
-                  step={0.01}
-                  min={0}
-                  max={1}
-                  value={cardSpec.headHeightRatio?.[0] ?? 0.7}
-                  onChange={(e) =>
-                    setCardSpec((s) => ({
-                      ...s,
-                      headHeightRatio: [Number(e.target.value), s.headHeightRatio?.[1] ?? 0.8],
-                    }))
-                  }
-                  className="w-full bg-white border border-gray-300 rounded-lg px-2 py-1.5 text-gray-900"
-                />
-                <span className="text-gray-400">–</span>
-                <input
-                  type="number"
-                  step={0.01}
-                  min={0}
-                  max={1}
-                  value={cardSpec.headHeightRatio?.[1] ?? 0.8}
-                  onChange={(e) =>
-                    setCardSpec((s) => ({
-                      ...s,
-                      headHeightRatio: [s.headHeightRatio?.[0] ?? 0.7, Number(e.target.value)],
-                    }))
-                  }
-                  className="w-full bg-white border border-gray-300 rounded-lg px-2 py-1.5 text-gray-900"
-                />
-              </div>
-            </div>
-            <div>
-              <label className="block text-sm text-gray-500 mb-1">Tỉ lệ đường mắt (0–1, từ trên xuống)</label>
-              <div className="flex items-center gap-2">
-                <input
-                  type="number"
-                  step={0.01}
-                  min={0}
-                  max={1}
-                  value={cardSpec.eyeLineRatio?.[0] ?? 0.4}
-                  onChange={(e) =>
-                    setCardSpec((s) => ({ ...s, eyeLineRatio: [Number(e.target.value), s.eyeLineRatio?.[1] ?? 0.45] }))
-                  }
-                  className="w-full bg-white border border-gray-300 rounded-lg px-2 py-1.5 text-gray-900"
-                />
-                <span className="text-gray-400">–</span>
-                <input
-                  type="number"
-                  step={0.01}
-                  min={0}
-                  max={1}
-                  value={cardSpec.eyeLineRatio?.[1] ?? 0.45}
-                  onChange={(e) =>
-                    setCardSpec((s) => ({ ...s, eyeLineRatio: [s.eyeLineRatio?.[0] ?? 0.4, Number(e.target.value)] }))
-                  }
-                  className="w-full bg-white border border-gray-300 rounded-lg px-2 py-1.5 text-gray-900"
-                />
-              </div>
-            </div>
-          </div>
-
-          <div>
-            <div className="text-xs text-gray-500 mb-1.5">Xem trước khung crop (minh hoạ, không dùng ảnh thật)</div>
-            <div
-              className="relative w-28 rounded-lg border border-gray-300 overflow-hidden"
-              style={{ aspectRatio: '2 / 3', backgroundColor: cardSpec.backgroundColor ?? '#FFFFFF' }}
-            >
-              <div
-                className="absolute left-1/2 -translate-x-1/2 rounded-full bg-gray-300"
-                style={{
-                  bottom: 0,
-                  width: '55%',
-                  height: `${(cardSpec.headHeightRatio?.[1] ?? 0.8) * 100}%`,
-                }}
-              />
-              <div
-                className="absolute left-0 right-0 border-t border-dashed border-blue-400"
-                style={{ top: `${(cardSpec.eyeLineRatio?.[0] ?? 0.4) * 100}%` }}
-              />
-            </div>
-          </div>
-        </Section>
-
         {error && <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">{error}</div>}
 
         <div className="flex items-center gap-3">
@@ -571,10 +516,12 @@ export function CampaignForm({
             Huỷ
           </button>
           {tooFewRows && (
-            <span className="text-xs text-red-600 font-medium">Cần tối thiểu {MIN_ROWS} góc chụp</span>
+            <span className="text-xs text-red-600 font-medium">Cần chọn một cấu hình mẫu chụp</span>
           )}
           {!tooFewRows && cardSourceCount !== 1 && (
-            <span className="text-xs text-red-600 font-medium">Cần đúng 1 dòng làm ảnh thẻ</span>
+            <span className="text-xs text-red-600 font-medium">
+              Cấu hình đã chọn không hợp lệ (cần đúng 1 góc làm ảnh thẻ)
+            </span>
           )}
         </div>
       </div>

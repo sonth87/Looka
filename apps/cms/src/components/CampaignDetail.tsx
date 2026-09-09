@@ -4,26 +4,37 @@ import { ApiError, Campaign, Device, getCampaign, listDevices } from '../api';
 import { StatsPanel } from './StatsPanel';
 import { SessionsPanel } from './SessionsPanel';
 import { CampaignDangerActions } from './CampaignDangerActions';
-import { DevicesPanel } from './DevicesPanel';
 import { CampaignStudentsPanel } from './CampaignStudentsPanel';
 import { EFFECTIVE_STATUS_BADGE_CLASS, EFFECTIVE_STATUS_LABEL, PURPOSE_LABEL, computeEffectiveStatus, formatExpiry, isExpired } from '../campaignFormat';
 
-type Tab = 'stats' | 'sessions' | 'students' | 'devices' | 'settings';
+type Tab = 'stats' | 'sessions' | 'students' | 'settings';
 
 const TABS: { key: Tab; label: string }[] = [
   { key: 'stats', label: 'Thống kê' },
   { key: 'sessions', label: 'Phiên chụp' },
   { key: 'students', label: 'Sinh viên' },
-  { key: 'devices', label: 'Thiết bị' },
   { key: 'settings', label: 'Cài đặt' },
 ];
 
 /**
- * Read-only campaign view (`/campaigns/:id`) — 5 tabs (Thống kê / Phiên
- * chụp / Sinh viên / Thiết bị / Cài đặt). "Sinh viên" (`CampaignStudentsPanel`)
- * moved in here 2026-09-08 from a global cross-campaign `/students` page —
- * product feedback: captured students only make sense scoped to one
- * campaign, not floating outside all of them. "Cán bộ chụp" (`MembersPanel`,
+ * Read-only campaign view (`/campaigns/:id`) — 4 tabs (Thống kê / Phiên
+ * chụp / Sinh viên / Cài đặt).
+ *
+ * A "Sinh viên dự kiến" tab (`CampaignRosterPanel`, a per-campaign
+ * `campaign_student_roster` CSV-imported expected-student list) briefly
+ * existed here (2026-09-09) before being removed the same day: it was built
+ * on a wrong assumption about what the kiosk's CCCD scan actually checks
+ * against. The corrected design has no campaign-scoped roster at all — a
+ * scanned citizen id is looked up against the FULL external roster file
+ * (`D:\Work\camera_server\response.json`, read-only, refreshed by a system
+ * outside this app) directly from the desktop kiosk's main process, with no
+ * per-campaign admin screen or CMS-side data entry involved. See
+ * `apps/desktop/src/main/cccdRoster.ts` for the real mechanism.
+ *
+ * "Sinh viên" (`CampaignStudentsPanel`) moved in here 2026-09-08 from a
+ * global cross-campaign `/students` page — product feedback: captured
+ * students only make sense scoped to one campaign, not floating outside
+ * all of them. "Cán bộ chụp" (`MembersPanel`,
  * the campaign_members approval queue) was REMOVED as a tab the same day,
  * same product feedback round — "không cần phân công" (no need to assign/
  * approve operators per campaign). The `campaign_members` backend model,
@@ -32,6 +43,21 @@ const TABS: { key: Tab; label: string }[] = [
  * see this repo's own planning-memory notes for the still-open question of
  * whether the desktop app's "Đăng ký"/"Chờ duyệt" gate should also be
  * dropped now that there is no CMS UI left to actually approve anyone.
+ *
+ * "Thiết bị" (`DevicesPanel` — register/reissue/revoke, scoped to one
+ * campaign) was ALSO removed 2026-09-08, product feedback from the SSO/
+ * campaign pivot: "thiết bị không cần quản lý, vì chỉ cần cài 1 lần và
+ * dùng cho nhiều campaign" — a kiosk self-enrolls once
+ * (`POST /v1/devices/self-enroll`, see `apps/desktop/src/renderer/
+ * CampaignGate.tsx`) and re-attaches whichever campaign the operator picks
+ * next, so a *per-campaign* device roster/register-reissue-revoke workflow
+ * no longer matches reality — a device is never really "this campaign's."
+ * `DevicesPanel.tsx` is deleted outright (nothing else imports it); the
+ * backend device endpoints (`POST .../devices`, `/reissue`, `/revoke`,
+ * `/activate`) are untouched — an admin may still need to revoke a lost or
+ * compromised kiosk, just not through a per-campaign management screen.
+ * `listDevices`/the `devices` list itself stays: `SessionsPanel`'s own
+ * device filter dropdown (Phiên chụp tab) still reads it directly.
  * Settings editing stays on its own page (`EditCampaignPage`,
  * `/campaigns/:id/edit`) — the "Cài đặt" tab here is a read-only summary
  * plus a link to it, rather than embedding the full 3-section
@@ -45,17 +71,15 @@ export function CampaignDetail() {
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('stats');
   /**
-   * Set by a device row's "Xem ảnh đã chụp" action (2026-09-07) — drives
-   * `SessionsPanel`'s device filter and switches to the "Phiên chụp" tab,
-   * since that panel is no longer always mounted alongside `DevicesPanel`
-   * now that both live behind tabs.
+   * Originally set by a device row's "Xem ảnh đã chụp" action, driving
+   * `SessionsPanel`'s device filter — that action lived on `DevicesPanel`,
+   * which was deleted outright 2026-09-08 (see this file's own doc comment
+   * on why). `SessionsPanel` still accepts/uses this filter on its own
+   * (e.g. arriving here via a direct link), so the state itself stays; only
+   * the dead `'devices'` tab and its now-callerless setter function were
+   * removed.
    */
-  const [focusDeviceId, setFocusDeviceId] = useState<string | undefined>(undefined);
-
-  const viewDeviceCaptures = (deviceId: string) => {
-    setFocusDeviceId(deviceId);
-    setTab('sessions');
-  };
+  const [focusDeviceId] = useState<string | undefined>(undefined);
 
   const reload = () => {
     if (!id) return;
@@ -146,10 +170,6 @@ export function CampaignDetail() {
       {tab === 'sessions' && <SessionsPanel campaignId={id} devices={devices} focusDeviceId={focusDeviceId} />}
 
       {tab === 'students' && <CampaignStudentsPanel campaignId={id} />}
-
-      {tab === 'devices' && (
-        <DevicesPanel campaignId={id} devices={devices} onChanged={reload} onViewCaptures={viewDeviceCaptures} />
-      )}
 
       {tab === 'settings' && (
         <div className="p-5 rounded-2xl border border-gray-200 bg-white shadow-sm space-y-3">

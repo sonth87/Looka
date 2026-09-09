@@ -7,5 +7,7 @@ export * from './get-campaigns-timeseries-query.dto';
 export * from './create-capture-angle-preset.dto';
 export * from './update-capture-angle-preset.dto';
 export * from './list-capture-angle-presets-query.dto';
+export * from './create-capture-configuration.dto';
+export * from './update-capture-configuration.dto';
 export * from './decide-campaign-member.dto';
 export * from './list-campaign-members-query.dto';

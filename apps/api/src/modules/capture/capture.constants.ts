@@ -39,5 +39,18 @@ export const MAX_PHOTO_BYTES = 12 * 1024 * 1024;
 
 export const ALLOWED_PHOTO_MIME_TYPES = ['image/jpeg', 'image/png'];
 
+/**
+ * Largest kiosk video accepted, before base64 expansion (2026-09-09, "route
+ * kiosk video uploads through apps/api" — see `AddDeviceVideoDto`/
+ * `SessionVideoService.addDeviceVideo`). Real recordings are 600KB-3MB
+ * (live-confirmed) — 15mb raw (~20mb once base64-inflated by ~33%) leaves
+ * generous headroom under `main.ts`'s 25mb JSON body limit while still
+ * rejecting a pathological multi-minute recording outright rather than
+ * timing out mid-request.
+ */
+export const MAX_VIDEO_BYTES = 15 * 1024 * 1024;
+
+export const ALLOWED_VIDEO_MIME_TYPES = ['video/webm', 'video/mp4'];
+
 /** Postgres advisory-free backoff cap: a long outage doesn't push a retry days out. */
 export const OUTBOX_MAX_RETRY_DELAY_SECONDS = 300;

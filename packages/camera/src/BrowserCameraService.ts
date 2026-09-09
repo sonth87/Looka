@@ -96,7 +96,15 @@ export class BrowserCameraService implements CameraService {
 
     try {
       const devices = await navigator.mediaDevices.enumerateDevices();
-      const videoDevices = devices.filter((device) => device.kind === 'videoinput');
+      const videoDevices = devices
+        .filter((device) => device.kind === 'videoinput')
+        // Excludes the Camo virtual webcam (2026-09-09) — a phone bridged
+        // via Camo is for the separate CCCD-scanning tool only; it must
+        // never be selectable as the actual student-photo capture camera
+        // here (same exclusion as apps/desktop's CameraSetupScreen.tsx, a
+        // separate device-enumeration path that needed its own copy of this
+        // filter).
+        .filter((device) => !/camo/i.test(device.label));
 
       return videoDevices.map((device, index) => ({
         id: device.deviceId,

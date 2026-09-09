@@ -13,7 +13,12 @@ import {
 } from '@face/ui';
 import { SsoAuthClient } from './ssoAuthClient';
 
-const authClient = new SsoAuthClient();
+// Exported so `App.tsx` can read `getOperatorUserId()` directly when
+// constructing `FaceCaptureApp`'s props — see that method's own doc comment.
+// Unlike `campaignConfig`, the operator identity doesn't change per campaign
+// selection (it's set once at login), so it doesn't need threading through
+// this file's own `children(props, campaignConfig)` callback.
+export const authClient = new SsoAuthClient();
 
 /**
  * S1→S3 gate (ui-redesign-plan.md §3.8.1): Đăng nhập → Chọn campaign →
@@ -34,7 +39,29 @@ export function CampaignGate({
   children,
   contentProps,
 }: {
-  children: (props: AppContentProps, campaignConfig: CampaignWorkflowConfig | null) => React.ReactNode;
+  /**
+   * `campaignId` (2026-09-09, CCCD-scan capture-identification feature) is
+   * `campaign.id` below — only known inside this gate's own closure (the
+   * campaign the operator picked and joined), threaded through the same way
+   * `campaignConfig` already is. `FaceCaptureApp.tsx` uses its (and
+   * `authClient`'s) mere presence purely to pick which pre-session
+   * identification screen to show — `CccdScanWaitingScreen` on this
+   * campaign+login path vs. `StudentIdEntryScreen`'s manual form on
+   * `apps/web`/the legacy path — never to scope a roster lookup: the roster
+   * (`D:\Work\camera_server\response.json`) is a single, campaign-agnostic
+   * file the kiosk's main process checks a scanned CCCD against directly
+   * (see `apps/desktop/src/main/cccdRosterWatcher.ts`), a 2026-09-09
+   * same-day architecture correction from an earlier, wrongly campaign-
+   * scoped Postgres roster. `null` only momentarily (`started` cannot
+   * become true without `campaign` being set — see the render logic below),
+   * never a real "no campaign" state `FaceCaptureApp` needs to handle
+   * differently.
+   */
+  children: (
+    props: AppContentProps,
+    campaignConfig: CampaignWorkflowConfig | null,
+    campaignId: string | null
+  ) => React.ReactNode;
   contentProps: AppContentProps;
 }) {
   const [identity, setIdentity] = useState<AuthenticatedIdentity | null>(() => authClient.getUser());
@@ -132,7 +159,7 @@ export function CampaignGate({
   }, [campaign?.id]);
 
   if (started && campaign) {
-    return <>{children(contentProps, campaignConfig)}</>;
+    return <>{children(contentProps, campaignConfig, campaign.id)}</>;
   }
 
   if (!identity) {

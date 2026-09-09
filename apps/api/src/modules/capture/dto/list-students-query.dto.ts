@@ -30,7 +30,10 @@ export class ListStudentsQueryDto extends QueryPaginateDto {
   @IsUUID()
   campaignId?: string;
 
-  @ApiPropertyOptional({ description: 'Tìm theo mã hoặc tên sinh viên' })
+  @ApiPropertyOptional({
+    description:
+      'Tìm theo mã SV, tên, số CCCD, hoặc tên lớp (hai trường sau đọc từ sessions.metadata — xem StudentService.listStudents)',
+  })
   @IsOptional()
   @IsString()
   q?: string;

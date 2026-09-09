@@ -43,6 +43,37 @@ export class CampaignDeviceStatsDao {
   lastCaptureAt?: Date;
 }
 
+/**
+ * One "cán bộ chụp" (operator/lecturer)'s row inside `CampaignStatsDao.byOperator`
+ * (2026-09-09, product request — shown in the campaign detail's own "Thống kê"
+ * tab, deliberately NOT a separate CMS tab: the "Cán bộ chụp" tab that used to
+ * exist here was for assigning/approving operators and was removed earlier the
+ * same day as "không cần phân công" — this is unrelated, read-only reporting
+ * on the operators SESSION_REPORT already recorded, not a management screen).
+ * `operatorUserId: null` groups every session with no operator identity at all
+ * (a kiosk build/session that predates threading the SSO user through to
+ * capture) under one row rather than dropping those sessions from the count.
+ */
+export class CampaignOperatorStatsDao {
+  @ApiPropertyOptional({ description: 'null gộp các phiên không có cán bộ chụp (chưa đăng nhập SSO khi chụp)' })
+  operatorUserId: string | null;
+
+  @ApiProperty()
+  operatorName: string;
+
+  @ApiProperty({ description: 'Số phiên đã hoàn tất do cán bộ này thực hiện' })
+  sessions: number;
+
+  @ApiProperty()
+  photosReady: number;
+
+  @ApiProperty()
+  photosFailed: number;
+
+  @ApiPropertyOptional({ description: 'Lần chụp gần nhất của cán bộ này' })
+  lastCaptureAt?: Date;
+}
+
 /** One day's row inside `CampaignStatsDao.byDay` — last 30 days, Asia/Ho_Chi_Minh (A.8). */
 export class CampaignDayStatsDao {
   @ApiProperty({ example: '2026-09-06' })
@@ -86,6 +117,12 @@ export class CampaignStatsDao {
 
   @ApiProperty({ type: [CampaignDeviceStatsDao] })
   byDevice: CampaignDeviceStatsDao[];
+
+  @ApiProperty({
+    type: [CampaignOperatorStatsDao],
+    description: 'Thống kê theo cán bộ chụp (SSO đăng nhập lúc chụp), nếu có',
+  })
+  byOperator: CampaignOperatorStatsDao[];
 
   @ApiProperty({
     type: [CampaignDayStatsDao],

@@ -265,9 +265,24 @@ test('setSubject() before the first capture makes ensure() send it to startSessi
     {
       subjectCode: 'SV001',
       subjectName: 'Nguyễn Văn An',
-      metadata: { className: 'CNTT01', major: 'Công nghệ thông tin', academicYear: '2025-2026' },
+      metadata: {
+        className: 'CNTT01',
+        major: 'Công nghệ thông tin',
+        academicYear: '2025-2026',
+        identityNumber: undefined,
+      },
     },
   ]);
+});
+
+test('setSubject() with identityNumber (CCCD-scan path) sends it through to startSession metadata too', async () => {
+  const { sink, startSessionInputs } = fakeSink();
+  const run = new RunScopedCaptureSession(sink);
+
+  run.setSubject({ ...STUDENT, identityNumber: '014203003990' });
+  await run.savePhoto({ stepId: 'step-front', attempt: 1, dataUrl: 'data:image/jpeg;base64,aaaa' });
+
+  assert.equal(startSessionInputs[0]?.metadata?.identityNumber, '014203003990');
 });
 
 test('with no setSubject() call, ensure() sends startSession an all-undefined subject, not {}', async () => {
@@ -281,7 +296,11 @@ test('with no setSubject() call, ensure() sends startSession an all-undefined su
   await run.savePhoto({ stepId: 'step-front', attempt: 1, dataUrl: 'data:image/jpeg;base64,aaaa' });
 
   assert.deepEqual(startSessionInputs, [
-    { subjectCode: undefined, subjectName: undefined, metadata: { className: undefined, major: undefined, academicYear: undefined } },
+    {
+      subjectCode: undefined,
+      subjectName: undefined,
+      metadata: { className: undefined, major: undefined, academicYear: undefined, identityNumber: undefined },
+    },
   ]);
 });
 
@@ -521,6 +540,7 @@ test('ElectronCaptureSink.approveUpload forwards sessionId, steps, and videoSess
       subjectCode: undefined,
       subjectName: undefined,
       metadata: undefined,
+      operatorUserId: undefined,
     },
   ]);
 });
@@ -554,6 +574,7 @@ test('ElectronCaptureSink.approveUpload forwards videoSessionId as undefined whe
       subjectCode: undefined,
       subjectName: undefined,
       metadata: undefined,
+      operatorUserId: undefined,
     },
   ]);
 });
@@ -585,7 +606,38 @@ test('ElectronCaptureSink.approveUpload forwards a student subject as subjectCod
       videoSessionId: undefined,
       subjectCode: 'SV001',
       subjectName: 'Nguyễn Văn An',
-      metadata: { className: 'CNTT01', major: 'Công nghệ thông tin', academicYear: '2025-2026' },
+      metadata: {
+        className: 'CNTT01',
+        major: 'Công nghệ thông tin',
+        academicYear: '2025-2026',
+        identityNumber: undefined,
+      },
+      operatorUserId: undefined,
     },
   ]);
+});
+
+test('ElectronCaptureSink.approveUpload forwards identityNumber (CCCD-scan path) inside metadata', async () => {
+  const calls: unknown[] = [];
+  await withFakeWindow(
+    {
+      approveSessionUpload: async (payload: unknown) => {
+        calls.push(payload);
+        return { ok: true, approved: 1 };
+      },
+    },
+    async () => {
+      const sink = new ElectronCaptureSink();
+      await sink.approveUpload('session_ok', undefined, undefined, {
+        subjectCode: 'SV001',
+        subjectName: 'Nguyễn Văn An',
+        className: 'CNTT01',
+        major: 'Công nghệ thông tin',
+        academicYear: '2025-2026',
+        identityNumber: '014203003990',
+      });
+    }
+  );
+  const payload = calls[0] as { metadata?: Record<string, unknown> };
+  assert.equal(payload.metadata?.identityNumber, '014203003990');
 });

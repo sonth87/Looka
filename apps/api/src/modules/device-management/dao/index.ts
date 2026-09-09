@@ -2,6 +2,7 @@ export * from './campaign.dao';
 export * from './campaign-config.dao';
 export * from './campaign-member.dao';
 export * from './capture-angle-preset.dao';
+export * from './capture-configuration.dao';
 export * from './device.dao';
 export * from './campaign-stats.dao';
 export * from './me.dao';
