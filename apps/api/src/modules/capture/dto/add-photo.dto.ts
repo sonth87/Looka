@@ -1,5 +1,24 @@
-import { ApiProperty } from '@nestjs/swagger';
-import { IsInt, IsNotEmpty, IsString, Min } from 'class-validator';
+import type { CaptureTriggerMode, CaptureTriggerSource } from '@face/core';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import {
+  IsIn,
+  IsInt,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  Min,
+} from 'class-validator';
+
+/** `@face/core`'s `CaptureTriggerSource` - see that type's own doc comment and §3.7.1 of the discussion doc. */
+const TRIGGER_SOURCES: CaptureTriggerSource[] = [
+  'AUTO',
+  'GESTURE',
+  'SHUTTER',
+  'EXTERNAL',
+];
+
+/** `@face/core`'s `CaptureTriggerMode`. */
+const CAPTURE_MODES: CaptureTriggerMode[] = ['AUTO', 'MANUAL', 'OFF'];
 
 export class AddPhotoDto {
   @ApiProperty({ description: 'Bước trong quy trình chụp, ví dụ FRONT/LEFT' })
@@ -21,4 +40,20 @@ export class AddPhotoDto {
   @IsString()
   @IsNotEmpty()
   dataUrl: string;
+
+  @ApiPropertyOptional({
+    description: 'Nguồn kích hoạt chụp, nếu có',
+    enum: TRIGGER_SOURCES,
+  })
+  @IsOptional()
+  @IsIn(TRIGGER_SOURCES)
+  triggerSource?: CaptureTriggerSource;
+
+  @ApiPropertyOptional({
+    description: 'Chế độ chụp đang bật khi ảnh này được chụp, nếu có',
+    enum: CAPTURE_MODES,
+  })
+  @IsOptional()
+  @IsIn(CAPTURE_MODES)
+  captureMode?: CaptureTriggerMode;
 }

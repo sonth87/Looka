@@ -85,7 +85,12 @@ describe('WorkflowEngine.recordExternalCapture', () => {
 
     assert.equal(engine.recordExternalCapture('step-front', 'img://front'), true);
 
-    assert.deepEqual(triggers, [{ stepId: 'step-front', imagePath: 'img://front' }]);
+    // `triggerSource: 'EXTERNAL'` is additive plumbing added for the
+    // auto-vs-manual capture stats feature (discussion doc §3.7.1) — see
+    // TriggerSource.test.ts for full coverage of the mapping.
+    assert.deepEqual(triggers, [
+      { stepId: 'step-front', imagePath: 'img://front', triggerSource: 'EXTERNAL' },
+    ]);
     assert.equal(stepOf(engine, 'step-front').status, 'COMPLETED');
     assert.equal(stepOf(engine, 'step-front').capturedImagePath, 'img://front');
     // Advanced past the just-completed current step to the next one.

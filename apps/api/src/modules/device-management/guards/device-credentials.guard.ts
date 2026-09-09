@@ -1,8 +1,16 @@
 import { CustomException, ERROR_CODE } from '@app/common/errors';
-import { CanActivate, ExecutionContext, HttpStatus, Injectable } from '@nestjs/common';
+import {
+  CanActivate,
+  ExecutionContext,
+  HttpStatus,
+  Injectable,
+} from '@nestjs/common';
 import { Request } from 'express';
 import { Device } from '../entities/device.entity';
-import { DeviceService, deviceCredentialFailure } from '../services/device.service';
+import {
+  DeviceService,
+  deviceCredentialFailure,
+} from '../services/device.service';
 
 declare module 'express' {
   interface Request {
@@ -33,7 +41,10 @@ export class DeviceCredentialsGuard implements CanActivate {
       );
     }
 
-    const check = await this.deviceService.verifyCredentials(deviceId, deviceSecret);
+    const check = await this.deviceService.verifyCredentials(
+      deviceId,
+      deviceSecret,
+    );
     if (!check.ok) {
       // 2026-09-08: was `UnauthorizedException`, which the global
       // `HttpExceptionFilter` maps to `errorCode: 401` in its default

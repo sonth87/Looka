@@ -26,6 +26,26 @@ export enum DeviceEventType {
   // migration 1789000000000-AttemptSuperseded for the same enum-rollout
   // ordering requirement as VIDEO_STATUS above.
   ATTEMPT_SUPERSEDED = 'ATTEMPT_SUPERSEDED',
+  // Fired the moment a kiosk/web session actually starts (subject identified,
+  // capture screen live) — not when it completes. Purely additive telemetry
+  // for the "đang chụp" ("currently being captured") indicator on the CMS
+  // students page and the kiosk's own captured-list panel — see
+  // docs/plans/campaign-config-sso-card-photo-discussion.md §3.8.2 and
+  // ui-redesign-plan.md C1/C4. No handler mutates `sessions`/`photos` off
+  // this event; `DeviceEventService.recordBatch` just stores it like any
+  // other raw event, and campaign-stats reads recent rows of this type
+  // directly (see StatsService).
+  SESSION_STARTED = 'SESSION_STARTED',
+  // One per actual shutter-fire, auto-vs-manual statistics feature — see
+  // the discussion doc §3.7. `metadata` carries
+  // `{ sessionId, stepId, attempt, triggerSource, captureMode }` where
+  // `triggerSource` is `@face/core`'s `CaptureTriggerSource`
+  // ('AUTO'|'GESTURE'|'SHUTTER'|'EXTERNAL'). Counts every attempt, including
+  // ones later superseded by a retake (§3.4b keeps only the final photo row,
+  // but the trigger-source *count* intentionally still reflects every real
+  // shutter-fire) — distinct from `photos.trigger_source`, which reflects
+  // only the final kept photo.
+  CAPTURE_TRIGGERED = 'CAPTURE_TRIGGERED',
 }
 
 /**

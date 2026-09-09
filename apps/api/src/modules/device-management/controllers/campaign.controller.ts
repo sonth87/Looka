@@ -1,9 +1,31 @@
-import { ApiResponseArrayDecorator, ApiResponseDecorator } from '@app/common/decorators';
+import {
+  ApiResponseArrayDecorator,
+  ApiResponseDecorator,
+} from '@app/common/decorators';
 import { SsoAuthGuard } from '@app/common/guards';
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Patch,
+  Post,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
-import { AllCampaignsStatsDao, CampaignDao, CampaignsTimeseriesDao, CampaignStatsDao } from '../dao';
-import { CreateCampaignDto, GetCampaignsTimeseriesQueryDto, UpdateCampaignDto } from '../dto';
+import {
+  AllCampaignsStatsDao,
+  CampaignDao,
+  CampaignsTimeseriesDao,
+  CampaignStatsDao,
+} from '../dao';
+import {
+  CreateCampaignDto,
+  GetCampaignsTimeseriesQueryDto,
+  UpdateCampaignDto,
+} from '../dto';
 import { CampaignService } from '../services/campaign.service';
 import { DeviceEventService } from '../services/device-event.service';
 
@@ -24,7 +46,10 @@ export class CampaignController {
   ) {}
 
   @Post()
-  @ApiOperation({ summary: 'Create a campaign — a named group of devices sharing one expiry/consent/capture config' })
+  @ApiOperation({
+    summary:
+      'Create a campaign — a named group of devices sharing one expiry/consent/capture config',
+  })
   @ApiResponseDecorator(CampaignDao, { status: 201 })
   createCampaign(@Body() dto: CreateCampaignDto): Promise<CampaignDao> {
     return this.campaignService.createCampaign(dto);
@@ -49,11 +74,16 @@ export class CampaignController {
    * here), so this is deliberate, not incidental.
    */
   @Get('stats/summary')
-  @ApiOperation({ summary: 'Get event-count stats summed across every campaign, plus the per-campaign breakdown' })
+  @ApiOperation({
+    summary:
+      'Get event-count stats summed across every campaign, plus the per-campaign breakdown',
+  })
   @ApiResponseDecorator(AllCampaignsStatsDao)
   async getAllCampaignsStats(): Promise<AllCampaignsStatsDao> {
     const campaigns = await this.campaignService.findAllCampaigns();
-    return this.deviceEventService.allCampaignsStats(campaigns.map((c) => ({ id: c.id, name: c.name })));
+    return this.deviceEventService.allCampaignsStats(
+      campaigns.map((c) => ({ id: c.id, name: c.name })),
+    );
   }
 
   /**
@@ -65,9 +95,14 @@ export class CampaignController {
    * `stats/summary` above.
    */
   @Get('stats/timeseries')
-  @ApiOperation({ summary: 'Get daily sessions-completed / uploads-success / uploads-failed / retake series across every campaign' })
+  @ApiOperation({
+    summary:
+      'Get daily sessions-completed / uploads-success / uploads-failed / retake series across every campaign',
+  })
   @ApiResponseDecorator(CampaignsTimeseriesDao)
-  getCampaignsTimeseries(@Query() query: GetCampaignsTimeseriesQueryDto): Promise<CampaignsTimeseriesDao> {
+  getCampaignsTimeseries(
+    @Query() query: GetCampaignsTimeseriesQueryDto,
+  ): Promise<CampaignsTimeseriesDao> {
     return this.deviceEventService.campaignsTimeseries(query.days ?? 14);
   }
 
@@ -85,7 +120,9 @@ export class CampaignController {
    * duplicated onto the device row (see the service's own doc comment).
    */
   @Patch(':id')
-  @ApiOperation({ summary: 'Update a campaign (expiry, consent, capture config)' })
+  @ApiOperation({
+    summary: 'Update a campaign (expiry, consent, capture config)',
+  })
   @ApiResponseDecorator(CampaignDao)
   updateCampaign(
     @Param('id') id: string,
@@ -103,7 +140,8 @@ export class CampaignController {
    */
   @Delete(':id')
   @ApiOperation({
-    summary: 'Delete a campaign — refused with 409 if it still has any devices or capture sessions attached',
+    summary:
+      'Delete a campaign — refused with 409 if it still has any devices or capture sessions attached',
   })
   async deleteCampaign(@Param('id') id: string): Promise<{ id: string }> {
     await this.campaignService.deleteCampaign(id);

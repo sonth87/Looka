@@ -208,6 +208,22 @@ export function openCbHelpWindow(excludeDisplayId?: number): void {
   });
   cbHelpWindow.setMenuBarVisibility(false);
 
+  // This window's own renderer (CbHelpFrames.tsx) opens its own independent
+  // getUserMedia streams — including one for CENTER, alongside the main
+  // kiosk window's already-open CENTER stream — and only ever logs a
+  // failure to open one (`[cb-help] failed to open camera ...`) to this
+  // window's own DevTools console, which nobody has open on a kiosk.
+  // Forwarded to main.log the same way `attachRendererDiagnostics` already
+  // does for the main window, so a blank tile here (2026-09-08 field
+  // report — every tile showing black, including the currently-capturing
+  // one) is diagnosable from the log instead of invisible.
+  cbHelpWindow.webContents.on('console-message', (details) => {
+    const level = details.level;
+    if (level === 'warning' || level === 'error') {
+      console.error(`[cb-help renderer] ${details.message} (${details.sourceId}:${details.lineNumber})`);
+    }
+  });
+
   if (process.env.VITE_DEV_SERVER_URL) {
     cbHelpWindow.loadURL(`${process.env.VITE_DEV_SERVER_URL}#cb-help`);
   } else {

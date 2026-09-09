@@ -45,8 +45,14 @@ import {
   getCameraRoleMapping,
   setCameraRoleMapping,
   sanitizeCameraRoleMapping,
+  getCaptureSequencing,
+  setCaptureSequencing,
+  getOrCreateDeviceFingerprint,
+  getHostname,
+  storeSelfEnrolledDevice,
 } from './secrets.js';
 import { openCameraSetupWindow } from './cameraSetupWindow.js';
+import { openSsoLoginWindow } from './ssoLogin.js';
 import { openRecentStudentsWindow } from './recentStudentsWindow.js';
 import { getDeviceAccessStatus } from './deviceApi.js';
 import { startVideoStream, endVideoStream, discardSessionVideos } from './streams.js';
@@ -415,6 +421,48 @@ app.whenReady().then(async () => {
   ipcMain.handle('device:getAccessStatus', () => getDeviceAccessStatus());
 
   /**
+   * What the renderer needs to call `POST /v1/devices/self-enroll` itself
+   * (with the operator's own SSO bearer token, which only the renderer
+   * holds — see `SsoAuthClient`) — this machine's stable fingerprint and a
+   * human-readable hostname. See `getOrCreateDeviceFingerprint`'s own doc
+   * comment for why the fingerprint is a persisted random id, not derived
+   * from real hardware.
+   */
+  ipcMain.handle('device:getFingerprintInfo', () => ({
+    fingerprint: getOrCreateDeviceFingerprint(),
+    hostname: getHostname(),
+  }));
+
+  /**
+   * Persists the result of a self-enroll call the renderer just made — see
+   * `storeSelfEnrolledDevice`'s own doc comment. This is the bridge that
+   * makes `statsEvents.ts`'s device-credential-gated stats/events pipeline
+   * (SESSION_REPORT — what makes a captured session show up in the CMS's
+   * photo-review list) start working under the campaign+login model, which
+   * never gives this kiosk a device identity any other way (2026-09-08 field
+   * report: "ấn lưu nhưng CMS không thấy thông tin ảnh chụp").
+   */
+  ipcMain.handle(
+    'device:storeSelfEnrolled',
+    (
+      _,
+      payload: { deviceId?: unknown; deviceSecret?: unknown; campaignId?: unknown; apiBaseUrl?: unknown }
+    ) => {
+      const deviceId = String(payload?.deviceId ?? '');
+      const deviceSecret = String(payload?.deviceSecret ?? '');
+      const apiBaseUrl = String(payload?.apiBaseUrl ?? '');
+      if (!deviceId || !deviceSecret || !apiBaseUrl) return { ok: false };
+      storeSelfEnrolledDevice({
+        deviceId,
+        deviceSecret,
+        apiBaseUrl,
+        campaignId: typeof payload?.campaignId === 'string' ? payload.campaignId : null,
+      });
+      return { ok: true };
+    }
+  );
+
+  /**
    * The renderer reporting a stats-worthy moment it just observed (a
    * session completed, a retake) — see docs/plans/multi-camera-device-management-discussion.md
    * §3.4. Queued locally and pushed on `statsEvents.ts`'s own schedule;
@@ -487,6 +535,21 @@ app.whenReady().then(async () => {
   });
   ipcMain.handle('camera:openSetup', () => {
     openCameraSetupWindow();
+    return true;
+  });
+
+  /**
+   * Real Microsoft 365 SSO login (see ssoLogin.ts's own doc comment) — the
+   * renderer's `SsoAuthClient` calls this instead of the old `DevAuthClient`
+   * mock. Resolves `null` if the operator closes the login window before
+   * finishing, which the renderer treats as a cancelled login, not an error.
+   */
+  ipcMain.handle('auth:ssoLogin', () => openSsoLoginWindow(mainWindow));
+
+  /** "Cách chụp" — Tuần tự/Đồng thời, set from Camera Setup / "Cài đặt thiết bị" (§3.9). */
+  ipcMain.handle('capture:getSequencing', () => getCaptureSequencing());
+  ipcMain.handle('capture:setSequencing', (_, value: unknown) => {
+    setCaptureSequencing(value === 'simultaneous' ? 'simultaneous' : 'sequential');
     return true;
   });
 

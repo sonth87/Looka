@@ -38,6 +38,8 @@ import { FlyingThumbnail } from "../../face/FlyingThumbnail.js";
 import { StepProgress } from "../../workflow/StepProgress.js";
 import { StabilityProgress } from "../../workflow/StabilityProgress.js";
 import { CountdownTimer } from "../../workflow/CountdownTimer.js";
+import { SubjectInfoBadge } from "../../workflow/SubjectInfoBadge.js";
+import { CapturedListPanel } from "../../workflow/CapturedListPanel.js";
 import { MultiFrameGrid } from "../../camera/MultiFrameGrid.js";
 import { FramesBlockedPanel } from "../../camera/FramesBlockedPanel.js";
 import {
@@ -48,6 +50,23 @@ import {
 } from "../../ui/tooltip.js";
 import { cn } from "../../../lib/utils.js";
 import { QUALITY_REASON_LABEL } from "../../../lib/qualityReasonLabels.js";
+
+/**
+ * The segmented picker below used to render the bare enum values
+ * ("AUTO"/"MANUAL"/"OFF") with no explanation — an operator picking "MANUAL"
+ * expecting a press-to-capture button got `GestureOverlay` instead (no
+ * button at all; MANUAL triggers on a held hand gesture), since the actual
+ * button only renders for `captureMode === "OFF"` (see this file's own
+ * `captureMode === "OFF" && onShutterCapture` block further down).
+ * 2026-09-08 fix: label each option with what it actually does instead of
+ * its internal enum name, matching the wording `CampaignHomeScreen.tsx`'s
+ * own `CAPTURE_MODE_LABEL` already uses for the same three values.
+ */
+const TRIGGER_MODE_LABEL: Record<"AUTO" | "MANUAL" | "OFF", string> = {
+  AUTO: "Tự động",
+  MANUAL: "Cử chỉ tay",
+  OFF: "Bấm nút",
+};
 
 export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
   const {
@@ -112,6 +131,8 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
     activeSensitivity,
     handleSensitivityChange,
     multiFrame,
+    subjectInfo,
+    capturedList,
   } = props;
 
   const [showTelemetryDrawer, setShowTelemetryDrawer] = useState(false);
@@ -303,9 +324,25 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
       {/* ── Main Viewport & Live Shot Sidebar ── */}
       <main className="w-full flex-1 flex items-center justify-center relative overflow-hidden px-2 sm:px-4 py-2 z-10">
         <div className="w-full h-full max-w-6xl flex items-center justify-center gap-4">
-          {/* Left Live Shot Gallery Sidebar - Clean Borderless Design */}
+          {/*
+            Left zone (ui-redesign-plan.md S5 "NGƯỜI ĐƯỢC CHỤP" + step
+            gallery) — widened from w-36 to w-60 (~240px, matching the S5
+            mockup's fixed left-column width) to make room for
+            SubjectInfoBadge stacked above the existing step thumbnails.
+          */}
           {!isFullscreen && (
-            <div className="hidden sm:flex flex-col gap-2 w-36 shrink-0 h-full max-h-[82vh] p-1">
+            <div className="hidden sm:flex flex-col gap-2 w-60 shrink-0 h-full max-h-[82vh] p-1">
+              {subjectInfo && (
+                <SubjectInfoBadge
+                  subject={subjectInfo.subject}
+                  round={subjectInfo.round}
+                  roundCount={subjectInfo.roundCount}
+                  photoCount={subjectInfo.photoCount}
+                  photoTotal={subjectInfo.photoTotal}
+                  theme={theme}
+                />
+              )}
+
               <div
                 className={cn(
                   "flex items-center justify-between pb-1.5 border-b",
@@ -849,6 +886,29 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
             )}
           </div>
 
+          {/*
+            Right zone (ui-redesign-plan.md S5 "ĐÃ CHỤP · ĐANG CHỤP") — a
+            persistent column (unlike the telemetry/settings drawer below,
+            which is an `absolute` overlay toggled by the header's Activity
+            button); the two can coexist since the drawer floats above this
+            column rather than sharing its layout space. `capturedList`
+            renders with empty/placeholder data until a later integration
+            pass wires real "đang chụp"/"đã chụp" data through
+            FaceCaptureApp — see SharedCaptureViewProps.capturedList's own
+            doc comment.
+          */}
+          {!isFullscreen && (
+            <div className="hidden lg:flex flex-col w-[300px] shrink-0 h-full max-h-[82vh] p-1">
+              <CapturedListPanel
+                current={capturedList?.current ?? null}
+                recent={capturedList?.recent ?? []}
+                onOpenSession={capturedList?.onOpenSession ?? (() => {})}
+                theme={theme}
+                className="h-full"
+              />
+            </div>
+          )}
+
           {/* Right Side: Sleek 2-Tab Glass Slide-Over Drawer (Never Clipped, Fits All Window Sizes) */}
           {showTelemetryDrawer && !isFullscreen && (
             <aside
@@ -1338,7 +1398,7 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                                     : "text-slate-600 hover:text-slate-900",
                               )}
                             >
-                              {m}
+                              {TRIGGER_MODE_LABEL[m]}
                             </button>
                           ))}
                         </div>

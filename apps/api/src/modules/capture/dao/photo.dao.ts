@@ -34,6 +34,16 @@ export class PhotoDao {
   @Expose()
   fsStatus?: string;
 
+  @ApiPropertyOptional({
+    description: 'Nguồn kích hoạt chụp: AUTO/GESTURE/SHUTTER/EXTERNAL',
+  })
+  @Expose()
+  triggerSource?: string;
+
+  @ApiPropertyOptional({ description: 'Chế độ chụp: AUTO/MANUAL/OFF' })
+  @Expose()
+  captureMode?: string;
+
   @ApiProperty({
     description:
       'PENDING/SENDING/UPLOADED/FAILED trên hàng đợi nội bộ, hoặc UPLOADED nếu đã xong',

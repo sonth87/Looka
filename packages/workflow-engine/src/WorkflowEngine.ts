@@ -3,6 +3,7 @@ import {
   CaptureSensitivity,
   CaptureStepResult,
   CaptureTriggerMode,
+  CaptureTriggerSource,
   CaptureWorkflow,
   FaceState,
   GuidanceState,
@@ -12,6 +13,38 @@ import { StepEvaluator } from './StepEvaluator.js';
 import { StabilityTracker } from './StabilityTracker.js';
 import { GuidanceEngine } from './GuidanceEngine.js';
 import { CaptureController } from './CaptureController.js';
+
+/**
+ * What a caller of `triggerManualCapture` says fired this particular
+ * capture — threaded straight into the `capture-trigger` event payload
+ * (docs/plans/campaign-config-sso-card-photo-discussion.md §3.7.1/§3.7.2)
+ * without touching any capture-decision logic. `processFrame`'s own
+ * AUTO-mode auto-fire always passes `{ source: 'AUTO' }`; every other call
+ * comes from outside the engine (FaceCaptureApp's gesture loop / shutter
+ * handler), which is the only place that knows whether a hold was a gesture
+ * or a button click. `gesture` mirrors `CaptureTriggerEvaluator`'s
+ * `MANUAL_GESTURE_<X>` reason (the `X`) and is only meaningful when
+ * `source === 'GESTURE'`.
+ */
+export interface CaptureTriggerInfo {
+  source: CaptureTriggerSource;
+  gesture?: string;
+}
+
+/** Payload emitted on `capture-trigger` by `triggerManualCapture()`. */
+export interface CaptureTriggerEventPayload {
+  stepId: string;
+  imagePath: string;
+  triggerSource: CaptureTriggerSource;
+  gesture?: string;
+}
+
+/** Payload emitted on `capture-trigger` by `recordExternalCapture()`. */
+export interface ExternalCaptureTriggerEventPayload {
+  stepId: string;
+  imagePath: string;
+  triggerSource: 'EXTERNAL';
+}
 
 export class WorkflowEngine implements IWorkflowEngine {
   private _currentSession: CaptureSession | null = null;
@@ -215,7 +248,7 @@ export class WorkflowEngine implements IWorkflowEngine {
         this.stabilityTracker.reset();
         this.emit('external-capture-ready', { stepId: currentStep.id });
       } else {
-        await this.triggerManualCapture(faceState);
+        await this.triggerManualCapture(faceState, { source: 'AUTO' });
       }
     }
 
@@ -223,7 +256,10 @@ export class WorkflowEngine implements IWorkflowEngine {
     return this._currentState;
   }
 
-  public async triggerManualCapture(faceState?: FaceState | null): Promise<boolean> {
+  public async triggerManualCapture(
+    faceState?: FaceState | null,
+    trigger?: CaptureTriggerInfo
+  ): Promise<boolean> {
     if (this.isCapturing || !this.activeWorkflow || !this._currentSession) return false;
     // Defence in depth: the real gate is FaceCaptureApp's shutter/gesture
     // handlers routing to recordExternalCapture instead of calling this in
@@ -281,10 +317,22 @@ export class WorkflowEngine implements IWorkflowEngine {
         this.updateStepStatus(currentStep.id, 'COMPLETED', captureResult.imagePath, gateFaceState || undefined);
 
         // Phát sự kiện trigger để UI hiển thị Flash & Freeze Base64 & Animation bay ảnh
-        this.emit('capture-trigger', {
+        //
+        // `triggerSource`/`gesture` are pure additive plumbing for the
+        // auto-vs-manual capture statistics feature (discussion doc
+        // §3.7.1/§3.7.2) — the caller (processFrame's own AUTO branch, or
+        // FaceCaptureApp's gesture loop / shutter handler) decides the
+        // source; nothing here changes which capture actually fires.
+        // `trigger` defaults to AUTO for any caller that omits it, matching
+        // this method's pre-existing behaviour of not distinguishing sources.
+        const { source: triggerSource, gesture } = trigger ?? { source: 'AUTO' as const };
+        const capturePayload: CaptureTriggerEventPayload = {
           stepId: currentStep.id,
           imagePath: captureResult.imagePath,
-        });
+          triggerSource,
+          ...(gesture ? { gesture } : {}),
+        };
+        this.emit('capture-trigger', capturePayload);
 
         // 2. Chờ thời gian thực hiện animation thu nhỏ và di chuyển về thẻ step (550ms)
         await new Promise((resolve) => setTimeout(resolve, 550));
@@ -525,7 +573,16 @@ export class WorkflowEngine implements IWorkflowEngine {
     stepResult.attempts++;
     this.updateStepStatus(stepId, 'COMPLETED', imagePath);
 
-    this.emit('capture-trigger', { stepId, imagePath });
+    // `triggerSource: 'EXTERNAL'` — pure additive plumbing (discussion doc
+    // §3.7.1): a side-camera frame captured alongside the CENTER frame's own
+    // trigger, so it never has an independent AUTO/GESTURE/SHUTTER source of
+    // its own. Does not change any of the completion logic above.
+    const externalPayload: ExternalCaptureTriggerEventPayload = {
+      stepId,
+      imagePath,
+      triggerSource: 'EXTERNAL',
+    };
+    this.emit('capture-trigger', externalPayload);
 
     // Only the step ordered capture is actually waiting on moves the
     // cursor; a future step just sits COMPLETED until advanceToNextStep's

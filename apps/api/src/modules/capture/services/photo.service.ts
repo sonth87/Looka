@@ -100,10 +100,12 @@ export class PhotoService extends CommonService<Photo> {
         // `ON CONFLICT ON CONSTRAINT` fails at runtime ("constraint ... does
         // not exist"). The column-list form resolves against any applicable
         // unique index regardless of how it was created.
-        `INSERT INTO photos (session_id, step_id, attempt, mime_type, bytes, sha256, virtual_path)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
+        `INSERT INTO photos (session_id, step_id, attempt, mime_type, bytes, sha256, virtual_path, trigger_source, capture_mode)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          ON CONFLICT (session_id, step_id, attempt) DO UPDATE
-           SET mime_type = EXCLUDED.mime_type
+           SET mime_type = EXCLUDED.mime_type,
+               trigger_source = EXCLUDED.trigger_source,
+               capture_mode = EXCLUDED.capture_mode
          RETURNING id`,
         [
           sessionId,
@@ -113,6 +115,8 @@ export class PhotoService extends CommonService<Photo> {
           data.byteLength,
           sha256,
           virtualPath,
+          dto.triggerSource ?? null,
+          dto.captureMode ?? null,
         ],
       );
       const id = rows[0].id;
@@ -147,6 +151,8 @@ export class PhotoService extends CommonService<Photo> {
         created_at: Date;
         fs_file_id: string | null;
         fs_status: string | null;
+        trigger_source: string | null;
+        capture_mode: string | null;
         upload_status: string;
       }>
     >(
@@ -158,6 +164,8 @@ export class PhotoService extends CommonService<Photo> {
               p.created_at,
               p.fs_file_id,
               p.fs_status,
+              p.trigger_source,
+              p.capture_mode,
               COALESCE(o.status, 'UPLOADED') AS upload_status
          FROM photos p
          LEFT JOIN upload_outbox o ON o.photo_id = p.id
@@ -177,6 +185,8 @@ export class PhotoService extends CommonService<Photo> {
         capturedAt: r.created_at,
         fsFileId: r.fs_file_id ?? undefined,
         fsStatus: r.fs_status ?? undefined,
+        triggerSource: r.trigger_source ?? undefined,
+        captureMode: r.capture_mode ?? undefined,
         uploadStatus: r.upload_status,
       })),
     );

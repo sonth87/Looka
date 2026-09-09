@@ -14,8 +14,13 @@ export function hashDeviceSecret(secret: string): string {
  * `timingSafeEqual`: a length/byte-position-timed comparison would let a
  * caller recover the secret one correct byte at a time.
  */
-export function verifyDeviceSecret(secret: string, storedHash: string): boolean {
+export function verifyDeviceSecret(
+  secret: string,
+  storedHash: string,
+): boolean {
   const candidate = Buffer.from(hashDeviceSecret(secret), 'hex');
   const expected = Buffer.from(storedHash, 'hex');
-  return candidate.length === expected.length && timingSafeEqual(candidate, expected);
+  return (
+    candidate.length === expected.length && timingSafeEqual(candidate, expected)
+  );
 }

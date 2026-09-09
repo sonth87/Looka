@@ -28,21 +28,74 @@ export enum DeviceStatus {
  */
 @Entity('devices')
 export class Device extends BaseEntity {
-  @Column('uuid', { name: 'campaign_id' })
+  /**
+   * Nullable since 2026-09-08 (§3.3): a self-enrolled device
+   * (`POST /v1/devices/self-enroll`) has no campaign at registration time —
+   * campaign is picked per login/session instead (§3.9's "campaign chọn lúc
+   * đăng nhập"). The FK changed from `ON DELETE CASCADE` to `ON DELETE
+   * SET NULL` at the same time: a campaign delete detaching a self-enrolled
+   * device (which isn't really "that campaign's" device) should never
+   * destroy the device row itself. Admin-registered devices
+   * (`POST /v1/campaigns/:campaignId/devices`, unchanged this pass) still
+   * always get one at creation.
+   */
+  @Column('uuid', { name: 'campaign_id', nullable: true })
   @Index()
-  @ApiProperty({ description: 'Campaign chứa thiết bị này' })
-  campaignId: string;
+  @ApiPropertyOptional({
+    description:
+      'Campaign chứa thiết bị này — null nếu tự đăng ký và chưa chọn campaign',
+  })
+  campaignId?: string | null;
 
-  @ManyToOne(() => Campaign, (campaign) => campaign.devices, { onDelete: 'CASCADE' })
+  @ManyToOne(() => Campaign, (campaign) => campaign.devices, {
+    onDelete: 'SET NULL',
+    nullable: true,
+  })
   @JoinColumn({ name: 'campaign_id' })
-  campaign?: Campaign;
+  campaign?: Campaign | null;
 
   @Column('varchar', { length: 255 })
   @ApiProperty({ description: 'Tên thiết bị' })
   name: string;
 
+  /** Self-enroll only (§3.3) — the machine's own hostname, as reported by the app. Null for admin-registered devices. */
+  @Column('varchar', { length: 255, nullable: true })
+  @ApiPropertyOptional({
+    description: 'Tên máy (hostname) — chỉ có khi tự đăng ký',
+  })
+  hostname?: string | null;
+
+  /**
+   * Self-enroll only (§3.3) — a stable hash of machine id + OS, used to
+   * recognize "this is the same physical machine logging in again" across
+   * different users/reinstalls without ever exposing raw machine
+   * identifiers. Indexed since `DeviceService.selfEnroll` looks devices up
+   * by this column on every self-enroll call.
+   */
+  @Column('varchar', { length: 255, nullable: true })
+  @Index()
+  @ApiPropertyOptional({
+    description:
+      'Fingerprint máy (hash machine id + OS) — chỉ có khi tự đăng ký',
+  })
+  fingerprint?: string | null;
+
+  /** Self-enroll only (§3.3) — the user whose login first created this device row. Never changes after creation. */
+  @Column('uuid', { nullable: true, name: 'enrolled_by_user_id' })
+  @ApiPropertyOptional({ description: 'Người tự đăng ký thiết bị này lần đầu' })
+  enrolledByUserId?: string | null;
+
+  /** Self-enroll only (§3.3) — updated to the current user on every self-enroll call against an existing fingerprint (i.e. every login on this machine). */
+  @Column('uuid', { nullable: true, name: 'last_user_id' })
+  @ApiPropertyOptional({
+    description: 'Người đăng nhập gần nhất trên thiết bị này',
+  })
+  lastUserId?: string | null;
+
   @Column('varchar', { length: 500, nullable: true, name: 'auth_api_endpoint' })
-  @ApiPropertyOptional({ description: 'API endpoint lấy thông tin xác thực cho thiết bị này' })
+  @ApiPropertyOptional({
+    description: 'API endpoint lấy thông tin xác thực cho thiết bị này',
+  })
   authApiEndpoint?: string;
 
   /**
@@ -80,7 +133,12 @@ export class Device extends BaseEntity {
    * `select: false` for the same reason as `deviceSecretHash` — it's still a
    * live credential, never handed to the CMS.
    */
-  @Column('varchar', { length: 64, nullable: true, name: 'previous_secret_hash', select: false })
+  @Column('varchar', {
+    length: 64,
+    nullable: true,
+    name: 'previous_secret_hash',
+    select: false,
+  })
   previousSecretHash?: string | null;
 
   /**
@@ -93,7 +151,10 @@ export class Device extends BaseEntity {
    * `secretRotatedAt != null`.
    */
   @Column('timestamptz', { nullable: true, name: 'secret_rotated_at' })
-  @ApiPropertyOptional({ description: 'Thời điểm cấp lại mã gần nhất, còn đang chờ kiosk nạp gói mới' })
+  @ApiPropertyOptional({
+    description:
+      'Thời điểm cấp lại mã gần nhất, còn đang chờ kiosk nạp gói mới',
+  })
   secretRotatedAt?: Date | null;
 
   /** Last time `verifyCredentials` accepted this device's secret — CMS-visible "xác thực gần nhất" for spotting a kiosk that's gone quiet. */
@@ -107,7 +168,11 @@ export class Device extends BaseEntity {
   lastAuthFailedAt?: Date | null;
 
   /** Reason for the failure recorded at `lastAuthFailedAt` — one of `INVALID_SECRET`/`EXPIRED`/`REVOKED` (`DeviceCredentialCheck['reason']`, minus `NOT_FOUND` which has no row to update). */
-  @Column('varchar', { length: 20, nullable: true, name: 'last_auth_fail_reason' })
+  @Column('varchar', {
+    length: 20,
+    nullable: true,
+    name: 'last_auth_fail_reason',
+  })
   @ApiPropertyOptional({ description: 'Lý do xác thực thất bại gần nhất' })
   lastAuthFailReason?: string | null;
 

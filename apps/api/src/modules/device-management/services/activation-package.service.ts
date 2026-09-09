@@ -55,7 +55,9 @@ export class ActivationPackageService {
     });
     archive.pipe(output);
 
-    archive.append(JSON.stringify(payload, null, 2), { name: 'activation.json' });
+    archive.append(JSON.stringify(payload, null, 2), {
+      name: 'activation.json',
+    });
 
     // Not configured/found is not an error here — see this class's own doc
     // comment. The registration itself must still succeed so the CMS flow
@@ -88,7 +90,10 @@ export class ActivationPackageService {
     );
     if (installerPath && existsSync(installerPath)) {
       if (statSync(installerPath).isDirectory()) {
-        archive.directory(installerPath, os === 'win' ? false : basename(installerPath));
+        archive.directory(
+          installerPath,
+          os === 'win' ? false : basename(installerPath),
+        );
       } else {
         archive.file(installerPath, { name: basename(installerPath) });
       }

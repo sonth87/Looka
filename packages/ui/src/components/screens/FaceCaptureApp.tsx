@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { SlidersHorizontal, Camera, Monitor } from 'lucide-react';
 import {
   CameraDevice,
+  CameraRole,
   CaptureSession,
   CaptureSensitivity,
   CaptureTriggerMode,
@@ -26,6 +27,9 @@ import {
   CAMERA_ROLE_LABELS_VI,
   FramePreflight,
   FrameSpec,
+  FrameReadiness,
+  planCaptureRounds,
+  CapturePlan,
 } from '../../lib/multiFrame.js';
 import {
   shouldRecordSingleStream,
@@ -33,7 +37,30 @@ import {
   isRecordingOverCap,
   MAX_RECORDING_DURATION_MS,
 } from '../../lib/recordingGate.js';
+import {
+  createRecordingLivenessState,
+  recordLivenessData,
+  checkRecordingLiveness,
+  RECORDING_TIMESLICE_MS,
+  RECORDING_LIVENESS_CHECK_INTERVAL_MS,
+} from '../../lib/recordingLiveness.js';
 import { deviceUnauthorizedMessage, type DeviceRejectReason } from '../../lib/deviceBlockMessage.js';
+
+/**
+ * What a caller that already resolved access some other way (2026-09-08:
+ * SSO login + `CampaignMemberGuard`'s APPROVED-membership-of-an-OPEN-
+ * campaign check, both already satisfied before `FaceCaptureApp` ever
+ * mounts — see `apps/desktop/src/renderer/CampaignGate.tsx`) hands in via
+ * `FaceCaptureAppProps.campaignConfig` to skip the legacy per-device-secret
+ * path entirely. Deliberately NOT the full `CampaignConfig` from
+ * `campaignPortalApi.ts` — only the handful of fields `resolveActiveWorkflow`
+ * actually needs, so this file does not have to track that interface's
+ * unrelated fields (id/name/cardSpec/…).
+ */
+export interface CampaignWorkflowConfig {
+  captureAngles?: unknown[] | null;
+  recordVideo?: boolean;
+}
 
 /**
  * Capped bitrate for session recordings (2026-09-08) — `MediaRecorder`'s own
@@ -134,13 +161,29 @@ const defaultWorkflow: CaptureWorkflow = {
 /**
  * The steps a session actually runs — `defaultWorkflow` above, unless the
  * kiosk's campaign configures its own set (`captureAngles`, see
- * docs/plans/multi-camera-device-management-discussion.md §3.6). Called at
- * the start of every session, not cached here: `window.faceAPI.getDeviceAccessStatus()`
- * already has its own process-lifetime cache on the main-process side (see
- * `deviceApi.ts`), so re-reading it here just picks up whatever change an
- * admin made without needing a restart — resolving open question #3 in that
- * doc's §4 in favor of "next session picks it up." Also carries §3.3's
- * fail-closed verdict (`blockedReason`) — see this function's return type.
+ * docs/plans/multi-camera-device-management-discussion.md §3.6).
+ *
+ * Two access models, picked by whether `campaignConfig` is passed in:
+ *
+ *  - **Campaign + login (2026-09-08 pivot, current desktop flow)**:
+ *    `campaignConfig` non-null means the caller (`CampaignGate.tsx`) already
+ *    gated entry on SSO login + `CampaignMemberGuard` (APPROVED member of an
+ *    OPEN campaign) before this component ever mounted — there is no
+ *    separate device identity to check here at all, so `blockedReason` is
+ *    always `null` on this path. `captureMode`/`autoHoldMs`/
+ *    `simultaneousCapture` are kiosk-local settings now, not campaign
+ *    fields (moved off `CampaignConfigDao` server-side the same day) — read
+ *    from `getSettings()`/`getCaptureSequencing()` exactly like
+ *    `CampaignHomeScreen` already does, never from `campaignConfig`.
+ *  - **Legacy per-device secret** (`campaignConfig` omitted — an app build
+ *    with no `CampaignGate`, e.g. `apps/web`, or a desktop build that
+ *    predates the pivot): the original §3.3 fail-closed policy, reading
+ *    `window.faceAPI.getDeviceAccessStatus()`'s own cached device-secret
+ *    verdict and config. Kept only for that backward compatibility — do not
+ *    add new features to this branch.
+ *
+ * Called at the start of every session, not cached here, so either path
+ * picks up an admin's config change without needing a restart.
  *
  * `(window as any).faceAPI` rather than a typed global: matches how the rest
  * of this package already reaches the preload bridge (see CaptureSink.ts and
@@ -150,7 +193,7 @@ const defaultWorkflow: CaptureWorkflow = {
  * `defaultWorkflow` to fall back to: the web build, and any error reaching
  * the admin portal, must never block a session from starting.
  */
-async function resolveActiveWorkflow(): Promise<{
+async function resolveActiveWorkflow(campaignConfig?: CampaignWorkflowConfig | null): Promise<{
   workflow: CaptureWorkflow;
   triggerConfig: {
     mode: CaptureTriggerMode;
@@ -214,20 +257,43 @@ async function resolveActiveWorkflow(): Promise<{
   let rejectReason: DeviceRejectReason | null = null;
   let simultaneousCapture = false;
   let recordVideo = false;
-  try {
-    const status = await faceAPI?.getDeviceAccessStatus?.();
-    blockedReason = status?.blocked ? status.reason ?? 'unauthorized' : null;
-    rejectReason = blockedReason === 'unauthorized' ? status?.rejectReason ?? 'UNKNOWN' : null;
-    const config = status?.config;
-    if (config?.captureAngles && Array.isArray(config.captureAngles) && config.captureAngles.length > 0) {
-      workflow = { ...defaultWorkflow, steps: config.captureAngles };
+
+  if (campaignConfig) {
+    // Campaign + login model — see this function's own doc comment. No
+    // device-secret check at all: access was already decided before this
+    // component mounted.
+    try {
+      if (
+        campaignConfig.captureAngles &&
+        Array.isArray(campaignConfig.captureAngles) &&
+        campaignConfig.captureAngles.length > 0
+      ) {
+        workflow = { ...defaultWorkflow, steps: campaignConfig.captureAngles as unknown as CaptureWorkflow['steps'] };
+      }
+      recordVideo = campaignConfig.recordVideo === true;
+      // "Cách chụp" (Tuần tự/Đồng thời) is kiosk-local (§3.9) — see
+      // CampaignGate.tsx's own `sequencing` state, read the same way.
+      const sequencing = await faceAPI?.getCaptureSequencing?.();
+      simultaneousCapture = sequencing === 'simultaneous';
+    } catch (err) {
+      console.error('[FaceCaptureApp] resolveActiveWorkflow (campaign config) failed:', err);
     }
-    campaignMode = config?.captureMode;
-    campaignAutoHoldMs = config?.autoHoldMs;
-    simultaneousCapture = config?.simultaneousCapture === true;
-    recordVideo = config?.recordVideo === true;
-  } catch (err) {
-    console.error('[FaceCaptureApp] resolveActiveWorkflow failed, using defaultWorkflow:', err);
+  } else {
+    try {
+      const status = await faceAPI?.getDeviceAccessStatus?.();
+      blockedReason = status?.blocked ? status.reason ?? 'unauthorized' : null;
+      rejectReason = blockedReason === 'unauthorized' ? status?.rejectReason ?? 'UNKNOWN' : null;
+      const config = status?.config;
+      if (config?.captureAngles && Array.isArray(config.captureAngles) && config.captureAngles.length > 0) {
+        workflow = { ...defaultWorkflow, steps: config.captureAngles };
+      }
+      campaignMode = config?.captureMode;
+      campaignAutoHoldMs = config?.autoHoldMs;
+      simultaneousCapture = config?.simultaneousCapture === true;
+      recordVideo = config?.recordVideo === true;
+    } catch (err) {
+      console.error('[FaceCaptureApp] resolveActiveWorkflow failed, using defaultWorkflow:', err);
+    }
   }
 
   const settings = getSettings();
@@ -439,6 +505,14 @@ export interface FaceCaptureAppProps {
    * captures but stores nothing, and says so rather than appearing to work.
    */
   sink?: CaptureSink;
+  /**
+   * Present → campaign + login access model; omitted/null → legacy
+   * per-device-secret model. See `resolveActiveWorkflow`'s own doc comment
+   * for what each does. `apps/desktop/src/renderer/CampaignGate.tsx` fetches
+   * this (`fetchCampaignConfig` in `campaignPortalApi.ts`) once the operator
+   * presses "Thực hiện chụp ảnh" and passes it through here.
+   */
+  campaignConfig?: CampaignWorkflowConfig | null;
 }
 
 export function FaceCaptureApp(props: FaceCaptureAppProps) {
@@ -643,6 +717,25 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   const [recordingSessionKey, setRecordingSessionKey] = useState<string | null>(null);
 
   /**
+   * §3.10 layer 2 ("Trong phiên") — which recording channels have been
+   * declared failed by the byte-liveness monitor in the two recording
+   * effects below (a 3s data gap, one automatic restart attempt, then
+   * another 3s gap — see recordingLiveness.ts). Keyed the same way each
+   * effect keys `faceAPI.startVideoStream`'s `cameraId`: the single-stream
+   * effect uses `selectedDeviceId || 'default'`, the multi-channel effect
+   * uses each mapped device id. Cleared per-key at the start of whichever
+   * effect owns that key, so a new recording session (or a device that
+   * drops out of the mapping) never inherits a stale failed flag.
+   *
+   * Not yet consumed by any view — exposed here (component state, plus
+   * threaded into `SharedCaptureViewProps.recordingFailed` below) so a
+   * later UI pass can render the "● REC" / failure indicators
+   * ui-redesign-plan.md's S5 mockup calls for, without this file's own
+   * reliability fix waiting on that UI work.
+   */
+  const [recordingFailed, setRecordingFailed] = useState<Record<string, boolean>>({});
+
+  /**
    * Latest simultaneous-capture readiness check — non-null once
    * `runFramePreflight` has run at least once. `!ok` means the session must
    * not start; rendered via GuidedCaptureScreen's `multiFrame.blocked` prop.
@@ -683,17 +776,57 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   const frameReadinessRef = useRef<Record<string, boolean>>({});
   const [frameReadiness, setFrameReadiness] = useState<Record<string, boolean>>({});
 
-  /** Stops and clears every open frame stream — see the call sites below. */
-  const closeFrameStreams = () => {
-    for (const [stepId, mediaStream] of Object.entries(frameStreamsRef.current)) {
+  /**
+   * Round planning (§3.1.5 "Quy tắc phủ N ảnh bằng K camera", wired in
+   * 2026-09-08 — see `planCaptureRounds` in lib/multiFrame.ts for the
+   * algorithm itself, fully implemented and unit-tested well before this).
+   * Built once per session start (`runSimultaneousCaptureGate`) from the
+   * campaign's steps and this kiosk's camera role mapping — a session is
+   * only ever blocked when the kiosk has literally zero cameras mapped
+   * (`plan.blocked`); otherwise the plan always finds *some* grouping,
+   * firing as many steps at once as this kiosk's camera count allows and
+   * falling back to one step at a time for the rest. `null` outside
+   * simultaneous mode (sequential/simulation never build a plan).
+   *
+   * `stepRoundIndexRef`/`roundDrivingStepRef` are derived from the same
+   * plan for O(1) lookups from the capture-trigger handler and
+   * `captureRetakingSideFrame`: `stepRoundIndexRef` maps every step to
+   * which round it belongs, `roundDrivingStepRef` maps a round to the one
+   * step in it that actually goes through the engine's own pose-gated
+   * capture path (CENTER-resolved when the round has one, so the CV
+   * pipeline's already-live face analysis drives it; otherwise the round's
+   * first step — see `captureRetakingSideFrame`'s extended stepId
+   * derivation below for how a non-CENTER driving step still gets its
+   * photo from its own physical camera, not the CENTER-only engine
+   * snapshot). Every other step in a round rides along, captured via
+   * `recordExternalCapture` the instant the driving step's capture fires
+   * — see the `capture-trigger` listener in the mount effect below.
+   */
+  const capturePlanRef = useRef<CapturePlan | null>(null);
+  const stepRoundIndexRef = useRef<Map<string, number>>(new Map());
+  const roundDrivingStepRef = useRef<Map<number, string>>(new Map());
+
+  /**
+   * Stops and clears open frame streams. Omitting `stepIds` closes every
+   * one (session end/cancel/restart, unchanged behaviour); passing an
+   * explicit list closes only those — used when a round finishes and the
+   * next round's streams are about to open, so a kiosk with fewer cameras
+   * than rounds never holds more physical cameras open at once than the
+   * current round actually needs.
+   */
+  const closeFrameStreams = (stepIds?: string[]) => {
+    const targets = stepIds ?? Object.keys(frameStreamsRef.current);
+    for (const stepId of targets) {
+      const mediaStream = frameStreamsRef.current[stepId];
+      if (!mediaStream) continue;
       mediaStream.getTracks().forEach((t) => t.stop());
       const videoEl = frameVideoElsRef.current[stepId];
       if (videoEl) videoEl.srcObject = null;
+      delete frameStreamsRef.current[stepId];
+      delete frameReadinessRef.current[stepId];
     }
-    frameStreamsRef.current = {};
-    setFrameStreams({});
-    frameReadinessRef.current = {};
-    setFrameReadiness({});
+    setFrameStreams({ ...frameStreamsRef.current });
+    setFrameReadiness({ ...frameReadinessRef.current });
   };
 
   /**
@@ -739,8 +872,8 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    * kind of USB/driver contention this file's other multi-camera effects
    * already warn about.
    */
-  const openFrameStreams = async (preflight: FramePreflight): Promise<boolean> => {
-    for (const frame of preflight.frames) {
+  const openFrameStreams = async (frames: FrameReadiness[]): Promise<boolean> => {
+    for (const frame of frames) {
       if (frame.role === 'CENTER' || !frame.deviceId) continue;
 
       const existing = frameStreamsRef.current[frame.stepId];
@@ -807,13 +940,9 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         );
       } catch (err: any) {
         console.error(`[FaceCaptureApp] frame stream failed for ${frame.label}: ${err?.name}: ${err?.message}`);
-        closeFrameStreams();
-        setFramePreflight({
-          ok: false,
-          frames: preflight.frames,
-          missing: [...preflight.missing, { ...frame, connected: false }],
-          duplicates: preflight.duplicates,
-        });
+        setStoreError(
+          `Khung ${frame.label} (${CAMERA_ROLE_LABELS_VI[frame.role]}): không mở được camera — ${err?.message ?? 'lỗi không rõ'}.`
+        );
         return false;
       }
     }
@@ -823,35 +952,184 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   };
 
   /**
+   * Builds this session's round plan (`planCaptureRounds`) and rewrites
+   * `workflow.steps` into round order, one step per physical camera per
+   * round: every step's `cameraRole` becomes its *resolved* role (its own
+   * preference when a camera is mapped for it, otherwise the §3.1.5
+   * fallback — CENTER, or the kiosk's sole camera), and its `pose` becomes
+   * the round's own `effectiveYaw`/`effectivePitch` (the pose target
+   * expressed on the CENTER-analysed camera, already adjusted for whichever
+   * physical camera actually resolves this step — see `RoundStepPlan`'s own
+   * doc comment in lib/multiFrame.ts). Every downstream piece of this file
+   * that reads `step.cameraRole`/`step.pose` (`framesForWorkflow`,
+   * `openFrameStreams`, `captureRetakingSideFrame`, CB Help) therefore sees
+   * the *resolved* camera and the *correct* gate pose automatically, with no
+   * separate round-awareness of their own — the workflow itself already
+   * carries it.
+   *
+   * Within each round the CENTER-resolved step (if the round has one) is
+   * ordered first, so it becomes the step the engine's own pose-gated
+   * `triggerManualCapture`/AUTO path drives — the CV pipeline only ever
+   * analyses the CENTER stream. A round with no CENTER-resolved step (only
+   * possible once the campaign's one CENTER step has already been used up by
+   * an earlier round) still gates correctly: `captureRetakingSideFrame`'s
+   * extended `stepId` fallback below routes ANY current step whose resolved
+   * role isn't CENTER through `recordExternalCapture` instead, so the CV
+   * pipeline still gates on the CENTER feed (reading this step's own
+   * `effectiveYaw`/`effectivePitch`) while the photo itself comes from that
+   * step's own physical camera.
+   */
+  const buildRoundPlan = (
+    workflow: CaptureWorkflow,
+    mapping: Record<string, string>,
+    sequencing: 'sequential' | 'simultaneous'
+  ): { plan: CapturePlan; workflow: CaptureWorkflow } => {
+    const plan = planCaptureRounds(workflow.steps, mapping, { sequencing });
+    stepRoundIndexRef.current = new Map();
+    roundDrivingStepRef.current = new Map();
+
+    const orderedSteps = plan.rounds.flatMap((round, roundIdx) => {
+      const ordered = [...round.steps].sort((a, b) => {
+        if (a.cameraRole === 'CENTER') return -1;
+        if (b.cameraRole === 'CENTER') return 1;
+        return 0;
+      });
+      ordered.forEach((rsp, i) => {
+        stepRoundIndexRef.current.set(rsp.step.id, roundIdx);
+        if (i === 0) roundDrivingStepRef.current.set(roundIdx, rsp.step.id);
+      });
+      return ordered.map((rsp) => {
+        const pose = { ...rsp.step.pose };
+        if (rsp.effectiveYaw !== undefined) {
+          pose.yaw = { tolerance: 10, ...pose.yaw, target: rsp.effectiveYaw };
+        }
+        if (rsp.effectivePitch !== undefined) {
+          pose.pitch = { tolerance: 10, ...pose.pitch, target: rsp.effectivePitch };
+        }
+        return { ...rsp.step, cameraRole: rsp.cameraRole, pose };
+      });
+    });
+
+    return { plan, workflow: { ...workflow, steps: orderedSteps } };
+  };
+
+  /**
+   * Opens every non-CENTER stream the given round needs (idempotent, same as
+   * `openFrameStreams` itself) and closes whichever previously-open streams
+   * that round does not reuse — so a kiosk with fewer cameras than rounds
+   * never holds more physical cameras open at once than the round actually
+   * in progress needs. `roleMapping` is passed in rather than re-read, since
+   * this can run mid-session (round transitions), unlike the initial
+   * `runFramePreflight` re-read at session start.
+   */
+  const openRoundStreams = async (
+    plan: CapturePlan,
+    roundIdx: number,
+    roleMapping: Record<string, string>
+  ): Promise<boolean> => {
+    const round = plan.rounds[roundIdx];
+    if (!round) return true;
+
+    const neededStepIds = new Set(round.steps.filter((s) => s.cameraRole !== 'CENTER').map((s) => s.step.id));
+    const staleStepIds = Object.keys(frameStreamsRef.current).filter((id) => !neededStepIds.has(id));
+    if (staleStepIds.length > 0) closeFrameStreams(staleStepIds);
+
+    const frames: FrameReadiness[] = round.steps
+      .filter((s) => s.cameraRole !== 'CENTER')
+      .map((s) => {
+        const deviceId = roleMapping[s.cameraRole] ?? null;
+        return {
+          stepId: s.step.id,
+          type: s.step.type,
+          role: s.cameraRole,
+          label: s.step.type,
+          instruction: s.step.instruction,
+          deviceId,
+          deviceLabel: null,
+          connected: !!deviceId,
+        };
+      });
+
+    return openFrameStreams(frames);
+  };
+
+  /**
    * The simultaneous-capture gate every live-engine session start goes
    * through (handleStartWorkflow, handleRestart, handleCancelWorkflow, and
-   * the initial mount-effect start below) — see the product requirement
-   * that a session must not start while any frame lacks a connected,
-   * distinct camera. Simulation mode ignores the flag entirely (no physical
-   * cameras to check), which is also why the sequential single-camera path
-   * — where `simultaneous` is always false — only ever takes the
-   * `closeFrameStreams` branch below, unchanged from today.
+   * the initial mount-effect start below). Per §3.1.5's product decision
+   * (2026-09-08), a session is only ever refused for *zero* cameras mapped
+   * at all (`plan.blocked`) — a kiosk with fewer cameras than the campaign
+   * has steps still runs, in as many simultaneous rounds as its camera count
+   * requires (see `buildRoundPlan`'s own doc comment), never blocked outright
+   * the way the old "every step needs its own distinct camera" rule used to.
+   *
+   * Returns the round-ordered, pose-adjusted workflow the caller must
+   * actually pass to `engine.startSession(...)` (not the original `workflow`
+   * argument) — `null` only when `plan.blocked`. Simulation mode and
+   * sequential mode skip round planning entirely and return `workflow`
+   * unchanged, same as before this existed.
    */
   const runSimultaneousCaptureGate = async (
     isLive: boolean,
     simultaneous: boolean,
     workflow: CaptureWorkflow
-  ): Promise<boolean> => {
+  ): Promise<CaptureWorkflow | null> => {
     setSimultaneousCapture(simultaneous);
     if (!isLive || !simultaneous) {
       closeFrameStreams();
-      return true;
+      capturePlanRef.current = null;
+      stepRoundIndexRef.current = new Map();
+      roundDrivingStepRef.current = new Map();
+      return workflow;
     }
 
-    const preflight = await runFramePreflight(workflow);
-    if (!preflight.ok) return false;
+    const faceAPI = (window as any).faceAPI;
+    let mapping: Record<string, string> = {};
+    try {
+      mapping = (await faceAPI?.getCameraRoleMapping?.()) ?? {};
+    } catch {
+      /* no bridge, or no mapping saved yet — stay on {} */
+    }
+    setCameraRoleMapping(mapping);
+    // checkFramesReadiness still runs (unchanged) purely for the hot-unplug
+    // diagnostics UI (`framePreflight`) — its stricter "every step needs its
+    // own distinct camera" verdict is no longer what decides whether the
+    // session may start; `plan.blocked` below is.
+    await runFramePreflight(workflow);
 
-    const centerFrame = preflight.frames.find((f) => f.role === 'CENTER');
-    if (centerFrame?.deviceId && centerFrame.deviceId !== cameraServiceRef.current?.getSelectedDevice()?.id) {
-      await handleSelectCamera(centerFrame.deviceId);
+    const { plan, workflow: roundWorkflow } = buildRoundPlan(workflow, mapping, 'simultaneous');
+    capturePlanRef.current = plan;
+    if (plan.blocked) return null;
+    currentRoundIdxRef.current = 0;
+
+    const centerDeviceId = mapping['CENTER'];
+    if (centerDeviceId && centerDeviceId !== cameraServiceRef.current?.getSelectedDevice()?.id) {
+      await handleSelectCamera(centerDeviceId);
     }
 
-    return openFrameStreams(preflight);
+    const opened = await openRoundStreams(plan, 0, mapping);
+    if (!opened) return null;
+    return roundWorkflow;
+  };
+
+  /**
+   * Called from the live engine's `state-change` listener whenever
+   * `currentState.stepId` changes — advances the open camera streams to
+   * match whichever round that step belongs to, opening the new round's
+   * streams and closing the previous round's. A no-op for sequential mode
+   * (`capturePlanRef.current` is `null`) and for a step change within the
+   * same round (a round's own non-driving steps complete via
+   * `recordExternalCapture`, which does not change `currentState.stepId`
+   * away from the round's driving step until the whole round is done).
+   */
+  const currentRoundIdxRef = useRef<number>(0);
+  const advanceRoundStreamsForStep = (stepId: string) => {
+    const plan = capturePlanRef.current;
+    if (!plan) return;
+    const roundIdx = stepRoundIndexRef.current.get(stepId);
+    if (roundIdx === undefined || roundIdx === currentRoundIdxRef.current) return;
+    currentRoundIdxRef.current = roundIdx;
+    void openRoundStreams(plan, roundIdx, cameraRoleMappingRef.current);
   };
 
   /**
@@ -873,12 +1151,22 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    *
    * Returns true when it handled the trigger this way — the caller must not
    * also run its normal `triggerManualCapture` path — and false for every
-   * other case (not simultaneous, no retake in progress, or retaking CENTER,
-   * which still goes through the normal capture-trigger path unmodified).
+   * other case (not simultaneous, no retake/current step to act on, or the
+   * step resolves to CENTER, which still goes through the normal
+   * capture-trigger path unmodified).
+   *
+   * Also the general driving mechanism for a round with no CENTER-resolved
+   * step (§3.1.5 round planning, 2026-09-08): `engine.currentState.stepId`
+   * is the fallback when there is no explicit retake, so a round whose
+   * driving step's own resolved camera isn't CENTER routes through here too
+   * — the CV pipeline still gates on the CENTER feed (that step's own
+   * `effectiveYaw`/`effectivePitch`, baked into its `pose` by
+   * `buildRoundPlan`), but the photo comes from this step's own physical
+   * camera instead of the engine's CENTER-only snapshot provider.
    */
   const captureRetakingSideFrame = (engine: WorkflowEngine, stepIdOverride?: string): boolean => {
     if (!simultaneousCaptureRef.current) return false;
-    const stepId = stepIdOverride ?? engine.retakingStepId;
+    const stepId = stepIdOverride ?? engine.retakingStepId ?? engine.currentState.stepId ?? null;
     if (!stepId) return false;
 
     const frame = framesForWorkflow(activeWorkflowRef.current).find((f) => f.stepId === stepId);
@@ -1033,7 +1321,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         rejectReason,
         simultaneousCapture: campaignSimultaneous,
         recordVideo: campaignRecordVideo,
-      } = await resolveActiveWorkflow();
+      } = await resolveActiveWorkflow(props.campaignConfig);
       setDeviceBlockedReason(blockedReason);
       setDeviceRejectReason(rejectReason);
       if (blockedReason) {
@@ -1041,25 +1329,28 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         isWorkflowStartedRef.current = false;
         return;
       }
-      setActiveWorkflow(workflow);
       activeEngine.setCaptureTriggerConfig(triggerConfig);
       setEffectiveTriggerConfig(triggerConfig);
       captureTriggerRef.current.updateConfig({ mode: triggerConfig.mode, autoHoldMs: triggerConfig.autoHoldMs });
       setRecordVideo(campaignRecordVideo);
 
-      const canStart = await runSimultaneousCaptureGate(mode === 'live', campaignSimultaneous, workflow);
-      if (!canStart) {
+      // `runSimultaneousCaptureGate` returns the round-ordered, pose-adjusted
+      // workflow to actually run — not the original `workflow` above — or
+      // `null` only when this kiosk has zero cameras mapped at all (§3.1.5).
+      const preparedWorkflow = await runSimultaneousCaptureGate(mode === 'live', campaignSimultaneous, workflow);
+      if (!preparedWorkflow) {
         setIsWorkflowStarted(false);
         isWorkflowStartedRef.current = false;
         return;
       }
+      setActiveWorkflow(preparedWorkflow);
 
       // Keys both recording effects to THIS session specifically (see
       // `recordingSessionKey`'s own doc comment) — reading the id off the
       // engine's return value rather than `activeEngine.currentSession?.id`
       // read later, so there is no gap where a stale render still sees the
       // previous session's id.
-      const startedSession = await activeEngine.startSession(workflow);
+      const startedSession = await activeEngine.startSession(preparedWorkflow);
       setRecordingSessionKey(startedSession.id);
     }
   };
@@ -1344,7 +1635,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           triggerConfig: simTriggerConfig,
           blockedReason: simBlockedReason,
           rejectReason: simRejectReason,
-        } = await resolveActiveWorkflow();
+        } = await resolveActiveWorkflow(props.campaignConfig);
         setDeviceBlockedReason(simBlockedReason);
         setDeviceRejectReason(simRejectReason);
         setActiveWorkflow(simWorkflow);
@@ -1370,6 +1661,12 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         liveEngine.on('state-change', (state: GuidanceState) => {
           setLiveGuidance({ ...state });
 
+          // Round planning (§3.1.5): the engine just moved to a step from a
+          // different round than the one currently open — advance which
+          // physical cameras are streaming to match. See
+          // `advanceRoundStreamsForStep`'s own doc comment.
+          if (state.stepId) advanceRoundStreamsForStep(state.stepId);
+
           // CB Help "step change" (§3.5) — de-duped against this event's
           // real firing rate (once per processed frame) via
           // `lastCbHelpKeyRef`; only an actual session start or step change
@@ -1391,25 +1688,28 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           const step = liveEngine.currentSession?.steps.find((st) => st.stepId === data.stepId);
           void storePhoto(data.stepId, data.imagePath, (step?.attempts ?? 0) + 1);
 
-          // Simultaneous capture (§ desktop kiosk multi-camera capture): one
-          // CENTER shutter feeds every other frame at once. Gated on the
-          // triggering step's OWN role, not on call order or a re-entrancy
-          // flag: `engine.recordExternalCapture` below re-emits this very
-          // 'capture-trigger' event for each side frame it marks COMPLETED,
-          // which re-enters this same handler synchronously — but that
-          // re-entrant call's frame role is never CENTER, so this block
-          // simply does not run for it, and there is no second round of
-          // snapshots.
+          // Round planning (§3.1.5): the step that just captured feeds every
+          // OTHER step of its OWN round at once — not the whole workflow the
+          // way this used to work before rounds existed. Gated on the
+          // triggering step being its round's *driving* step, not on call
+          // order or a re-entrancy flag: `engine.recordExternalCapture` below
+          // re-emits this very 'capture-trigger' event for each round-mate it
+          // marks COMPLETED, which re-enters this same handler synchronously
+          // — but none of those re-entrant calls' steps are ever a round's
+          // own driving step, so this block simply does not run for them,
+          // and there is no second fan-out.
           if (simultaneousCaptureRef.current) {
-            const frames = framesForWorkflow(activeWorkflowRef.current);
-            const triggeredFrame = frames.find((f) => f.stepId === data.stepId);
-            if (triggeredFrame?.role === 'CENTER') {
-              for (const frame of frames) {
-                if (frame.stepId === data.stepId) continue;
-                const sessionStep = liveEngine.currentSession?.steps.find((st) => st.stepId === frame.stepId);
+            const plan = capturePlanRef.current;
+            const roundIdx = stepRoundIndexRef.current.get(data.stepId);
+            const isDrivingStep = roundIdx !== undefined && roundDrivingStepRef.current.get(roundIdx) === data.stepId;
+            if (plan && isDrivingStep) {
+              const round = plan.rounds[roundIdx];
+              for (const rsp of round.steps) {
+                if (rsp.step.id === data.stepId) continue;
+                const sessionStep = liveEngine.currentSession?.steps.find((st) => st.stepId === rsp.step.id);
                 if (sessionStep?.status === 'COMPLETED') continue;
 
-                const videoEl = frameVideoElsRef.current[frame.stepId];
+                const videoEl = frameVideoElsRef.current[rsp.step.id];
                 const dataUrl = videoEl ? snapshotVideoFrame(videoEl) : null;
                 if (!dataUrl) {
                   // 2026-09-05 black-frame fix: this is the exact path the
@@ -1420,14 +1720,14 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
                   // uploading a black still. Surfaced to the operator, not
                   // just main.log, since a retake is actually needed here.
                   console.warn(
-                    `[FaceCaptureApp] simultaneous capture: no snapshot for ${frame.label} (${frame.role}) — left pending for retake`
+                    `[FaceCaptureApp] simultaneous capture: no snapshot for ${rsp.step.type} (${rsp.cameraRole}) — left pending for retake`
                   );
                   setStoreError(
-                    `Khung ${frame.label} (${CAMERA_ROLE_LABELS_VI[frame.role]}): camera chưa sẵn sàng, chụp lại góc này.`
+                    `Khung ${rsp.step.type} (${CAMERA_ROLE_LABELS_VI[rsp.cameraRole]}): camera chưa sẵn sàng, chụp lại góc này.`
                   );
                   continue;
                 }
-                liveEngine.recordExternalCapture(frame.stepId, dataUrl);
+                liveEngine.recordExternalCapture(rsp.step.id, dataUrl);
               }
             }
           }
@@ -1491,16 +1791,18 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           rejectReason: liveRejectReason,
           simultaneousCapture: liveSimultaneous,
           recordVideo: liveRecordVideo,
-        } = await resolveActiveWorkflow();
+        } = await resolveActiveWorkflow(props.campaignConfig);
         setDeviceBlockedReason(liveBlockedReason);
         setDeviceRejectReason(liveRejectReason);
-        setActiveWorkflow(liveWorkflow);
         liveEngine.setCaptureTriggerConfig(liveTriggerConfig);
         setEffectiveTriggerConfig(liveTriggerConfig);
         captureTriggerRef.current.updateConfig({ mode: liveTriggerConfig.mode, autoHoldMs: liveTriggerConfig.autoHoldMs });
         setRecordVideo(liveRecordVideo);
-        const canStartLive = await runSimultaneousCaptureGate(true, liveSimultaneous, liveWorkflow);
-        if (!liveBlockedReason && canStartLive) await liveEngine.startSession(liveWorkflow);
+        const preparedLiveWorkflow = liveBlockedReason
+          ? null
+          : await runSimultaneousCaptureGate(true, liveSimultaneous, liveWorkflow);
+        setActiveWorkflow(preparedLiveWorkflow ?? liveWorkflow);
+        if (preparedLiveWorkflow) await liveEngine.startSession(preparedLiveWorkflow);
 
         // Opening the camera was gated behind a user-agent test, so a desktop
         // showed a live-mode interface with no picture in it: stream stayed
@@ -1607,7 +1909,14 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
                   // faceState at all used to skip that check silently — this
                   // gesture path had nothing else standing between a smiling
                   // face and a completed capture.
-                  if (wf.triggerManualCapture) wf.triggerManualCapture(currentFaceState);
+                  //
+                  // `{ source: 'GESTURE', gesture: gs.gesture }` is pure
+                  // additive plumbing for the auto-vs-manual capture stats
+                  // feature (discussion doc §3.7.1) — this is the one place
+                  // that knows the capture was decided by a hand gesture
+                  // rather than AUTO stability or the shutter button.
+                  if (wf.triggerManualCapture)
+                    wf.triggerManualCapture(currentFaceState, { source: 'GESTURE', gesture: gs.gesture });
                 }
               }
             } catch (e) {
@@ -1643,7 +1952,10 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
       // real data to re-check, instead of silently accepting whatever the
       // shutter button's own `enabled` prop happened to miss (e.g. a smile
       // that started the instant before the click landed).
-      if (wf.triggerManualCapture) wf.triggerManualCapture(faceState);
+      //
+      // `{ source: 'SHUTTER' }` — pure additive plumbing (discussion doc
+      // §3.7.1), same as the gesture loop's own trigger info above.
+      if (wf.triggerManualCapture) wf.triggerManualCapture(faceState, { source: 'SHUTTER' });
     }
   }, [faceState]);
 
@@ -1969,16 +2281,19 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     setIsWorkflowStarted(true);
     isWorkflowStartedRef.current = true;
 
-    if (simultaneousCaptureRef.current) {
+    if (simultaneousCaptureRef.current && capturePlanRef.current) {
       // Frame streams normally stay open from session start straight through
       // review (nothing closes them until finishSession/cancel/restart — see
       // closeFrameStreams' call sites), but re-open defensively in case one
       // was lost for an unrelated reason: openFrameStreams is idempotent
       // (see its own doc comment), so this is a harmless no-op in the common
       // case and the only thing standing between a lost stream and a side
-      // frame that silently never goes live again.
-      const preflight = await runFramePreflight(activeWorkflowRef.current);
-      if (preflight.ok) await openFrameStreams(preflight);
+      // frame that silently never goes live again. Reopens whichever round
+      // `stepId` itself belongs to (retakeStep just moved the engine's
+      // current step there), not necessarily the round in progress before
+      // this retake started.
+      const roundIdx = stepRoundIndexRef.current.get(stepId) ?? currentRoundIdxRef.current;
+      await openRoundStreams(capturePlanRef.current, roundIdx, cameraRoleMappingRef.current);
     }
 
     // CB Help (§3.5): show this frame live on the extended display right
@@ -2041,17 +2356,21 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         rejectReason,
         simultaneousCapture: campaignSimultaneous,
         recordVideo: campaignRecordVideo,
-      } = await resolveActiveWorkflow();
+      } = await resolveActiveWorkflow(props.campaignConfig);
       setDeviceBlockedReason(blockedReason);
       setDeviceRejectReason(rejectReason);
-      setActiveWorkflow(workflow);
       activeEngine.setCaptureTriggerConfig(triggerConfig);
       setEffectiveTriggerConfig(triggerConfig);
       captureTriggerRef.current.updateConfig({ mode: triggerConfig.mode, autoHoldMs: triggerConfig.autoHoldMs });
       setRecordVideo(campaignRecordVideo);
       if (!blockedReason) {
-        const canStart = await runSimultaneousCaptureGate(mode === 'live', campaignSimultaneous, workflow);
-        if (canStart) await activeEngine.startSession(workflow);
+        const preparedWorkflow = await runSimultaneousCaptureGate(mode === 'live', campaignSimultaneous, workflow);
+        if (preparedWorkflow) {
+          setActiveWorkflow(preparedWorkflow);
+          await activeEngine.startSession(preparedWorkflow);
+        }
+      } else {
+        setActiveWorkflow(workflow);
       }
     }
     if (mode === 'simulation') {
@@ -2103,11 +2422,10 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
       setRecordingSessionKey(lastCompletedSessionRef.current.videoSessionId);
     }
 
-    if (simultaneousCaptureRef.current) {
-      void (async () => {
-        const preflight = await runFramePreflight(activeWorkflowRef.current);
-        if (preflight.ok) await openFrameStreams(preflight);
-      })();
+    if (simultaneousCaptureRef.current && capturePlanRef.current) {
+      // retakeAllSteps() rewound the engine back to step 0 — round 0.
+      currentRoundIdxRef.current = 0;
+      void openRoundStreams(capturePlanRef.current, 0, cameraRoleMappingRef.current);
     }
 
     publishCbHelpState();
@@ -2325,6 +2643,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     let recorder: MediaRecorder | null = null;
     let streamId: string | null = null;
     let capTimerId: ReturnType<typeof setInterval> | null = null;
+    let livenessTimerId: ReturnType<typeof setInterval> | null = null;
     const chunks: BlobPart[] = [];
     const startedAt = Date.now();
     // Read once, at effect-start: `recordingSessionKey` IS the real session
@@ -2332,6 +2651,21 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     // briefly still name the previous run in the gap between arming the
     // flag and the engine actually creating the new session).
     const sessionIdForLog = recordingSessionKey ?? 'unknown';
+    // Same key `startVideoStream` below is called with — used to namespace
+    // `recordingFailed` so a later session (or the multi-channel effect,
+    // which keys by every mapped device id instead) never collides with it.
+    const recordingKey = selectedDeviceId || 'default';
+    setRecordingFailed((prev) => {
+      if (!(recordingKey in prev)) return prev;
+      const next = { ...prev };
+      delete next[recordingKey];
+      return next;
+    });
+    // §3.10 layer 2 ("Trong phiên") — see recordingLiveness.ts's own header
+    // comment. Mutated by `ondataavailable` and the liveness-check interval
+    // below; read fresh each check, never stale-closed-over since both live
+    // in this same effect closure.
+    let liveness = createRecordingLivenessState(Date.now());
 
     /** Stops the recorder (if still active) and finalizes via `endVideoStream`, logging what happened either way. Idempotent: a recorder already `inactive` (already stopped by the cap, or never started) is a no-op. */
     const stopAndFinalize = (): Promise<void> => {
@@ -2379,23 +2713,35 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           ? ['video/webm;codecs=vp8', 'video/webm'].find((t) => MediaRecorder.isTypeSupported(t))
           : undefined;
 
+      /** Wires up `ondataavailable`/timeslice identically for the initial start and every liveness-driven restart — see recordingLiveness.ts's header comment. */
+      const startRecorder = (targetStream: MediaStream): MediaRecorder => {
+        const r = new MediaRecorder(targetStream, {
+          ...(mimeType ? { mimeType } : {}),
+          videoBitsPerSecond: VIDEO_BITRATE_BPS,
+        });
+        r.ondataavailable = (e) => {
+          if (e.data.size > 0) {
+            chunks.push(e.data);
+            liveness = recordLivenessData(liveness, e.data.size, Date.now());
+          }
+        };
+        // `timeslice` (1s) — without this, `ondataavailable` only ever fired
+        // once, at `stop()`, so there was no signal at all for the liveness
+        // check below to react to (discussion doc §3.10, §7.1 point 6).
+        r.start(RECORDING_TIMESLICE_MS);
+        return r;
+      };
+
       try {
         const result = await faceAPI.startVideoStream({
           sessionId: sessionIdForLog,
-          cameraId: selectedDeviceId || 'default',
+          cameraId: recordingKey,
           mimeType,
         });
         if (cancelled) return;
         streamId = result.streamId;
 
-        recorder = new MediaRecorder(stream!, {
-          ...(mimeType ? { mimeType } : {}),
-          videoBitsPerSecond: VIDEO_BITRATE_BPS,
-        });
-        recorder.ondataavailable = (e) => {
-          if (e.data.size > 0) chunks.push(e.data);
-        };
-        recorder.start();
+        recorder = startRecorder(stream!);
 
         // Runaway-recording cap (2026-09-05 fix) — see `recordingSessionKey`'s
         // own doc comment and recordingGate.ts's `isRecordingOverCap`: a
@@ -2413,6 +2759,39 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           void stopAndFinalize();
           setRecordingSessionKey((current) => (current === recordingSessionKey ? null : current));
         }, 30_000);
+
+        // Byte-liveness monitor (discussion doc §3.10 layer 2) — 3s with no
+        // new data attempts one automatic restart on the same stream; a
+        // second 3s gap after that marks this channel failed so S5/S6 (once
+        // wired — see recordingLiveness.ts) can surface it without cutting
+        // the session short (Q23).
+        livenessTimerId = setInterval(() => {
+          if (cancelled || !recorder || recorder.state === 'inactive') return;
+          const check = checkRecordingLiveness(liveness, Date.now());
+          liveness = check.state;
+          if (check.action === 'RESTART') {
+            console.warn('[FaceCaptureApp] recording data gap detected, restarting recorder', {
+              sessionId: sessionIdForLog,
+              cameraId: recordingKey,
+            });
+            try {
+              const stale = recorder;
+              if (stale.state !== 'inactive') stale.stop();
+              recorder = startRecorder(stream!);
+            } catch (err: any) {
+              console.error(
+                `[FaceCaptureApp] recording restart failed: ${err?.name}: ${err?.message}`
+              );
+              setRecordingFailed((prev) => ({ ...prev, [recordingKey]: true }));
+            }
+          } else if (check.action === 'FAIL') {
+            console.error('[FaceCaptureApp] recording appears stalled after restart, marking as failed', {
+              sessionId: sessionIdForLog,
+              cameraId: recordingKey,
+            });
+            setRecordingFailed((prev) => ({ ...prev, [recordingKey]: true }));
+          }
+        }, RECORDING_LIVENESS_CHECK_INTERVAL_MS);
       } catch (err: any) {
         // DOMException (e.g. from MediaRecorder/faceAPI) stringifies to
         // "[object DOMException]" once console output is captured into the
@@ -2425,6 +2804,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     return () => {
       cancelled = true;
       if (capTimerId) clearInterval(capTimerId);
+      if (livenessTimerId) clearInterval(livenessTimerId);
       void stopAndFinalize();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2451,18 +2831,35 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    * default is lighter on the same USB/GPU bandwidth the CV stream is
    * already drawing on.
    *
-   * Known, unresolved risk: when a mapped role's device is also the CV
-   * pipeline's currently-active device, that physical camera ends up opened
-   * twice concurrently — the same kind of USB/driver contention
+   * Double-open risk: when a mapped role's device is also the CV pipeline's
+   * currently-active device, that physical camera would otherwise end up
+   * opened twice concurrently — the same kind of USB/driver contention
    * docs/plans/multi-camera-device-management-discussion.md §2.1 already
-   * documented hitting with even a single camera. Not mitigated here; needs
-   * a real multi-camera hardware test pass, same caveat this file's
-   * single-stream recorder above had when it was first built (no
-   * display/simulator was available to exercise `MediaRecorder` live).
-   * Mitigated only for simultaneous-capture mode (`simultaneousCapture`):
-   * when `frameStreams` already has a stream for a device, this reuses it
-   * below instead of opening a second one — the risk above still stands for
-   * a role mapping configured without that flag.
+   * documented hitting with even a single camera. Mitigated two ways below,
+   * checked in this order for each channel (2026-09-08, discussion doc
+   * §3.10 point 5 — "chỗ còn mở hai lần là Tuần tự + có camera bên được
+   * gán"):
+   *   1. Simultaneous-capture mode (`simultaneousCapture`): when
+   *      `frameStreams` already has a stream open for a device (a side
+   *      frame's own always-open stream, see `openFrameStreams`), this
+   *      reuses that exact `MediaStream` object — owned and torn down by
+   *      `openFrameStreams`/`closeFrameStreams`, not by this effect.
+   *   2. Otherwise (sequential mode, or a device `frameStreams` doesn't
+   *      have): if this device is `cameraServiceRef.current`'s own active
+   *      stream *at the moment this effect starts recording*, this clones
+   *      that `MediaStream` (`MediaStream.clone()` — independent tracks
+   *      sharing the same underlying camera source, no second
+   *      `getUserMedia` call) instead of opening a fresh one. This closes
+   *      the exact "Tuần tự + có camera bên được gán" gap the discussion
+   *      doc names, but only for the device the CV pipeline happens to be
+   *      on when the recording session starts — sequential mode's
+   *      role-switch effect (below) keeps moving that pipeline's active
+   *      device from step to step for the rest of the session, and a later
+   *      switch onto a *different* mapped device this effect already opened
+   *      independently is not re-checked. Still needs a real multi-camera
+   *      hardware pass (V1-V7, discussion doc §3.10) to confirm in
+   *      practice — no display/simulator was available to exercise
+   *      `MediaRecorder` against real USB contention while writing this.
    *
    * Gated via `shouldRecordMultiChannel` (recordingGate.ts) on `recordVideo`,
    * `recordingSessionKey`, and `multiChannelDeviceIds.length >= 2` — same
@@ -2491,14 +2888,33 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     const sessionId = recordingSessionKey ?? 'unknown';
     const startedAt = Date.now();
     const channels: Array<{
+      deviceId: string;
       mediaStream: MediaStream;
       recorder: MediaRecorder;
       streamId: string;
       chunks: BlobPart[];
-      /** Whether this effect opened `mediaStream` itself and must stop its tracks — false for a stream reused from `frameStreamsRef`, which openFrameStreams/closeFrameStreams own instead. */
+      /** Whether this effect opened `mediaStream` itself and must stop its tracks — false for a stream reused from `frameStreamsRef`, which openFrameStreams/closeFrameStreams own instead. True for a CV-pipeline stream reused via `.clone()` (see the loop below): the clone's tracks are independent and this effect must stop them itself. */
       ownsStream: boolean;
+      /** §3.10 layer 2 — see recordingLiveness.ts. Mutated in place by `ondataavailable` and the liveness-check interval below. */
+      liveness: import('../../lib/recordingLiveness.js').RecordingLivenessState;
     }> = [];
     let capTimerId: ReturnType<typeof setInterval> | null = null;
+    let livenessTimerId: ReturnType<typeof setInterval> | null = null;
+    // Fresh per session — a device no longer in `multiChannelDeviceIds` this
+    // time around must not keep showing a stale failed flag from a previous
+    // session.
+    setRecordingFailed((prev) => {
+      const next: Record<string, boolean> = {};
+      let changed = false;
+      for (const [key, value] of Object.entries(prev)) {
+        if (multiChannelDeviceIds.includes(key)) {
+          next[key] = value;
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
 
     /** Stops every channel's recorder (if still active) and finalizes each via `endVideoStream`, then logs the whole session's outcome once. Idempotent per channel. */
     const stopAndFinalizeAll = (): Promise<void> => {
@@ -2551,19 +2967,39 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
 
       for (const deviceId of multiChannelDeviceIds) {
         try {
-          const reusedStream = simultaneousCapture
+          const reusedFrameStream = simultaneousCapture
             ? Object.values(frameStreamsRef.current).find(
                 (s) => s.getVideoTracks()[0]?.getSettings().deviceId === deviceId
               ) ?? null
             : null;
-          const ownsStream = !reusedStream;
 
-          const mediaStream =
-            reusedStream ??
-            (await navigator.mediaDevices.getUserMedia({
+          // Double-open fix (discussion doc §3.10 point 5, §7.1 point 6 —
+          // "chỗ còn mở hai lần là Tuần tự + có camera bên được gán"): if
+          // this device is the CV pipeline's own already-open stream right
+          // now, clone it instead of a second `getUserMedia` for the same
+          // physical camera — see this effect's own doc comment above for
+          // exactly what this does and does not cover.
+          const cvService = cameraServiceRef.current;
+          const reusedCvStream =
+            !reusedFrameStream && cvService?.getSelectedDevice()?.id === deviceId
+              ? cvService.getActiveStream()
+              : null;
+
+          let mediaStream: MediaStream;
+          let ownsStream: boolean;
+          if (reusedFrameStream) {
+            mediaStream = reusedFrameStream;
+            ownsStream = false;
+          } else if (reusedCvStream) {
+            mediaStream = reusedCvStream.clone();
+            ownsStream = true; // a clone's tracks are independent — this effect must stop them itself
+          } else {
+            mediaStream = await navigator.mediaDevices.getUserMedia({
               audio: false,
               video: { deviceId: { exact: deviceId } },
-            }));
+            });
+            ownsStream = true;
+          }
           if (cancelled) {
             if (ownsStream) mediaStream.getTracks().forEach((t) => t.stop());
             continue;
@@ -2575,16 +3011,41 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
             continue;
           }
 
+          setRecordingFailed((prev) => {
+            if (!(deviceId in prev)) return prev;
+            const next = { ...prev };
+            delete next[deviceId];
+            return next;
+          });
+
           const chunks: BlobPart[] = [];
-          const recorder = new MediaRecorder(mediaStream, {
+          const channelEntry: (typeof channels)[number] = {
+            deviceId,
+            mediaStream,
+            // Placeholder — `startChannelRecorder` below assigns the real
+            // recorder immediately after; typed non-null so `channels.push`
+            // below satisfies the array's element type without an `any`.
+            recorder: null as unknown as MediaRecorder,
+            streamId: result.streamId,
+            chunks,
+            ownsStream,
+            liveness: createRecordingLivenessState(Date.now()),
+          };
+          channelEntry.recorder = new MediaRecorder(mediaStream, {
             ...(mimeType ? { mimeType } : {}),
             videoBitsPerSecond: VIDEO_BITRATE_BPS,
           });
-          recorder.ondataavailable = (e) => {
-            if (e.data.size > 0) chunks.push(e.data);
+          channelEntry.recorder.ondataavailable = (e) => {
+            if (e.data.size > 0) {
+              channelEntry.chunks.push(e.data);
+              channelEntry.liveness = recordLivenessData(channelEntry.liveness, e.data.size, Date.now());
+            }
           };
-          recorder.start();
-          channels.push({ mediaStream, recorder, streamId: result.streamId, chunks, ownsStream });
+          // `timeslice` (1s) — see the single-stream effect's identical
+          // comment above; this is what makes the liveness check below
+          // possible at all.
+          channelEntry.recorder.start(RECORDING_TIMESLICE_MS);
+          channels.push(channelEntry);
         } catch (err: any) {
           // Same DOMException-stringification fix as the single-stream
           // recorder above — see the comment there.
@@ -2607,11 +3068,59 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           setRecordingSessionKey((current) => (current === recordingSessionKey ? null : current));
         }, 30_000);
       }
+
+      // Byte-liveness monitor (discussion doc §3.10 layer 2), applied per
+      // channel — same restart-once-then-fail state machine as the
+      // single-stream effect above, see recordingLiveness.ts.
+      if (!cancelled && channels.length > 0) {
+        livenessTimerId = setInterval(() => {
+          if (cancelled) return;
+          for (const channel of channels) {
+            if (channel.recorder.state === 'inactive') continue;
+            const check = checkRecordingLiveness(channel.liveness, Date.now());
+            channel.liveness = check.state;
+            if (check.action === 'RESTART') {
+              console.warn('[FaceCaptureApp] multi-channel recording data gap detected, restarting recorder', {
+                sessionId,
+                cameraId: channel.deviceId,
+              });
+              try {
+                const stale = channel.recorder;
+                if (stale.state !== 'inactive') stale.stop();
+                const fresh = new MediaRecorder(channel.mediaStream, {
+                  ...(mimeType ? { mimeType } : {}),
+                  videoBitsPerSecond: VIDEO_BITRATE_BPS,
+                });
+                fresh.ondataavailable = (e) => {
+                  if (e.data.size > 0) {
+                    channel.chunks.push(e.data);
+                    channel.liveness = recordLivenessData(channel.liveness, e.data.size, Date.now());
+                  }
+                };
+                fresh.start(RECORDING_TIMESLICE_MS);
+                channel.recorder = fresh;
+              } catch (err: any) {
+                console.error(
+                  `[FaceCaptureApp] multi-channel recording restart failed for ${channel.deviceId}: ${err?.name}: ${err?.message}`
+                );
+                setRecordingFailed((prev) => ({ ...prev, [channel.deviceId]: true }));
+              }
+            } else if (check.action === 'FAIL') {
+              console.error(
+                '[FaceCaptureApp] multi-channel recording appears stalled after restart, marking as failed',
+                { sessionId, cameraId: channel.deviceId }
+              );
+              setRecordingFailed((prev) => ({ ...prev, [channel.deviceId]: true }));
+            }
+          }
+        }, RECORDING_LIVENESS_CHECK_INTERVAL_MS);
+      }
     })();
 
     return () => {
       cancelled = true;
       if (capTimerId) clearInterval(capTimerId);
+      if (livenessTimerId) clearInterval(livenessTimerId);
       void stopAndFinalizeAll();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2684,6 +3193,30 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    * `multiFrame` prop's `undefined` branch and render exactly as they did
    * before this feature existed.
    */
+  /**
+   * Round planning (§3.1.5): every step's `cameraRole` already carries the
+   * *resolved* role (fallback-applied) once `buildRoundPlan` has run — see
+   * that function's own doc comment — so a step is only genuinely "missing"
+   * here if its resolved role has no mapped, connected camera *right now*
+   * (a hot-unplug since the round plan was built). Deliberately NOT
+   * `framePreflight.missing`/`.duplicates` any more: those are computed over
+   * the WHOLE (round-ordered) step list using each step's raw preference,
+   * so two different rounds legitimately reusing the same physical camera —
+   * the entire point of round planning — used to read as a "duplicate" and
+   * permanently block the shutter. `framePreflight` itself is still computed
+   * (`runFramePreflight`) purely for the zero-cameras-mapped blocking panel
+   * below, where its semantics are still accurate.
+   */
+  const isFrameMissingDevice = (role: CameraRole): boolean =>
+    role !== 'CENTER' && !devices.some((d) => d.id === cameraRoleMapping[role]);
+
+  const currentRoundFrames = (): FrameSpec[] => {
+    const plan = capturePlanRef.current;
+    const allFrames = framesForWorkflow(activeWorkflow);
+    if (!plan) return allFrames;
+    return allFrames.filter((f) => stepRoundIndexRef.current.get(f.stepId) === currentRoundIdxRef.current);
+  };
+
   const multiFrameProp: MultiFrameViewProps | undefined =
     simultaneousCapture && mode === 'live'
       ? {
@@ -2692,7 +3225,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
             const stepIdx = activeWorkflow.steps.findIndex((s) => s.id === frame.stepId);
             const isCompleted = sessionStep?.status === 'COMPLETED';
             const isCurrent = isWorkflowStarted && stepIdx === activeGuidance.currentStepIndex && !isCompleted;
-            const isMissing = !!framePreflight?.missing.some((m) => m.stepId === frame.stepId);
+            const isMissing = isFrameMissingDevice(frame.role);
             const deviceId = frame.role === 'CENTER' ? selectedDeviceId : cameraRoleMapping[frame.role];
             const deviceLabel = devices.find((d) => d.id === deviceId)?.label ?? null;
             const frameStream = frame.role === 'CENTER' ? stream : frameStreams[frame.stepId] ?? null;
@@ -2729,17 +3262,24 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
               imagePath: sessionStep?.capturedImagePath,
             };
           }),
-          blocked: framePreflight,
-          // 2026-09-05 black-frame fix: the shutter (OFF mode, in
-          // DesktopCaptureView/MobileCaptureView) stays disabled until every
-          // side frame is actually rendering — see `allSideFramesReady`'s
-          // own doc comment in lib/multiFrame.ts for why this can't be
-          // folded into `framePreflight`/`blocked` (that check runs before
-          // any stream is even opened; this one needs the stream to already
-          // be live).
-          allSideFramesReady: allSideFramesReady(framesForWorkflow(activeWorkflow), frameReadiness),
+          // Only the zero-cameras-mapped case still blocks outright
+          // (`capturePlanRef.current?.blocked`) — `framePreflight` really is
+          // "everything missing" in exactly that case, so it is still an
+          // accurate `FramesBlockedPanel` payload there. Every other
+          // combination of steps × cameras always produces *some* plan (see
+          // `planCaptureRounds`), so this is `null` (panel hidden) for a
+          // round-planned session even when it needs multiple rounds.
+          blocked: capturePlanRef.current?.blocked ? framePreflight : null,
+          // 2026-09-05 black-frame fix, round-scoped 2026-09-08: the shutter
+          // (OFF mode) stays disabled until every side frame *of the round
+          // currently in progress* is actually rendering — a future round's
+          // frames have no stream open yet at all (see `openRoundStreams`),
+          // so gating on the WHOLE workflow's frames would permanently
+          // disable the shutter the moment a session needs more than one
+          // round.
+          allSideFramesReady: allSideFramesReady(currentRoundFrames(), frameReadiness),
           notReadyRoleLabel: (() => {
-            const role = firstNotReadyFrameRole(framesForWorkflow(activeWorkflow), frameReadiness);
+            const role = firstNotReadyFrameRole(currentRoundFrames(), frameReadiness);
             return role ? CAMERA_ROLE_LABELS_VI[role] : null;
           })(),
           onOpenCameraSetup: () => {
@@ -2891,17 +3431,21 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         rejectReason,
         simultaneousCapture: campaignSimultaneous,
         recordVideo: campaignRecordVideo,
-      } = await resolveActiveWorkflow();
+      } = await resolveActiveWorkflow(props.campaignConfig);
       setDeviceBlockedReason(blockedReason);
       setDeviceRejectReason(rejectReason);
-      setActiveWorkflow(workflow);
       activeEngine.setCaptureTriggerConfig(triggerConfig);
       setEffectiveTriggerConfig(triggerConfig);
       captureTriggerRef.current.updateConfig({ mode: triggerConfig.mode, autoHoldMs: triggerConfig.autoHoldMs });
       setRecordVideo(campaignRecordVideo);
       if (!blockedReason) {
-        const canStart = await runSimultaneousCaptureGate(mode === 'live', campaignSimultaneous, workflow);
-        if (canStart) await activeEngine.startSession(workflow);
+        const preparedWorkflow = await runSimultaneousCaptureGate(mode === 'live', campaignSimultaneous, workflow);
+        if (preparedWorkflow) {
+          setActiveWorkflow(preparedWorkflow);
+          await activeEngine.startSession(preparedWorkflow);
+        }
+      } else {
+        setActiveWorkflow(workflow);
       }
     }
     // recordingSessionKey added for the video-discard block above: without it
@@ -3005,6 +3549,25 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         onAutoHoldMsChange={handleAutoHoldMsChange}
         latestCapturedImage={latestCapturedImage}
         multiFrame={multiFrameProp}
+        recordingFailed={recordingFailed}
+        // ui-redesign-plan.md S5 left zone. `subject`/photo counts are real,
+        // already-available state; `round`/`roundCount` are placeholders
+        // (1/1) until planCaptureRounds (lib/multiFrame.ts, §3.1.5) is wired
+        // into a live session — see the TODO at runSimultaneousCaptureGate
+        // above for exactly what that wiring involves. SubjectInfoBadge
+        // itself renders nothing while `subject` is null (no code entered
+        // yet), so this is safe to pass unconditionally.
+        subjectInfo={{
+          subject: currentStudentRef.current,
+          round: 1,
+          roundCount: 1,
+          photoCount: activeSession?.steps.filter((s) => s.status === 'COMPLETED').length ?? 0,
+          photoTotal: activeSession?.steps.length ?? activeWorkflow.steps.length,
+        }}
+        // ui-redesign-plan.md S5 right zone — real "đang chụp"/"đã chụp"
+        // data (Q19/Q20) is a later integration pass; this proves the
+        // layout renders with the panel's own empty state.
+        capturedList={{ current: null, recent: [], onOpenSession: () => {} }}
       />
 
       {mode === 'simulation' && (

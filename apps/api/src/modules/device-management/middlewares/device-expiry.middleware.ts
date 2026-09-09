@@ -1,7 +1,10 @@
 import { CustomException, ERROR_CODE } from '@app/common/errors';
 import { HttpStatus, Injectable, NestMiddleware } from '@nestjs/common';
 import { NextFunction, Request, Response } from 'express';
-import { DeviceService, deviceCredentialFailure } from '../services/device.service';
+import {
+  DeviceService,
+  deviceCredentialFailure,
+} from '../services/device.service';
 
 /**
  * The "Lớp Looka (apps/api)" half of the two-layer expiry block described in
@@ -40,7 +43,10 @@ export class DeviceExpiryMiddleware implements NestMiddleware {
       );
     }
 
-    const check = await this.deviceService.verifyCredentials(deviceId, deviceSecret);
+    const check = await this.deviceService.verifyCredentials(
+      deviceId,
+      deviceSecret,
+    );
     if (!check.ok) {
       // 2026-09-08: now shares `deviceCredentialFailure` with
       // `DeviceCredentialsGuard` instead of its own manual reason→code map,

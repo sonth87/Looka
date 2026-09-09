@@ -1,6 +1,7 @@
 import { DeviceLayout, AppConfig, AppContentProps } from '@sonth87/device-layout';
 // import { UserCheck } from 'lucide-react'; // only used by the commented-out attendance app entry below
 import { ElectronCaptureSink, FaceCaptureApp, /* KioskAttendanceApp, */ LookaIcon } from '@face/ui';
+import { CampaignGate } from './CampaignGate';
 
 const electronCaptureSink = new ElectronCaptureSink();
 
@@ -16,9 +17,25 @@ const electronCaptureSink = new ElectronCaptureSink();
  * every capture on this app silently fails to save (storePhoto's own
  * `if (!sink)` guard) — the pipeline behind `window.faceAPI.queueCapture`
  * exists and is idle, waiting for exactly this call.
+ *
+ * Wrapped in `CampaignGate` (§3.8.1: Đăng nhập → Chọn campaign → Trang
+ * campaign → chụp) — `FaceCaptureApp` itself, and everything it does, is
+ * completely unchanged; the gate only decides WHEN this component mounts,
+ * and now also WHICH capture config it mounts with: `CampaignGate` fetches
+ * the selected campaign's real config (steps, "quay video") once the
+ * operator presses "Thực hiện chụp ảnh" and hands it through as the second
+ * `children` argument — forwarded here as `campaignConfig` so
+ * `FaceCaptureApp` uses the campaign + login access model (no device-secret
+ * check at all) instead of its legacy `window.faceAPI.getDeviceAccessStatus()`
+ * fallback. See `FaceCaptureApp`'s `resolveActiveWorkflow` for what each
+ * path does.
  */
 function FaceCaptureAppWithFsSink(props: AppContentProps) {
-  return <FaceCaptureApp {...props} sink={electronCaptureSink} />;
+  return (
+    <CampaignGate contentProps={props}>
+      {(p, campaignConfig) => <FaceCaptureApp {...p} sink={electronCaptureSink} campaignConfig={campaignConfig} />}
+    </CampaignGate>
+  );
 }
 
 const appsConfig: AppConfig[] = [

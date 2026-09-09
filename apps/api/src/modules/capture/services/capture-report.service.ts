@@ -16,6 +16,10 @@ interface SessionReportPhotoInput {
   localStatus?: string | null;
   fsFileId?: string | null;
   fsStatus?: string | null;
+  /** What actually fired this shutter - `@face/core`'s `CaptureTriggerSource` ('AUTO'|'GESTURE'|'SHUTTER'|'EXTERNAL'), §3.7.1. */
+  triggerSource?: string | null;
+  /** Which kiosk-wide setting was active when it fired - `@face/core`'s `CaptureTriggerMode` ('AUTO'|'MANUAL'|'OFF'). */
+  captureMode?: string | null;
 }
 
 interface SessionReportPayload {
@@ -27,6 +31,8 @@ interface SessionReportPayload {
   subjectName?: string | null;
   /** className/major/academicYear when a kiosk looked up a student — no dedicated column exists for these, see applySessionReport()'s own doc comment for why they merge into `sessions.metadata` instead. */
   metadata?: Record<string, unknown> | null;
+  /** Id of the operator who ran this session, if the kiosk had one signed in - §3.2.3. Same COALESCE-non-regression treatment as `subjectCode`/`subjectName` below. */
+  operatorUserId?: string | null;
   photos: SessionReportPhotoInput[];
 }
 
@@ -116,8 +122,8 @@ export class CaptureReportService {
       `INSERT INTO sessions (
           id, source, device_id, campaign_id, status,
           captured_at, completed_at, approved_at, workflow_id,
-          subject_code, subject_name, metadata
-        ) VALUES ($1, 'KIOSK', $2, $3, 'COMPLETED', $4, $5, $5, $6, $7, $8, $9::jsonb)
+          subject_code, subject_name, metadata, operator_user_id
+        ) VALUES ($1, 'KIOSK', $2, $3, 'COMPLETED', $4, $5, $5, $6, $7, $8, $9::jsonb, $10)
         ON CONFLICT (id) DO UPDATE SET
           source = 'KIOSK',
           device_id = EXCLUDED.device_id,
@@ -129,7 +135,8 @@ export class CaptureReportService {
           workflow_id = EXCLUDED.workflow_id,
           subject_code = COALESCE(EXCLUDED.subject_code, sessions.subject_code),
           subject_name = COALESCE(EXCLUDED.subject_name, sessions.subject_name),
-          metadata = sessions.metadata || EXCLUDED.metadata`,
+          metadata = sessions.metadata || EXCLUDED.metadata,
+          operator_user_id = COALESCE(EXCLUDED.operator_user_id, sessions.operator_user_id)`,
       [
         payload.sessionId,
         deviceId,
@@ -140,6 +147,7 @@ export class CaptureReportService {
         payload.subjectCode ?? null,
         payload.subjectName ?? null,
         JSON.stringify(payload.metadata ?? {}),
+        payload.operatorUserId ?? null,
       ],
     );
 
@@ -148,8 +156,8 @@ export class CaptureReportService {
         `INSERT INTO photos (
             id, session_id, step_id, attempt, step_type, camera_role,
             mime_type, bytes, sha256, virtual_path, captured_at,
-            local_status, fs_file_id, fs_status
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            local_status, fs_file_id, fs_status, trigger_source, capture_mode
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
           ON CONFLICT (session_id, step_id, attempt) DO UPDATE SET
             step_type = EXCLUDED.step_type,
             camera_role = EXCLUDED.camera_role,
@@ -157,7 +165,9 @@ export class CaptureReportService {
             bytes = EXCLUDED.bytes,
             sha256 = EXCLUDED.sha256,
             virtual_path = EXCLUDED.virtual_path,
-            captured_at = EXCLUDED.captured_at`,
+            captured_at = EXCLUDED.captured_at,
+            trigger_source = EXCLUDED.trigger_source,
+            capture_mode = EXCLUDED.capture_mode`,
         [
           photo.photoId,
           payload.sessionId,
@@ -173,6 +183,8 @@ export class CaptureReportService {
           photo.localStatus ?? null,
           photo.fsFileId ?? null,
           photo.fsStatus ?? null,
+          photo.triggerSource ?? null,
+          photo.captureMode ?? null,
         ],
       );
     }
@@ -425,6 +437,8 @@ export class CaptureReportService {
         localStatus: (p.localStatus as string | null | undefined) ?? null,
         fsFileId: (p.fsFileId as string | null | undefined) ?? null,
         fsStatus: (p.fsStatus as string | null | undefined) ?? null,
+        triggerSource: (p.triggerSource as string | null | undefined) ?? null,
+        captureMode: (p.captureMode as string | null | undefined) ?? null,
       } satisfies SessionReportPhotoInput;
     });
 
@@ -435,7 +449,9 @@ export class CaptureReportService {
       workflowId: (m.workflowId as string | null | undefined) ?? null,
       subjectCode: (m.subjectCode as string | null | undefined) ?? null,
       subjectName: (m.subjectName as string | null | undefined) ?? null,
-      metadata: (m.metadata as Record<string, unknown> | null | undefined) ?? null,
+      metadata:
+        (m.metadata as Record<string, unknown> | null | undefined) ?? null,
+      operatorUserId: (m.operatorUserId as string | null | undefined) ?? null,
       photos,
     };
   }

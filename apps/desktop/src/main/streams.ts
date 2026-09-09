@@ -106,6 +106,21 @@ export function endVideoStream(
     endedAt: Date.now(),
   });
 
+  // §3.10 layer 3 ("Kết thúc phiên") — the exact historical bug the ROADMAP
+  // describes: a `capture_streams` row that "ended" with size_bytes=0 (the
+  // renderer's MediaRecorder never actually produced data, or the browser
+  // handed back an empty buffer) used to report `{ ok: true }` here,
+  // indistinguishable from a real recording. The row is still finalized
+  // above either way (`ended_at` set, `sizeBytes` recorded as-is) — an open
+  // (`ended_at` NULL) row is a worse bug than a zero-byte one — but this is
+  // no longer reported as success, so the renderer's existing
+  // `if (!result?.ok)` handling (both recording effects in
+  // FaceCaptureApp.tsx already log `result?.error` on a false `ok`) surfaces
+  // it instead of silently treating an empty recording as saved.
+  if (input.data.byteLength === 0) {
+    return { ok: false, error: `Recording for stream ${input.streamId} ended with 0 bytes` };
+  }
+
   return { ok: true };
 }
 

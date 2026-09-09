@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react';
-import { Ban, CheckCircle2, Images, RefreshCw } from 'lucide-react';
+import { Ban, CheckCircle2, ChevronDown, ChevronRight, Images, RefreshCw } from 'lucide-react';
 import { activateDevice, ApiError, Device, DesktopOs, registerDevice, reissueDevice, revokeDevice } from '../api';
 import { ModalShell } from './CampaignDangerActions';
 import { IconButton } from './IconButton';
@@ -96,6 +96,14 @@ export function DevicesPanel({
   const [activatingId, setActivatingId] = useState<string | null>(null);
   const [revokingId, setRevokingId] = useState<string | null>(null);
   const [confirmRevoke, setConfirmRevoke] = useState<Device | null>(null);
+  /**
+   * "Nâng cao" collapse (2026-09-08, ui-redesign-plan.md C2.3) — new devices
+   * are meant to self-enroll from the kiosk going forward (§3.3), so the
+   * old admin registration-by-zip flow is visually deprioritized behind a
+   * collapsed section rather than removed: the campaigns backend agent was
+   * told to keep those endpoints working this pass. Defaults collapsed.
+   */
+  const [advancedOpen, setAdvancedOpen] = useState(false);
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -223,6 +231,8 @@ export function DevicesPanel({
             <th className="py-2 pr-3">Tên</th>
             <th className="py-2 pr-3">Trạng thái</th>
             <th className="py-2 pr-3">Kích hoạt lúc</th>
+            <th className="py-2 pr-3">Máy (hostname)</th>
+            <th className="py-2 pr-3">Người đăng nhập gần nhất</th>
             <th className="py-2 pr-3">Hành động</th>
           </tr>
         </thead>
@@ -284,6 +294,15 @@ export function DevicesPanel({
                     <div className="text-xs text-gray-400">Xác thực gần nhất: {formatTime(d.lastAuthAt)}</div>
                   )}
                 </td>
+                <td className="py-2 pr-3 text-gray-500">
+                  <div>{d.hostname ?? '—'}</div>
+                  {d.fingerprint && (
+                    <div className="text-xs text-gray-400 font-mono truncate max-w-[140px]" title={d.fingerprint}>
+                      {d.fingerprint.slice(0, 12)}…
+                    </div>
+                  )}
+                </td>
+                <td className="py-2 pr-3 text-gray-500">{d.lastUserName ?? d.lastUserId ?? '—'}</td>
                 <td className="py-2 pr-3">
                   <div className="flex items-center gap-1">
                     {onViewCaptures && (
@@ -321,7 +340,7 @@ export function DevicesPanel({
           })}
           {devices.length === 0 && (
             <tr>
-              <td colSpan={4} className="py-3 text-gray-500">
+              <td colSpan={6} className="py-3 text-gray-500">
                 Chưa có thiết bị nào.
               </td>
             </tr>
@@ -329,34 +348,50 @@ export function DevicesPanel({
         </tbody>
       </table>
 
-      <form onSubmit={submit} className="space-y-3 pt-3 border-t border-gray-200">
-        <h3 className="text-sm font-medium text-gray-700">Đăng ký thiết bị mới</h3>
-        <input
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder="Tên thiết bị (VD: Kiosk sảnh A)"
-          required
-          className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900"
-        />
-        <div>
-          <label className="block text-xs text-gray-500 mb-1">Hệ điều hành kiosk</label>
-          <select
-            value={os}
-            onChange={(e) => setOs(e.target.value as DesktopOs)}
-            className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900"
-          >
-            <option value="mac">macOS</option>
-            <option value="win">Windows</option>
-          </select>
-        </div>
+      <div className="pt-3 border-t border-gray-200">
         <button
-          type="submit"
-          disabled={registering}
-          className="w-full py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-sm disabled:opacity-50"
+          type="button"
+          onClick={() => setAdvancedOpen((v) => !v)}
+          className="flex items-center gap-1.5 text-sm font-medium text-gray-600 hover:text-gray-900"
         >
-          {registering ? 'Đang đăng ký...' : 'Đăng ký thiết bị'}
+          {advancedOpen ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+          Nâng cao — đăng ký thiết bị bằng tay (gói kích hoạt zip)
         </button>
-      </form>
+        <p className="text-xs text-gray-400 mt-1 pl-5">
+          Thiết bị mới nên tự đăng ký khi đăng nhập trên kiosk — chỉ dùng mục này khi cần tạo/khôi phục một thiết bị
+          thủ công.
+        </p>
+
+        {advancedOpen && (
+          <form onSubmit={submit} className="space-y-3 mt-3">
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="Tên thiết bị (VD: Kiosk sảnh A)"
+              required
+              className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900"
+            />
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">Hệ điều hành kiosk</label>
+              <select
+                value={os}
+                onChange={(e) => setOs(e.target.value as DesktopOs)}
+                className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900"
+              >
+                <option value="mac">macOS</option>
+                <option value="win">Windows</option>
+              </select>
+            </div>
+            <button
+              type="submit"
+              disabled={registering}
+              className="w-full py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-sm disabled:opacity-50"
+            >
+              {registering ? 'Đang đăng ký...' : 'Đăng ký thiết bị'}
+            </button>
+          </form>
+        )}
+      </div>
 
       {confirmRevoke && (
         <RevokeConfirmModal

@@ -1,4 +1,5 @@
 import { FileStorageService } from '@app/modules/file-storage/services/file-storage.service';
+import { PhotoReviewService } from '@app/modules/photo-review/services/photo-review.service';
 import { Test, TestingModule } from '@nestjs/testing';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
@@ -54,6 +55,12 @@ describeDb('capture persistence', () => {
         // behaviour) and not reachable in this environment anyway. Only the
         // method SessionService.completeSession actually calls is stubbed.
         { provide: FileStorageService, useValue: fileStorage },
+        // completeSession()'s best-effort photo-review hook (2026-09-08) —
+        // irrelevant here, a resolved-no-op stub is enough to satisfy DI.
+        {
+          provide: PhotoReviewService,
+          useValue: { ensureSetForApprovedSession: jest.fn().mockResolvedValue(null) },
+        },
       ],
     }).compile();
 
@@ -90,6 +97,53 @@ describeDb('capture persistence', () => {
     const stored = photos.find((p) => p.id === photoId);
     expect(stored).toBeDefined();
     expect(stored?.uploadStatus).toBe('PENDING');
+  });
+
+  test('addPhoto stores triggerSource/captureMode when the caller sends them', async () => {
+    const session = await sessionService.createSession({});
+    const { photoId } = await photoService.addPhoto(session.id, {
+      stepId: 'FRONT',
+      attempt: 1,
+      dataUrl: jpegDataUrl(2),
+      triggerSource: 'GESTURE',
+      captureMode: 'MANUAL',
+    });
+
+    const photos = await photoService.listBySession(session.id);
+    const stored = photos.find((p) => p.id === photoId);
+    expect(stored?.triggerSource).toBe('GESTURE');
+    expect(stored?.captureMode).toBe('MANUAL');
+  });
+
+  test('addPhoto leaves triggerSource/captureMode unset when the caller omits them', async () => {
+    const session = await sessionService.createSession({});
+    const { photoId } = await photoService.addPhoto(session.id, {
+      stepId: 'FRONT',
+      attempt: 1,
+      dataUrl: jpegDataUrl(3),
+    });
+
+    const photos = await photoService.listBySession(session.id);
+    const stored = photos.find((p) => p.id === photoId);
+    expect(stored?.triggerSource).toBeUndefined();
+    expect(stored?.captureMode).toBeUndefined();
+  });
+
+  test('createSession stores operatorUserId when the caller sends it, and leaves it unset when omitted', async () => {
+    const withOperator = await sessionService.createSession({
+      subjectCode: 'OP-1',
+      operatorUserId: '11111111-1111-1111-1111-111111111111',
+    });
+    expect(withOperator.operatorUserId).toBe(
+      '11111111-1111-1111-1111-111111111111',
+    );
+
+    const withoutOperator = await sessionService.createSession({
+      subjectCode: 'OP-2',
+    });
+    // A nullable uuid column with nothing written to it round-trips through
+    // TypeORM as `null`, not `undefined`.
+    expect(withoutOperator.operatorUserId).toBeNull();
   });
 
   test('resending the same capture does not queue it twice', async () => {

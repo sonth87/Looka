@@ -1,7 +1,8 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import { CaptureReportService } from '@app/modules/capture/services/capture-report.service';
+import { PhotoReviewService } from '@app/modules/photo-review/services/photo-review.service';
 import { CommonService } from '@app/modules/shared/common/common.service';
 import {
   AllCampaignsStatsDao,
@@ -19,6 +20,8 @@ import { DeviceEvent, DeviceEventType } from '../entities/device-event.entity';
 
 @Injectable()
 export class DeviceEventService extends CommonService<DeviceEvent> {
+  private readonly logger = new Logger(DeviceEventService.name);
+
   constructor(
     @InjectRepository(DeviceEvent)
     repository: Repository<DeviceEvent>,
@@ -27,6 +30,7 @@ export class DeviceEventService extends CommonService<DeviceEvent> {
     @InjectDataSource()
     private readonly dataSource: DataSource,
     private readonly captureReportService: CaptureReportService,
+    private readonly photoReview: PhotoReviewService,
   ) {
     super(repository);
   }
@@ -54,7 +58,14 @@ export class DeviceEventService extends CommonService<DeviceEvent> {
   ): Promise<number> {
     if (events.length === 0) return 0;
 
-    return this.dataSource.transaction(async (manager) => {
+    // Collected while applying SESSION_REPORT events below, then used
+    // AFTER the transaction commits (see the best-effort loop at the
+    // bottom of this method) — never inside it, so a photo-review hiccup
+    // can never roll back a batch of real capture-stats the kiosk already
+    // committed to sending.
+    const approvedSessionIds: string[] = [];
+
+    const savedCount = await this.dataSource.transaction(async (manager) => {
       for (const event of events) {
         if (event.type === DeviceEventType.SESSION_REPORT) {
           await this.captureReportService.applySessionReport(
@@ -63,6 +74,8 @@ export class DeviceEventService extends CommonService<DeviceEvent> {
             campaignId,
             event.metadata,
           );
+          const sessionId = (event.metadata as { sessionId?: unknown } | null)?.sessionId;
+          if (typeof sessionId === 'string') approvedSessionIds.push(sessionId);
         } else if (event.type === DeviceEventType.PHOTO_STATUS) {
           await this.captureReportService.applyPhotoStatus(
             manager,
@@ -97,6 +110,21 @@ export class DeviceEventService extends CommonService<DeviceEvent> {
       const saved = await this.saveMultiWithTransaction(manager, rows);
       return saved.length;
     });
+
+    // Best-effort, outside the transaction — same reasoning as
+    // `SessionService.completeSession`'s identical hook for the web path
+    // (see that method's own comment). A `SESSION_REPORT` batch can legally
+    // report several sessions at once (a kiosk pushes its queue every
+    // 15s — see docs/ROADMAP.md), so this is a small loop, not a single call.
+    for (const sessionId of approvedSessionIds) {
+      await this.photoReview.ensureSetForApprovedSession(sessionId).catch((err) => {
+        this.logger.warn(
+          `best-effort photo-review set creation failed for session ${sessionId}: ${(err as Error).message}`,
+        );
+      });
+    }
+
+    return savedCount;
   }
 
   /**

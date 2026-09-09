@@ -47,6 +47,46 @@ export { GuidanceMessage } from './components/workflow/GuidanceMessage.js';
 export { StabilityProgress } from './components/workflow/StabilityProgress.js';
 export { CountdownTimer } from './components/workflow/CountdownTimer.js';
 export { SessionReviewModal } from './components/workflow/SessionReviewModal.js';
+export { SubjectInfoBadge } from './components/workflow/SubjectInfoBadge.js';
+export type { SubjectInfoBadgeProps } from './components/workflow/SubjectInfoBadge.js';
+export { CapturedListPanel } from './components/workflow/CapturedListPanel.js';
+export type {
+  CapturedListPanelProps,
+  CapturedListCurrent,
+  CapturedListRecentEntry,
+} from './components/workflow/CapturedListPanel.js';
+export { LoginScreen } from './components/screens/LoginScreen.js';
+export type { LoginScreenProps } from './components/screens/LoginScreen.js';
+export { CampaignPickerScreen } from './components/screens/CampaignPickerScreen.js';
+export type { CampaignPickerScreenProps } from './components/screens/CampaignPickerScreen.js';
+export { CampaignHomeScreen } from './components/screens/CampaignHomeScreen.js';
+export type { CampaignHomeScreenProps } from './components/screens/CampaignHomeScreen.js';
+export type { AuthClient, AuthenticatedIdentity } from './lib/authClient.js';
+export { DevAuthClient } from './lib/authClient.js';
+export type {
+  CampaignSummary,
+  CampaignConfig,
+  CampaignCaptureStep,
+  MeResponse,
+  CampaignEffectiveStatus,
+  CampaignMembershipStatus,
+  SelfEnrollDeviceResult,
+} from './lib/campaignPortalApi.js';
+export {
+  CampaignPortalApiError,
+  fetchMe,
+  fetchMyCampaigns,
+  joinCampaign,
+  fetchCampaignConfig,
+  selfEnrollDevice,
+} from './lib/campaignPortalApi.js';
+export {
+  formatSubjectClassLine,
+  formatRoundLabel,
+  formatPhotoLabel,
+  formatCapturedTime,
+  formatDeviceSuffix,
+} from './components/workflow/captureStatusFormat.js';
 
 // Debug
 export { DebugPanel } from './components/debug/DebugPanel.js';
@@ -67,5 +107,6 @@ export { GuidedCaptureScreen } from './components/screens/GuidedCaptureScreen.js
 export { KioskAttendanceScreen } from './components/screens/KioskAttendanceScreen.js';
 export { KioskAttendanceApp } from './components/screens/KioskAttendanceApp.js';
 export { FaceCaptureApp } from './components/screens/FaceCaptureApp.js';
+export type { FaceCaptureAppProps, CampaignWorkflowConfig } from './components/screens/FaceCaptureApp.js';
 
 export * from './lib/CaptureSink.js';
