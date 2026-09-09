@@ -44,6 +44,14 @@ export class AddDevicePhotoDto {
   @IsUUID()
   sessionId: string;
 
+  @ApiPropertyOptional({
+    description:
+      'Số CCCD của sinh viên, nếu có (dùng để đặt tên thư mục ảnh trên file-service cho dễ truy xuất)',
+  })
+  @IsOptional()
+  @IsString()
+  identityNumber?: string;
+
   @ApiProperty({ description: 'Bước trong quy trình chụp, ví dụ FRONT/LEFT' })
   @IsString()
   @IsNotEmpty()

@@ -77,7 +77,7 @@ import {
   sanitizeCbHelpState,
 } from './cbHelpWindow.js';
 import { initLogger, installCrashHandlers, closeLogger, logFilePath } from './logger.js';
-import { startCccdWatcher, stopCccdWatcher } from './cccdWatcher.js';
+import { startCccdRosterWatcher, stopCccdRosterWatcher, lookupCccdByIdentityNumber } from './cccdRosterWatcher.js';
 
 /**
  * Disable Chromium's hardware-accelerated (D3D11/Media Foundation) webcam
@@ -505,6 +505,32 @@ app.whenReady().then(async () => {
    * by itself at startup.
    */
   ipcMain.handle('cbhelp:toggle', () => toggleCbHelpWindow(currentMainDisplayId()));
+
+  /**
+   * The kiosk's own embedded CCCD-scan corner (`CccdScanWaitingScreen.tsx`'s
+   * `ScanMonitorCorner`) asking whether a freshly, stably OCR'd citizen id
+   * matches anyone in the external student roster
+   * (`D:\Work\camera_server\response.json`) — 2026-09-09 architecture
+   * correction, replacing the earlier same-day `cccd:writeScanResult`
+   * handler (which wrote the OCR result to a file, on the wrong assumption
+   * that file was a per-scan write target). This process never writes to
+   * that path at all anymore; `cccdRosterWatcher.ts` only reads it, on a
+   * background poll, into an in-memory cache this handler looks up against.
+   *
+   * `found: false` is a normal, expected 200-shaped result (a citizen id
+   * simply not present anywhere in the roster), never a thrown error — see
+   * `cccdRosterWatcher.ts`'s `lookupCccdByIdentityNumber`'s own doc comment.
+   * Defense-in-depth re-check on the input, same reasoning the old handler
+   * had: the renderer already gates on `cccdOcr.ts`'s `extractCitizenId`
+   * before ever offering a stable read, but this main process must never
+   * trust a renderer-supplied string blindly.
+   */
+  ipcMain.handle('cccd:lookupByIdentityNumber', (_, payload: { identityNumber?: unknown }) => {
+    const identityNumber = typeof payload?.identityNumber === 'string' ? payload.identityNumber.trim() : '';
+    if (!identityNumber) return { found: false };
+    const record = lookupCccdByIdentityNumber(identityNumber);
+    return record ? { found: true, record } : { found: false };
+  });
 
   /** Whether the CB Help window is currently open — used to sync the kiosk UI's toggle button on mount. */
   ipcMain.handle('cbhelp:isOpen', () => isCbHelpWindowOpen());
@@ -948,12 +974,12 @@ app.whenReady().then(async () => {
   createWindow();
   void ensureMacCameraAccess();
 
-  // CCCD-scan capture-identification (2026-09-09) — watches the external
-  // scanner's output file and pushes each new scan to the kiosk window over
-  // `cccd:scan`; see cccdWatcher.ts's own doc comment. `() => mainWindow`
-  // (not `mainWindow` itself) so this keeps working across a window
-  // recreate (`app.on('activate', ...)` below) without re-registering.
-  startCccdWatcher(() => mainWindow);
+  // CCCD-scan capture-identification (2026-09-09, corrected architecture) —
+  // keeps the external student roster file cached in memory, polling for
+  // changes; see cccdRosterWatcher.ts's own doc comment. No window
+  // reference needed at all anymore — lookups are pulled on demand via the
+  // `cccd:lookupByIdentityNumber` IPC handler above, not pushed.
+  startCccdRosterWatcher();
 
   // CB Help's entry point into the camera role-assignment screen (§2.1) —
   // see cameraSetupWindow.ts's own doc comment for why this is a separate
@@ -990,7 +1016,7 @@ app.whenReady().then(async () => {
 app.on('window-all-closed', () => {
   stopUploads();
   stopStatsEventPush();
-  stopCccdWatcher();
+  stopCccdRosterWatcher();
   closeDatabase();
   if (process.platform !== 'darwin') app.quit();
 });
@@ -998,7 +1024,7 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   stopUploads();
   stopStatsEventPush();
-  stopCccdWatcher();
+  stopCccdRosterWatcher();
   closeDatabase();
   closeLogger();
   globalShortcut.unregisterAll();

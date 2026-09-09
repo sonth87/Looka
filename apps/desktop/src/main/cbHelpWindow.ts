@@ -97,6 +97,15 @@ export interface CbHelpPublishState {
    * convention as `greeting`. `null`/absent the rest of the time.
    */
   errorMessage?: string | null;
+  /**
+   * Post-save "Cảm ơn" overlay (2026-09-09, "cảm ơn phải hiển thị trên màn
+   * extend") — set only for the same fixed window `FaceCaptureApp.tsx`'s own
+   * `thankYouStudent` state is non-null (right after a successful save,
+   * before the screen falls back to awaiting the next student). Same
+   * "presence, not `phase`, drives the renderer" convention as `greeting`.
+   * `null`/absent the rest of the time.
+   */
+  thankYou?: { name: string } | null;
 }
 
 const EMPTY_CBHELP_STATE: CbHelpPublishState = {
@@ -108,6 +117,7 @@ const EMPTY_CBHELP_STATE: CbHelpPublishState = {
   greeting: null,
   centerPreviewDataUrl: null,
   errorMessage: null,
+  thankYou: null,
 };
 
 let cbHelpState: CbHelpPublishState = EMPTY_CBHELP_STATE;
@@ -147,6 +157,10 @@ export function sanitizeCbHelpState(raw: unknown): CbHelpPublishState {
     greeting: sanitizeGreeting(payload?.greeting),
     centerPreviewDataUrl: typeof payload?.centerPreviewDataUrl === 'string' ? payload.centerPreviewDataUrl : null,
     errorMessage: typeof payload?.errorMessage === 'string' ? payload.errorMessage : null,
+    thankYou:
+      payload?.thankYou && typeof payload.thankYou === 'object' && typeof (payload.thankYou as any).name === 'string'
+        ? { name: (payload.thankYou as any).name }
+        : null,
   };
 }
 

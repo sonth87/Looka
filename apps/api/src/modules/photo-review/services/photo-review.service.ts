@@ -3,9 +3,10 @@ import { toDao } from '@app/common/helpers';
 import { FileStorageService } from '@app/modules/file-storage/services/file-storage.service';
 import { Pagination } from '@app/modules/shared/common/pagination';
 import { HttpStatus, Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import archiver from 'archiver';
-import { createHash } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { PassThrough } from 'node:stream';
 import { DataSource, EntityManager, Repository } from 'typeorm';
 import {
@@ -41,9 +42,17 @@ import {
 import { PhotoKindService } from './photo-kind.service';
 import { PhotoReviewSidecarService, SidecarError } from './photo-review-sidecar.service';
 
-/** Bytes + a couple of file-service upload fields, in whichever shape `uploadCardBytes` needs to hand back to its callers. */
-interface UploadedBytesResult {
-  fsFileId: string;
+/**
+ * How long a signed variant `local-content` link stays valid — same value,
+ * same reasoning as `PhotoService`'s own `LOCAL_VIEW_TTL_SECONDS` (a short
+ * transitional window, good until the next successful
+ * `VariantUploadWorkerService` send or the next time this set is reloaded
+ * and a fresh link is minted).
+ */
+const LOCAL_VARIANT_VIEW_TTL_SECONDS = 600;
+
+/** Bytes + content hash, in whichever shape `storeVariantBytesLocalFirst` needs to hand back to its callers — no `fsFileId` here, unlike the old `uploadCardBytes` this replaces: that id is not known yet at write time (see that method's own doc comment). */
+interface StoredVariantBytesResult {
   bytes: number;
   sha256: string;
 }
@@ -129,6 +138,7 @@ export class PhotoReviewService {
     private readonly fileStorage: FileStorageService,
     private readonly sidecar: PhotoReviewSidecarService,
     private readonly photoKindService: PhotoKindService,
+    private readonly configService: ConfigService,
   ) {}
 
   // ── Locking (plan §4) ──────────────────────────────────────────────────
@@ -170,10 +180,46 @@ export class PhotoReviewService {
     return variant;
   }
 
-  /** Tenant + year for a session — mirrors `PhotoService.resolveViewContext`'s tenant rule (KIOSK → device id, else the API's own default tenant) exactly, read via plain SQL since `sessions` belongs to the `capture` module. */
+  /**
+   * Tenant + year for a session — tenant is now always `undefined` (this
+   * API's own already-configured default tenant), including for a
+   * KIOSK-sourced session. This used to resolve the session's device id as
+   * a per-device fs-core tenant (mirroring `PhotoService.resolveViewContext`
+   * before its own 2026-09-09 fix — see that method's doc comment for the
+   * full reasoning), on the theory that a kiosk subject's source photo AND
+   * generated card variant should live under that device's own namespace.
+   * Neither half of that held up:
+   *
+   *  - The source photo is uploaded exclusively by `UploadWorkerService.send()`
+   *    (`capture` module), which always uses this API's single default-tenant
+   *    client — never a per-device one — so `readSourcePhotoBytes`'s fs-core
+   *    fallback was resolving a tenant the photo was never actually stored
+   *    under.
+   *  - The generated CARD_AUTO/CARD_AI variant is produced by THIS module's
+   *    own sidecar call and pushed by `VariantUploadWorkerService` — nothing
+   *    the kiosk device itself ever touches — so there was no correctness
+   *    reason to route it through a per-device tenant either.
+   *
+   * And even where a per-device tenant genuinely is correct (a kiosk-uploaded
+   * VIDEO — see `SessionVideoService.resolveViewContext`, untouched by this
+   * fix), `FileStorageService.clientForTenant` cannot reliably serve it:
+   * fs-core's real `/api/v1/self-service/provision` (confirmed live
+   * 2026-09-09) only ever returns an `api_key` the very first time a tenant
+   * is created; every later call — the only case that matters once a device
+   * has already self-provisioned, which every real kiosk does at first boot
+   * (`apps/desktop/src/main/secrets.ts`) — returns `created: false` and no
+   * `api_key` at all, and apps/api stores no per-device key to fall back on.
+   * That is exactly what surfaced here as `photo_variants.note` reading
+   * "provision succeeded but returned no api_key" on every `reprocess()` for
+   * a KIOSK session's subject.
+   *
+   * `device_id` is no longer read as a result — kept as plain SQL against
+   * `sessions` (cross-module-boundary read, see the class doc comment)
+   * rather than importing anything from `capture`.
+   */
   private async resolveSessionContext(sessionId: string): Promise<SessionContext> {
-    const rows: Array<{ source: string; device_id: string | null; at: Date }> = await this.dataSource.query(
-      `SELECT source, device_id, COALESCE(captured_at, created_at) AS at FROM sessions WHERE id = $1`,
+    const rows: Array<{ at: Date }> = await this.dataSource.query(
+      `SELECT COALESCE(captured_at, created_at) AS at FROM sessions WHERE id = $1`,
       [sessionId],
     );
     const row = rows[0];
@@ -185,22 +231,15 @@ export class PhotoReviewService {
       );
     }
     return {
-      tenantName: row.source === 'KIOSK' && row.device_id ? row.device_id : undefined,
+      tenantName: undefined,
       year: new Date(row.at).getFullYear(),
     };
   }
 
-  /** Batch version of `resolveSessionContext`, tenant only — used by list/export so N rows cost one query instead of N. */
+  /** Batch version of `resolveSessionContext`, tenant only — see that method's own doc comment for why this is always `undefined` now. Kept (rather than deleted outright) so `listSets`/`getSetDetail` don't need to change shape. */
   private async batchResolveTenants(sessionIds: string[]): Promise<Map<string, string | undefined>> {
     const map = new Map<string, string | undefined>();
-    if (sessionIds.length === 0) return map;
-    const rows: Array<{ id: string; source: string; device_id: string | null }> = await this.dataSource.query(
-      `SELECT id, source, device_id FROM sessions WHERE id = ANY($1::uuid[])`,
-      [sessionIds],
-    );
-    for (const row of rows) {
-      map.set(row.id, row.source === 'KIOSK' && row.device_id ? row.device_id : undefined);
-    }
+    for (const id of sessionIds) map.set(id, undefined);
     return map;
   }
 
@@ -277,7 +316,7 @@ export class PhotoReviewService {
     return this.fetchBytesFromFileStorage(photo.fsFileId, tenantName);
   }
 
-  /** Bytes for something that lives ONLY on fs-core — a `photo_variants` row, which `uploadCardBytes` always uploads there directly (no local-outbox equivalent for this module's own uploads). */
+  /** Bytes for an fs-core file id directly — used once a caller already knows nothing local is available (see `readVariantBytes`/`readSourcePhotoBytes`, which both prefer local bytes first and fall back to this only when the local row has cleared its content or never had one). */
   private async fetchBytesFromFileStorage(fsFileId: string, tenantName?: string): Promise<Buffer> {
     const link = await this.fileStorage.issueViewLink(fsFileId, 'photo-review-sidecar', tenantName);
     const res = await fetch(link.url);
@@ -287,40 +326,219 @@ export class PhotoReviewService {
     return Buffer.from(await res.arrayBuffer());
   }
 
-  private buildVirtualPath(sessionId: string, year: number, prefix: string, version: number, ext: string): string {
-    return `card/${year}/${sessionId}/${prefix}-v${version}.${ext}`;
+  /**
+   * Resolves bytes for an EXISTING `photo_variants` row — the local-first
+   * counterpart of `readSourcePhotoBytes` above, same preference order:
+   * `variant_upload_outbox.content` (written the instant the variant's
+   * bytes were produced, regardless of whether fs-core has confirmed the
+   * upload yet — see `storeVariantBytesLocalFirst`) before a view-link + HTTP
+   * fetch off fs-core, which only ever applies once the local row has
+   * cleared its content (`VariantUploadWorkerService.send()` blanks it after
+   * a confirmed upload) or never had one (a variant created before this
+   * local-first path existed).
+   *
+   * Used by `aiEdit` to read the variant being edited FROM — this is what
+   * lets an AI edit start from a variant that is fully READY and viewable
+   * but has not reached fs-core yet (fs-core down, or just not its turn in
+   * the cron queue), instead of wrongly requiring `fsFileId` to be set
+   * first.
+   */
+  private async readVariantBytes(variant: PhotoVariant, tenantName?: string): Promise<Buffer> {
+    const rows: Array<{ content: Buffer | null }> = await this.dataSource.query(
+      `SELECT content FROM variant_upload_outbox
+        WHERE variant_id = $1 AND content IS NOT NULL AND length(content) > 0
+        ORDER BY created_at DESC LIMIT 1`,
+      [variant.id],
+    );
+    if (rows[0]?.content) {
+      return rows[0].content;
+    }
+    if (!variant.fsFileId) {
+      throw new SidecarError(
+        'Source variant has no bytes available yet — not staged locally, and not yet uploaded to the file-service',
+      );
+    }
+    return this.fetchBytesFromFileStorage(variant.fsFileId, tenantName);
+  }
+
+  /** Cheap existence check backing both `readVariantBytes`'s callers (the `aiEdit` "is this variant usable as a source" gate) and `toVariantDao`'s view-link fallback — a `SELECT content` without materialising it into JS would still ship the whole `bytea` value over the wire, so this asks Postgres for just the boolean instead. */
+  private async hasLocalVariantContent(variantId: string): Promise<boolean> {
+    const rows: Array<{ has_content: boolean }> = await this.dataSource.query(
+      `SELECT (content IS NOT NULL AND length(content) > 0) AS has_content
+         FROM variant_upload_outbox WHERE variant_id = $1
+        ORDER BY created_at DESC LIMIT 1`,
+      [variantId],
+    );
+    return Boolean(rows[0]?.has_content);
   }
 
   /**
-   * Writes bytes to the file-service under the right tenant — kiosk
-   * sessions use the device's own tenant (`FileStorageService.clientForTenant`,
-   * same mechanism `PhotoController`/`PhotoService` already use for
-   * view-links), web sessions use the API's own default tenant
-   * (`FileStorageService.uploadRaw`). See `FileStorageService`'s own doc
-   * comment — this module does not modify that service, only calls its
-   * already-public methods.
+   * Local-first bytes write for a `photo_variants` row — the direct
+   * counterpart of `PhotoService.addPhoto`'s `upload_outbox` insert: bytes
+   * land in `variant_upload_outbox` in the SAME transaction as the caller's
+   * own variant write (`manager` is shared), so the variant image is
+   * durably stored and immediately viewable
+   * (`resolveVariantViewSource`/`VariantContentController`) before, and
+   * regardless of whether, the push to fs-core ever succeeds.
+   *
+   * Replaces the old `uploadCardBytes`, which uploaded to fs-core
+   * SYNCHRONOUSLY and blocked the caller's own success on that call
+   * succeeding — exactly the failure mode this task exists to close (with
+   * `FS_API_KEY` currently stale, every `reprocess`/`aiEdit`/`uploadVariant`
+   * call used to end in `AUTO_FAILED`/an uncaught 500, even though the
+   * sidecar had already produced a perfectly good image). The actual fs-core
+   * upload is now entirely `VariantUploadWorkerService`'s job, draining this
+   * table in the background exactly like `UploadWorkerService` already does
+   * for `upload_outbox` — this method never calls fs-core at all, so it
+   * cannot fail on fs-core's account; `fsFileId` on the variant stays null
+   * until the cron confirms the upload.
    */
-  private async uploadCardBytes(input: {
-    tenantName?: string;
-    virtualPath: string;
-    mimeType: string;
-    data: Buffer;
-    idempotencyKey: string;
-  }): Promise<UploadedBytesResult> {
+  private async storeVariantBytesLocalFirst(
+    manager: EntityManager,
+    input: {
+      variantId: string;
+      tenantName?: string;
+      virtualPath: string;
+      mimeType: string;
+      data: Buffer;
+      idempotencyKey: string;
+    },
+  ): Promise<StoredVariantBytesResult> {
     const sha256 = createHash('sha256').update(input.data).digest('hex');
-    const uploadInput = {
-      virtualPath: input.virtualPath,
-      mimeType: input.mimeType,
-      data: input.data,
-      idempotencyKey: input.idempotencyKey,
-      visibility: 'private' as const,
-    };
+    await manager.query(
+      `INSERT INTO variant_upload_outbox (variant_id, idem_key, virtual_path, mime_type, content, tenant_name)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (idem_key) DO NOTHING`,
+      [
+        input.variantId,
+        input.idempotencyKey,
+        input.virtualPath,
+        input.mimeType,
+        input.data,
+        input.tenantName ?? null,
+      ],
+    );
+    return { bytes: input.data.byteLength, sha256 };
+  }
 
-    const result = input.tenantName
-      ? await (await this.fileStorage.clientForTenant(input.tenantName)).uploadRaw(uploadInput)
-      : await this.fileStorage.uploadRaw(uploadInput);
+  /**
+   * Where to load a variant's card image from for viewing — the variant
+   * counterpart of `PhotoService.resolveViewSource`: the real fs-core link
+   * once `fsFileId` is set AND reachable, or a signal to fall back to this
+   * API's own locally held bytes (`variant_upload_outbox.content`) when it
+   * is not. Unlike `PhotoService.resolveViewSource`, this ALSO falls back to
+   * local bytes when `fsFileId` is set but the fs-core call itself fails
+   * (e.g. a later outage after a successful upload, or — the scenario this
+   * task's own verification exercised — `FS_API_KEY` going stale) as long as
+   * the local row has not yet cleared its content; `PhotoController`'s photo
+   * path does not need this extra branch because a photo's `content` is
+   * blanked the moment `fs_file_id` is confirmed, same as here, so in
+   * practice this only ever helps in the narrow window where both still
+   * happen to be true. Returns `{ kind: 'none' }` rather than throwing —
+   * every caller here is a best-effort DAO field, not a hard requirement
+   * (mirrors this module's existing `try/catch` around every `issueViewLink`
+   * call, e.g. `toVariantDao`'s own original body).
+   *
+   * `fsFileId` alone is NOT enough to trust the remote copy (2026-09-09
+   * fix, same reasoning as `PhotoService.resolveViewSource`'s own fix) —
+   * `VariantUploadWorkerService.send()` sets it from the upload response
+   * BEFORE the file has actually survived fs-core's own scan, and this real
+   * fs-core deployment has been observed purging a file during that scan
+   * (live-confirmed: variant `de2db48a-3563-45cd-b10e-cf1ba9e1e535`'s
+   * `fs_file_id` now 404s on `getFile`). `fsStatus` is what that service's
+   * `pollScans()` sets to `'FAILED'` once that happens — a non-healthy
+   * status (`'FAILED'`/`'QUARANTINED'`) must fall through to the same
+   * local-content check a missing `fsFileId` already gets, exactly like
+   * `resolveCurrentCardViewUrl` below already does for the "current card"
+   * views.
+   */
+  private async resolveVariantViewSource(
+    variant: PhotoVariant,
+  ): Promise<
+    | { kind: 'remote'; fsFileId: string }
+    | { kind: 'local' }
+    | { kind: 'none' }
+  > {
+    if (variant.fsFileId && variant.fsStatus !== 'FAILED' && variant.fsStatus !== 'QUARANTINED') {
+      return { kind: 'remote', fsFileId: variant.fsFileId };
+    }
+    if (await this.hasLocalVariantContent(variant.id)) {
+      return { kind: 'local' };
+    }
+    return { kind: 'none' };
+  }
 
-    return { fsFileId: result.fileId, bytes: input.data.byteLength, sha256 };
+  /**
+   * A signed, short-lived URL for `VariantContentController`'s
+   * unauthenticated `GET /v1/review/variants/:id/local-content` — the
+   * variant counterpart of `PhotoService.issueLocalViewLink`/
+   * `verifyLocalViewTokenOrFail`/`readLocalContent`, mirrored here rather
+   * than imported: those are private instance methods on `PhotoService`
+   * (owned by `CaptureModule`, which this module must not import — see this
+   * class's own top doc comment), not exported utilities, so reusing them
+   * would mean either exporting crypto helpers off a controller-adjacent
+   * service for one other caller or reaching into `CaptureModule` from here.
+   * A direct, isolated mirror (signing `variant:<id>:<exp>` instead of
+   * `<id>:<exp>`, so a link minted for one route can never be replayed
+   * against the other even though both share the same `API_KEY` secret) is
+   * simpler and keeps this module's existing "duplicate small things rather
+   * than couple modules" convention (see `resolveSessionContext` etc.).
+   */
+  private issueLocalVariantViewLink(
+    variantId: string,
+    apiBaseUrl: string,
+  ): { url: string; expiresAt: string } {
+    const exp = Math.floor(Date.now() / 1000) + LOCAL_VARIANT_VIEW_TTL_SECONDS;
+    const sig = this.signLocalVariantViewToken(variantId, exp);
+    const url = `${apiBaseUrl.replace(/\/$/, '')}/v1/review/variants/${variantId}/local-content?exp=${exp}&sig=${sig}`;
+    return { url, expiresAt: new Date(exp * 1000).toISOString() };
+  }
+
+  /** Throws `VARIANT_LOCAL_TOKEN_INVALID` unless `sig`/`exp` are a valid, unexpired pair for `variantId` — see `issueLocalVariantViewLink`. Called by `VariantContentController`. */
+  verifyLocalVariantViewTokenOrFail(variantId: string, expRaw: string, sigRaw: string): void {
+    const exp = Number(expRaw);
+    const expectedBuf = Buffer.from(this.signLocalVariantViewToken(variantId, exp), 'hex');
+    const gotBuf = sigRaw ? Buffer.from(sigRaw, 'hex') : Buffer.alloc(0);
+    const valid =
+      Number.isFinite(exp) &&
+      exp >= Math.floor(Date.now() / 1000) &&
+      expectedBuf.length === gotBuf.length &&
+      expectedBuf.length > 0 &&
+      timingSafeEqual(expectedBuf, gotBuf);
+    if (!valid) {
+      throw new CustomException(
+        'This local-content link is invalid or has expired — reload the set to get a fresh one',
+        PHOTO_REVIEW_ERROR_CODE.VARIANT_LOCAL_TOKEN_INVALID,
+        HttpStatus.UNAUTHORIZED,
+      );
+    }
+  }
+
+  private signLocalVariantViewToken(variantId: string, exp: number): string {
+    const secret = this.configService.get<string>('security.apiKey') ?? '';
+    return createHmac('sha256', secret).update(`variant:${variantId}:${exp}`).digest('hex');
+  }
+
+  /** Streams straight from `variant_upload_outbox.content` — see `resolveVariantViewSource`'s 'local' branch. Called by `VariantContentController`. */
+  async readLocalVariantContent(variantId: string): Promise<{ data: Buffer; mimeType: string }> {
+    const rows: Array<{ content: Buffer | null; mime_type: string }> = await this.dataSource.query(
+      `SELECT content, mime_type FROM variant_upload_outbox
+        WHERE variant_id = $1 AND content IS NOT NULL AND length(content) > 0
+        ORDER BY created_at DESC LIMIT 1`,
+      [variantId],
+    );
+    if (!rows[0]?.content) {
+      throw new CustomException(
+        'No locally stored bytes for this variant',
+        PHOTO_REVIEW_ERROR_CODE.VARIANT_NOT_VIEWABLE,
+        HttpStatus.NOT_FOUND,
+      );
+    }
+    return { data: rows[0].content, mimeType: rows[0].mime_type };
+  }
+
+  private buildVirtualPath(sessionId: string, year: number, prefix: string, version: number, ext: string): string {
+    return `card/${year}/${sessionId}/${prefix}-v${version}.${ext}`;
   }
 
   /** Best-effort sidecar metadata file next to the image (plan §3: `auto-v1.json`/`ai-v2.json`) — never fails the caller's own flow. */
@@ -391,23 +609,101 @@ export class PhotoReviewService {
     );
   }
 
-  private async toVariantDao(variant: PhotoVariant, tenantName?: string): Promise<PhotoVariantDao> {
+  /**
+   * `viewUrl` resolution for one variant, shown to the CMS (plan §5.2's
+   * detail page, "Phiên bản"/"Ảnh thẻ hiện tại" panels) — per this task's
+   * product ask ("chỉ cần hiển thị ảnh", the review side must never surface
+   * whether a card photo has reached fs-core yet), this ALWAYS resolves to
+   * a real, loadable URL whenever the variant has bytes ANYWHERE (fs-core or
+   * still-local), and only ever omits `viewUrl` when the variant genuinely
+   * has no bytes yet (`PROCESSING`, or `FAILED` with nothing produced) — see
+   * `resolveVariantViewSource`.
+   */
+  private async toVariantDao(
+    variant: PhotoVariant,
+    apiBaseUrl: string,
+    tenantName?: string,
+  ): Promise<PhotoVariantDao> {
     const dao = toDao(PhotoVariantDao, variant);
-    if (variant.fsFileId) {
+    const source = await this.resolveVariantViewSource(variant);
+    if (source.kind === 'remote') {
       try {
-        const link = await this.fileStorage.issueViewLink(variant.fsFileId, 'photo-review', tenantName);
+        const link = await this.fileStorage.issueViewLink(source.fsFileId, 'photo-review', tenantName);
         dao.viewUrl = link.url;
         dao.viewUrlExpiresAt = link.expiresAt;
+        return dao;
       } catch (error) {
         this.logger.warn(`view-link failed for variant ${variant.id}: ${(error as Error).message}`);
+        // Fall through: fs-core rejected/failed the request (e.g. a stale
+        // FS_API_KEY) even though this variant has an fsFileId — try the
+        // local fallback below before giving up, same "show SOMETHING"
+        // principle `resolveVariantViewSource`'s own doc comment explains.
+        if (await this.hasLocalVariantContent(variant.id)) {
+          const local = this.issueLocalVariantViewLink(variant.id, apiBaseUrl);
+          dao.viewUrl = local.url;
+          dao.viewUrlExpiresAt = local.expiresAt;
+        }
+        return dao;
       }
+    }
+    if (source.kind === 'local') {
+      const local = this.issueLocalVariantViewLink(variant.id, apiBaseUrl);
+      dao.viewUrl = local.url;
+      dao.viewUrlExpiresAt = local.expiresAt;
     }
     return dao;
   }
 
+  /**
+   * `currentCardViewUrl` resolution shared by `listSets`, `getSetDetail`,
+   * and `toSetListItemDao` — same "always resolve to a real URL whenever
+   * bytes exist anywhere" rule as `toVariantDao`, just working off a plain
+   * `(variantId, fsFileId, fsStatus)` tuple instead of a loaded
+   * `PhotoVariant` entity (these three call sites all read the current
+   * variant's `fs_file_id`/`fs_status` off a raw SQL join rather than a full
+   * entity load, so there is no `variant` object to hand
+   * `toVariantDao`/`resolveVariantViewSource` here).
+   *
+   * `fsStatus` gate (2026-09-09 fix) — same reasoning as
+   * `resolveVariantViewSource`'s own fix just above: `fsFileId` alone only
+   * means "accepted by fs-core," not "still there." Before this fix, a
+   * `'FAILED'`/`'QUARANTINED'` current variant still attempted
+   * `issueViewLink` first — usually harmless (that call's own
+   * `waitUntilReady` eventually times out and this falls through to local
+   * content in the `catch` below regardless), but pointlessly slow (up to
+   * its 30s timeout) for a variant already KNOWN dead, and — the case that
+   * actually matters — that fallback is only possible at all because
+   * `VariantUploadWorkerService.send()`/`pollScans()` (this same day's
+   * pairing fix) now leave local content in place for exactly this state;
+   * checking `fsStatus` up front is what makes the "known dead, skip
+   * straight to local" path fast instead of merely eventually-correct.
+   */
+  private async resolveCurrentCardViewUrl(
+    variantId: string | null | undefined,
+    fsFileId: string | null | undefined,
+    fsStatus: string | null | undefined,
+    apiBaseUrl: string,
+    tenantName?: string,
+  ): Promise<{ url?: string; expiresAt?: string }> {
+    if (!variantId) return {};
+    if (fsFileId && fsStatus !== 'FAILED' && fsStatus !== 'QUARANTINED') {
+      try {
+        const link = await this.fileStorage.issueViewLink(fsFileId, 'photo-review', tenantName);
+        return { url: link.url, expiresAt: link.expiresAt };
+      } catch (error) {
+        this.logger.warn(`current-card view-link failed for variant ${variantId}: ${(error as Error).message}`);
+      }
+    }
+    if (await this.hasLocalVariantContent(variantId)) {
+      const local = this.issueLocalVariantViewLink(variantId, apiBaseUrl);
+      return { url: local.url, expiresAt: local.expiresAt };
+    }
+    return {};
+  }
+
   // ── GET /v1/review/sets ─────────────────────────────────────────────
 
-  async listSets(query: ListSetsQueryDto): Promise<Pagination<ReviewSetListItemDao>> {
+  async listSets(query: ListSetsQueryDto, apiBaseUrl: string): Promise<Pagination<ReviewSetListItemDao>> {
     const page = query.page ?? 1;
     const limit = query.limit ?? 20;
     const offset = (page - 1) * limit;
@@ -447,6 +743,7 @@ export class PhotoReviewService {
           s.id, s.campaign_id, s.subject_code, s.subject_name, s.kind_id, k.code AS kind_code,
           s.source_session_id, s.status, s.current_card_variant_id, s.created_at, s.updated_at,
           cv.fs_file_id AS current_fs_file_id,
+          cv.fs_status AS current_fs_status,
           EXISTS (SELECT 1 FROM photo_variants v WHERE v.set_id = s.id AND v.kind = 'CARD_AI' AND v.status <> 'DISCARDED') AS has_ai,
           EXISTS (SELECT 1 FROM photo_variants v WHERE v.set_id = s.id AND v.kind = 'CARD_UPLOAD' AND v.status <> 'DISCARDED') AS has_upload
         FROM subject_photo_sets s
@@ -473,20 +770,15 @@ export class PhotoReviewService {
     ]);
 
     const links = await Promise.all(
-      rows.map(async (row) => {
-        const fsFileId = row.current_fs_file_id as string | null;
-        if (!fsFileId) return null;
-        try {
-          return await this.fileStorage.issueViewLink(
-            fsFileId,
-            'photo-review-list',
-            tenantMap.get(row.source_session_id as string),
-          );
-        } catch (error) {
-          this.logger.warn(`list view-link failed for set ${row.id}: ${(error as Error).message}`);
-          return null;
-        }
-      }),
+      rows.map((row) =>
+        this.resolveCurrentCardViewUrl(
+          row.current_card_variant_id as string | null,
+          row.current_fs_file_id as string | null,
+          row.current_fs_status as string | null,
+          apiBaseUrl,
+          tenantMap.get(row.source_session_id as string),
+        ),
+      ),
     );
 
     const items = toDao(
@@ -521,7 +813,7 @@ export class PhotoReviewService {
 
   // ── GET /v1/review/sets/:id ──────────────────────────────────────────
 
-  async getSetDetail(id: string): Promise<ReviewSetDetailDao> {
+  async getSetDetail(id: string, apiBaseUrl: string): Promise<ReviewSetDetailDao> {
     const rows: Array<Record<string, unknown>> = await this.dataSource.query(
       `SELECT s.id, s.campaign_id, s.subject_code, s.subject_name, s.kind_id, k.code AS kind_code,
               s.source_session_id, s.status, s.current_card_variant_id, s.created_at, s.updated_at
@@ -571,22 +863,20 @@ export class PhotoReviewService {
     ]);
 
     const nonDiscardedVariants = variantRows.filter((v) => v.status !== PhotoVariantStatus.DISCARDED);
-    const variants = await Promise.all(nonDiscardedVariants.map((v) => this.toVariantDao(v, tenantName)));
+    const variants = await Promise.all(nonDiscardedVariants.map((v) => this.toVariantDao(v, apiBaseUrl, tenantName)));
 
-    const currentFsFileId = row.current_card_variant_id
-      ? nonDiscardedVariants.find((v) => v.id === row.current_card_variant_id)?.fsFileId
+    const currentVariant = row.current_card_variant_id
+      ? nonDiscardedVariants.find((v) => v.id === row.current_card_variant_id)
       : undefined;
-    let currentCardViewUrl: string | undefined;
-    let currentCardViewUrlExpiresAt: string | undefined;
-    if (currentFsFileId) {
-      try {
-        const link = await this.fileStorage.issueViewLink(currentFsFileId, 'photo-review-detail', tenantName);
-        currentCardViewUrl = link.url;
-        currentCardViewUrlExpiresAt = link.expiresAt;
-      } catch (error) {
-        this.logger.warn(`detail view-link failed for set ${id}: ${(error as Error).message}`);
-      }
-    }
+    const currentCardLink = await this.resolveCurrentCardViewUrl(
+      currentVariant?.id,
+      currentVariant?.fsFileId,
+      currentVariant?.fsStatus,
+      apiBaseUrl,
+      tenantName,
+    );
+    const currentCardViewUrl = currentCardLink.url;
+    const currentCardViewUrlExpiresAt = currentCardLink.expiresAt;
 
     return toDao(ReviewSetDetailDao, {
       id: row.id,
@@ -650,7 +940,7 @@ export class PhotoReviewService {
    * hanging request; `PhotoReviewSidecarService` already caps every call at
    * `SIDECAR_TIMEOUT_MS` (30s) via `AbortController`.
    */
-  async reprocess(setId: string, actorUserId: string | null): Promise<PhotoVariantDao> {
+  async reprocess(setId: string, actorUserId: string | null, apiBaseUrl: string): Promise<PhotoVariantDao> {
     const set = await this.findSetEntityOrFail(setId);
     const kind = await this.photoKindService.findKindEntityOrFail(set.kindId);
     const sessionContext = await this.resolveSessionContext(set.sourceSessionId);
@@ -696,31 +986,27 @@ export class PhotoReviewService {
       const ext = this.extForMime(result.mimeType);
       const virtualPath = this.buildVirtualPath(set.sourceSessionId, sessionContext.year, 'auto', variant.version, ext);
       const data = Buffer.from(result.imageBase64, 'base64');
-      const uploaded = await this.uploadCardBytes({
-        tenantName: sessionContext.tenantName,
-        virtualPath,
-        mimeType: result.mimeType,
-        data,
-        idempotencyKey: `photo-review:${variant.id}:auto`,
-      });
-      await this.uploadMetadataBestEffort({
-        tenantName: sessionContext.tenantName,
-        virtualPath: virtualPath.replace(/\.[^.]+$/, '.json'),
-        idempotencyKey: `photo-review:${variant.id}:auto:meta`,
-        metadata: {
-          warnings: result.warnings,
-          cardSpec: kind.cardSpec,
-        },
-      });
 
-      return await this.dataSource.transaction(async (manager) => {
+      const readyVariant = await this.dataSource.transaction(async (manager) => {
         const lockedSet = await this.lockSet(manager, setId);
+        const stored = await this.storeVariantBytesLocalFirst(manager, {
+          variantId: variant.id,
+          tenantName: sessionContext.tenantName,
+          virtualPath,
+          mimeType: result.mimeType,
+          data,
+          idempotencyKey: `photo-review:${variant.id}:auto`,
+        });
+
         const repo = manager.getRepository(PhotoVariant);
         variant.status = PhotoVariantStatus.READY;
-        variant.fsFileId = uploaded.fsFileId;
+        // fsFileId intentionally left null here — VariantUploadWorkerService's
+        // cron sets it once the push to fs-core actually succeeds (see
+        // storeVariantBytesLocalFirst's own doc comment for why this no
+        // longer uploads to fs-core synchronously).
         variant.virtualPath = virtualPath;
-        variant.bytes = uploaded.bytes;
-        variant.sha256 = uploaded.sha256;
+        variant.bytes = stored.bytes;
+        variant.sha256 = stored.sha256;
         variant.width = result.width ?? null;
         variant.height = result.height ?? null;
         variant.dpi = result.dpi ?? null;
@@ -744,6 +1030,22 @@ export class PhotoReviewService {
         });
         return variant;
       });
+
+      // Best-effort, direct-to-fs-core (see uploadMetadataBestEffort's own
+      // doc comment) — a sidecar metadata sidecar file, not the image
+      // itself, so it stays out of the local-first path; fs-core being down
+      // just means this warns and skips, same as before this task.
+      await this.uploadMetadataBestEffort({
+        tenantName: sessionContext.tenantName,
+        virtualPath: virtualPath.replace(/\.[^.]+$/, '.json'),
+        idempotencyKey: `photo-review:${variant.id}:auto:meta`,
+        metadata: {
+          warnings: result.warnings,
+          cardSpec: kind.cardSpec,
+        },
+      });
+
+      return this.toVariantDao(readyVariant, apiBaseUrl, sessionContext.tenantName);
     } catch (error) {
       const message = extractSidecarFailureMessage(error);
       this.logger.warn(`reprocess failed for set ${setId}: ${message}`);
@@ -767,7 +1069,7 @@ export class PhotoReviewService {
       });
     }
 
-    return this.toVariantDao(variant, sessionContext.tenantName);
+    return this.toVariantDao(variant, apiBaseUrl, sessionContext.tenantName);
   }
 
   // ── POST /v1/review/sets/:id/ai-edit ────────────────────────────────
@@ -781,7 +1083,12 @@ export class PhotoReviewService {
    * async queue can slot in behind the same `PhotoVariantDao` shape without
    * changing this method's contract.
    */
-  async aiEdit(setId: string, dto: AiEditDto, actorUserId: string | null): Promise<PhotoVariantDao> {
+  async aiEdit(
+    setId: string,
+    dto: AiEditDto,
+    actorUserId: string | null,
+    apiBaseUrl: string,
+  ): Promise<PhotoVariantDao> {
     const set = await this.findSetEntityOrFail(setId);
     this.assertUnlocked(set);
 
@@ -803,18 +1110,23 @@ export class PhotoReviewService {
     if (fromVariant.setId !== setId) {
       throw new CustomException('Variant does not belong to this set', PHOTO_REVIEW_ERROR_CODE.VARIANT_NOT_IN_SET, HttpStatus.BAD_REQUEST);
     }
-    if (fromVariant.status === PhotoVariantStatus.DISCARDED || !fromVariant.fsFileId) {
+    // "Usable" no longer means "already on fs-core" — a variant that is
+    // fully READY with only local bytes (fs-core down, or just not its turn
+    // in VariantUploadWorkerService's queue yet) is exactly as editable as
+    // one that has already been pushed; `readVariantBytes` below resolves
+    // bytes from either place. Only a genuinely-empty variant (DISCARDED, or
+    // one with no bytes ANYWHERE — PROCESSING that never finished, or FAILED
+    // with nothing produced) is rejected here.
+    if (
+      fromVariant.status === PhotoVariantStatus.DISCARDED ||
+      (!fromVariant.fsFileId && !(await this.hasLocalVariantContent(fromVariant.id)))
+    ) {
       throw new CustomException(
-        'Source variant is not usable (discarded or not yet uploaded)',
+        'Source variant is not usable (discarded or has no image bytes yet)',
         PHOTO_REVIEW_ERROR_CODE.VARIANT_NOT_READY,
         HttpStatus.CONFLICT,
       );
     }
-    // Captured into a local: `fromVariant.fsFileId` is used again below,
-    // after an `await` on a transaction — TypeScript cannot keep a property
-    // access narrowed across a call it can't prove is side-effect free, so
-    // a plain local variable is used instead of re-reading the property.
-    const fromVariantFsFileId = fromVariant.fsFileId;
 
     const kind = await this.photoKindService.findKindEntityOrFail(set.kindId);
     const sessionContext = await this.resolveSessionContext(set.sourceSessionId);
@@ -846,7 +1158,7 @@ export class PhotoReviewService {
     });
 
     try {
-      const sourceBytes = await this.fetchBytesFromFileStorage(fromVariantFsFileId, sessionContext.tenantName);
+      const sourceBytes = await this.readVariantBytes(fromVariant, sessionContext.tenantName);
       const result = await this.sidecar.edit({
         imageBase64: sourceBytes.toString('base64'),
         prompt: dto.prompt,
@@ -857,13 +1169,36 @@ export class PhotoReviewService {
       const ext = this.extForMime(result.mimeType);
       const virtualPath = this.buildVirtualPath(set.sourceSessionId, sessionContext.year, 'ai', variant.version, ext);
       const data = Buffer.from(result.imageBase64, 'base64');
-      const uploaded = await this.uploadCardBytes({
-        tenantName: sessionContext.tenantName,
-        virtualPath,
-        mimeType: result.mimeType,
-        data,
-        idempotencyKey: `photo-review:${variant.id}:ai`,
+
+      await this.dataSource.transaction(async (manager) => {
+        const stored = await this.storeVariantBytesLocalFirst(manager, {
+          variantId: variant.id,
+          tenantName: sessionContext.tenantName,
+          virtualPath,
+          mimeType: result.mimeType,
+          data,
+          idempotencyKey: `photo-review:${variant.id}:ai`,
+        });
+
+        variant.status = PhotoVariantStatus.READY;
+        // fsFileId intentionally left null — see storeVariantBytesLocalFirst's
+        // own doc comment; VariantUploadWorkerService's cron fills it in once
+        // the push to fs-core actually succeeds.
+        variant.virtualPath = virtualPath;
+        variant.bytes = stored.bytes;
+        variant.sha256 = stored.sha256;
+        variant.width = result.width ?? null;
+        variant.height = result.height ?? null;
+        variant.seed = result.seed ?? null;
+        variant.modelId = result.modelId ?? null;
+        variant.algorithmVersion = result.algorithmVersion ?? null;
+        variant.identitySimilarity = result.identitySimilarity ?? null;
+        await manager.getRepository(PhotoVariant).save(variant);
+        // Not set as current — plan §5.3/§6.2: "con người chấp nhận: không bao
+        // giờ tự đặt bản AI làm ảnh hiện tại". A reviewer must call
+        // POST /v1/review/variants/:id/accept explicitly.
       });
+
       await this.uploadMetadataBestEffort({
         tenantName: sessionContext.tenantName,
         virtualPath: virtualPath.replace(/\.[^.]+$/, '.json'),
@@ -877,22 +1212,6 @@ export class PhotoReviewService {
           algorithmVersion: result.algorithmVersion,
         },
       });
-
-      variant.status = PhotoVariantStatus.READY;
-      variant.fsFileId = uploaded.fsFileId;
-      variant.virtualPath = virtualPath;
-      variant.bytes = uploaded.bytes;
-      variant.sha256 = uploaded.sha256;
-      variant.width = result.width ?? null;
-      variant.height = result.height ?? null;
-      variant.seed = result.seed ?? null;
-      variant.modelId = result.modelId ?? null;
-      variant.algorithmVersion = result.algorithmVersion ?? null;
-      variant.identitySimilarity = result.identitySimilarity ?? null;
-      await this.variantRepository.save(variant);
-      // Not set as current — plan §5.3/§6.2: "con người chấp nhận: không bao
-      // giờ tự đặt bản AI làm ảnh hiện tại". A reviewer must call
-      // POST /v1/review/variants/:id/accept explicitly.
     } catch (error) {
       const message = extractSidecarFailureMessage(error);
       this.logger.warn(`ai-edit failed for set ${setId}: ${message}`);
@@ -901,7 +1220,7 @@ export class PhotoReviewService {
       await this.variantRepository.save(variant);
     }
 
-    return this.toVariantDao(variant, sessionContext.tenantName);
+    return this.toVariantDao(variant, apiBaseUrl, sessionContext.tenantName);
   }
 
   // ── GET /v1/review/jobs/:id ──────────────────────────────────────────
@@ -915,16 +1234,16 @@ export class PhotoReviewService {
    * real async job queue is a reasonable future improvement, not required
    * now.
    */
-  async getJob(variantId: string): Promise<PhotoVariantDao> {
+  async getJob(variantId: string, apiBaseUrl: string): Promise<PhotoVariantDao> {
     const variant = await this.findVariantEntityOrFail(variantId);
     const set = await this.findSetEntityOrFail(variant.setId);
     const sessionContext = await this.resolveSessionContext(set.sourceSessionId);
-    return this.toVariantDao(variant, sessionContext.tenantName);
+    return this.toVariantDao(variant, apiBaseUrl, sessionContext.tenantName);
   }
 
   // ── POST /v1/review/variants/:id/accept ─────────────────────────────
 
-  async acceptVariant(variantId: string, actorUserId: string | null): Promise<PhotoVariantDao> {
+  async acceptVariant(variantId: string, actorUserId: string | null, apiBaseUrl: string): Promise<PhotoVariantDao> {
     const variant = await this.findVariantEntityOrFail(variantId);
     const set = await this.findSetEntityOrFail(variant.setId);
     this.assertUnlocked(set);
@@ -961,12 +1280,16 @@ export class PhotoReviewService {
     });
 
     const sessionContext = await this.resolveSessionContext(set.sourceSessionId);
-    return this.toVariantDao(variant, sessionContext.tenantName);
+    return this.toVariantDao(variant, apiBaseUrl, sessionContext.tenantName);
   }
 
   // ── POST /v1/review/variants/:id/discard ────────────────────────────
 
-  async discardVariant(variantId: string, actorUserId: string | null): Promise<PhotoVariantDao> {
+  async discardVariant(
+    variantId: string,
+    actorUserId: string | null,
+    apiBaseUrl: string,
+  ): Promise<PhotoVariantDao> {
     const variant = await this.findVariantEntityOrFail(variantId);
     const set = await this.findSetEntityOrFail(variant.setId);
     this.assertUnlocked(set);
@@ -979,7 +1302,7 @@ export class PhotoReviewService {
       );
     }
     if (variant.status === PhotoVariantStatus.DISCARDED) {
-      return this.toVariantDao(variant, (await this.resolveSessionContext(set.sourceSessionId)).tenantName);
+      return this.toVariantDao(variant, apiBaseUrl, (await this.resolveSessionContext(set.sourceSessionId)).tenantName);
     }
 
     await this.dataSource.transaction(async (manager) => {
@@ -995,7 +1318,7 @@ export class PhotoReviewService {
     });
 
     const sessionContext = await this.resolveSessionContext(set.sourceSessionId);
-    return this.toVariantDao(variant, sessionContext.tenantName);
+    return this.toVariantDao(variant, apiBaseUrl, sessionContext.tenantName);
   }
 
   // ── POST /v1/review/sets/:id/upload ─────────────────────────────────
@@ -1010,6 +1333,7 @@ export class PhotoReviewService {
     setId: string,
     file: { buffer: Buffer; mimetype: string; size: number },
     actorUserId: string | null,
+    apiBaseUrl: string,
   ): Promise<UploadVariantResultDao> {
     const set = await this.findSetEntityOrFail(setId);
     this.assertUnlocked(set);
@@ -1100,32 +1424,17 @@ export class PhotoReviewService {
       const ext = this.extForMime(cardResult.mimeType);
       const virtualPath = this.buildVirtualPath(set.sourceSessionId, sessionContext.year, 'upload', version, ext);
       const data = Buffer.from(cardResult.imageBase64, 'base64');
-      const uploaded = await this.uploadCardBytes({
-        tenantName: sessionContext.tenantName,
-        virtualPath,
-        mimeType: cardResult.mimeType,
-        data,
-        idempotencyKey: `photo-review:${setId}:upload:v${version}`,
-      });
-      // Best-effort: also keep the original file the operator picked, next
-      // to the cropped card photo (plan §3 — `upload-vN.source.jpg`).
-      await this.uploadMetadataBestEffort({
-        tenantName: sessionContext.tenantName,
-        virtualPath: this.buildVirtualPath(set.sourceSessionId, sessionContext.year, 'upload', version, 'source.json'),
-        idempotencyKey: `photo-review:${setId}:upload:v${version}:meta`,
-        metadata: { identitySimilarity: similarity, originalMimeType: file.mimetype },
-      });
 
+      // Created first, without bytes/fsFileId — `storeVariantBytesLocalFirst`
+      // below needs a real `photo_variants.id` to satisfy
+      // `variant_upload_outbox`'s FK before it can insert the local-first row.
       const created = await repo.save(
         repo.create({
           setId,
           version,
           kind: PhotoVariantKind.CARD_UPLOAD,
           status: PhotoVariantStatus.READY,
-          fsFileId: uploaded.fsFileId,
           virtualPath,
-          bytes: uploaded.bytes,
-          sha256: uploaded.sha256,
           width: cardResult.width ?? null,
           height: cardResult.height ?? null,
           dpi: cardResult.dpi ?? null,
@@ -1135,6 +1444,37 @@ export class PhotoReviewService {
           createdByUserId: actorUserId,
         }),
       );
+
+      const stored = await this.storeVariantBytesLocalFirst(manager, {
+        variantId: created.id,
+        tenantName: sessionContext.tenantName,
+        virtualPath,
+        mimeType: cardResult.mimeType,
+        data,
+        idempotencyKey: `photo-review:${setId}:upload:v${version}`,
+      });
+      created.bytes = stored.bytes;
+      created.sha256 = stored.sha256;
+      // fsFileId intentionally left null — see storeVariantBytesLocalFirst's
+      // own doc comment; VariantUploadWorkerService's cron fills it in once
+      // the push to fs-core actually succeeds. Previously this whole
+      // transaction aborted (no variant row at all) if the direct fs-core
+      // upload failed here — with fs-core down, EVERY upload-replace used
+      // to fail outright even though the sidecar had already produced a
+      // usable card photo.
+      await repo.save(created);
+
+      // Best-effort: also keep the original file the operator picked, next
+      // to the cropped card photo (plan §3 — `upload-vN.source.jpg`). Still
+      // direct-to-fs-core (a sidecar file, not the image itself — see
+      // uploadMetadataBestEffort's own doc comment); fs-core being down just
+      // means this warns and skips.
+      await this.uploadMetadataBestEffort({
+        tenantName: sessionContext.tenantName,
+        virtualPath: this.buildVirtualPath(set.sourceSessionId, sessionContext.year, 'upload', version, 'source.json'),
+        idempotencyKey: `photo-review:${setId}:upload:v${version}:meta`,
+        metadata: { identitySimilarity: similarity, originalMimeType: file.mimetype },
+      });
 
       lockedSet.currentCardVariantId = created.id;
       if (lockedSet.status === PhotoReviewSetStatus.READY) {
@@ -1153,7 +1493,7 @@ export class PhotoReviewService {
       return created;
     });
 
-    const dao = await this.toVariantDao(variant, sessionContext.tenantName);
+    const dao = await this.toVariantDao(variant, apiBaseUrl, sessionContext.tenantName);
     return toDao(UploadVariantResultDao, {
       variant: dao,
       identitySimilarity: similarity,
@@ -1163,7 +1503,12 @@ export class PhotoReviewService {
 
   // ── POST /v1/review/sets/:id/current ────────────────────────────────
 
-  async setCurrent(setId: string, variantId: string, actorUserId: string | null): Promise<ReviewSetListItemDao> {
+  async setCurrent(
+    setId: string,
+    variantId: string,
+    actorUserId: string | null,
+    apiBaseUrl: string,
+  ): Promise<ReviewSetListItemDao> {
     const set = await this.findSetEntityOrFail(setId);
     this.assertUnlocked(set);
 
@@ -1190,17 +1535,27 @@ export class PhotoReviewService {
       });
     });
 
-    return this.toSetListItemDao(setId);
+    return this.toSetListItemDao(setId, apiBaseUrl);
   }
 
   // ── POST /v1/review/sets/:id/approve, /reject ───────────────────────
 
-  async approve(setId: string, dto: ApproveRejectDto, actorUserId: string | null): Promise<ReviewSetListItemDao> {
-    return this.transitionSetStatus(setId, PhotoReviewSetStatus.APPROVED, PhotoReviewAction.APPROVED, dto, actorUserId);
+  async approve(
+    setId: string,
+    dto: ApproveRejectDto,
+    actorUserId: string | null,
+    apiBaseUrl: string,
+  ): Promise<ReviewSetListItemDao> {
+    return this.transitionSetStatus(setId, PhotoReviewSetStatus.APPROVED, PhotoReviewAction.APPROVED, dto, actorUserId, apiBaseUrl);
   }
 
-  async reject(setId: string, dto: ApproveRejectDto, actorUserId: string | null): Promise<ReviewSetListItemDao> {
-    return this.transitionSetStatus(setId, PhotoReviewSetStatus.REJECTED, PhotoReviewAction.REJECTED, dto, actorUserId);
+  async reject(
+    setId: string,
+    dto: ApproveRejectDto,
+    actorUserId: string | null,
+    apiBaseUrl: string,
+  ): Promise<ReviewSetListItemDao> {
+    return this.transitionSetStatus(setId, PhotoReviewSetStatus.REJECTED, PhotoReviewAction.REJECTED, dto, actorUserId, apiBaseUrl);
   }
 
   private async transitionSetStatus(
@@ -1209,6 +1564,7 @@ export class PhotoReviewService {
     action: PhotoReviewAction,
     dto: ApproveRejectDto,
     actorUserId: string | null,
+    apiBaseUrl: string,
   ): Promise<ReviewSetListItemDao> {
     const set = await this.findSetEntityOrFail(setId);
     this.assertUnlocked(set);
@@ -1225,16 +1581,17 @@ export class PhotoReviewService {
       });
     });
 
-    return this.toSetListItemDao(setId);
+    return this.toSetListItemDao(setId, apiBaseUrl);
   }
 
   /** Single-row equivalent of one `listSets` result item — used to build the response of every mutating action that returns a set (setCurrent/approve/reject), without a bogus "page 1, limit 1" query that could return the wrong set entirely. */
-  private async toSetListItemDao(setId: string): Promise<ReviewSetListItemDao> {
+  private async toSetListItemDao(setId: string, apiBaseUrl: string): Promise<ReviewSetListItemDao> {
     const rows: Array<Record<string, unknown>> = await this.dataSource.query(
       `SELECT
           s.id, s.campaign_id, s.subject_code, s.subject_name, s.kind_id, k.code AS kind_code,
           s.source_session_id, s.status, s.current_card_variant_id, s.created_at, s.updated_at,
           cv.fs_file_id AS current_fs_file_id,
+          cv.fs_status AS current_fs_status,
           EXISTS (SELECT 1 FROM photo_variants v WHERE v.set_id = s.id AND v.kind = 'CARD_AI' AND v.status <> 'DISCARDED') AS has_ai,
           EXISTS (SELECT 1 FROM photo_variants v WHERE v.set_id = s.id AND v.kind = 'CARD_UPLOAD' AND v.status <> 'DISCARDED') AS has_upload
         FROM subject_photo_sets s
@@ -1248,23 +1605,16 @@ export class PhotoReviewService {
       throw new CustomException('Photo review set not found', PHOTO_REVIEW_ERROR_CODE.SET_NOT_FOUND, HttpStatus.NOT_FOUND);
     }
 
-    let currentCardViewUrl: string | undefined;
-    let currentCardViewUrlExpiresAt: string | undefined;
-    const fsFileId = row.current_fs_file_id as string | null;
-    if (fsFileId) {
-      const tenantMap = await this.batchResolveTenants([row.source_session_id as string]);
-      try {
-        const link = await this.fileStorage.issueViewLink(
-          fsFileId,
-          'photo-review',
-          tenantMap.get(row.source_session_id as string),
-        );
-        currentCardViewUrl = link.url;
-        currentCardViewUrlExpiresAt = link.expiresAt;
-      } catch (error) {
-        this.logger.warn(`view-link failed for set ${setId}: ${(error as Error).message}`);
-      }
-    }
+    const tenantMap = await this.batchResolveTenants([row.source_session_id as string]);
+    const currentCardLink = await this.resolveCurrentCardViewUrl(
+      row.current_card_variant_id as string | null,
+      row.current_fs_file_id as string | null,
+      row.current_fs_status as string | null,
+      apiBaseUrl,
+      tenantMap.get(row.source_session_id as string),
+    );
+    const currentCardViewUrl = currentCardLink.url;
+    const currentCardViewUrlExpiresAt = currentCardLink.expiresAt;
 
     return toDao(ReviewSetListItemDao, {
       id: row.id,

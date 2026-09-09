@@ -11,5 +11,3 @@ export * from './create-capture-configuration.dto';
 export * from './update-capture-configuration.dto';
 export * from './decide-campaign-member.dto';
 export * from './list-campaign-members-query.dto';
-export * from './list-campaign-student-roster-query.dto';
-export * from './update-campaign-student-roster-row.dto';

@@ -68,8 +68,8 @@ export class Photo extends BaseEntity {
   @ApiPropertyOptional({ description: 'Loại bước chụp (kiosk), vd FRONT' })
   stepType?: string;
 
-  /** e.g. CENTER/LEFT/RIGHT - which physical camera took this frame (kiosk only). */
-  @Column('varchar', { length: 10, nullable: true, name: 'camera_role' })
+  /** e.g. CENTER/LEFT/RIGHT, or the physical camera id when no role mapping applies — same fallback as `SessionVideo.cameraRole`, widened for the same reason (2026-09-09 fix; see migration 1805000000000). */
+  @Column('varchar', { length: 255, nullable: true, name: 'camera_role' })
   @ApiPropertyOptional({ description: 'Camera vật lý đã chụp (kiosk)' })
   cameraRole?: string;
 

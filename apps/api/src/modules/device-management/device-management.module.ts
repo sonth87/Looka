@@ -6,7 +6,6 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { CampaignController } from './controllers/campaign.controller';
 import { CampaignConfigController } from './controllers/campaign-config.controller';
 import { CampaignMemberController } from './controllers/campaign-member.controller';
-import { CampaignStudentRosterController } from './controllers/campaign-student-roster.controller';
 import { CaptureAnglePresetController } from './controllers/capture-angle-preset.controller';
 import { CaptureConfigurationController } from './controllers/capture-configuration.controller';
 import { DeviceController } from './controllers/device.controller';
@@ -14,7 +13,6 @@ import { DeviceSelfController } from './controllers/device-self.controller';
 import { MeController } from './controllers/me.controller';
 import { Campaign } from './entities/campaign.entity';
 import { CampaignMember } from './entities/campaign-member.entity';
-import { CampaignStudentRoster } from './entities/campaign-student-roster.entity';
 import { CaptureAnglePreset } from './entities/capture-angle-preset.entity';
 import { CaptureConfiguration } from './entities/capture-configuration.entity';
 import { Device } from './entities/device.entity';
@@ -25,7 +23,6 @@ import { DeviceCredentialsGuard } from './guards/device-credentials.guard';
 import { ActivationPackageService } from './services/activation-package.service';
 import { CampaignService } from './services/campaign.service';
 import { CampaignMemberService } from './services/campaign-member.service';
-import { CampaignStudentRosterService } from './services/campaign-student-roster.service';
 import { CaptureAnglePresetService } from './services/capture-angle-preset.service';
 import { CaptureConfigurationService } from './services/capture-configuration.service';
 import { DeviceService } from './services/device.service';
@@ -40,7 +37,6 @@ import { DeviceEventService } from './services/device-event.service';
       CaptureAnglePreset,
       CaptureConfiguration,
       CampaignMember,
-      CampaignStudentRoster,
     ]),
     CaptureModule,
     // For DeviceEventService's best-effort
@@ -76,7 +72,6 @@ import { DeviceEventService } from './services/device-event.service';
     DeviceController,
     CampaignConfigController,
     CampaignMemberController,
-    CampaignStudentRosterController,
     CaptureAnglePresetController,
     CaptureConfigurationController,
     MeController,
@@ -86,7 +81,6 @@ import { DeviceEventService } from './services/device-event.service';
     DeviceService,
     DeviceEventService,
     CampaignMemberService,
-    CampaignStudentRosterService,
     CaptureAnglePresetService,
     CaptureConfigurationService,
     ActivationPackageService,
@@ -102,7 +96,6 @@ import { DeviceEventService } from './services/device-event.service';
     DeviceService,
     DeviceEventService,
     CampaignMemberService,
-    CampaignStudentRosterService,
     CaptureAnglePresetService,
     CaptureConfigurationService,
   ],

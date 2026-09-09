@@ -38,6 +38,10 @@ export class PhotoVariantDao {
   @Expose()
   fsFileId?: string | null;
 
+  @ApiPropertyOptional({ description: 'Trạng thái file trên file-service (SCANNING/READY/FAILED/...) — xem PhotoReviewService.resolveVariantViewSource' })
+  @Expose()
+  fsStatus?: string | null;
+
   @ApiPropertyOptional()
   @Expose()
   virtualPath?: string | null;

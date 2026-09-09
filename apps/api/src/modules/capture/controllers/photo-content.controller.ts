@@ -40,6 +40,19 @@ export class PhotoContentController {
     const { data, mimeType } = await this.photoService.readLocalContent(photoId);
     res.setHeader('Content-Type', mimeType);
     res.setHeader('Cache-Control', 'private, max-age=60');
+    // `helmet()` (main.ts) sets `Cross-Origin-Resource-Policy: same-origin`
+    // by default on every response, which silently blocks exactly the
+    // `<img src>` load this route exists for once the CMS runs on a
+    // different origin/port than this API (dev: 3200 vs 3100) — Chrome
+    // fails it as `net::ERR_BLOCKED_BY_RESPONSE.NotSameOrigin`, invisible in
+    // a same-origin curl/Postman check, only surfaced by an actual
+    // cross-origin browser load (confirmed live via the photo-review
+    // module's identical local-content route during this task's own CMS
+    // verification — see `VariantContentController`'s own copy of this
+    // comment). CORS is already deliberately open API-wide for this exact
+    // cross-origin case (see main.ts's own comment); this header is the
+    // other half of the same browser security model actually needs.
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
     res.send(data);
   }
 }

@@ -11,6 +11,7 @@ import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { SwaggerModule } from '@nestjs/swagger';
 import 'dotenv/config';
+import { json, urlencoded } from 'express';
 import helmet from 'helmet';
 import 'reflect-metadata';
 import { AppModule } from './app.module';
@@ -22,6 +23,17 @@ async function bootstrap() {
 
   app.enable('trust proxy');
   app.use(helmet());
+
+  // Express's own default body limit is 100kb — comfortably smaller than a
+  // single base64-encoded photo (2026-09-09 field bug: every kiosk photo
+  // upload over ~70KB raw was silently rejected with a 413 "request entity
+  // too large" the client-side retry loop then just kept backing off on
+  // forever, since a 413 has no smaller-body retry to fall back to). Photos
+  // land here as base64 inside JSON (`AddDevicePhotoDto.dataUrl`,
+  // `AddPhotoDto.dataUrl`), which inflates a raw JPEG by ~33% — 25mb covers a
+  // full-resolution capture with headroom.
+  app.use(json({ limit: '25mb' }));
+  app.use(urlencoded({ extended: true, limit: '25mb' }));
 
   app.useGlobalFilters(new HttpExceptionFilter(), new TypeOrmExceptionFilter());
   app.useGlobalPipes(validationPipes);

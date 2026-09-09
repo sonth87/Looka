@@ -165,44 +165,6 @@ export interface SelfEnrollDeviceResult {
  * never leave the kiosk, with no error surfaced anywhere (2026-09-08 field
  * report — "ấn lưu nhưng CMS không thấy thông tin ảnh chụp").
  */
-/**
- * `GET /v1/campaigns/:id/roster/lookup?citizenId=...` result — see
- * `apps/api`'s `RosterLookupResultDao`. `found: false` is a normal, expected
- * result (a scan simply not matching this campaign's expected-student
- * roster), not an error — callers branch on this boolean directly rather
- * than on a caught exception, so a transient network/API failure (thrown by
- * `call()` below as a `CampaignPortalApiError`) is never confused with a
- * genuine no-match. See `FaceCaptureApp.tsx`'s `handleCccdScan`.
- */
-export interface RosterLookupResult {
-  found: boolean;
-  studentCode?: string;
-  studentName?: string;
-  className?: string;
-  major?: string;
-  academicYear?: string;
-  citizenId?: string;
-}
-
-/**
- * The kiosk's own call, made the moment `apps/desktop/src/main/cccdWatcher.ts`
- * reports a freshly scanned CCCD number (2026-09-09 "quét CCCD thay cho
- * nhập mã SV" feature) — gated server-side the same way `fetchCampaignConfig`
- * already is (`CampaignMemberGuard`: an SSO-logged-in, APPROVED member of an
- * OPEN campaign), so a failure here is a transient/authorization issue, not
- * something this call needs to special-case.
- */
-export function lookupRosterByCitizenId(
-  campaignId: string,
-  citizenId: string,
-  authHeaders: Record<string, string>,
-): Promise<RosterLookupResult> {
-  return call<RosterLookupResult>(
-    `/v1/campaigns/${campaignId}/roster/lookup?citizenId=${encodeURIComponent(citizenId)}`,
-    authHeaders,
-  );
-}
-
 export function selfEnrollDevice(
   input: { hostname: string; fingerprint: string; os?: string; campaignId?: string },
   authHeaders: Record<string, string>,

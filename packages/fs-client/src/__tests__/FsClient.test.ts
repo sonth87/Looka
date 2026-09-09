@@ -20,6 +20,16 @@ class FakeServer {
   private failAt: { chunkIndex: number; kind: 'network' | 'server' | 'client' } | null = null;
   private chunkCount = 0;
   public fileStatus: string = 'SCANNING';
+  /**
+   * Mirrors the real server's live-confirmed (2026-09-09) behaviour for the
+   * plain metadata GET, NOT what the integration guide/this fake originally
+   * assumed (a flat 200 + status body at every stage): while a file is not
+   * yet READY, `GET /api/v1/files/:id` itself answers 423 SCAN_PENDING —
+   * the same status code documented for the byte-fetching `/download`
+   * route — rather than 200 with a `status` field. See `FsClient.getFile`'s
+   * own doc comment.
+   */
+  public scanPendingAs423 = false;
 
   public failOnChunk(chunkIndex: number, kind: 'network' | 'server' | 'client' = 'network'): void {
     this.failAt = { chunkIndex, kind };
@@ -37,6 +47,15 @@ class FakeServer {
     });
 
     if (u.includes('/api/v1/files/') && init?.method === 'GET') {
+      if (this.scanPendingAs423 && this.fileStatus !== 'READY') {
+        return json(423, {
+          error: {
+            code: 'SCAN_PENDING',
+            message: 'File đang chờ quét virus, chưa thể tải về',
+            detail: { status: this.fileStatus },
+          },
+        });
+      }
       return json(200, { file_id: 'file_1', virtual_path: 'p', status: this.fileStatus, size: 10 });
     }
 
@@ -266,6 +285,22 @@ describe('FsClient — resume after interruption', () => {
     assert.notEqual(a, other);
     assert.match(a, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
   });
+
+  test('the upload id is a real UUID (version+variant nibbles), not just UUID-shaped hex', () => {
+    // 2026-09-09 field bug: a raw hash slice satisfies the shape regex above
+    // but not this stricter one — apps/api's `@IsUUID()` DTO validators use
+    // the strict check, which only ~7.8% of raw hash slices pass by chance,
+    // so most kiosk photo uploads were permanently rejected with "photoId
+    // must be a UUID". Every key here is chosen so a pre-fix run would have
+    // failed at least one of them.
+    for (const key of ['sess_1:FRONT:1:raw', 'sess_1:LEFT:2:face', 'sess_1:RIGHT:2:face', 'x', 'y', 'z']) {
+      assert.match(
+        deterministicUuid(key),
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+        `deterministicUuid(${key}) must be a syntactically valid v4-shaped UUID`
+      );
+    }
+  });
 });
 
 describe('FsClient — error classification', () => {
@@ -336,13 +371,71 @@ describe('FsClient — scan state', () => {
       /SCAN_PENDING/
     );
   });
+
+  // Confirmed live against a real fs-core deployment (2026-09-09): the plain
+  // metadata `getFile` answers 423 SCAN_PENDING while a file is mid-scan,
+  // not 200 + a status body — see FakeServer.scanPendingAs423 and
+  // FsClient.getFile's own doc comment. Before this fix, that 423 propagated
+  // straight out of getFile as a thrown FsError, which waitUntilReady's poll
+  // loop never got a chance to treat as "still working" (the throw happens
+  // before its own allowlist check runs) — every wait for a real, currently
+  // still-scanning file failed immediately instead of polling it out.
+  test('getFile recovers a SCAN_PENDING status from a 423, instead of throwing', async () => {
+    const server = new FakeServer();
+    server.scanPendingAs423 = true;
+    server.fileStatus = 'SCAN_PENDING';
+
+    const info = await makeClient(server).getFile('file_1');
+    assert.equal(info.status, 'SCAN_PENDING');
+  });
+
+  test('waitUntilReady polls through a real server\'s 423-for-SCAN_PENDING and returns once READY', async () => {
+    const server = new FakeServer();
+    server.scanPendingAs423 = true;
+    server.fileStatus = 'SCAN_PENDING';
+
+    const wait = makeClient(server).waitUntilReady('file_1', { pollMs: 5, timeoutMs: 200 });
+    // Flips to READY after the first poll has definitely happened — proving
+    // this is an actual retry loop reaching a real resolution, not just a
+    // one-shot translation that happens to look fine on the first call.
+    setTimeout(() => {
+      server.fileStatus = 'READY';
+    }, 20);
+
+    const info = await wait;
+    assert.equal(info.status, 'READY');
+  });
+
+  // A file that is genuinely gone (deleted, or purged by the server's own
+  // retention/scan pipeline before ever reaching READY — exactly what the
+  // live 2026-09-09 check against a real fs-core instance saw a few seconds
+  // after SCAN_PENDING) must still fail rather than being mistaken for a
+  // pending scan: only the SCAN_PENDING code is translated, every other
+  // error still propagates.
+  test('a genuinely missing file still throws NOT_FOUND, not a fabricated pending state', async () => {
+    const server = new FakeServer();
+    server.fetch = async () => json(404, { error: { code: 'NOT_FOUND', message: 'Không tìm thấy' } });
+
+    await assert.rejects(() => makeClient(server).getFile('file_1'), /NOT_FOUND/);
+  });
 });
 
 describe('FsClient — metadata encoding', () => {
-  test('separators inside values cannot split a field', () => {
-    const encoded = encodeMetadata({ sessionId: 'a;b=c', step: 'FRONT' });
-    assert.equal(encoded, 'sessionId=a_b_c;step=FRONT');
-    assert.equal(encoded.split(';').length, 2);
+  // fs-engine v0.2.10 (2026-09-09): X-Metadata is encodeURIComponent(JSON.stringify(obj)),
+  // not the old `k1=v1;k2=v2` string join — see encodeMetadata's own doc comment.
+  test('encodes as a url-encoded JSON object', () => {
+    const meta = { session_id: 'a;b=c', step: 'FRONT' };
+    const encoded = encodeMetadata(meta);
+    assert.equal(encoded, encodeURIComponent(JSON.stringify(meta)));
+    assert.deepEqual(JSON.parse(decodeURIComponent(encoded)), meta);
+  });
+
+  test('a value containing reserved characters (";", "=", "&") round-trips intact', () => {
+    // The old format silently mangled these by replacing them with "_"; JSON
+    // encoding must preserve them exactly.
+    const meta = { ref_id: 'a;b=c&d' };
+    const encoded = encodeMetadata(meta);
+    assert.deepEqual(JSON.parse(decodeURIComponent(encoded)), meta);
   });
 });
 

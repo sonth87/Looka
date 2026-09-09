@@ -80,6 +80,9 @@ importers:
       dotenv:
         specifier: ^17.4.1
         version: 17.4.2
+      express:
+        specifier: 5.2.1
+        version: 5.2.1
       helmet:
         specifier: ^8.2.0
         version: 8.3.0
@@ -671,6 +674,9 @@ importers:
       tailwind-merge:
         specifier: ^3.0.1
         version: 3.6.0
+      tesseract.js:
+        specifier: ^7.0.0
+        version: 7.0.0
     devDependencies:
       '@types/react':
         specifier: ^19.0.8
@@ -11628,7 +11634,7 @@ snapshots:
       '@radix-ui/react-toast': 1.2.23(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       '@radix-ui/react-tooltip': 1.2.16(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       '@tanstack/react-query': 5.101.4(react@19.2.4)
-      '@tanstack/react-query-devtools': 5.101.4(@tanstack/react-query@5.101.4(react@19.2.4))(react@19.2.4)
+      '@tanstack/react-query-devtools': 5.101.4(@tanstack/react-query@5.101.4(react@19.2.8))(react@19.2.4)
       '@tiptap/extension-placeholder': 3.30.0(@tiptap/extensions@3.30.0(@tiptap/core@3.30.0(@tiptap/pm@3.30.0))(@tiptap/pm@3.30.0))
       '@tiptap/extension-table': 3.30.0(@tiptap/core@3.30.0(@tiptap/pm@3.30.0))(@tiptap/pm@3.30.0)
       '@tiptap/extension-table-cell': 3.30.0(@tiptap/extension-table@3.30.0(@tiptap/core@3.30.0(@tiptap/pm@3.30.0))(@tiptap/pm@3.30.0))
@@ -11790,7 +11796,7 @@ snapshots:
 
   '@tanstack/query-devtools@5.101.4': {}
 
-  '@tanstack/react-query-devtools@5.101.4(@tanstack/react-query@5.101.4(react@19.2.4))(react@19.2.4)':
+  '@tanstack/react-query-devtools@5.101.4(@tanstack/react-query@5.101.4(react@19.2.8))(react@19.2.4)':
     dependencies:
       '@tanstack/query-devtools': 5.101.4
       '@tanstack/react-query': 5.101.4(react@19.2.4)

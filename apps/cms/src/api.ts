@@ -710,116 +710,6 @@ export const listDevices = (campaignId: string) => request<Device[]>(`/v1/campai
 export const getDevice = (id: string) => request<Device>(`/v1/devices/${id}`);
 
 /**
- * "Sinh viên dự kiến" — a campaign's expected-student roster (2026-09-09,
- * CCCD-scan capture-identification feature). See `apps/api`'s
- * `CampaignStudentRoster` entity for the full "why" — this is a distinct
- * table/screen from `StudentListItem`/`listStudents` above (that one is a
- * capture *log*, "who has already been photographed"; this is "who is
- * expected," checked at scan time against `citizenId`).
- */
-export interface CampaignStudentRosterRow {
-  id: string;
-  campaignId: string;
-  studentCode: string;
-  studentName: string;
-  citizenId: string;
-  className?: string | null;
-  major?: string | null;
-  academicYear?: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface RosterImportRowError {
-  line: number;
-  reason: string;
-}
-
-export interface RosterImportResult {
-  totalRows: number;
-  imported: number;
-  errors: RosterImportRowError[];
-}
-
-export interface ListCampaignStudentRosterParams {
-  q?: string;
-  page?: number;
-  limit?: number;
-}
-
-export function listCampaignStudentRoster(
-  campaignId: string,
-  params: ListCampaignStudentRosterParams = {}
-): Promise<Paginated<CampaignStudentRosterRow>> {
-  const search = new URLSearchParams();
-  if (params.q) search.set('q', params.q);
-  if (params.page) search.set('page', String(params.page));
-  if (params.limit) search.set('limit', String(params.limit));
-  const qs = search.toString();
-  return request<Paginated<CampaignStudentRosterRow>>(`/v1/campaigns/${campaignId}/roster${qs ? `?${qs}` : ''}`);
-}
-
-export interface UpdateCampaignStudentRosterRowInput {
-  studentCode?: string;
-  studentName?: string;
-  citizenId?: string;
-  className?: string;
-  major?: string;
-  academicYear?: string;
-}
-
-export const updateCampaignStudentRosterRow = (
-  campaignId: string,
-  rowId: string,
-  input: UpdateCampaignStudentRosterRowInput
-) =>
-  request<CampaignStudentRosterRow>(`/v1/campaigns/${campaignId}/roster/${rowId}`, {
-    method: 'PATCH',
-    body: JSON.stringify(input),
-  });
-
-export const deleteCampaignStudentRosterRow = (campaignId: string, rowId: string) =>
-  request<{ id: string }>(`/v1/campaigns/${campaignId}/roster/${rowId}`, { method: 'DELETE' });
-
-export const clearCampaignStudentRoster = (campaignId: string) =>
-  request<{ removed: number }>(`/v1/campaigns/${campaignId}/roster`, { method: 'DELETE' });
-
-/**
- * `POST /v1/campaigns/:id/roster/import` (multipart) — mirrors
- * `uploadReplacePhoto`'s reasoning for why this isn't the plain `request()`
- * helper: needs a `FormData` body, no `Content-Type` set manually (the
- * browser adds the multipart boundary), but still returns the normal
- * `{ data }` envelope.
- */
-export async function importCampaignStudentRoster(campaignId: string, file: File): Promise<RosterImportResult> {
-  const form = new FormData();
-  form.append('file', file);
-
-  const res = await fetch(`${baseUrl()}/v1/campaigns/${campaignId}/roster/import`, {
-    method: 'POST',
-    headers: { ...authHeaders() },
-    body: form,
-  });
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    let message = text.slice(0, 300) || res.statusText;
-    let code: number | undefined;
-    try {
-      const parsed = JSON.parse(text) as { message?: string; error?: string; errorCode?: number };
-      message = parsed.message || parsed.error || message;
-      code = parsed.errorCode;
-    } catch {
-      /* not JSON; the raw text is the best available */
-    }
-    throw new ApiError(message, res.status, code);
-  }
-
-  const envelope = (await res.json()) as { data: RosterImportResult };
-  return envelope.data;
-}
-
-/**
  * List capture sessions (Phase 11), filterable and paginated — mirrors
  * `ListSessionsQueryDto` server-side. Only params with a value are put on
  * the query string, so callers can pass a partly-filled filter object as-is.
@@ -1003,13 +893,17 @@ export interface ReviewSetListItem {
   updatedAt: string;
 }
 
+/** Mirrors `ReviewOriginalPhotoDao` (apps/api/src/modules/photo-review/dao/review-set.dao.ts) exactly — no `viewUrl` is embedded here, unlike `PhotoVariant`; callers must resolve one per photo via `issuePhotoViewLink`, same as `SessionDetailDrawer` does for `SessionPhoto`. */
 export interface ReviewOriginalPhoto {
   id: string;
+  stepId: string;
   stepType?: string;
   cameraRole?: string;
-  angleLabel?: string;
-  fallback?: boolean;
-  viewUrl?: string;
+  attempt: number;
+  mimeType: string;
+  fsFileId?: string;
+  fsStatus?: string;
+  capturedAt?: string;
 }
 
 export interface ReviewOriginalVideo {
@@ -1056,7 +950,7 @@ export interface ReviewSetDetail extends ReviewSetListItem {
   sourceSessionId?: string;
   sourceCapturedAt?: string;
   sourceDeviceName?: string;
-  originals: ReviewOriginalPhoto[];
+  originalPhotos: ReviewOriginalPhoto[];
   videos: ReviewOriginalVideo[];
   variants: PhotoVariant[];
   events: ReviewEvent[];

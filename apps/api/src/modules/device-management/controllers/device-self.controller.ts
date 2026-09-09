@@ -1,8 +1,9 @@
 import { ApiResponseDecorator } from '@app/common/decorators';
 import { CustomException, ERROR_CODE } from '@app/common/errors';
 import { toDao } from '@app/common/helpers';
-import { AddDevicePhotoDto } from '@app/modules/capture/dto';
+import { AddDevicePhotoDto, AddDeviceVideoDto } from '@app/modules/capture/dto';
 import { PhotoService } from '@app/modules/capture/services/photo.service';
+import { SessionVideoService } from '@app/modules/capture/services/session-video.service';
 import {
   Body,
   Controller,
@@ -37,6 +38,7 @@ export class DeviceSelfController {
     private readonly campaignService: CampaignService,
     private readonly deviceEventService: DeviceEventService,
     private readonly photoService: PhotoService,
+    private readonly sessionVideoService: SessionVideoService,
   ) {}
 
   /**
@@ -131,6 +133,41 @@ export class DeviceSelfController {
       );
     }
     return this.photoService.addDevicePhoto(
+      req.device!.id,
+      req.device!.campaignId,
+      dto,
+    );
+  }
+
+  /**
+   * A kiosk pushing one recorded video's actual bytes (2026-09-09, "route
+   * kiosk VIDEO uploads through apps/api the same way kiosk PHOTO uploads
+   * already work") — writes into the same `session_videos`/
+   * `video_upload_outbox` tables `SessionVideoService.addDeviceVideo`'s own
+   * doc comment describes, through the new `VideoUploadWorkerService` cron,
+   * so a kiosk-sourced video is durable and viewable from this API's own
+   * Postgres the instant it is captured, exactly like a photo already is.
+   *
+   * Same nullable-campaignId guard as `pushPhoto`/`getMyConfig`/`pushEvents`
+   * above — a self-enrolled device with no campaign of its own has nothing
+   * this write could attribute the video to.
+   */
+  @Post('videos')
+  @ApiOperation({
+    summary: "Push one recorded video's actual bytes for durable storage ahead of the file-service",
+  })
+  async pushVideo(
+    @Req() req: Request,
+    @Body() dto: AddDeviceVideoDto,
+  ): Promise<{ videoId: string }> {
+    if (!req.device!.campaignId) {
+      throw new CustomException(
+        'This device has no campaign (self-enrolled) — video upload requires a campaign',
+        ERROR_CODE.DEVICE_HAS_NO_CAMPAIGN,
+        HttpStatus.CONFLICT,
+      );
+    }
+    return this.sessionVideoService.addDeviceVideo(
       req.device!.id,
       req.device!.campaignId,
       dto,

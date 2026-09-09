@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { ChevronDown, ChevronUp, GripVertical, Trash2 } from 'lucide-react';
 import { ApiError, CameraRoleName, CaptureAnglePreset, listAnglePresets } from '../api';
-import { CAMERA_ROLE_LABELS } from '../captureAngles';
+import { CAMERA_ROLE_LABELS, DEFAULT_PHYSICAL_ANGLES } from '../captureAngles';
 import {
   CaptureAngleRow,
   fallbackRowsFromStepDefs,
@@ -68,6 +68,37 @@ export function CaptureAnglesTable({
     if (!row) return;
     const current = row.pose[axis] ?? { target: 0, tolerance: 10 };
     updateRow(key, { pose: { ...row.pose, [axis]: { ...current, [field]: value } } });
+  }
+
+  /**
+   * Picking a camera for this row also seeds its pose target to that
+   * camera's own physical mounting angle (2026-09-09 fix, "chụp đồng thời 3
+   * cam") — see `DEFAULT_PHYSICAL_ANGLES`'s own doc comment for why this
+   * exact value, not the subject-turn-style default `updateRow` would
+   * otherwise leave in place.
+   *
+   * Only ever touches an axis the row is already using, OR the new role's
+   * own primary axis (yaw for LEFT/RIGHT, pitch for UP/DOWN) when the row
+   * has nothing there yet — never the OTHER axis. Forcing a target onto an
+   * axis the row was deliberately leaving unconstrained (`pose.yaw`/`pitch`
+   * absent — matches *any* value, per `anglesMatch`) would make grouping
+   * MORE restrictive than intended, blocking a legitimate combined angle
+   * (e.g. an UP row meant to also share a round with a LEFT-camera row) —
+   * exactly the over-tightening the "đừng làm lỏng kiểm tra góc" instruction
+   * warned against, just from the opposite direction. A row that already
+   * has both axes set (a genuine combined CUSTOM angle) keeps both, each
+   * corrected to the new role's own value.
+   */
+  function handleCameraRoleChange(key: string, nextRole: CameraRoleName) {
+    const row = rows.find((r) => r.key === key);
+    if (!row) return;
+    const angle = DEFAULT_PHYSICAL_ANGLES[nextRole];
+    const nextPose = { ...row.pose };
+    const touchYaw = !!row.pose.yaw || nextRole === 'LEFT' || nextRole === 'RIGHT';
+    const touchPitch = !!row.pose.pitch || nextRole === 'UP' || nextRole === 'DOWN';
+    if (touchYaw) nextPose.yaw = { target: angle.yaw, tolerance: row.pose.yaw?.tolerance ?? 10 };
+    if (touchPitch) nextPose.pitch = { target: angle.pitch, tolerance: row.pose.pitch?.tolerance ?? 10 };
+    updateRow(key, { cameraRole: nextRole, pose: nextPose });
   }
 
   function removeRow(key: string) {
@@ -268,7 +299,7 @@ export function CaptureAnglesTable({
                 <td className="py-2 px-2">
                   <select
                     value={row.cameraRole}
-                    onChange={(e) => updateRow(row.key, { cameraRole: e.target.value as CameraRoleName })}
+                    onChange={(e) => handleCameraRoleChange(row.key, e.target.value as CameraRoleName)}
                     className="w-full bg-white border border-gray-300 rounded-lg px-2 py-1.5 text-gray-900"
                   >
                     {CAMERA_ROLES.map((role) => (

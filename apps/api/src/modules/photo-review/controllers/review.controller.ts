@@ -67,28 +67,40 @@ interface UploadedMulterFile {
 export class ReviewController {
   constructor(private readonly photoReviewService: PhotoReviewService) {}
 
+  /**
+   * The origin the calling browser actually used to reach THIS request —
+   * not a configured public URL — so a local-content link this request
+   * hands back (`PhotoReviewService.issueLocalVariantViewLink`, via
+   * `toVariantDao`/`resolveCurrentCardViewUrl`) resolves correctly however
+   * the CMS reached this API. Same helper/reasoning as
+   * `PhotoController.viewLink`'s own inline computation.
+   */
+  private apiBaseUrl(req: Request): string {
+    return `${req.protocol}://${req.get('host')}`;
+  }
+
   @Get('sets')
   @ApiOperation({ summary: 'List photo-review sets, filterable and paginated (plan §5.1)' })
-  listSets(@Query() query: ListSetsQueryDto): Promise<Pagination<ReviewSetListItemDao>> {
-    return this.photoReviewService.listSets(query);
+  listSets(@Query() query: ListSetsQueryDto, @Req() req: Request): Promise<Pagination<ReviewSetListItemDao>> {
+    return this.photoReviewService.listSets(query, this.apiBaseUrl(req));
   }
 
   @Get('sets/:id')
   @ApiOperation({ summary: 'Get one set — original photos, video, variants, recent events (plan §5.2)' })
-  getSetDetail(@Param('id') id: string): Promise<ReviewSetDetailDao> {
-    return this.photoReviewService.getSetDetail(id);
+  getSetDetail(@Param('id') id: string, @Req() req: Request): Promise<ReviewSetDetailDao> {
+    return this.photoReviewService.getSetDetail(id, this.apiBaseUrl(req));
   }
 
   @Post('sets/:id/reprocess')
   @ApiOperation({ summary: 'Regenerate the CARD_AUTO variant — allowed even while the set is locked (plan §4/R-Q1)' })
   reprocess(@Param('id') id: string, @Req() req: Request): Promise<PhotoVariantDao> {
-    return this.photoReviewService.reprocess(id, req.user?.id ?? null);
+    return this.photoReviewService.reprocess(id, req.user?.id ?? null, this.apiBaseUrl(req));
   }
 
   @Post('sets/:id/ai-edit')
   @ApiOperation({ summary: 'Request an AI edit — 422 if the prompt hits the forbidden-keyword filter (plan §5.3/§6.3)' })
   aiEdit(@Param('id') id: string, @Body() dto: AiEditDto, @Req() req: Request): Promise<PhotoVariantDao> {
-    return this.photoReviewService.aiEdit(id, dto, req.user?.id ?? null);
+    return this.photoReviewService.aiEdit(id, dto, req.user?.id ?? null, this.apiBaseUrl(req));
   }
 
   /**
@@ -98,20 +110,20 @@ export class ReviewController {
    */
   @Get('jobs/:id')
   @ApiOperation({ summary: 'Poll an AI-edit/reprocess job — :id is a photo_variants.id, see service doc comment' })
-  getJob(@Param('id') id: string): Promise<PhotoVariantDao> {
-    return this.photoReviewService.getJob(id);
+  getJob(@Param('id') id: string, @Req() req: Request): Promise<PhotoVariantDao> {
+    return this.photoReviewService.getJob(id, this.apiBaseUrl(req));
   }
 
   @Post('variants/:id/accept')
   @ApiOperation({ summary: 'Accept a READY CARD_AI/CARD_UPLOAD variant as the current card photo' })
   acceptVariant(@Param('id') id: string, @Req() req: Request): Promise<PhotoVariantDao> {
-    return this.photoReviewService.acceptVariant(id, req.user?.id ?? null);
+    return this.photoReviewService.acceptVariant(id, req.user?.id ?? null, this.apiBaseUrl(req));
   }
 
   @Post('variants/:id/discard')
   @ApiOperation({ summary: 'Discard a variant (never allowed on the current variant)' })
   discardVariant(@Param('id') id: string, @Req() req: Request): Promise<PhotoVariantDao> {
-    return this.photoReviewService.discardVariant(id, req.user?.id ?? null);
+    return this.photoReviewService.discardVariant(id, req.user?.id ?? null, this.apiBaseUrl(req));
   }
 
   @Post('sets/:id/upload')
@@ -126,25 +138,25 @@ export class ReviewController {
     @UploadedFile() file: UploadedMulterFile,
     @Req() req: Request,
   ): Promise<UploadVariantResultDao> {
-    return this.photoReviewService.uploadVariant(id, file, req.user?.id ?? null);
+    return this.photoReviewService.uploadVariant(id, file, req.user?.id ?? null, this.apiBaseUrl(req));
   }
 
   @Post('sets/:id/current')
   @ApiOperation({ summary: 'Switch which variant is the current card photo' })
   setCurrent(@Param('id') id: string, @Body() dto: SetCurrentDto, @Req() req: Request): Promise<ReviewSetListItemDao> {
-    return this.photoReviewService.setCurrent(id, dto.variantId, req.user?.id ?? null);
+    return this.photoReviewService.setCurrent(id, dto.variantId, req.user?.id ?? null, this.apiBaseUrl(req));
   }
 
   @Post('sets/:id/approve')
   @ApiOperation({ summary: 'Approve a set (plan §5.5)' })
   approve(@Param('id') id: string, @Body() dto: ApproveRejectDto, @Req() req: Request): Promise<ReviewSetListItemDao> {
-    return this.photoReviewService.approve(id, dto, req.user?.id ?? null);
+    return this.photoReviewService.approve(id, dto, req.user?.id ?? null, this.apiBaseUrl(req));
   }
 
   @Post('sets/:id/reject')
   @ApiOperation({ summary: 'Reject a set, with a note (plan §5.5)' })
   reject(@Param('id') id: string, @Body() dto: ApproveRejectDto, @Req() req: Request): Promise<ReviewSetListItemDao> {
-    return this.photoReviewService.reject(id, dto, req.user?.id ?? null);
+    return this.photoReviewService.reject(id, dto, req.user?.id ?? null, this.apiBaseUrl(req));
   }
 
   @Get('sets/:id/events')

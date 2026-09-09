@@ -1,13 +1,16 @@
 import { useEffect, useState, type FormEvent } from 'react';
+import { Link } from 'react-router-dom';
 import {
   ApiError,
   CardSpec,
   CaptureConfiguration,
   CreateCaptureConfigurationInput,
+  PhotoKind,
   UpdateCaptureConfigurationInput,
   createCaptureConfiguration,
   deleteCaptureConfiguration,
   listCaptureConfigurations,
+  listPhotoKinds,
   updateCaptureConfiguration,
 } from '../api';
 import { CaptureAngleRow, captureStepToRow, fallbackRowsFromStepDefs, rowToCaptureStep } from '../captureAngleSteps';
@@ -15,17 +18,26 @@ import { CaptureAnglesTable, MIN_ROWS } from './CaptureAnglesTable';
 import { CardSpecFields, DEFAULT_CARD_SPEC } from './CardSpecFields';
 
 /**
- * "Mẫu cấu hình chụp" — item 10 of the 2026-09-09 task brief: management
- * page for reusable capture templates (angle table + optional card spec) an
- * admin can save once and reuse across campaigns. Distinct from the
- * existing "Cấu hình" nav item (`/config`, `PhotoKindsPage` — `photo_kinds`
- * standards per photo TYPE, unrelated to this) and from "Góc chụp"
- * (`/angle-presets`, `AnglePresetsPage` — the individual-angle catalog a
- * configuration's own rows are built FROM, one level down). A campaign
- * picks one of these from `CampaignForm.tsx`'s "Chọn từ cấu hình có sẵn",
- * which copies its `captureAngles`/`cardSpec` values in once — see
- * `CaptureConfiguration`'s own doc comment (apps/api) for why this is a
- * one-time-copy template, never a live link back to this table.
+ * "Mẫu chụp" (nav label) / "Mẫu cấu hình chụp" (page title) — item 10 of the
+ * 2026-09-09 task brief: management page for reusable capture templates
+ * (angle table + optional card spec) an admin can save once and reuse
+ * across campaigns. Distinct from the existing "Cấu hình" nav item
+ * (`/config`, `PhotoKindsPage` — `photo_kinds` standards per photo TYPE,
+ * shared across campaigns rather than tied to one capture template) and
+ * from "Góc chụp" (`/angle-presets`, `AnglePresetsPage` — the
+ * individual-angle catalog a configuration's own rows are built FROM, one
+ * level down). A campaign picks one of these from `CampaignForm.tsx`'s
+ * "Chọn từ cấu hình có sẵn", which copies its `captureAngles`/`cardSpec`
+ * values in once — see `CaptureConfiguration`'s own doc comment (apps/api)
+ * for why this is a one-time-copy template, never a live link back to this
+ * table.
+ *
+ * 2026-09-09 (product feedback, item 1/2 of that day's bug report): this
+ * form's own card-spec section can now ALSO pull a saved `PhotoKind` (from
+ * "Cấu hình") in as a starting point via `applyPhotoKind` below, instead of
+ * only ever hand-typing `CardSpecFields`. Same one-time-copy convention as
+ * `CampaignForm.tsx`'s picker — picking a kind here never creates a live
+ * link to `photo_kinds`; there's no `photoKindId` column, by design.
  */
 export function CaptureConfigurationsPage() {
   const [configs, setConfigs] = useState<CaptureConfiguration[] | null>(null);
@@ -74,8 +86,9 @@ export function CaptureConfigurationsPage() {
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Mẫu cấu hình chụp</h1>
           <p className="text-sm text-gray-500 mt-0.5">
-            Bảng góc chụp + chuẩn ảnh thẻ có thể tái sử dụng — campaign chọn một mẫu ở đây để điền sẵn thay vì nhập lại
-            từ đầu.
+            Mẫu góc chụp + chuẩn ảnh thẻ mà một campaign chọn dùng — campaign chọn một mẫu ở đây để điền sẵn thay vì
+            nhập lại từ đầu. Khác với trang "Cấu hình" (chuẩn ảnh dùng chung nhiều campaign, theo từng loại ảnh): khi
+            tạo/sửa mẫu ở đây, bạn có thể lấy chuẩn ảnh thẻ từ một "Cấu hình" đã lưu để không phải nhập tay lại.
           </p>
         </div>
         <button
@@ -93,7 +106,9 @@ export function CaptureConfigurationsPage() {
 
       {configs === null && !error && <p className="text-gray-500">Đang tải...</p>}
 
-      {configs && configs.length === 0 && <p className="text-gray-500">Chưa có mẫu cấu hình nào.</p>}
+      {configs && configs.length === 0 && (
+        <p className="text-gray-500">Chưa có mẫu cấu hình nào — bấm "+ Thêm mẫu" để tạo mẫu góc chụp + chuẩn ảnh thẻ đầu tiên.</p>
+      )}
 
       {configs && configs.length > 0 && (
         <table className="w-full text-sm border-collapse bg-white rounded-xl border border-gray-200 overflow-hidden">
@@ -172,6 +187,32 @@ function CaptureConfigurationForm({
   const [cardSpec, setCardSpec] = useState<CardSpec>(() => ({ ...DEFAULT_CARD_SPEC, ...(config?.cardSpec ?? {}) }));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // "Cấu hình đã lưu" (photo_kinds) picker — item 1/2 of the 2026-09-09 bug
+  // report: an operator who already defined a photo-type standard in "Cấu
+  // hình" had no way to reuse it here, only ever hand-typing `CardSpecFields`
+  // from scratch. Same one-time-copy convention as `CampaignForm.tsx`'s own
+  // `applyCaptureConfiguration` picker (see that function's doc comment) —
+  // picking a kind here copies its `cardSpec` into the fields below, which
+  // stay fully editable afterwards and save as this configuration's own
+  // independent copy. No `photoKindId` link is stored anywhere.
+  const [photoKinds, setPhotoKinds] = useState<PhotoKind[] | null>(null);
+  const [selectedPhotoKindId, setSelectedPhotoKindId] = useState('');
+
+  useEffect(() => {
+    listPhotoKinds()
+      .then(setPhotoKinds)
+      .catch(() => setPhotoKinds([])); // non-critical — the picker just shows empty rather than blocking the form
+  }, []);
+
+  function applyPhotoKind(kindId: string) {
+    setSelectedPhotoKindId(kindId);
+    const kind = photoKinds?.find((k) => k.id === kindId);
+    if (!kind) return;
+    setCardSpec((prev) => ({ ...prev, ...kind.cardSpec }));
+  }
+
+  const activePhotoKinds = photoKinds?.filter((k) => k.active) ?? [];
 
   const tooFewRows = rows.length < MIN_ROWS;
   const cardSourceCount = rows.filter((r) => r.isCardSource).length;
@@ -260,6 +301,37 @@ function CaptureConfigurationForm({
           </label>
           {includeCardSpec && (
             <div className="pt-1 space-y-3">
+              <div>
+                <label className="block text-sm text-gray-700 font-medium mb-1">Chọn từ Cấu hình đã lưu (tuỳ chọn)</label>
+                <div className="flex items-center gap-3 flex-wrap">
+                  <select
+                    value={selectedPhotoKindId}
+                    onChange={(e) => applyPhotoKind(e.target.value)}
+                    className="flex-1 min-w-[12rem] bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
+                  >
+                    <option value="">— Nhập tay bên dưới —</option>
+                    {activePhotoKinds.map((k) => (
+                      <option key={k.id} value={k.id}>
+                        {k.labelVi} ({k.cardSpec.size ?? '?'} · {k.cardSpec.dpi ?? '?'}dpi)
+                      </option>
+                    ))}
+                  </select>
+                  <Link to="/config" className="text-xs text-blue-700 hover:text-blue-900 underline shrink-0">
+                    Quản lý Cấu hình →
+                  </Link>
+                </div>
+                <p className="text-xs text-gray-500 mt-1">
+                  Chọn một "Cấu hình" (chuẩn ảnh dùng chung nhiều campaign) sẽ THAY THẾ toàn bộ chuẩn ảnh thẻ bên dưới
+                  bằng chuẩn đã lưu — các ô vẫn chỉnh sửa được sau khi chọn, và bản chỉnh sửa chỉ lưu riêng cho mẫu
+                  này, không ảnh hưởng ngược lại "Cấu hình" gốc.
+                </p>
+                {isEdit && !selectedPhotoKindId && (
+                  <p className="text-xs text-amber-700 mt-1">
+                    Đang dùng chuẩn ảnh đã lưu riêng của mẫu này — chọn một Cấu hình ở trên nếu muốn thay thế bằng
+                    chuẩn dùng chung.
+                  </p>
+                )}
+              </div>
               <CardSpecFields cardSpec={cardSpec} onChange={setCardSpec} />
             </div>
           )}

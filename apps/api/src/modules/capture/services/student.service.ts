@@ -56,9 +56,18 @@ export class StudentService {
       conditions.push(`s.campaign_id = $${params.length}`);
     }
     if (query.q) {
+      // Also matches `identityNumber`/`className` inside `sessions.metadata`
+      // (2026-09-09, CCCD-scan capture-identification feature — "sau có thể
+      // lên cms tìm theo cccd, tên lớp"). Those two have no dedicated
+      // column anywhere (see `StudentSubjectInfo`'s own doc comment in
+      // `packages/ui`), so they only exist as free-form jsonb; `->>'...'`
+      // reads a jsonb text value straight out for `ILIKE`, same as any
+      // other text column, and is `NULL` (never matches) for a session with
+      // no metadata at all or an older session captured before this field
+      // existed.
       params.push(`%${query.q}%`);
       conditions.push(
-        `(s.subject_code ILIKE $${params.length} OR s.subject_name ILIKE $${params.length})`,
+        `(s.subject_code ILIKE $${params.length} OR s.subject_name ILIKE $${params.length} OR s.metadata ->> 'identityNumber' ILIKE $${params.length} OR s.metadata ->> 'className' ILIKE $${params.length})`,
       );
     }
     const where = `WHERE ${conditions.join(' AND ')}`;

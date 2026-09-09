@@ -215,8 +215,13 @@ export const FS_SERVER_CODES = {
   SESSION_EXPIRED: 'SESSION_EXPIRED',
   QUOTA_EXCEEDED: 'QUOTA_EXCEEDED',
   FILE_QUARANTINED: 'FILE_QUARANTINED',
+  // 423 — file accepted but still being virus-scanned; retry the read later.
+  SCAN_PENDING: 'SCAN_PENDING',
   PRECONDITION_REQUIRED: 'PRECONDITION_REQUIRED',
   RATE_LIMITED: 'RATE_LIMITED',
+  // 429 — too many concurrent operations rather than too many per unit time;
+  // the integration guide lists both under the same HTTP status.
+  TOO_MANY_CONCURRENT: 'TOO_MANY_CONCURRENT',
   CHUNK_CHECKSUM_MISMATCH: 'CHUNK_CHECKSUM_MISMATCH',
   INSUFFICIENT_STORAGE: 'INSUFFICIENT_STORAGE',
 } as const;

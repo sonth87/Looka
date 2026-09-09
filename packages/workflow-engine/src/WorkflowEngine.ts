@@ -293,7 +293,17 @@ export class WorkflowEngine implements IWorkflowEngine {
     faceState?: FaceState | null,
     trigger?: CaptureTriggerInfo
   ): Promise<boolean> {
-    if (this.isCapturing || !this.activeWorkflow || !this._currentSession) return false;
+    // `status !== 'RUNNING'` (2026-09-09 field bug) — mirrors `processFrame`'s
+    // own guard just above, which this method never had: the shutter button
+    // and the gesture loop both call this directly, bypassing `processFrame`
+    // entirely, so between one student's completed session and the next
+    // one's `startSession()` (the whole CCCD-scan-waiting window) `_currentSession`
+    // is still the PREVIOUS student's, non-null but `COMPLETED` — a manual
+    // shutter press or gesture during that window used to still pass the
+    // `!this._currentSession` check below and record a real capture against
+    // that already-finished session.
+    if (this.isCapturing || !this.activeWorkflow || !this._currentSession || this._currentSession.status !== 'RUNNING')
+      return false;
     // Defence in depth: the real gate is FaceCaptureApp's shutter/gesture
     // handlers routing to recordExternalCapture instead of calling this in
     // the first place (see `externalCaptureOnly`'s own doc comment) — this

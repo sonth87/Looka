@@ -13,7 +13,12 @@ import {
   sha256Hex,
 } from '@face/fs-client';
 import type { FsFileInfo, UploadInput, UploadResult } from '@face/fs-client';
-import { UploadOutboxRepository, CaptureStreamRepository, CapturedStudentRepository, nextRetryDelayMs } from '@face/database';
+import {
+  UploadOutboxRepository,
+  CaptureStreamRepository,
+  CapturedStudentRepository,
+  nextRetryDelayMs,
+} from '@face/database';
 import type { OutboxItem, OutboxStatus, CaptureStreamItem } from '@face/database';
 import { getDatabase } from './db.js';
 import { recordStatsEvent } from './statsEvents.js';
@@ -21,17 +26,19 @@ import { DeviceApiClient } from './deviceApi.js';
 
 /**
  * Recovers `(sessionId, stepId, attempt)` from an idem_key of the shape
- * `<sessionId>:<stepId>:<attempt>:<kind>` — `queueCapture()` below is the
- * only writer of this shape, and `@face/database`'s own
- * `UploadOutboxRepository` already relies on the identical parse (see its
- * `stepIdFromIdemKey`/`attemptFromIdemKey`, whose own doc comment explains
- * why none of the other parts can contain the ':' this splits on). Used by
- * `ApiPhotoUploadClient` below, which only ever sees the `UploadInput` the
- * generic `UploadWorker` builds — not the full outbox row — so this is the
- * one place it can recover the identity fields `POST /v1/devices/photos`
- * needs.
+ * `<sessionId>:<stepId>:<attempt>:<kind>` — both `queueCapture()` (photo) and
+ * `enqueueSessionVideos()` (video) below write this exact shape, and
+ * `@face/database`'s own `UploadOutboxRepository` already relies on the
+ * identical parse (see its `stepIdFromIdemKey`/`attemptFromIdemKey`, whose
+ * own doc comment explains why none of the other parts can contain the ':'
+ * this splits on). Used by `ApiPhotoUploadClient` below, which only ever
+ * sees the `UploadInput` the generic `UploadWorker` builds — not the full
+ * outbox row — so this is the one place it can recover the identity fields
+ * `POST /v1/devices/photos`/`POST /v1/devices/videos` need. For a video job,
+ * `stepId` here is the recording's own `capture_streams.id` (see
+ * `enqueueSessionVideos()`'s own doc comment), not a camera/role name.
  */
-function parsePhotoIdemKey(
+function parseCaptureIdemKey(
   idemKey: string
 ): { sessionId: string; stepId: string; attempt: number } | null {
   const parts = idemKey.split(':');
@@ -47,14 +54,28 @@ function parsePhotoIdemKey(
 const LOCAL_FILE_ID_PREFIX = 'local:';
 
 /**
- * Drop-in `FsClient` substitute for `UploadWorker` (Part A of the "route
- * kiosk photo uploads through apps/api" work) — routes anything that is NOT
- * a video capture to apps/api's own `POST /v1/devices/photos` instead of
- * fs-core directly, so a kiosk-captured photo is durable and viewable from
- * apps/api's own Postgres the instant it is captured, matching the web
- * path's `PhotoService.addPhoto` guarantee. Video is deliberately untouched
- * — this task is scoped to "kiosk PHOTO uploads" — and keeps going straight
- * to fs-core via the ordinary inherited `FsClient` behaviour.
+ * Drop-in `FsClient` substitute for `UploadWorker` — routes EVERY capture,
+ * photo or video, to apps/api's own `POST /v1/devices/photos`/
+ * `POST /v1/devices/videos` instead of fs-core directly, so a kiosk capture
+ * is durable and viewable from apps/api's own Postgres the instant it is
+ * captured, matching the web path's `PhotoService.addPhoto` guarantee.
+ *
+ * Video was deliberately left going straight to fs-core when this class was
+ * first written ("Part A" of this work, scoped to photos only) — that is
+ * what this 2026-09-09 change closes. It was the reason a kiosk-recorded
+ * video could never be viewed from the CMS at all: each kiosk self-
+ * provisions its OWN fs-core tenant key at boot
+ * (`apps/desktop/src/main/secrets.ts`), apps/api never saw that key, and
+ * fs-core's `/api/v1/self-service/provision` only ever hands one back the
+ * FIRST time a tenant is created — so apps/api's own later attempt to
+ * provision a view-link client for that same per-device tenant always got
+ * `created: false` with no key, permanently. Routing video through this
+ * class the same way a photo already does sidesteps that entirely: apps/api
+ * uploads every capture through its own single default-tenant client, no
+ * per-device tenant ever enters the picture, and a local Postgres copy
+ * survives even if fs-core's own scan pipeline later purges the remote one
+ * (live-confirmed behaviour of the real fs-core deployment this app talks
+ * to).
  *
  * `UploadWorker` only ever calls `uploadRaw`/`upload`/`getFile`
  * (packages/fs-client/src/UploadWorker.ts) — `deleteFile`/`cancelUpload`
@@ -62,7 +83,7 @@ const LOCAL_FILE_ID_PREFIX = 'local:';
  * swallowed-on-error, so they are left un-overridden; a `local:`-prefixed
  * id landing there is a harmless no-op-ish failure, not a correctness
  * issue (see this class's own note in the codebase's task notes for the
- * one narrow, pre-existing edge case this does NOT close: a photo
+ * one narrow, pre-existing edge case this does NOT close: a capture
  * superseded — "chụp lại sau khi đã lưu" — after apps/api's own upload
  * worker has already pushed it to fs-core has no client-side
  * `deleteFile()` call left to clean up the orphaned fs-core copy; a
@@ -79,7 +100,16 @@ const LOCAL_FILE_ID_PREFIX = 'local:';
 class ApiPhotoUploadClient extends FsClient {
   constructor(
     fsConfig: { baseUrl: string; apiKey: string },
-    private readonly deviceClient: DeviceApiClient
+    private readonly deviceClient: DeviceApiClient,
+    /**
+     * Read-only lookup for the video branch below (`stream.cameraId`/
+     * `stream.durationMs`, reported to apps/api as `cameraRole`/
+     * `durationMs` — `session_videos` has no other way to learn either,
+     * since `UploadInput` itself carries neither). Optional only so a test
+     * constructing this class for the photo path alone need not supply one;
+     * every real call site (`startUploads()` below) always does.
+     */
+    private readonly streamRepo?: CaptureStreamRepository
   ) {
     super(fsConfig);
   }
@@ -93,35 +123,67 @@ class ApiPhotoUploadClient extends FsClient {
   }
 
   private async routeUpload(input: UploadInput): Promise<UploadResult> {
-    if (input.virtualPath.startsWith('video/')) {
-      // Untouched — straight to fs-core, exactly as before this change.
-      return super.upload(input);
-    }
+    const isVideo = input.virtualPath.startsWith('video/');
 
-    const parsed = parsePhotoIdemKey(input.idempotencyKey);
+    const parsed = parseCaptureIdemKey(input.idempotencyKey);
     if (!parsed) {
       throw new FsError(
         0,
         FS_ERROR_CODES.HTTP,
-        `Cannot route photo upload: idempotencyKey "${input.idempotencyKey}" is not in the expected sessionId:stepId:attempt:kind shape`
+        `Cannot route ${isVideo ? 'video' : 'photo'} upload: idempotencyKey "${input.idempotencyKey}" is not in the expected sessionId:stepId:attempt:kind shape`
       );
     }
 
-    // Deterministic from idemKey — the exact same id queueCapture() already
-    // derived for this job (`deterministicUuid(idemKey)`), and the same id
-    // SESSION_REPORT/PHOTO_STATUS report this photo under - see
+    // Deterministic from idemKey — the exact same id queueCapture()/
+    // enqueueSessionVideos() already derived for this job
+    // (`deterministicUuid(idemKey)`), and for a photo the same id
+    // SESSION_REPORT/PHOTO_STATUS report it under - see
     // PhotoService.addDevicePhoto's own doc comment for why keeping one id
-    // across the whole lifecycle matters.
-    const photoId = deterministicUuid(input.idempotencyKey);
+    // across the whole lifecycle matters. For video this is
+    // `AddDeviceVideoDto.videoId` server-side.
+    const captureId = deterministicUuid(input.idempotencyKey);
     const dataUrl = `data:${input.mimeType};base64,${Buffer.from(input.data).toString('base64')}`;
 
-    await this.deviceClient.pushDevicePhoto({
-      photoId,
-      sessionId: parsed.sessionId,
-      stepId: parsed.stepId,
-      attempt: parsed.attempt,
-      dataUrl,
-    });
+    if (isVideo) {
+      // `parsed.stepId` is the recording's own `capture_streams.id` (see
+      // parseCaptureIdemKey's own doc comment) - looked up here, not carried
+      // through UploadInput, since nothing else needs it and CaptureStreamRepository
+      // is already a cheap local SQLite read.
+      const stream = this.streamRepo?.getById(parsed.stepId);
+      await this.deviceClient.pushDeviceVideo({
+        videoId: captureId,
+        sessionId: parsed.sessionId,
+        cameraRole: stream?.cameraId,
+        durationMs: stream?.durationMs,
+        dataUrl,
+        // 2026-09-09 ("đưa vào cùng folder với ảnh của sinh viên đó, để dễ
+        // quản lý") — same transport-only reasoning as the photo branch's
+        // own `identityNumber` above; `SessionVideoService.addDeviceVideo`
+        // uses it to place this video under the exact same
+        // `students/<CCCD>/` folder its photos already live in.
+        identityNumber: input.metadata?.identityNumber,
+      });
+    } else {
+      await this.deviceClient.pushDevicePhoto({
+        photoId: captureId,
+        sessionId: parsed.sessionId,
+        stepId: parsed.stepId,
+        attempt: parsed.attempt,
+        dataUrl,
+        // 2026-09-09 ("lưu sang file server sẽ lấy căn cước để lưu ảnh, dễ
+        // truy xuất") — carried purely as a desktop→apps/api transport value
+        // here, NOT as fs-core `X-Metadata` (this call goes to apps/api's own
+        // POST /v1/devices/photos, never to fs-core directly — see this
+        // class's own doc comment on why capture uploads are routed this
+        // way); `PhotoService.addDevicePhoto` uses it to build the
+        // file-service virtual path this photo eventually lands under.
+        // `input.metadata` is otherwise reserved for real fs-core metadata
+        // (see `UploadInput.metadata`'s own "must not carry personal data"
+        // doc comment) — safe here specifically because it never reaches
+        // that call.
+        identityNumber: input.metadata?.identityNumber,
+      });
+    }
 
     // apps/api accepting this POST is the durability guarantee this whole
     // change exists for - bytes are safely in its own Postgres even before
@@ -129,7 +191,7 @@ class ApiPhotoUploadClient extends FsClient {
     // `getFile()` below can recognise it, statelessly, even after a process
     // restart - see LOCAL_FILE_ID_PREFIX's own comment.
     return {
-      fileId: `${LOCAL_FILE_ID_PREFIX}${photoId}`,
+      fileId: `${LOCAL_FILE_ID_PREFIX}${captureId}`,
       virtualPath: input.virtualPath,
       status: 'READY',
       size: input.data.byteLength,
@@ -200,69 +262,58 @@ export function startUploads(config: UploadsConfig | null): boolean {
   if (!config?.baseUrl || !config.apiKey) return false;
 
   outbox = new UploadOutboxRepository(getDatabase());
-  // Read-only lookup for emitVideoStatus() below — item.stepId is a
-  // capture_streams.id (see enqueueSessionVideos()'s own doc comment), so
-  // this is how cameraRole/durationMs get into the VIDEO_STATUS event
-  // without duplicating them into the outbox row's own metadata (which is
-  // sent to the file-service verbatim — see EnqueueInput.metadata's doc
-  // comment — and these two fields have no business being there).
+  // Read-only lookup the ApiPhotoUploadClient video branch uses to fill in
+  // `cameraRole`/`durationMs` on a `POST /v1/devices/videos` call (item's own
+  // `stepId` is a capture_streams.id — see enqueueSessionVideos()'s own doc
+  // comment) — and, below, by deleteLocalVideo's disk cleanup. Until
+  // 2026-09-09 this only ever fed the now-removed emitVideoStatus(); see this
+  // function's own updated comments for why VIDEO_STATUS reporting from here
+  // is retired.
   const streamsForStatus = new CaptureStreamRepository(getDatabase());
-  // Part A ("route kiosk photo uploads through apps/api"): anything that
-  // isn't a video now goes to apps/api's own POST /v1/devices/photos
-  // instead of fs-core directly — see ApiPhotoUploadClient's own doc
-  // comment for the routing rule and why video is unaffected.
+  // 2026-09-09 ("route kiosk VIDEO uploads through apps/api the same way
+  // kiosk PHOTO uploads already work"): EVERY capture, photo or video, now
+  // goes to apps/api's own POST /v1/devices/photos or POST /v1/devices/videos
+  // instead of fs-core directly — see ApiPhotoUploadClient's own doc comment
+  // for the full routing rule and why video was the one thing left out of
+  // the original "Part A" pass.
   client = new ApiPhotoUploadClient(
     { baseUrl: config.baseUrl, apiKey: config.apiKey },
-    new DeviceApiClient()
+    new DeviceApiClient(),
+    streamsForStatus
   );
 
-  // PHOTO_STATUS is no longer emitted from here (see the 'uploaded'/'ready'/
-  // 'failed'/'quarantined' branches below) — now that a photo's bytes go
-  // straight into apps/api's own Postgres via ApiPhotoUploadClient, its
-  // `fs_file_id`/`fs_status` are tracked authoritatively by apps/api's own
-  // UploadWorkerService (the same cron that already drains the web path's
-  // outbox) the instant it uploads to fs-core itself — a kiosk-reported
-  // PHOTO_STATUS would at best be redundant with that and at worst carry
-  // this class's own placeholder `local:`-prefixed fileId, which must never
-  // reach `photos.fs_file_id` (see PhotoService.resolveViewSource, which
-  // treats any non-null fs_file_id as a real fs-core file to link to).
-  // VIDEO_STATUS (below) is untouched: video still uploads straight to
-  // fs-core, so the kiosk is still the only place that observes its real
-  // fs_file_id/fs_status.
+  // Neither PHOTO_STATUS nor VIDEO_STATUS is emitted from here anymore (see
+  // the 'uploaded'/'ready'/'failed'/'quarantined' branches below) — now that
+  // EVERY capture's bytes go straight into apps/api's own Postgres via
+  // ApiPhotoUploadClient, its `fs_file_id`/`fs_status` (on `photos` or
+  // `session_videos`) are tracked authoritatively by apps/api's own
+  // UploadWorkerService/VideoUploadWorkerService (the same crons that drain
+  // the web path's own outbox) the instant either uploads to fs-core itself.
+  // A kiosk-reported *_STATUS event here would at best be redundant with
+  // that and at worst carry this class's own placeholder `local:`-prefixed
+  // fileId, which must never reach `photos.fs_file_id`/
+  // `session_videos.fs_file_id` (see PhotoService.resolveViewSource /
+  // SessionVideoService.resolveViewSource, which treat any non-null
+  // fs_file_id as a real fs-core file to link to) — `CaptureReportService
+  // .applyVideoStatus`'s own UPDATE is not even COALESCE-guarded on
+  // fs_status the way fs_file_id is, so a stray VIDEO_STATUS carrying this
+  // class's placeholder would actively regress a status the server-side
+  // worker already advanced correctly. `applyVideoStatus`/`VIDEO_STATUS`
+  // itself is left in place server-side, same as `applyPhotoStatus` was for
+  // photos — an already-deployed older kiosk build may still send it.
 
-  // Mirrors the old emitPhotoStatus() on its own DeviceEventType
-  // (VIDEO_STATUS) so
-  // the API/CMS side can tell video rows from photo rows without inspecting
-  // metadata shape — see CaptureReportService.applyVideoStatus(). stepId
-  // here is capture_streams.id (see enqueueSessionVideos() below): video has
-  // no retake concept, so "the recording" and "the step" are the same thing.
-  const emitVideoStatus = (jobId: string, error: string | null = null) => {
-    const item = outbox?.getById(jobId);
-    if (!item) return;
-    const stream = item.stepId ? streamsForStatus.getById(item.stepId) : null;
-    recordStatsEvent('VIDEO_STATUS', {
-      sessionId: item.sessionId,
-      videoId: item.id,
-      at: new Date().toISOString(),
-      localStatus: item.status,
-      fsFileId: item.fsFileId,
-      fsStatus: item.fsStatus,
-      error: error ?? item.lastError,
-      mimeType: item.mimeType,
-      sizeBytes: item.sizeBytes,
-      sha256: item.sha256,
-      virtualPath: item.virtualPath,
-      cameraRole: stream?.cameraId ?? null,
-      durationMs: stream?.durationMs ?? null,
-    });
-  };
-
-  // Video-only (plan §3): once the server confirms the file is scanned and
-  // READY, the local copy has served its purpose (recover-on-crash before
+  // Video-only (plan §3): once apps/api's own Postgres durably has the
+  // bytes, the local copy has served its purpose (recover-on-crash before
   // that point). Best-effort — a failed unlink is logged, never thrown; a
-  // leftover video file is a disk-space nag, not a correctness problem, and
-  // must not stop the VIDEO_STATUS report from going out. Photos are never
-  // auto-deleted this way; that behaviour is unchanged.
+  // leftover video file is a disk-space nag, not a correctness problem.
+  // Photos are never auto-deleted this way; that behaviour is unchanged.
+  // Firing on the SAME 'ready' event that used to mean "fs-core confirmed
+  // the scan" now means "apps/api's own Postgres accepted the bytes" (see
+  // ApiPhotoUploadClient.getFile's `local:`-prefixed short-circuit) — a
+  // strictly EARLIER, and still safe, moment: apps/api's local-first copy is
+  // the new durability guarantee, so the kiosk's own copy is no longer
+  // needed once that lands, regardless of what fs-core's own scan pipeline
+  // does to the remote copy afterwards.
   const deleteLocalVideo = (jobId: string) => {
     const item = outbox?.getById(jobId);
     if (!item) return;
@@ -287,41 +338,34 @@ export function startUploads(config: UploadsConfig | null): boolean {
       // 'recovered' carries no jobId — nothing below applies to it.
       if (event.type === 'recovered') return;
 
-      // VIDEO_STATUS only — see the comment above emitVideoStatus's
-      // definition for why a photo job no longer reports its own status
-      // from here at all (Part A: apps/api's own UploadWorkerService is now
-      // the authoritative observer of a photo's fs_file_id/fs_status).
+      // Video-only disk cleanup below — see deleteLocalVideo's own doc
+      // comment for why this is video-only and safe to trigger this early.
       const isVideo = outbox?.getById(event.jobId)?.kind === 'video';
 
       // Stats events (§3.4) only on a *final* outcome, not every transient
       // retry attempt: 'uploaded' is bytes actually accepted by the upload
-      // target (fs-core for video, apps/api for a photo — see
+      // target (apps/api, for both photo and video now — see
       // ApiPhotoUploadClient); 'quarantined'/'failed' are permanent
       // rejections (D6 in phase-11's plan — 'failed' used to be silent
       // here, undercounting real upload failures such as a quota or a 4xx
       // that is never retried). 'retry' is operational noise the retry loop
       // already handles on its own and would wildly over-count if treated
       // as a stats-facing signal. UPLOAD_SUCCESS/UPLOAD_FAILED counters
-      // still fire for both photo and video jobs — unlike PHOTO_STATUS,
-      // these carry no fs-core-specific identifier, so they stay accurate
-      // regardless of which target actually received the bytes.
+      // still fire for both photo and video jobs — unlike PHOTO_STATUS/
+      // VIDEO_STATUS, these carry no fs-core-specific identifier, so they
+      // stay accurate regardless of which target actually received the
+      // bytes.
       if (event.type === 'uploaded') {
         recordStatsEvent('UPLOAD_SUCCESS', { jobId: event.jobId });
-        if (isVideo) emitVideoStatus(event.jobId);
       }
       if (event.type === 'ready') {
-        if (isVideo) {
-          emitVideoStatus(event.jobId);
-          deleteLocalVideo(event.jobId);
-        }
+        if (isVideo) deleteLocalVideo(event.jobId);
       }
       if (event.type === 'failed') {
         recordStatsEvent('UPLOAD_FAILED', { jobId: event.jobId });
-        if (isVideo) emitVideoStatus(event.jobId, event.error);
       }
       if (event.type === 'quarantined') {
         recordStatsEvent('UPLOAD_FAILED', { jobId: event.jobId });
-        if (isVideo) emitVideoStatus(event.jobId);
       }
     },
   });
@@ -708,7 +752,9 @@ export async function approveSessionUpload(
   }
 
   const videoSessionId = options?.videoSessionId ?? sessionId;
-  const enqueuedStreams = await enqueueSessionVideos(sessionId, videoSessionId, repo, streamRepo);
+  const identityNumber =
+    typeof options?.metadata?.identityNumber === 'string' ? options.metadata.identityNumber : undefined;
+  const enqueuedStreams = await enqueueSessionVideos(sessionId, videoSessionId, repo, streamRepo, identityNumber);
   for (const stream of enqueuedStreams) {
     const older = streamRepo.listOlderFinishedRecordings(videoSessionId, stream.cameraId, stream.id);
     for (const oldStream of older) {
@@ -809,7 +855,8 @@ async function enqueueSessionVideos(
   outboxSessionId: string,
   videoSessionId: string,
   repo: ApproveSessionUploadRepo,
-  streamRepo: ApproveSessionUploadStreamRepo
+  streamRepo: ApproveSessionUploadStreamRepo,
+  identityNumber?: string
 ): Promise<CaptureStreamItem[]> {
   const streams = streamRepo.listBySession(videoSessionId).filter((s) => s.endedAt !== null);
   const year = new Date().getFullYear();
@@ -842,6 +889,12 @@ async function enqueueSessionVideos(
         stepId: stream.id,
         attempt: 1,
         approvedAt,
+        // 2026-09-09 ("đưa vào cùng folder với ảnh của sinh viên đó") —
+        // carried the same transport-only way `capture:queue`'s photo path
+        // already does; picked up by `ApiPhotoUploadClient.routeUpload`'s
+        // video branch and forwarded to `POST /v1/devices/videos`, never to
+        // fs-core's own metadata (see that call site's own doc comment).
+        metadata: identityNumber ? { identityNumber } : undefined,
       });
       enqueued.push(stream);
     } catch (err) {

@@ -7,11 +7,7 @@ import { ConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { DataSource, Repository } from 'typeorm';
-import {
-  ALLOWED_PHOTO_MIME_TYPES,
-  MAX_PHOTO_BYTES,
-  SessionSource,
-} from '../capture.constants';
+import { ALLOWED_PHOTO_MIME_TYPES, MAX_PHOTO_BYTES } from '../capture.constants';
 import { PhotoDao } from '../dao';
 import { AddDevicePhotoDto, AddPhotoDto } from '../dto';
 import { Photo } from '../entities/photo.entity';
@@ -203,7 +199,28 @@ export class PhotoService extends CommonService<Photo> {
     const sha256 = createHash('sha256').update(data).digest('hex');
     const idemKey = `${dto.sessionId}:${dto.stepId}:${dto.attempt}`;
     const ext = mimeType === 'image/png' ? 'png' : 'jpg';
-    const virtualPath = `sessions/${dto.sessionId}/${dto.stepId}-${dto.attempt}.${ext}`;
+    // 2026-09-09 ("lưu sang file server sẽ lấy căn cước để lưu ảnh, dễ truy
+    // xuất") — nests every session's photos under a per-student top-level
+    // folder on the file-service, keyed by CCCD, so a student's whole
+    // history is browsable there directly instead of only through this
+    // API's own DB search. Stripped to `\w` only (never trusted verbatim
+    // as a path segment — the exact class of bug a raw, unsanitized
+    // campaign display name caused elsewhere, landing literal `/`
+    // characters in a virtual path from a name like "test night 9/9") and
+    // falls back to the plain `sessions/<id>/...` shape when the kiosk
+    // sends no identity number at all (manual "nhập mã sinh viên" path, or
+    // an older kiosk build).
+    const safeIdentity = dto.identityNumber?.replace(/[^\w-]/g, '');
+    // No `sessions/<id>` segment (2026-09-09, explicit product request) —
+    // every one of a student's photos, across every session they ever sit
+    // for, lands flat under their own CCCD folder. This means a retake
+    // session's `step-0-FRONT-1.jpg` silently overwrites an earlier
+    // session's file of the same name on the file-service (attempt numbers
+    // restart at 1 within each new session) — accepted deliberately here,
+    // not an oversight.
+    const virtualPath = safeIdentity
+      ? `students/${safeIdentity}/${dto.stepId}-${dto.attempt}.${ext}`
+      : `sessions/${dto.sessionId}/${dto.stepId}-${dto.attempt}.${ext}`;
 
     await this.dataSource.transaction(async (manager) => {
       await manager.query(
@@ -328,11 +345,28 @@ export class PhotoService extends CommonService<Photo> {
 
   /**
    * Which file-service client should serve this photo's view-link (A.7).
-   * A kiosk photo lives under its device's own tenant namespace (see
-   * `FileStorageService.clientForTenant` - the tenant name is the device
-   * id, the same self-service provisioning the kiosk itself used); a web
-   * photo stays on this API's own default tenant, so `tenantName` is
-   * `undefined` for it.
+   *
+   * Always `undefined` (this API's own default tenant) — including for a
+   * KIOSK-sourced photo. This used to resolve the device id as a per-device
+   * tenant name (the idea being that a kiosk photo lives under its own
+   * device's tenant namespace, the same self-service provisioning the kiosk
+   * itself used), but that has never matched where the bytes actually are:
+   * `UploadWorkerService.send()` (the ONLY thing that ever pushes a captured
+   * photo — web or kiosk — to fs-core, since the "route kiosk photo uploads
+   * through apps/api" local-first work landed) always uses this service's
+   * single, already-configured default-tenant client; `upload_outbox` has no
+   * `tenant_name` column for `send()` to even read one from. Worse, fs-core's
+   * real `/api/v1/self-service/provision` only ever returns an `api_key` the
+   * very first time a tenant is created (confirmed live 2026-09-09) — every
+   * later call, which is the ONLY case that matters once a device has
+   * already self-provisioned (as every real kiosk does at first boot, see
+   * `apps/desktop/src/main/secrets.ts`), returns `created: false` with no
+   * `api_key` at all, and apps/api has nowhere it durably stores a
+   * per-device key to fall back on. So resolving a device tenant here was
+   * guaranteed to either look in the wrong namespace or throw "provision
+   * succeeded but returned no api_key" — the exact `FILE_STORAGE_UPSTREAM_ERROR`
+   * ("File server không phản hồi" in the CMS) this method's callers used to
+   * surface for every KIOSK session's photos.
    *
    * Superseded by `resolveViewSource` below (Part A of the
    * capture-routing work) for `PhotoController.viewLink`'s own use — kept
@@ -359,13 +393,7 @@ export class PhotoService extends CommonService<Photo> {
       );
     }
 
-    const session = await this.sessionService.findById(photo.sessionId);
-    const tenantName =
-      session?.source === SessionSource.KIOSK && session.deviceId
-        ? session.deviceId
-        : undefined;
-
-    return { fsFileId: photo.fsFileId, tenantName };
+    return { fsFileId: photo.fsFileId, tenantName: undefined };
   }
 
   /**
@@ -379,6 +407,22 @@ export class PhotoService extends CommonService<Photo> {
    * photo whose row exists (e.g. from SESSION_REPORT metadata alone, an
    * older kiosk build, or a row this API created before its bytes ever
    * arrived) but whose bytes never reached either place.
+   *
+   * `fsFileId` alone is NOT enough to trust the remote copy (2026-09-09
+   * fix) — `UploadWorkerService.send()` assigns it from the upload
+   * response BEFORE the file has actually survived fs-core's own scan, and
+   * this real fs-core deployment has been observed purging a file during
+   * that scan and later answering `getFile` with 404 (see that service's
+   * `pollScans` doc comment) — `fs_status` is what `pollScans` sets to
+   * `'FAILED'` once that happens, and it is the one field that actually
+   * tracks whether the remote copy still exists. A non-`'READY'` (and, in
+   * particular, `'FAILED'`/`'QUARANTINED'`) status must fall through to
+   * the same local-content check a missing `fsFileId` already gets —
+   * otherwise a photo whose remote copy fs-core discarded keeps trying
+   * (and failing) that dead link forever, exactly the "File server không
+   * phản hồi" symptom this closes, even though `UploadWorkerService` never
+   * clears the local copy on that same failure specifically so this path
+   * could fall back to it.
    */
   async resolveViewSource(
     photoId: string,
@@ -395,13 +439,12 @@ export class PhotoService extends CommonService<Photo> {
       );
     }
 
-    if (photo.fsFileId) {
-      const session = await this.sessionService.findById(photo.sessionId);
-      const tenantName =
-        session?.source === SessionSource.KIOSK && session.deviceId
-          ? session.deviceId
-          : undefined;
-      return { kind: 'remote', fsFileId: photo.fsFileId, tenantName };
+    if (photo.fsFileId && photo.fsStatus !== 'FAILED' && photo.fsStatus !== 'QUARANTINED') {
+      // Always the default tenant — see `resolveViewContext`'s doc comment
+      // just above for why a KIOSK session's device id must never be used
+      // here (the photo was never actually stored under it, and fs-core
+      // cannot hand that tenant's key back out a second time regardless).
+      return { kind: 'remote', fsFileId: photo.fsFileId, tenantName: undefined };
     }
 
     const rows: Array<{ has_content: boolean }> = await this.dataSource.query(

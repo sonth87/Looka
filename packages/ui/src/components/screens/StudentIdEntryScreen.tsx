@@ -14,7 +14,16 @@ import { useState, type FormEvent } from 'react';
  * (2026-09-08 product feedback): the live camera preview underneath must
  * stay visible while a student's code is being entered, both so the
  * operator can already see whether the next person is framed correctly and
- * so the screen doesn't look "frozen" during the walk-up loop's idle wait.
+ * so the screen doesn't look "frozen" during the walk-up loop's idle wait —
+ * and `pointer-events-none` (only this screen's own small card is
+ * `pointer-events-auto`) lets clicks fall through to the capture view
+ * underneath, including its "Bắt đầu"/"Màn hình mở rộng"/"Cài đặt camera"
+ * controls, on purpose: the toolbar controls must stay reachable at any
+ * time, and "Bắt đầu" starting a session before a student is identified is
+ * prevented at the function level instead — see `handleStartWorkflow`'s own
+ * `fromIdentification` doc comment in `FaceCaptureApp.tsx` (2026-09-09 —
+ * blocking pointer events at this overlay was tried first and reverted, see
+ * that comment for why).
  */
 export interface StudentIdEntryScreenProps {
   onSubmit: (code: string) => void;

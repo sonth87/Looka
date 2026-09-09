@@ -174,16 +174,23 @@ export interface CbHelpPublishState {
 }
 
 /**
- * CCCD-scan capture-identification (2026-09-09) — mirrors
- * `apps/desktop/src/main/cccdScanFile.ts`'s `ParsedCccdScan`, the same
+ * CCCD-scan capture-identification (2026-09-09, corrected architecture) —
+ * mirrors `apps/desktop/src/main/cccdRoster.ts`'s `RosterRecord`, the same
  * duplicate-the-IPC-payload-shape convention every other `faceAPI` type here
- * already follows.
+ * already follows. Every field but `identityNumber` is display-only/
+ * best-effort — see that module's own doc comment.
  */
-export interface CccdScan {
-  citizenId: string;
-  fullName: string;
-  dateOfBirth: string | null;
+export interface CccdRosterRecord {
+  identityNumber: string;
+  studentCode: string | null;
+  fullName: string | null;
+  className: string | null;
+  majorName: string | null;
+  courseYear: string | null;
 }
+
+/** `cccd:lookupByIdentityNumber`'s result shape — `found: false` is a normal, expected outcome, never an error. */
+export type CccdLookupResult = { found: true; record: CccdRosterRecord } | { found: false };
 
 export interface CampaignConfig {
   id: string;
@@ -363,6 +370,20 @@ export interface FaceAPIBridge {
   isCbHelpWindowOpen: () => Promise<boolean>;
 
   /**
+   * The kiosk's own embedded CCCD-scan corner (`CccdScanWaitingScreen.tsx`'s
+   * `ScanMonitorCorner`) asking whether a freshly, stably OCR'd citizen id
+   * matches anyone in the external student roster — see
+   * `cccd:lookupByIdentityNumber`'s own doc comment in `index.ts`. Only ever
+   * called after the corner's own stability gate has confirmed the same
+   * 12-digit read several times in a row (see that component's doc
+   * comment) — never a single-frame guess. Replaces the earlier same-day
+   * `writeCccdScanResult`, which wrote the OCR result to `response.json` on
+   * the wrong assumption that file was a per-scan write target — this app
+   * never writes to that path.
+   */
+  lookupCccdByIdentityNumber: (payload: { identityNumber: string }) => Promise<CccdLookupResult>;
+
+  /**
    * Publishes a fresh capture-frames snapshot for the CB Help window (§3.5)
    * — called from `FaceCaptureApp.tsx`'s `publishCbHelpState` on session
    * start, step change, every capture/retake, and on complete/cancel/
@@ -386,14 +407,11 @@ export interface FaceAPIBridge {
    */
   onCbHelpUpdate: (callback: (state: CbHelpPublishState) => void) => () => void;
 
-  /**
-   * CCCD-scan capture-identification (2026-09-09) — subscribes to every scan
-   * `cccdWatcher.ts` reports off the external scanner's output file. Push-only,
-   * main → renderer, same shape as `onCbHelpUpdate`; returns an unsubscribe
-   * function. See `FaceCaptureApp.tsx`'s `handleCccdScan` for what happens
-   * with each scan (a roster lookup, then FOUND/NOT_FOUND branching).
-   */
-  onCccdScan: (callback: (scan: CccdScan) => void) => () => void;
+  // No push-based `onCccdScan` subscription anymore — the earlier same-day
+  // version assumed the external file was a per-scan write target and
+  // pushed each "new scan" main -> renderer. The corrected model is
+  // request/response only (`lookupCccdByIdentityNumber` above), called
+  // directly by `ScanMonitorCorner` once its own OCR stability gate fires.
 
   /**
    * Local video recording (§3.1) — registers a row before any bytes exist.
@@ -522,6 +540,7 @@ const faceAPI: FaceAPIBridge = {
   storeSelfEnrolledDevice: (payload) => ipcRenderer.invoke('device:storeSelfEnrolled', payload),
 
   toggleCbHelpWindow: () => ipcRenderer.invoke('cbhelp:toggle'),
+  lookupCccdByIdentityNumber: (payload) => ipcRenderer.invoke('cccd:lookupByIdentityNumber', payload),
   isCbHelpWindowOpen: () => ipcRenderer.invoke('cbhelp:isOpen'),
   publishCbHelpState: (state) => ipcRenderer.invoke('cbhelp:publish', state),
   getCbHelpState: () => ipcRenderer.invoke('cbhelp:getState'),
@@ -529,12 +548,6 @@ const faceAPI: FaceAPIBridge = {
     const listener = (_: unknown, state: CbHelpPublishState) => callback(state);
     ipcRenderer.on('cbhelp:update', listener);
     return () => ipcRenderer.removeListener('cbhelp:update', listener);
-  },
-
-  onCccdScan: (callback) => {
-    const listener = (_: unknown, scan: CccdScan) => callback(scan);
-    ipcRenderer.on('cccd:scan', listener);
-    return () => ipcRenderer.removeListener('cccd:scan', listener);
   },
 
   startVideoStream: (payload) => ipcRenderer.invoke('stream:start', payload),

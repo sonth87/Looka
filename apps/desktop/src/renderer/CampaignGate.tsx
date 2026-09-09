@@ -43,11 +43,19 @@ export function CampaignGate({
    * `campaignId` (2026-09-09, CCCD-scan capture-identification feature) is
    * `campaign.id` below — only known inside this gate's own closure (the
    * campaign the operator picked and joined), threaded through the same way
-   * `campaignConfig` already is, so `FaceCaptureApp.tsx`'s `handleCccdScan`
-   * knows which roster to check a scanned CCCD number against. `null` only
-   * momentarily (`started` cannot become true without `campaign` being
-   * set — see the render logic below), never a real "no campaign" state
-   * `FaceCaptureApp` needs to handle differently.
+   * `campaignConfig` already is. `FaceCaptureApp.tsx` uses its (and
+   * `authClient`'s) mere presence purely to pick which pre-session
+   * identification screen to show — `CccdScanWaitingScreen` on this
+   * campaign+login path vs. `StudentIdEntryScreen`'s manual form on
+   * `apps/web`/the legacy path — never to scope a roster lookup: the roster
+   * (`D:\Work\camera_server\response.json`) is a single, campaign-agnostic
+   * file the kiosk's main process checks a scanned CCCD against directly
+   * (see `apps/desktop/src/main/cccdRosterWatcher.ts`), a 2026-09-09
+   * same-day architecture correction from an earlier, wrongly campaign-
+   * scoped Postgres roster. `null` only momentarily (`started` cannot
+   * become true without `campaign` being set — see the render logic below),
+   * never a real "no campaign" state `FaceCaptureApp` needs to handle
+   * differently.
    */
   children: (
     props: AppContentProps,

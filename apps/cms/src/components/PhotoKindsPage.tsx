@@ -34,6 +34,15 @@ function cardSpecSummary(spec: CardSpec): string {
  * No DELETE endpoint exists (same never-hard-delete convention used
  * throughout this API) — "Ẩn" (hide) is a PATCH `active: false`, and a
  * hidden kind can always be brought back with "Hiện".
+ *
+ * 2026-09-09 (product feedback, item 1/2): distinct from "Mẫu chụp"
+ * (`/capture-configurations`, `CaptureConfigurationsPage.tsx`) — a "Cấu
+ * hình" row here is just a reusable *chuẩn ảnh thẻ* (photo standard) shared
+ * across campaigns, with no angle table of its own. "Mẫu chụp" is a step
+ * up: a full capture template (angle table + optional card spec) a
+ * campaign selects. A "Mẫu chụp" can now pull its own card spec from one of
+ * these rows via a picker in its form (`applyPhotoKind`) instead of typing
+ * it by hand — see that page's own doc comment.
  */
 export function PhotoKindsPage() {
   const [kinds, setKinds] = useState<PhotoKind[] | null>(null);
@@ -58,7 +67,11 @@ export function PhotoKindsPage() {
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Cấu hình</h1>
-          <p className="text-sm text-gray-500 mt-0.5">Chuẩn dùng chung cho từng loại ảnh (ảnh thẻ, ...), áp dụng cho mọi campaign.</p>
+          <p className="text-sm text-gray-500 mt-0.5">
+            Chuẩn ảnh dùng chung cho nhiều campaign, theo từng loại ảnh (ảnh thẻ, ...) — cỡ, dpi, nền, gợi ý sửa AI.
+            Không có bảng góc chụp riêng. Khi tạo "Mẫu chụp" (trang riêng), có thể chọn một chuẩn ở đây để điền sẵn
+            thay vì nhập tay.
+          </p>
         </div>
         <button
           onClick={() => {

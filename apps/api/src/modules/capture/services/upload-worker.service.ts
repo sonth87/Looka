@@ -157,6 +157,36 @@ export class UploadWorkerService implements OnModuleInit {
    * a file again afterwards, so without this a photo can sit at SCANNING
    * forever even once the server has finished. apps/desktop's `UploadWorker`
    * has the same second stage (`pollScans`) for the same reason.
+   *
+   * Two failure modes matter differently here, distinguished the same way
+   * `recordFailure` below already distinguishes them for `send()` (via
+   * `FsError.retryable`):
+   *
+   *  - Transient (network hiccup, 5xx, rate limit) — logged and left alone;
+   *    the row's status hasn't actually changed, and the next tick tries
+   *    again.
+   *  - Terminal (a plain 4xx — most commonly `NOT_FOUND`) — the file is
+   *    gone and will never become READY, so the row is marked `FAILED`
+   *    rather than left showing its last known status forever. Confirmed
+   *    live (2026-09-09): a freshly uploaded diagnostic file answered
+   *    `getFile` with `SCAN_PENDING` seconds after upload, then `NOT_FOUND`
+   *    shortly after that — this real fs-core deployment's own scan
+   *    pipeline purged it before ever marking it READY. Before this fix,
+   *    that same 404 was silently swallowed here every 3 seconds forever,
+   *    which is the exact "stuck on SCANNING" symptom this method exists to
+   *    prevent — just for a file that was never coming back, rather than
+   *    one that just hadn't finished yet. `FsClient.getFile` itself now
+   *    absorbs the OTHER live-confirmed surprise — a `SCAN_PENDING` file
+   *    answering with `423` instead of a normal `200` + status body — so a
+   *    genuinely-still-scanning file no longer even reaches this catch
+   *    block; see that method's own doc comment.
+   *
+   * `upload_outbox.content` (2026-09-09 fix, paired with `send()`'s own
+   * comment) is only ever cleared here, and only once `info.status ===
+   * 'READY'` confirms the file genuinely survived — never on a terminal
+   * `FAILED`, so a photo this real fs-core deployment purges mid-scan still
+   * has a durable, servable local copy forever instead of becoming
+   * unviewable everywhere.
    */
   private async pollScans(): Promise<void> {
     const rows: ScanningPhotoRow[] = await this.dataSource.query(
@@ -179,9 +209,23 @@ export class UploadWorkerService implements OnModuleInit {
           `UPDATE photos SET fs_status = $2 WHERE id = $1`,
           [row.id, info.status],
         );
+        if (info.status === 'READY') {
+          await this.dataSource.query(
+            `UPDATE upload_outbox SET status = 'DONE', content = ''::bytea WHERE photo_id = $1`,
+            [row.id],
+          );
+        }
       } catch (err) {
-        // A scan check failing (network hiccup, transient upstream error) is
-        // not a reason to touch a row that hasn't actually changed state -
+        const fsErr = err instanceof FsError ? err : null;
+        if (fsErr && !fsErr.retryable) {
+          await this.dataSource.query(
+            `UPDATE photos SET fs_status = 'FAILED', upload_error = $2 WHERE id = $1`,
+            [row.id, fsErr.message.slice(0, 500)],
+          );
+          continue;
+        }
+        // A transient failure (network hiccup, 5xx, rate limit) is not a
+        // reason to touch a row that hasn't actually changed state -
         // the next tick tries again.
         this.logger.warn(
           `pollScans failed for photo ${row.id}: ${(err as Error).message}`,
@@ -215,11 +259,23 @@ export class UploadWorkerService implements OnModuleInit {
             result.virtualPath,
           ],
         );
-        // The bytes are on the file-service now; keeping a second copy here
-        // would double the storage for no benefit.
+        // `content` stays put here — 2026-09-09 fix. This used to be cleared
+        // the instant the upload response came back (`status: 'UPLOADED'`
+        // only means "the file-service accepted the bytes," not "the file
+        // actually survived its own virus scan"). Live-confirmed the same
+        // day (see `pollScans`'s own doc comment): this real fs-core
+        // deployment's scan pipeline can purge a freshly-uploaded file
+        // before ever marking it READY, which `pollScans` correctly detects
+        // and marks `photos.fs_status = 'FAILED'` for — but with content
+        // already gone at that point, the photo became permanently
+        // unviewable everywhere (not on fs-core, not locally), the exact
+        // "SCANNING forever" / "File server không phản hồi" field symptom
+        // this whole fix chases. `pollScans` below is now the only place
+        // that clears it, and only once the file has actually reached
+        // `READY` — see that method's own comment.
         await manager.query(
           `UPDATE upload_outbox
-              SET status = 'UPLOADED', content = ''::bytea, last_error = NULL
+              SET status = 'UPLOADED', last_error = NULL
             WHERE id = $1`,
           [job.id],
         );

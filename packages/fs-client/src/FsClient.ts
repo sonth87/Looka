@@ -12,6 +12,7 @@ import {
   FsUsage,
   FsError,
   FS_ERROR_CODES,
+  FS_SERVER_CODES,
 } from './types.js';
 
 const MiB = 1024 * 1024;
@@ -24,22 +25,37 @@ export function sha256Hex(data: Uint8Array): string {
 /**
  * A UUID derived from a key, so the same logical upload always resumes the same
  * server-side session — even after the app crashed and lost its memory of it.
+ *
+ * Forces the version nibble to `4` and the variant nibble to `8-b` (2026-09-09
+ * fix — a raw hash slice has no such guarantee, and apps/api's `@IsUUID()`
+ * DTO validators reject anything that doesn't look like a real UUID: only
+ * ~7.8% of raw SHA-256 slices happen to pass by chance, so roughly 92% of
+ * kiosk photo uploads were permanently rejected with "photoId must be a
+ * UUID" — see `AddDevicePhotoDto.photoId`). Every other nibble is still the
+ * hash's own, so this stays fully deterministic and collision-resistant.
  */
 export function deterministicUuid(key: string): string {
   const h = createHash('sha256').update(key).digest('hex');
-  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
+  const variantNibble = ((parseInt(h[16], 16) & 0x3) | 0x8).toString(16);
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-${variantNibble}${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
 
 /**
- * Encode metadata as `k=v;k=v`.
+ * Encode metadata as fs-core's `X-Metadata` header value.
  *
- * Separators are stripped from values so a stray character cannot split one
- * field into two. Keys are restricted for the same reason.
+ * Since fs-engine v0.2.10 (2026-09-09) this is `encodeURIComponent(JSON.stringify(obj))`
+ * — a url-encoded, flat JSON object. The previous `k1=v1;k2=v2` string-join
+ * format is no longer accepted: the server's `json.Unmarshal` fails on it and
+ * the whole upload/patch is rejected with `400 BAD_REQUEST`, non-backward-compatibly.
+ *
+ * This function does not itself validate the server's constraints (integration
+ * guide §3: ≤16 keys, key names `a-z0-9_` only ≤64 chars and never starting
+ * with `_`/`fs.`, ≤1KB per value / ≤8KB total when JSON-encoded) — those are
+ * enforced server-side and surface as a `BAD_REQUEST` from `request()` below.
+ * Callers populating `metadata` should stick to lowercase snake_case keys.
  */
 export function encodeMetadata(meta: Record<string, string>): string {
-  return Object.entries(meta)
-    .map(([k, v]) => `${k.replace(/[;=]/g, '_')}=${String(v).replace(/[;=]/g, '_')}`)
-    .join(';');
+  return encodeURIComponent(JSON.stringify(meta));
 }
 
 /**
@@ -203,15 +219,59 @@ export class FsClient {
 
   // ── Read ──────────────────────────────────────────────────────────────────
 
+  /**
+   * Current scan/lifecycle state for a file already accepted by the server.
+   *
+   * A file still being virus-scanned answers this with `423 SCAN_PENDING`
+   * rather than `200` + a `status` field — confirmed live against the real
+   * server (2026-09-09), and NOT what the integration guide's own example
+   * flow (and this package's mock server, `mock-fs-core.mjs`) suggested,
+   * which was a plain `200` for this metadata-only endpoint at every stage
+   * and reserved the 423 for the byte-fetching `/download` route alone. Left
+   * as a bare `throw`, this took down every caller that expects a normal
+   * `FsFileInfo` back while a scan is in flight: `waitUntilReady`'s poll
+   * loop below never got the chance to recognise "still working" and retry
+   * (the throw happens before its own SCANNING/SCAN_PENDING allowlist check
+   * ever runs), and apps/api's `UploadWorkerService.pollScans` — which calls
+   * this directly, once per photo, every 3 seconds — caught the exception,
+   * logged a warning, and left `photos.fs_status` frozen at whatever the
+   * original upload response said, forever, even long after the real scan
+   * had finished. A photo's status badge stuck on "SCANNING" with no route
+   * back to READY was the direct, live-reproduced symptom of exactly this.
+   *
+   * Recovering the real state from the error rather than re-throwing is the
+   * fix: the server's own error `detail` already carries the file's current
+   * status (see `mock-fs-core.mjs`'s `NOT_READY` envelope, `{ status:
+   * f.status }`) even on this real deployment's differently-shaped 423, so
+   * a `SCAN_PENDING`-coded failure is translated back into an ordinary
+   * `FsFileInfo` instead of propagating. Any OTHER error (network failure,
+   * a genuine 404 for a file that no longer exists, a hard quarantine)
+   * still throws — those are not "still working" states, and a caller like
+   * `pollScans` needs to see them to mark a photo as failed rather than
+   * silently stuck.
+   */
   public async getFile(fileId: string): Promise<FsFileInfo> {
-    const res = await this.request(`/api/v1/files/${encodeURIComponent(fileId)}`, { method: 'GET' });
-    const body = (await res.json()) as Record<string, unknown>;
-    return {
-      fileId: String(body.file_id ?? fileId),
-      virtualPath: String(body.virtual_path ?? ''),
-      status: body.status as FsFileStatus,
-      size: Number(body.size ?? 0),
-    };
+    try {
+      const res = await this.request(`/api/v1/files/${encodeURIComponent(fileId)}`, { method: 'GET' });
+      const body = (await res.json()) as Record<string, unknown>;
+      return {
+        fileId: String(body.file_id ?? fileId),
+        virtualPath: String(body.virtual_path ?? ''),
+        status: body.status as FsFileStatus,
+        size: Number(body.size ?? 0),
+      };
+    } catch (err) {
+      if (err instanceof FsError && err.code === FS_SERVER_CODES.SCAN_PENDING) {
+        const detail = err.details?.detail as { status?: string } | undefined;
+        return {
+          fileId,
+          virtualPath: '',
+          status: (detail?.status as FsFileStatus) ?? 'SCAN_PENDING',
+          size: 0,
+        };
+      }
+      throw err;
+    }
   }
 
   /**

@@ -45,6 +45,30 @@ export class PhotoVariant extends BaseEntity {
   @ApiPropertyOptional({ description: 'file_id trên file-service' })
   fsFileId?: string | null;
 
+  /**
+   * Remote-copy health, mirroring `photos.fsStatus` (2026-09-09 fix, migration
+   * `1806000000000-PhotoVariantFsStatus.ts`) — `fsFileId` alone only ever
+   * means "the file-service accepted the upload", set by
+   * `VariantUploadWorkerService.send()` before the file has survived
+   * fs-core's own scan. This is what that service's `pollScans()` updates as
+   * the real outcome becomes known, and the one field
+   * `PhotoReviewService.resolveVariantViewSource`/`resolveCurrentCardViewUrl`
+   * actually trust to decide whether `fsFileId` is still a live link — a
+   * `'FAILED'`/`'QUARANTINED'` value means fs-core has discarded this
+   * variant's remote copy and every viewer must fall back to
+   * `variant_upload_outbox.content` instead.
+   */
+  @Column('varchar', { length: 50, name: 'fs_status', nullable: true })
+  @ApiPropertyOptional({
+    description: 'Trạng thái file trên file-service (SCANNING/READY/FAILED/...)',
+  })
+  fsStatus?: string | null;
+
+  /** Most recent fs-core-side failure, distinct from `note` (sidecar/pipeline failures) — same separation `photos.uploadError` keeps. */
+  @Column('text', { name: 'fs_upload_error', nullable: true })
+  @ApiPropertyOptional({ description: 'Lỗi upload/scan gần nhất trên file-service, nếu có' })
+  fsUploadError?: string | null;
+
   @Column('text', { name: 'virtual_path', nullable: true })
   @ApiPropertyOptional({ description: 'Đường dẫn ảo trên file-service (card/<năm>/<sessionId>/…)' })
   virtualPath?: string | null;

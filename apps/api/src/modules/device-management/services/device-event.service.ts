@@ -146,7 +146,15 @@ export class DeviceEventService extends CommonService<DeviceEvent> {
         return null;
       });
       if (result?.pendingAuto) {
-        await this.photoReview.reprocess(result.setId, null).catch((err) => {
+        // `reprocess()`'s resolved `PhotoVariantDao` is discarded here (this
+        // is a best-effort background trigger, not a request/response flow)
+        // — the `apiBaseUrl` it uses to build a local-content fallback link
+        // (see `PhotoReviewService.toVariantDao`) is therefore never actually
+        // read; there is no incoming HTTP request here to derive a real one
+        // from (unlike `ReviewController`'s own routes), so a placeholder is
+        // passed rather than threading `ConfigService`/a request object into
+        // this service for a value nothing consumes.
+        await this.photoReview.reprocess(result.setId, null, 'http://localhost').catch((err) => {
           this.logger.warn(
             `best-effort auto CARD_AUTO reprocess failed for set ${result.setId} (session ${sessionId}): ${(err as Error).message}`,
           );

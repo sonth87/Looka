@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { recognizeCccdFrame } from './ocr.js';
+import type { Worker } from 'tesseract.js';
+import { createCccdWorker, recognizeWithWorker } from './ocr.js';
 
 /**
  * Standalone CCCD (Vietnamese citizen ID card) front-side OCR scanner —
@@ -17,34 +18,62 @@ import { recognizeCccdFrame } from './ocr.js';
  * machine but as a separate process, opened only when an operator is
  * actively scanning a card.
  *
- * Flow: pick the phone's bridged camera (Iriun/DroidCam/etc. — it just shows
- * up as a normal Windows camera device) -> live preview -> capture a frame
- * -> OCR it -> operator confirms the recognized 12-digit number on screen
- * (never auto-written — see the product brief's own safety rationale: a
- * misread digit that still happens to form a well-formed 12-digit number
- * could silently mismatch the wrong card to the wrong session) -> write
- * response.json -> back to live preview for the next student.
+ * Flow (2026-09-09, second pass — fully hands-free): pick the phone's
+ * bridged camera (Iriun/DroidCam/Camo/etc. — it just shows up as a normal
+ * Windows camera device) -> live preview -> the app continuously OCRs
+ * incoming frames on its own, no capture button. A 12-digit citizen id is
+ * only trusted once the SAME number is read on `STABILITY_COUNT` consecutive
+ * polls in a row — a single garbled frame can't trigger a write on its own,
+ * since Tesseract's per-frame accuracy on a hand-held card varies with
+ * focus/lighting/angle. Once stable, the number is shown on screen for
+ * `STABLE_DISPLAY_MS` (an operator glance-check, not a blocking gate — the
+ * product decision here was "auto-confirm after a stable read", not "always
+ * require a tap") before `response.json` is written automatically, then the
+ * loop resumes for the next student.
  */
 
-type Phase = 'preview' | 'recognizing' | 'confirm' | 'no-match' | 'writing' | 'write-error' | 'success';
+type Phase = 'initializing' | 'scanning' | 'stable-detected' | 'writing' | 'write-error' | 'success';
 
 interface Candidate {
   citizenId: string;
   fullName: string | null;
 }
 
+/**
+ * Consecutive identical reads required before a number is trusted enough to
+ * auto-write. 2 is a deliberate floor, not just "as low as possible": one
+ * lucky/unlucky single-frame read is not enough evidence on its own, but
+ * requiring many more would make the operator hold the card still for
+ * noticeably longer with no meaningful safety gain — a coincidental identical
+ * misread twice in a row, for the same physical card, is already very
+ * unlikely given `extractCitizenId`'s clean-12-digit-token gate.
+ */
+const STABILITY_COUNT = 2;
+
+/** How long a stable read stays visible before auto-writing — long enough for an operator glance, short enough to not slow down a queue of students. */
+const STABLE_DISPLAY_MS = 1200;
+
+/** How long the success banner stays up before the loop resumes scanning for the next student. */
+const SUCCESS_DISPLAY_MS = 1800;
+
+/** How long to wait between OCR polls once a frame has been processed — OCR itself takes a few hundred ms to ~1s, this just prevents back-to-back polls with zero breathing room. */
+const POLL_GAP_MS = 300;
+
 export default function App() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const workerRef = useRef<Worker | null>(null);
 
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
   const [cameraError, setCameraError] = useState<string | null>(null);
+  const [workerReady, setWorkerReady] = useState(false);
 
-  const [phase, setPhase] = useState<Phase>('preview');
+  const [phase, setPhase] = useState<Phase>('initializing');
   const [candidate, setCandidate] = useState<Candidate | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [lastAttemptText, setLastAttemptText] = useState<string | null>(null);
 
   const stopStream = useCallback(() => {
     streamRef.current?.getTracks().forEach((track) => track.stop());
@@ -112,53 +141,143 @@ export default function App() {
 
   useEffect(() => stopStream, [stopStream]);
 
-  const handleCapture = useCallback(async () => {
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    if (!video || !canvas || video.videoWidth === 0) return;
-
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const dataUrl = canvas.toDataURL('image/png');
-
-    setPhase('recognizing');
-    try {
-      const result = await recognizeCccdFrame(dataUrl);
-      if (result.citizenId) {
-        setCandidate({ citizenId: result.citizenId, fullName: result.fullName });
-        setPhase('confirm');
-      } else {
-        setPhase('no-match');
+  // One long-lived Tesseract worker for the life of this window — see
+  // `ocr.ts`'s own doc comment on why continuous polling needs this instead
+  // of `recognizeCccdFrame`'s original create-per-call shape.
+  useEffect(() => {
+    let cancelled = false;
+    void createCccdWorker().then((worker) => {
+      if (cancelled) {
+        void worker.terminate();
+        return;
       }
-    } catch (err) {
-      setErrorMessage(err instanceof Error ? err.message : String(err));
-      setPhase('no-match');
+      workerRef.current = worker;
+      setWorkerReady(true);
+    });
+    return () => {
+      cancelled = true;
+      const worker = workerRef.current;
+      workerRef.current = null;
+      if (worker) void worker.terminate();
+    };
+  }, []);
+
+  // The continuous auto-scan loop itself. Runs whenever the camera and
+  // worker are both ready and nothing else (a stable detection being
+  // displayed, a write in flight, the success banner) currently owns the
+  // screen — `phase === 'scanning'` is the single gate for "the loop should
+  // be polling right now", so pausing it during those other phases is just
+  // a matter of not being in 'scanning'.
+  useEffect(() => {
+    if (phase !== 'scanning') return;
+    if (!workerReady || !selectedDeviceId || cameraError) return;
+
+    let cancelled = false;
+    let streak = 0;
+    let streakCitizenId: string | null = null;
+    let streakFullName: string | null = null;
+
+    async function pollOnce() {
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      const worker = workerRef.current;
+      if (!video || !canvas || !worker || video.videoWidth === 0) return;
+
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const dataUrl = canvas.toDataURL('image/png');
+
+      let result;
+      try {
+        result = await recognizeWithWorker(worker, dataUrl);
+      } catch (err) {
+        // A one-off OCR failure (e.g. a mid-frame camera hiccup) must not
+        // kill the loop — just skip this poll and try again next tick.
+        if (!cancelled) setLastAttemptText(err instanceof Error ? err.message : String(err));
+        return;
+      }
+      if (cancelled) return;
+
+      if (!result.citizenId) {
+        streak = 0;
+        streakCitizenId = null;
+        streakFullName = null;
+        setLastAttemptText('Chưa đọc được số CCCD rõ ràng...');
+        return;
+      }
+
+      if (result.citizenId === streakCitizenId) {
+        streak += 1;
+      } else {
+        streak = 1;
+        streakCitizenId = result.citizenId;
+      }
+      streakFullName = result.fullName ?? streakFullName;
+      setLastAttemptText(`Đang đọc: ${result.citizenId} (${streak}/${STABILITY_COUNT})`);
+
+      if (streak >= STABILITY_COUNT) {
+        setCandidate({ citizenId: streakCitizenId, fullName: streakFullName });
+        setPhase('stable-detected');
+      }
     }
-  }, []);
 
-  const handleRetake = useCallback(() => {
-    setCandidate(null);
-    setErrorMessage(null);
-    setPhase('preview');
-  }, []);
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    async function loop() {
+      while (!cancelled) {
+        await pollOnce();
+        if (cancelled) return;
+        await new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, POLL_GAP_MS);
+        });
+      }
+    }
+    void loop();
 
-  const handleConfirm = useCallback(async () => {
-    if (!candidate) return;
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [phase, workerReady, selectedDeviceId, cameraError]);
+
+  // Kick off scanning once the camera + worker are both ready. Also the
+  // reset path after a write error / success / a fresh device pick.
+  useEffect(() => {
+    if (workerReady && selectedDeviceId && !cameraError && phase === 'initializing') {
+      setPhase('scanning');
+    }
+  }, [workerReady, selectedDeviceId, cameraError, phase]);
+
+  // Stable read detected -> show it briefly -> auto-write. Purely a timer,
+  // no operator action required (2026-09-09 product decision: auto-confirm
+  // after a stable read, with the number shown for a glance rather than a
+  // blocking confirm click).
+  useEffect(() => {
+    if (phase !== 'stable-detected' || !candidate) return;
+    const timer = setTimeout(() => {
+      void writeCandidate(candidate);
+    }, STABLE_DISPLAY_MS);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase, candidate]);
+
+  const writeCandidate = useCallback(async (toWrite: Candidate) => {
     setPhase('writing');
     try {
       const result = await window.cccdScannerAPI.writeScan({
-        citizenId: candidate.citizenId,
-        fullName: candidate.fullName ?? '',
+        citizenId: toWrite.citizenId,
+        fullName: toWrite.fullName ?? '',
       });
       if (result.ok) {
         setPhase('success');
         setTimeout(() => {
           setCandidate(null);
-          setPhase('preview');
-        }, 2000);
+          setErrorMessage(null);
+          setLastAttemptText(null);
+          setPhase('scanning');
+        }, SUCCESS_DISPLAY_MS);
       } else {
         setErrorMessage(result.error ?? 'Ghi file thất bại');
         setPhase('write-error');
@@ -167,11 +286,22 @@ export default function App() {
       setErrorMessage(err instanceof Error ? err.message : String(err));
       setPhase('write-error');
     }
-  }, [candidate]);
+  }, []);
+
+  const handleRetryWrite = useCallback(() => {
+    if (candidate) void writeCandidate(candidate);
+  }, [candidate, writeCandidate]);
+
+  const handleSkipAndRescan = useCallback(() => {
+    setCandidate(null);
+    setErrorMessage(null);
+    setLastAttemptText(null);
+    setPhase('scanning');
+  }, []);
 
   return (
     <div style={styles.page}>
-      <h1 style={styles.title}>Quét CCCD (mặt trước)</h1>
+      <h1 style={styles.title}>Quét CCCD (mặt trước) — tự động</h1>
 
       <div style={styles.row}>
         <label style={styles.label} htmlFor="camera-select">
@@ -181,7 +311,10 @@ export default function App() {
           id="camera-select"
           style={styles.select}
           value={selectedDeviceId}
-          onChange={(e) => setSelectedDeviceId(e.target.value)}
+          onChange={(e) => {
+            setSelectedDeviceId(e.target.value);
+            handleSkipAndRescan();
+          }}
         >
           {devices.length === 0 && <option value="">Không tìm thấy camera</option>}
           {devices.map((d) => (
@@ -193,21 +326,20 @@ export default function App() {
       </div>
 
       {cameraError && <div style={styles.errorBanner}>{cameraError}</div>}
+      {!workerReady && !cameraError && <div style={styles.status}>Đang khởi tạo bộ nhận dạng...</div>}
 
       <div style={styles.previewWrap}>
         <video ref={videoRef} autoPlay muted playsInline style={styles.video} />
         <canvas ref={canvasRef} style={{ display: 'none' }} />
       </div>
 
-      {phase === 'preview' && (
-        <button style={styles.primaryButton} onClick={() => void handleCapture()} disabled={!selectedDeviceId}>
-          Chụp
-        </button>
+      {phase === 'scanning' && workerReady && (
+        <div style={styles.status}>
+          {lastAttemptText ?? 'Đang quét — đưa mặt trước CCCD vào khung hình...'}
+        </div>
       )}
 
-      {phase === 'recognizing' && <div style={styles.status}>Đang nhận dạng...</div>}
-
-      {phase === 'confirm' && candidate && (
+      {phase === 'stable-detected' && candidate && (
         <div style={styles.confirmBox}>
           <div style={styles.confirmLine}>
             Số CCCD nhận dạng được: <strong>{candidate.citizenId}</strong>
@@ -217,25 +349,7 @@ export default function App() {
               Họ và tên: <strong>{candidate.fullName}</strong>
             </div>
           )}
-          <div style={styles.buttonRow}>
-            <button style={styles.primaryButton} onClick={() => void handleConfirm()}>
-              Xác nhận
-            </button>
-            <button style={styles.secondaryButton} onClick={handleRetake}>
-              Chụp lại
-            </button>
-          </div>
-        </div>
-      )}
-
-      {phase === 'no-match' && (
-        <div style={styles.confirmBox}>
-          <div style={styles.errorBanner}>
-            Không đọc được số CCCD, thử lại{errorMessage ? ` (${errorMessage})` : ''}
-          </div>
-          <button style={styles.primaryButton} onClick={handleRetake}>
-            Thử lại
-          </button>
+          <div style={styles.status}>Đang lưu tự động...</div>
         </div>
       )}
 
@@ -245,11 +359,11 @@ export default function App() {
         <div style={styles.confirmBox}>
           <div style={styles.errorBanner}>Lỗi khi lưu: {errorMessage}</div>
           <div style={styles.buttonRow}>
-            <button style={styles.primaryButton} onClick={() => void handleConfirm()}>
+            <button style={styles.primaryButton} onClick={handleRetryWrite}>
               Thử lưu lại
             </button>
-            <button style={styles.secondaryButton} onClick={handleRetake}>
-              Chụp lại
+            <button style={styles.secondaryButton} onClick={handleSkipAndRescan}>
+              Bỏ qua, quét lại
             </button>
           </div>
         </div>

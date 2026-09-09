@@ -40,10 +40,12 @@ const electronCaptureSink = new ElectronCaptureSink();
  * `campaignId`/`authClient` (2026-09-09, CCCD-scan capture-identification
  * feature): `campaignId` comes through `CampaignGate`'s `children` callback
  * (see that prop's own doc comment there); `authClient` is the same
- * already-imported SSO singleton `operatorUserId` above reads from — passed
- * straight through so `FaceCaptureApp.tsx`'s `handleCccdScan` can call
- * `GET /v1/campaigns/:id/roster/lookup` with the operator's own SSO headers
- * without this package needing its own copy of `SsoAuthClient`.
+ * already-imported SSO singleton `operatorUserId` above reads from. Passed
+ * straight through purely so `FaceCaptureApp.tsx` can tell this
+ * campaign+login kiosk path apart from `apps/web`/the legacy path — the
+ * actual CCCD roster check no longer goes through either of these (it's a
+ * direct main-process file lookup, no API call, no campaign scoping — see
+ * `apps/desktop/src/main/cccdRosterWatcher.ts`).
  */
 function FaceCaptureAppWithFsSink(props: AppContentProps) {
   return (

@@ -72,7 +72,6 @@ export type {
   CampaignEffectiveStatus,
   CampaignMembershipStatus,
   SelfEnrollDeviceResult,
-  RosterLookupResult,
 } from './lib/campaignPortalApi.js';
 export {
   CampaignPortalApiError,
@@ -81,7 +80,6 @@ export {
   joinCampaign,
   fetchCampaignConfig,
   selfEnrollDevice,
-  lookupRosterByCitizenId,
 } from './lib/campaignPortalApi.js';
 export {
   formatSubjectClassLine,

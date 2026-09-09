@@ -62,6 +62,15 @@ interface CbHelpPublishState {
    * overlay below, capture must not proceed" — see the render further down.
    */
   errorMessage?: string | null;
+  /**
+   * Post-save "Cảm ơn" overlay (2026-09-09, "cảm ơn phải hiển thị trên màn
+   * extend") — mirrors `apps/desktop/src/main/cbHelpWindow.ts`'s own copy.
+   * Its presence (regardless of `phase`) means "show the full-screen thank
+   * you overlay below" — see the render further down. Set only for the same
+   * fixed window `FaceCaptureApp.tsx`'s own `thankYouStudent` state is
+   * non-null, right after a successful save.
+   */
+  thankYou?: { name: string } | null;
 }
 
 /** Mirrors `apps/desktop/src/main/cbHelpWindow.ts`'s own copy. */
@@ -82,6 +91,7 @@ const EMPTY_STATE: CbHelpPublishState = {
   greeting: null,
   centerPreviewDataUrl: null,
   errorMessage: null,
+  thankYou: null,
 };
 
 /**
@@ -110,9 +120,27 @@ const GREETING_DURATION_MS = 3000;
  * tile stays blank even though the main window's CENTER camera is clearly
  * live). CENTER's tile is fed by `centerPreviewDataUrl` instead — see the
  * render below and that field's own doc comment.
+ *
+ * `centerDeviceId` (2026-09-09 fix, live-hardware-confirmed: `[cb-help]
+ * failed to open camera <id>: NotReadableError`/`[object DOMException]` on a
+ * kiosk with exactly one real camera): the CENTER exclusion above only ever
+ * checked the frame's *role*, not which physical device it resolves to — but
+ * the "1 camera covers multiple roles" fallback (`planCaptureRounds`,
+ * lib/multiFrame.ts) can map a non-CENTER role (LEFT/RIGHT/CUSTOM) to the
+ * *exact same* device id as CENTER's `currentDeviceId` on a kiosk that does
+ * not have a distinct camera for every role. That frame hits the identical
+ * "second concurrent reader" conflict item 12b already fixed for the
+ * literal CENTER role — just under a different role name — because nothing
+ * here was comparing device ids across frames. A frame whose `deviceId`
+ * equals `centerDeviceId` is therefore excluded here the same way, with the
+ * same fallback: no live stream of its own in this window (there is no
+ * snapshot feed for it, unlike CENTER, so its tile simply shows nothing
+ * live until it is COMPLETED — same as a frame with no mapped device at
+ * all).
  */
-function isFrameLive(frame: CbHelpFrame, simultaneous: boolean): boolean {
+function isFrameLive(frame: CbHelpFrame, simultaneous: boolean, centerDeviceId: string | null): boolean {
   if (!frame.deviceId || frame.status === 'COMPLETED' || frame.role === 'CENTER') return false;
+  if (centerDeviceId && frame.deviceId === centerDeviceId) return false;
   return simultaneous || frame.status === 'CURRENT';
 }
 
@@ -223,11 +251,32 @@ export default function CbHelpFrames() {
     };
   }, []);
 
+  // Stable, content-based key for "which device ids does this window need a
+  // stream for right now" — 2026-09-09 fix. `state` is a brand-new object on
+  // EVERY `cbhelp:update` push, including the main window's item-12b
+  // `centerPreviewDataUrl` heartbeat (a few times a second, unconditionally,
+  // for the whole capture-screen lifetime — see that field's own doc
+  // comment), so keying the effect below directly on `state.frames` (an
+  // array reference that changes every single tick even when its actual
+  // device-id content is identical) meant this effect re-ran, and re-tried
+  // opening every not-yet-open device, on EVERY heartbeat — including a
+  // device id that isn't currently plugged in at all (a 3-camera capture
+  // configuration with only 1 camera actually connected, say), which then
+  // fails with the same `OverconstrainedError` and gets retried again well
+  // under a second later, forever, as fast as `getUserMedia` itself can
+  // reject. Sorting+joining into one string means the effect's dependency
+  // array only actually changes when the SET of needed device ids changes —
+  // a real hot-plug/step change — not on every content-identical republish.
+  const centerFrameDeviceId = state.frames.find((f) => f.role === 'CENTER')?.deviceId ?? null;
+  const neededDeviceIdsKey = state.frames
+    .filter((f) => isFrameLive(f, state.simultaneous, centerFrameDeviceId))
+    .map((f) => f.deviceId as string)
+    .sort()
+    .join(',');
+
   useEffect(() => {
     let cancelled = false;
-    const neededDeviceIds = new Set(
-      state.frames.filter((f) => isFrameLive(f, state.simultaneous)).map((f) => f.deviceId as string)
-    );
+    const neededDeviceIds = new Set(neededDeviceIdsKey ? neededDeviceIdsKey.split(',') : []);
 
     for (const [deviceId, stream] of streamsRef.current) {
       if (neededDeviceIds.has(deviceId)) continue;
@@ -251,6 +300,13 @@ export default function CbHelpFrames() {
           streamsRef.current.set(deviceId, stream);
           openedAny = true;
         } catch (err) {
+          // Logged once per actual device-set change now (see this effect's
+          // dependency array), not in a sub-second retry storm — a device
+          // that genuinely is not plugged in (fewer cameras connected than
+          // the capture configuration expects, an explicitly allowed
+          // situation — see the multi-camera capture-configuration
+          // decision) will keep failing here, but only once per real change,
+          // not continuously.
           console.error(`[cb-help] failed to open camera ${deviceId}:`, err);
         }
       }
@@ -275,7 +331,7 @@ export default function CbHelpFrames() {
     return () => {
       cancelled = true;
     };
-  }, [state.frames, state.simultaneous]);
+  }, [neededDeviceIdsKey]);
 
   // Unmount: never leave a camera open once this window closes.
   useEffect(
@@ -298,6 +354,22 @@ export default function CbHelpFrames() {
       <div className="w-screen h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center gap-4 overflow-hidden px-12 text-center">
         <span className="text-6xl">⚠️</span>
         <p className="text-2xl sm:text-3xl font-semibold max-w-3xl leading-snug">{state.errorMessage}</p>
+      </div>
+    );
+  }
+
+  // Post-save "Cảm ơn" overlay (2026-09-09) — takes over the whole window
+  // for the same fixed window `FaceCaptureApp.tsx`'s own `thankYouStudent`
+  // is up, ahead of the greeting/idle/frame-grid branches below (mirrors
+  // `errorMessage`'s own priority — this window only ever shows one
+  // full-screen takeover at a time). Publisher clears this before the next
+  // greeting ever arrives, so the two branches never actually contend.
+  if (state.thankYou) {
+    return (
+      <div className="w-screen h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center gap-3 overflow-hidden px-8 text-center">
+        <span className="text-6xl">✅</span>
+        <h1 className="text-4xl sm:text-5xl font-bold tracking-wide">Cảm ơn {state.thankYou.name || 'bạn'}!</h1>
+        <p className="text-lg text-slate-400">Hồ sơ ảnh đã được lưu thành công.</p>
       </div>
     );
   }

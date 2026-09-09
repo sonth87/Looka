@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { CAMERA_ROLES, defaultCameraRoleForStepType, type CameraRole, type CaptureStep } from '@face/core';
-import { getSettings, updateSettings, DEFAULT_PHYSICAL_ANGLES, type PhysicalCameraAngles } from '@face/ui';
-import type { CaptureTriggerMode } from '@face/core';
+import { DEFAULT_PHYSICAL_ANGLES, type PhysicalCameraAngles } from '@face/ui';
 
 type CameraRoleMapping = Partial<Record<CameraRole, string>>;
 /** Every role's *effective* physical mounting angle — always fully populated (defaults filled in), unlike the sparse override map this screen saves/loads. */
@@ -103,15 +102,19 @@ export default function CameraSetupScreen() {
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [moveNotice, setMoveNotice] = useState<string | null>(null);
-  // "Cách chụp" / "Kích hoạt chụp" (§3.9) — kiosk-local settings, no longer
-  // read from the campaign. Sequencing persists via secrets.dat (mirrors
-  // camera.roleMapping's own persistence); capture mode/gestures reuse the
-  // existing @face/ui settingsStore (packages/ui/src/lib/settingsStore.ts),
-  // just given a proper home in this screen per the plan's instruction.
+  // "Cách chụp" (§3.9) — kiosk-local setting, no longer read from the
+  // campaign. Persists via secrets.dat (mirrors camera.roleMapping's own
+  // persistence). "Kích hoạt chụp" (capture-trigger mode/gesture) used to
+  // live here too, saved to the @face/ui settingsStore — removed 2026-09-09
+  // as a straight duplicate of the "Chế độ chụp" control already in the
+  // live capture screen's own overlay (`OverlayConfigPanel.tsx`), just a
+  // confusing one: that overlay's control only ever changed the current
+  // session in memory (no durable save), while this screen's version was
+  // the only thing writing a durable default — two controls that looked
+  // equivalent but behaved differently. Product decision: no durable
+  // default is needed at all going forward, so this whole control is gone
+  // rather than made to persist too.
   const [sequencing, setSequencing] = useState<'sequential' | 'simultaneous'>('sequential');
-  const [captureMode, setCaptureModeState] = useState<CaptureTriggerMode>('MANUAL');
-  const [allowGesture, setAllowGesture] = useState(false);
-  const [autoHoldMs, setAutoHoldMs] = useState(1500);
   const streamsRef = useRef<Map<string, MediaStream>>(new Map());
   const videoRefs = useRef<Map<CameraRole, HTMLVideoElement | null>>(new Map());
   const cancelledRef = useRef(false);
@@ -122,10 +125,6 @@ export default function CameraSetupScreen() {
   const mappingRef = useRef<CameraRoleMapping>({});
 
   useEffect(() => {
-    const settings = getSettings();
-    setCaptureModeState(settings.captureMode ?? 'MANUAL');
-    setAllowGesture((settings.allowedGestures?.length ?? 0) > 0);
-    setAutoHoldMs(settings.autoHoldMs ?? 1500);
     const faceAPI = (window as any).faceAPI;
     faceAPI?.getCaptureSequencing?.().then((v: 'sequential' | 'simultaneous') => {
       if (v) setSequencing(v);
@@ -165,6 +164,12 @@ export default function CameraSetupScreen() {
       const all = await navigator.mediaDevices.enumerateDevices();
       const cams = all
         .filter((d) => d.kind === 'videoinput')
+        // Excludes the Camo virtual webcam (2026-09-09) — that phone-bridge
+        // camera is for the separate CCCD scanning tool (apps/cccd-scanner)
+        // only; it has no business being assignable as a CENTER/LEFT/RIGHT
+        // student-photo capture role here, and an operator picking it by
+        // mistake would silently break the actual capture setup.
+        .filter((d) => !/camo/i.test(d.label))
         .map((d, i) => ({ id: d.deviceId, label: d.label || `Camera ${i + 1}` }));
       if (cancelledRef.current) return;
       setDevices(cams);
@@ -297,11 +302,6 @@ export default function CameraSetupScreen() {
     await faceAPI?.setCameraRoleMapping?.(mapping);
     await faceAPI?.setCameraPhysicalAngles?.(physicalAngles);
     await faceAPI?.setCaptureSequencing?.(sequencing);
-    updateSettings({
-      captureMode,
-      autoHoldMs,
-      allowedGestures: allowGesture ? ['VICTORY', 'THUMBS_UP', 'OPEN_PALM'] : [],
-    });
     setSaved(true);
     // Item 9 (2026-09-09): this screen only ever runs inside the
     // `#camera-setup` popup (see cameraSetupWindow.ts) — never the main
@@ -444,52 +444,6 @@ export default function CameraSetupScreen() {
               />
               Đồng thời — nhiều camera bấm cùng lúc mỗi vòng
             </label>
-          </div>
-        </div>
-
-        <div>
-          <p className="font-semibold mb-2">Kích hoạt chụp</p>
-          <div className="flex flex-wrap items-center gap-4 text-sm">
-            <label className="flex items-center gap-2">
-              <input type="radio" checked={captureMode === 'AUTO'} onChange={() => setCaptureModeState('AUTO')} />
-              Tự động — giữ tư thế
-            </label>
-            <label className="flex items-center gap-2">
-              <input
-                type="radio"
-                checked={captureMode !== 'AUTO'}
-                onChange={() => setCaptureModeState(allowGesture ? 'MANUAL' : 'OFF')}
-              />
-              Thủ công — bấm nút
-            </label>
-            {captureMode !== 'AUTO' && (
-              <label className="flex items-center gap-2 text-slate-400">
-                <input
-                  type="checkbox"
-                  checked={allowGesture}
-                  onChange={(e) => {
-                    setAllowGesture(e.target.checked);
-                    setCaptureModeState(e.target.checked ? 'MANUAL' : 'OFF');
-                  }}
-                />
-                Cho phép cử chỉ tay
-              </label>
-            )}
-            {captureMode === 'AUTO' && (
-              <label className="flex items-center gap-2 text-slate-400">
-                Giữ tư thế
-                <input
-                  type="number"
-                  min={500}
-                  max={3000}
-                  step={100}
-                  value={autoHoldMs}
-                  onChange={(e) => setAutoHoldMs(Number(e.target.value))}
-                  className="w-20 bg-slate-950 border border-slate-700 rounded px-2 py-1"
-                />
-                ms
-              </label>
-            )}
           </div>
         </div>
 

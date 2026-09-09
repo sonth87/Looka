@@ -5,43 +5,31 @@ import { StatsPanel } from './StatsPanel';
 import { SessionsPanel } from './SessionsPanel';
 import { CampaignDangerActions } from './CampaignDangerActions';
 import { CampaignStudentsPanel } from './CampaignStudentsPanel';
-import { CampaignRosterPanel } from './CampaignRosterPanel';
 import { EFFECTIVE_STATUS_BADGE_CLASS, EFFECTIVE_STATUS_LABEL, PURPOSE_LABEL, computeEffectiveStatus, formatExpiry, isExpired } from '../campaignFormat';
 
-type Tab = 'stats' | 'sessions' | 'roster' | 'students' | 'settings';
+type Tab = 'stats' | 'sessions' | 'students' | 'settings';
 
 const TABS: { key: Tab; label: string }[] = [
   { key: 'stats', label: 'Thống kê' },
   { key: 'sessions', label: 'Phiên chụp' },
-  { key: 'roster', label: 'Sinh viên dự kiến' },
   { key: 'students', label: 'Sinh viên' },
   { key: 'settings', label: 'Cài đặt' },
 ];
 
 /**
- * Read-only campaign view (`/campaigns/:id`) — 5 tabs (Thống kê / Phiên
- * chụp / Sinh viên dự kiến / Sinh viên / Cài đặt).
+ * Read-only campaign view (`/campaigns/:id`) — 4 tabs (Thống kê / Phiên
+ * chụp / Sinh viên / Cài đặt).
  *
- * "Sinh viên dự kiến" (`CampaignRosterPanel`, 2026-09-09, CCCD-scan
- * capture-identification feature) is deliberately its OWN tab, not folded
- * into "Sinh viên" below despite the similar name: they answer different
- * questions and read from different tables. "Sinh viên dự kiến" is the
- * expected-student roster (`campaign_student_roster`, populated by CSV
- * import) the kiosk checks a scanned CCCD against BEFORE a capture session
- * starts — "who is supposed to show up." "Sinh viên" is the capture *log*
- * (`GET /v1/students`, aggregated from `sessions`) — "who has already been
- * photographed," entirely independent of whether they were ever on the
- * roster. Merging the two screens would conflate "expected" with "captured"
- * (a session's subjectCode isn't guaranteed to be on the roster even once
- * this feature is in use — the manual-entry/legacy path still exists for
- * `apps/web`, see `packages/ui`'s own doc comments) and would make an
- * import look like it created capture history, which it never does. This
- * is unlike "Cán bộ chụp"/"Thiết bị" (removed as tabs the same week, see
- * below) — those were administrative surfaces nobody needed; a roster is
- * actual required data the capture flow cannot function without once a
- * kiosk's campaign relies on CCCD scanning, so a dedicated tab is
- * warranted here even though this file's own history is otherwise "remove
- * tabs, don't add them."
+ * A "Sinh viên dự kiến" tab (`CampaignRosterPanel`, a per-campaign
+ * `campaign_student_roster` CSV-imported expected-student list) briefly
+ * existed here (2026-09-09) before being removed the same day: it was built
+ * on a wrong assumption about what the kiosk's CCCD scan actually checks
+ * against. The corrected design has no campaign-scoped roster at all — a
+ * scanned citizen id is looked up against the FULL external roster file
+ * (`D:\Work\camera_server\response.json`, read-only, refreshed by a system
+ * outside this app) directly from the desktop kiosk's main process, with no
+ * per-campaign admin screen or CMS-side data entry involved. See
+ * `apps/desktop/src/main/cccdRoster.ts` for the real mechanism.
  *
  * "Sinh viên" (`CampaignStudentsPanel`) moved in here 2026-09-08 from a
  * global cross-campaign `/students` page — product feedback: captured
@@ -180,8 +168,6 @@ export function CampaignDetail() {
       {tab === 'stats' && <StatsPanel campaignId={id} />}
 
       {tab === 'sessions' && <SessionsPanel campaignId={id} devices={devices} focusDeviceId={focusDeviceId} />}
-
-      {tab === 'roster' && <CampaignRosterPanel campaignId={id} />}
 
       {tab === 'students' && <CampaignStudentsPanel campaignId={id} />}
 

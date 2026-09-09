@@ -15,6 +15,26 @@ export interface DevicePhotoInput {
   stepId: string;
   attempt: number;
   dataUrl: string;
+  /** The subject's CCCD number, when known — see `ApiPhotoUploadClient.routeUpload`'s own doc comment for why this rides along the request. */
+  identityNumber?: string;
+}
+
+/**
+ * Body for `POST /v1/devices/videos` — see `DeviceApiClient.pushDeviceVideo`
+ * (2026-09-09, "route kiosk VIDEO uploads through apps/api the same way
+ * kiosk PHOTO uploads already work"). No `stepId`/`attempt` the way
+ * `DevicePhotoInput` has — see `AddDeviceVideoDto`'s own doc comment
+ * server-side for why video needs neither. `identityNumber` added
+ * afterward ("đưa vào cùng folder với ảnh của sinh viên đó") — see
+ * `DevicePhotoInput.identityNumber`'s own doc comment, same reasoning.
+ */
+export interface DeviceVideoInput {
+  videoId: string;
+  sessionId: string;
+  cameraRole?: string;
+  durationMs?: number;
+  dataUrl: string;
+  identityNumber?: string;
 }
 
 export interface CampaignConfig {
@@ -232,6 +252,47 @@ export class DeviceApiClient {
     }
 
     const envelope = (await res.json()) as { data: { photoId: string } };
+    return envelope.data;
+  }
+
+  /**
+   * Pushes one recorded video's actual bytes to `POST /v1/devices/videos`
+   * (2026-09-09, "route kiosk VIDEO uploads through apps/api the same way
+   * kiosk PHOTO uploads already work") — the exact video counterpart of
+   * `pushDevicePhoto` above; see that method's own doc comment for why
+   * `FsError` rather than a generic error.
+   */
+  async pushDeviceVideo(input: DeviceVideoInput): Promise<{ videoId: string }> {
+    const creds = getDeviceCredentials();
+    if (!creds || !creds.apiBaseUrl) {
+      throw new FsError(0, FS_ERROR_CODES.NETWORK, 'No device credentials/apiBaseUrl configured');
+    }
+
+    let res: Response;
+    try {
+      res = await this.fetchImpl(`${creds.apiBaseUrl}/v1/devices/videos`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-device-id': creds.deviceId,
+          'x-device-secret': creds.deviceSecret,
+        },
+        body: JSON.stringify(input),
+      });
+    } catch (err) {
+      throw new FsError(0, FS_ERROR_CODES.NETWORK, (err as Error).message);
+    }
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new FsError(
+        res.status,
+        FS_ERROR_CODES.HTTP,
+        `devices/videos ${res.status}: ${text.slice(0, 300)}`
+      );
+    }
+
+    const envelope = (await res.json()) as { data: { videoId: string } };
     return envelope.data;
   }
 }
