@@ -12,6 +12,18 @@
       "runtimeExecutable": "pnpm",
       "runtimeArgs": ["--filter", "@face/api", "start:dev"],
       "port": 3100
+    },
+    {
+      "name": "looka-cms",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--filter", "@face/cms", "dev"],
+      "port": 3200
+    },
+    {
+      "name": "looka-cccd-scanner",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--filter", "@face/cccd-scanner", "dev"],
+      "port": 3010
     }
   ]
 }

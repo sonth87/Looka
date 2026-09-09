@@ -45,6 +45,9 @@ import {
   getCameraRoleMapping,
   setCameraRoleMapping,
   sanitizeCameraRoleMapping,
+  getCameraPhysicalAngles,
+  setCameraPhysicalAngles,
+  sanitizeCameraPhysicalAngles,
   getCaptureSequencing,
   setCaptureSequencing,
   getOrCreateDeviceFingerprint,
@@ -74,6 +77,7 @@ import {
   sanitizeCbHelpState,
 } from './cbHelpWindow.js';
 import { initLogger, installCrashHandlers, closeLogger, logFilePath } from './logger.js';
+import { startCccdWatcher, stopCccdWatcher } from './cccdWatcher.js';
 
 /**
  * Disable Chromium's hardware-accelerated (D3D11/Media Foundation) webcam
@@ -533,6 +537,20 @@ app.whenReady().then(async () => {
     setCameraRoleMapping(sanitizeCameraRoleMapping(mapping));
     return true;
   });
+
+  /**
+   * Per-role physical camera mounting angle (§3.9) — see
+   * `secrets.ts`'s `getCameraPhysicalAngles`/`setCameraPhysicalAngles` own
+   * doc comment. Set from the camera setup screen alongside the role
+   * mapping, read by the main kiosk window's round planning
+   * (`FaceCaptureApp.tsx`'s `runSimultaneousCaptureGate` →
+   * `planCaptureRounds`'s `physicalAngles` option).
+   */
+  ipcMain.handle('camera:getPhysicalAngles', () => getCameraPhysicalAngles());
+  ipcMain.handle('camera:setPhysicalAngles', (_, angles: unknown) => {
+    setCameraPhysicalAngles(sanitizeCameraPhysicalAngles(angles));
+    return true;
+  });
   ipcMain.handle('camera:openSetup', () => {
     openCameraSetupWindow();
     return true;
@@ -800,6 +818,7 @@ app.whenReady().then(async () => {
         subjectCode?: unknown;
         subjectName?: unknown;
         metadata?: unknown;
+        operatorUserId?: unknown;
       }
     ) => {
       const sessionId = String(payload?.sessionId ?? '');
@@ -815,6 +834,7 @@ app.whenReady().then(async () => {
           payload?.metadata && typeof payload.metadata === 'object'
             ? (payload.metadata as Record<string, unknown>)
             : undefined;
+        const operatorUserId = typeof payload?.operatorUserId === 'string' ? payload.operatorUserId : undefined;
         const { approved, superseded, videosEnqueued } = await approveSessionUpload(sessionId, steps, {
           workflowId,
           startedAt,
@@ -822,6 +842,7 @@ app.whenReady().then(async () => {
           subjectCode,
           subjectName,
           metadata,
+          operatorUserId,
         });
         console.warn(
           `[session:approveUpload] sessionId=${sessionId} approved=${approved} superseded=${superseded} videosEnqueued=${videosEnqueued}`
@@ -927,6 +948,13 @@ app.whenReady().then(async () => {
   createWindow();
   void ensureMacCameraAccess();
 
+  // CCCD-scan capture-identification (2026-09-09) — watches the external
+  // scanner's output file and pushes each new scan to the kiosk window over
+  // `cccd:scan`; see cccdWatcher.ts's own doc comment. `() => mainWindow`
+  // (not `mainWindow` itself) so this keeps working across a window
+  // recreate (`app.on('activate', ...)` below) without re-registering.
+  startCccdWatcher(() => mainWindow);
+
   // CB Help's entry point into the camera role-assignment screen (§2.1) —
   // see cameraSetupWindow.ts's own doc comment for why this is a separate
   // window rather than something bolted onto the kiosk UI. A global shortcut
@@ -962,6 +990,7 @@ app.whenReady().then(async () => {
 app.on('window-all-closed', () => {
   stopUploads();
   stopStatsEventPush();
+  stopCccdWatcher();
   closeDatabase();
   if (process.platform !== 'darwin') app.quit();
 });
@@ -969,6 +998,7 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   stopUploads();
   stopStatsEventPush();
+  stopCccdWatcher();
   closeDatabase();
   closeLogger();
   globalShortcut.unregisterAll();

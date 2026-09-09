@@ -1,0 +1,32 @@
+{
+  "name": "@face/cccd-scanner",
+  "version": "0.1.0",
+  "description": "Looka - Standalone CCCD (Vietnamese citizen ID card) front-side OCR scanner. Writes D:\\Work\\camera_server\\response.json for the kiosk's cccdWatcher.ts to pick up. Decoupled on purpose from apps/desktop — see this package's README-less top-of-App.tsx comment for why.",
+  "author": "Skyline <sonth87@gmail.com>",
+  "main": "./dist/main/index.js",
+  "scripts": {
+    "dev": "node ./scripts/dev.mjs",
+    "build": "vite build --emptyOutDir false && tsc -p tsconfig.electron.json",
+    "start": "electron .",
+    "start:build": "pnpm build && electron .",
+    "test": "tsx --test test/**/*.test.ts",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json"
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tesseract.js": "^7.0.0"
+  },
+  "devDependencies": {
+    "@napi-rs/canvas": "^1.0.8",
+    "@types/node": "^22.13.4",
+    "@types/react": "^19.0.10",
+    "@types/react-dom": "^19.0.4",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^37.10.3",
+    "rimraf": "^6.0.1",
+    "tsx": "^4.23.13",
+    "typescript": "^5.7.3",
+    "vite": "^6.1.0"
+  }
+}

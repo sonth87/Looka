@@ -3,6 +3,7 @@ import { FileStorageModule } from '@app/modules/file-storage/file-storage.module
 import { PhotoReviewModule } from '@app/modules/photo-review/photo-review.module';
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { PhotoContentController } from './controllers/photo-content.controller';
 import { PhotoController } from './controllers/photo.controller';
 import { SessionController } from './controllers/session.controller';
 import { StudentController } from './controllers/student.controller';
@@ -32,6 +33,7 @@ import { UploadWorkerService } from './services/upload-worker.service';
   controllers: [
     SessionController,
     PhotoController,
+    PhotoContentController,
     VideoController,
     StudentController,
   ],

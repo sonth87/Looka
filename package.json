@@ -15,6 +15,7 @@
     "dev:app": "pnpm --filter @face/desktop dev",
     "dev:cms": "pnpm --filter @face/cms dev",
     "dev:api": "pnpm --filter @face/api start:dev",
+    "dev:cccd-scanner": "pnpm --filter @face/cccd-scanner dev",
     "build:app": "pnpm --filter @face/desktop build",
     "package:app": "pnpm --filter @face/desktop package",
     "package:app:mac": "pnpm --filter @face/desktop package:mac",

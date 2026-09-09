@@ -72,6 +72,18 @@ export function Layout({ children }: { children: ReactNode }) {
             Góc chụp
           </NavLink>
           {/*
+            "Mẫu chụp" (item 10, 2026-09-09) — reusable capture-configuration
+            templates (angle table + optional card spec) a campaign can pick
+            from instead of building its own from scratch. Deliberately
+            named differently from "Cấu hình" below (`photo_kinds` —
+            standards per photo TYPE, a different concept) and placed right
+            after "Góc chụp" since a configuration's rows are built from that
+            catalog, one level up.
+          */}
+          <NavLink to="/capture-configurations" className={navItemClass}>
+            Mẫu chụp
+          </NavLink>
+          {/*
             "Cấu hình" (2026-09-08, product feedback) — standalone page for
             "loại ảnh" (`photo_kinds`): standards shared across campaigns
             (card size/dpi/background, AI-edit prompt hints), not tied to any

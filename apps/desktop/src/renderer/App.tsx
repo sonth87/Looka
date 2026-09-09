@@ -1,7 +1,7 @@
 import { DeviceLayout, AppConfig, AppContentProps } from '@sonth87/device-layout';
 // import { UserCheck } from 'lucide-react'; // only used by the commented-out attendance app entry below
 import { ElectronCaptureSink, FaceCaptureApp, /* KioskAttendanceApp, */ LookaIcon } from '@face/ui';
-import { CampaignGate } from './CampaignGate';
+import { CampaignGate, authClient } from './CampaignGate';
 
 const electronCaptureSink = new ElectronCaptureSink();
 
@@ -29,11 +29,35 @@ const electronCaptureSink = new ElectronCaptureSink();
  * check at all) instead of its legacy `window.faceAPI.getDeviceAccessStatus()`
  * fallback. See `FaceCaptureApp`'s `resolveActiveWorkflow` for what each
  * path does.
+ *
+ * `operatorUserId` (2026-09-09, "thống kê phần giảng viên chụp" — see
+ * `FaceCaptureAppProps.operatorUserId`'s own doc comment): read straight
+ * from `authClient` rather than threaded through `CampaignGate`'s own
+ * `children` callback, since — unlike `campaignConfig` — it doesn't change
+ * per campaign selection; it's set once at login and stable for the whole
+ * kiosk session.
+ *
+ * `campaignId`/`authClient` (2026-09-09, CCCD-scan capture-identification
+ * feature): `campaignId` comes through `CampaignGate`'s `children` callback
+ * (see that prop's own doc comment there); `authClient` is the same
+ * already-imported SSO singleton `operatorUserId` above reads from — passed
+ * straight through so `FaceCaptureApp.tsx`'s `handleCccdScan` can call
+ * `GET /v1/campaigns/:id/roster/lookup` with the operator's own SSO headers
+ * without this package needing its own copy of `SsoAuthClient`.
  */
 function FaceCaptureAppWithFsSink(props: AppContentProps) {
   return (
     <CampaignGate contentProps={props}>
-      {(p, campaignConfig) => <FaceCaptureApp {...p} sink={electronCaptureSink} campaignConfig={campaignConfig} />}
+      {(p, campaignConfig, campaignId) => (
+        <FaceCaptureApp
+          {...p}
+          sink={electronCaptureSink}
+          campaignConfig={campaignConfig}
+          campaignId={campaignId}
+          authClient={authClient}
+          operatorUserId={authClient.getOperatorUserId()}
+        />
+      )}
     </CampaignGate>
   );
 }

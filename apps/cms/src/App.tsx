@@ -7,6 +7,7 @@ import { CreateCampaignPage } from './components/CreateCampaignPage';
 import { CampaignDetail } from './components/CampaignDetail';
 import { EditCampaignPage } from './components/EditCampaignPage';
 import { AnglePresetsPage } from './components/AnglePresetsPage';
+import { CaptureConfigurationsPage } from './components/CaptureConfigurationsPage';
 import { PhotoKindsPage } from './components/PhotoKindsPage';
 import { ReviewListPage } from './photo-review/ReviewListPage';
 import { ReviewDetailPage } from './photo-review/ReviewDetailPage';
@@ -51,6 +52,7 @@ export default function App() {
             <Route path="/campaigns/:id" element={<CampaignDetail />} />
             <Route path="/campaigns/:id/edit" element={<EditCampaignPage />} />
             <Route path="/angle-presets" element={<AnglePresetsPage />} />
+            <Route path="/capture-configurations" element={<CaptureConfigurationsPage />} />
             <Route path="/config" element={<PhotoKindsPage />} />
             <Route path="/review" element={<ReviewListPage />} />
             <Route path="/review/:id" element={<ReviewDetailPage />} />

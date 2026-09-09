@@ -1,3 +1,4 @@
+import { ArrowLeft, Images, Camera, Settings2, Repeat, MousePointerClick, CircleDot } from 'lucide-react';
 import type { CampaignSummary } from '../../lib/campaignPortalApi.js';
 
 export interface CampaignHomeScreenProps {
@@ -28,6 +29,12 @@ const CAPTURE_MODE_LABEL: Record<CampaignHomeScreenProps['captureMode'], string>
  * local). The action button is gated on all three conditions at once and
  * always shows why when it can't be pressed — see §3.8.1's exact wording
  * table, mirrored in `reasonForBlock` below.
+ *
+ * Redesigned 2026-09-09 (item 7) — same props/behaviour as before (no
+ * change to `CampaignHomeScreenProps`, `reasonForBlock`'s wording, or the
+ * gating logic), a kiosk-appropriate visual pass: bigger stat rows with
+ * icons, a full-bleed hero CTA, and a clearer "why blocked" banner instead
+ * of a single small centred line.
  */
 export function CampaignHomeScreen({
   campaign,
@@ -66,62 +73,121 @@ export function CampaignHomeScreen({
   const blockReason = reasonForBlock();
 
   return (
-    <div className="w-full h-full flex flex-col bg-slate-950 text-slate-100">
-      <div className="flex items-center gap-3 px-6 py-4 border-b border-slate-800">
-        <button onClick={onBack} className="text-slate-400 hover:text-slate-200">
-          ←
-        </button>
-        <div className="font-semibold">{campaign.code ? `${campaign.code} · ` : ''}{campaign.name}</div>
-      </div>
-
-      <div className="flex-1 overflow-y-auto p-6 grid grid-cols-1 md:grid-cols-2 gap-4 max-w-3xl">
-        <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-          <div className="text-xs uppercase tracking-wide text-slate-500 mb-2">Campaign (chụp cái gì)</div>
-          <div className="text-sm text-slate-300 space-y-1">
-            <div>Chỉ tiêu: {campaign.quotaPlanned ?? '—'}{campaign.quotaReached ? ' (đã đạt)' : ''}</div>
-            <div>
-              {/* BUG FIX (2026-09-08): this used to show requiredCameraCount
-                  for BOTH numbers — "5 ảnh · cần tối đa 5 camera" was never
-                  actually the photo count, just the camera count printed
-                  twice. captureAngles.length is the real "số ảnh cần chụp". */}
-              {campaign.captureAngles?.length ?? '—'} ảnh · cần tối đa {campaign.requiredCameraCount} camera
+    <div className="w-full h-full flex flex-col items-center bg-slate-950 text-slate-100">
+      <div className="flex w-full max-w-4xl flex-col">
+        <header className="flex items-center gap-3 px-2 py-6">
+          <button
+            onClick={onBack}
+            className="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-800 text-slate-400 transition-colors hover:border-slate-600 hover:text-slate-200"
+            aria-label="Quay lại"
+          >
+            <ArrowLeft className="h-5 w-5" />
+          </button>
+          <div>
+            <div className="text-xs font-medium uppercase tracking-wide text-slate-500">Chiến dịch</div>
+            <div className="text-lg font-bold text-slate-100">
+              {campaign.code ? `${campaign.code} · ` : ''}
+              {campaign.name}
             </div>
           </div>
+        </header>
+
+        <div className="flex-1 grid grid-cols-1 gap-5 px-2 pb-6 md:grid-cols-2">
+          <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
+            <div className="mb-4 text-xs font-bold uppercase tracking-wide text-slate-500">
+              Campaign — chụp cái gì
+            </div>
+            <div className="space-y-3.5">
+              <div className="flex items-center gap-3">
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-blue-500/10 text-blue-400">
+                  <Images className="h-4.5 w-4.5" />
+                </div>
+                <div>
+                  <div className="text-sm font-semibold text-slate-100">
+                    {campaign.captureAngles?.length ?? '—'} ảnh
+                  </div>
+                  <div className="text-xs text-slate-500">Số ảnh cần chụp cho mỗi sinh viên</div>
+                </div>
+              </div>
+              <div className="flex items-center gap-3">
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-blue-500/10 text-blue-400">
+                  <Camera className="h-4.5 w-4.5" />
+                </div>
+                <div>
+                  <div className="text-sm font-semibold text-slate-100">
+                    Cần tối đa {campaign.requiredCameraCount} camera
+                  </div>
+                  <div className="text-xs text-slate-500">
+                    Chỉ tiêu: {campaign.quotaPlanned ?? '—'}
+                    {campaign.quotaReached ? ' (đã đạt)' : ''}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
+            <div className="mb-4 flex items-center justify-between">
+              <div className="text-xs font-bold uppercase tracking-wide text-slate-500">
+                Thiết bị này — chụp bằng gì
+              </div>
+              <button
+                onClick={onOpenDeviceSettings}
+                className="flex items-center gap-1 text-xs font-medium text-blue-400 transition-colors hover:text-blue-300"
+              >
+                <Settings2 className="h-3.5 w-3.5" />
+                Cài đặt
+              </button>
+            </div>
+            <div className="space-y-3.5">
+              <div className="flex items-center gap-3">
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-400">
+                  <Camera className="h-4.5 w-4.5" />
+                </div>
+                <div className="text-sm font-semibold text-slate-100">{mappedCameraCount} camera đã gán</div>
+              </div>
+              <div className="flex items-center gap-3">
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-400">
+                  <Repeat className="h-4.5 w-4.5" />
+                </div>
+                <div className="text-sm font-semibold text-slate-100">
+                  {sequencing === 'simultaneous' ? 'Đồng thời' : 'Tuần tự'}
+                  {estimatedRounds != null && (
+                    <span className="ml-1.5 font-normal text-slate-500">· {estimatedRounds} vòng / SV</span>
+                  )}
+                </div>
+              </div>
+              <div className="flex items-center gap-3">
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-400">
+                  <MousePointerClick className="h-4.5 w-4.5" />
+                </div>
+                <div className="text-sm font-semibold text-slate-100">{CAPTURE_MODE_LABEL[captureMode]}</div>
+              </div>
+            </div>
+          </section>
         </div>
 
-        <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-          <div className="text-xs uppercase tracking-wide text-slate-500 mb-2">Thiết bị này (chụp bằng gì)</div>
-          <div className="text-sm text-slate-300 space-y-1">
-            <div>{mappedCameraCount} camera đã gán</div>
-            <div>Cách chụp: {sequencing === 'simultaneous' ? 'Đồng thời' : 'Tuần tự'}</div>
-            <div>Kích hoạt: {CAPTURE_MODE_LABEL[captureMode]}</div>
-            {estimatedRounds != null && <div>Dự kiến: {estimatedRounds} vòng / SV</div>}
-          </div>
+        <div className="px-2 pb-8">
           <button
-            onClick={onOpenDeviceSettings}
-            className="mt-3 text-sm text-blue-400 hover:text-blue-300 underline"
+            onClick={onStartCapture}
+            disabled={!canCapture || starting}
+            className="flex w-full items-center justify-center gap-3 rounded-2xl bg-blue-600 py-5 text-xl font-bold text-white shadow-lg shadow-blue-950/50 transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-slate-800 disabled:text-slate-600 disabled:shadow-none"
           >
-            Cài đặt thiết bị
+            <CircleDot className={`h-6 w-6 ${starting ? 'animate-pulse' : ''}`} />
+            {starting ? 'Đang chuẩn bị…' : 'Thực hiện chụp ảnh'}
           </button>
-        </div>
-      </div>
 
-      <div className="px-6 pb-6 max-w-3xl">
-        <button
-          onClick={onStartCapture}
-          disabled={!canCapture || starting}
-          className="w-full rounded-2xl bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-500 text-white font-semibold text-lg py-4 transition-colors"
-        >
-          {starting ? 'Đang chuẩn bị…' : '● Thực hiện chụp ảnh'}
-        </button>
-        <div className="mt-2 text-center text-sm">
-          {blockReason ? (
-            <span className="text-amber-400">✖ {blockReason}</span>
-          ) : (
-            <span className="text-emerald-400">
-              ✔ Tài khoản đã được duyệt · Campaign đang mở · {mappedCameraCount} camera
-            </span>
-          )}
+          <div className="mt-3 text-center">
+            {blockReason ? (
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-500/10 px-3 py-1.5 text-sm font-medium text-amber-400">
+                {blockReason}
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-3 py-1.5 text-sm font-medium text-emerald-400">
+                Tài khoản đã được duyệt · Campaign đang mở · {mappedCameraCount} camera
+              </span>
+            )}
+          </div>
         </div>
       </div>
     </div>

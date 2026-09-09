@@ -202,6 +202,8 @@ export interface CampaignStats {
   sessions: number;
   photos: CampaignPhotoStats;
   byDevice: CampaignDeviceStats[];
+  /** Per-operator ("cán bộ chụp") breakdown — see `CampaignOperatorStats`'s own doc comment. */
+  byOperator: CampaignOperatorStats[];
   byDay: CampaignDayStats[];
   byTrigger?: CaptureTriggerBreakdown;
 }
@@ -257,6 +259,22 @@ export interface CampaignPhotoStats {
 export interface CampaignDeviceStats {
   deviceId: string;
   deviceName: string;
+  sessions: number;
+  photosReady: number;
+  photosFailed: number;
+  lastCaptureAt?: string;
+}
+
+/**
+ * Per-operator ("cán bộ chụp"/giảng viên) row in a campaign's stats
+ * (2026-09-09) — `operatorUserId: null` groups every session with no
+ * operator identity recorded (a kiosk build/session predating this) under
+ * one row rather than dropping those sessions from the count; see
+ * `CampaignOperatorStatsDao`'s own doc comment server-side.
+ */
+export interface CampaignOperatorStats {
+  operatorUserId: string | null;
+  operatorName: string;
   sessions: number;
   photosReady: number;
   photosFailed: number;
@@ -495,6 +513,53 @@ export const createAnglePreset = (input: CreateAnglePresetInput) =>
 export const updateAnglePreset = (id: string, input: UpdateAnglePresetInput) =>
   request<CaptureAnglePreset>(`/v1/capture-angle-presets/${id}`, { method: 'PATCH', body: JSON.stringify(input) });
 
+// --- Capture Configurations ("Cấu hình chụp" — reusable template) ----------
+// Item 10 of the 2026-09-09 task brief: a reusable capture template an admin
+// manages independently of any one campaign — "Configuration 1: 3 camera,
+// gán trái/phải/chính giữa, chụp tỉ lệ 4x6, cộng các tham số khác". Deliberately
+// a preset, not a live link: `CampaignForm.tsx`'s "Chọn từ cấu hình có sẵn"
+// copies one of these onto the campaign's own `captureAngles`/`cardSpec`
+// fields ONCE, at creation/edit time — editing this configuration later, or
+// deleting it, never touches any campaign that already copied its values in.
+// Endpoints: `GET/POST/PATCH/DELETE /v1/capture-configurations` (device-management
+// module, apps/api).
+
+export interface CaptureConfiguration {
+  id: string;
+  name: string;
+  description?: string | null;
+  captureAngles: Record<string, unknown>[];
+  cardSpec?: CardSpec | null;
+  /** Read-only "cần tối đa K camera" hint — same derivation as `Campaign.requiredCameraCount`. */
+  requiredCameraCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateCaptureConfigurationInput {
+  name: string;
+  description?: string;
+  captureAngles: Record<string, unknown>[];
+  cardSpec?: CardSpec | null;
+}
+
+export interface UpdateCaptureConfigurationInput {
+  name?: string;
+  description?: string;
+  captureAngles?: Record<string, unknown>[];
+  cardSpec?: CardSpec | null;
+}
+
+export const listCaptureConfigurations = () => request<CaptureConfiguration[]>('/v1/capture-configurations');
+export const getCaptureConfiguration = (id: string) =>
+  request<CaptureConfiguration>(`/v1/capture-configurations/${id}`);
+export const createCaptureConfiguration = (input: CreateCaptureConfigurationInput) =>
+  request<CaptureConfiguration>('/v1/capture-configurations', { method: 'POST', body: JSON.stringify(input) });
+export const updateCaptureConfiguration = (id: string, input: UpdateCaptureConfigurationInput) =>
+  request<CaptureConfiguration>(`/v1/capture-configurations/${id}`, { method: 'PATCH', body: JSON.stringify(input) });
+export const deleteCaptureConfiguration = (id: string) =>
+  request<{ id: string }>(`/v1/capture-configurations/${id}`, { method: 'DELETE' });
+
 // --- Campaign members ("Cán bộ chụp") ----------------------------------------
 // See docs/plans/campaign-config-sso-card-photo-discussion.md §2.3/§3.2.2 for
 // the `campaign_members`/`users` schema this mirrors, and this app's task
@@ -643,6 +708,116 @@ export const getCampaignsTimeseries = (days = 14) =>
 
 export const listDevices = (campaignId: string) => request<Device[]>(`/v1/campaigns/${campaignId}/devices`);
 export const getDevice = (id: string) => request<Device>(`/v1/devices/${id}`);
+
+/**
+ * "Sinh viên dự kiến" — a campaign's expected-student roster (2026-09-09,
+ * CCCD-scan capture-identification feature). See `apps/api`'s
+ * `CampaignStudentRoster` entity for the full "why" — this is a distinct
+ * table/screen from `StudentListItem`/`listStudents` above (that one is a
+ * capture *log*, "who has already been photographed"; this is "who is
+ * expected," checked at scan time against `citizenId`).
+ */
+export interface CampaignStudentRosterRow {
+  id: string;
+  campaignId: string;
+  studentCode: string;
+  studentName: string;
+  citizenId: string;
+  className?: string | null;
+  major?: string | null;
+  academicYear?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RosterImportRowError {
+  line: number;
+  reason: string;
+}
+
+export interface RosterImportResult {
+  totalRows: number;
+  imported: number;
+  errors: RosterImportRowError[];
+}
+
+export interface ListCampaignStudentRosterParams {
+  q?: string;
+  page?: number;
+  limit?: number;
+}
+
+export function listCampaignStudentRoster(
+  campaignId: string,
+  params: ListCampaignStudentRosterParams = {}
+): Promise<Paginated<CampaignStudentRosterRow>> {
+  const search = new URLSearchParams();
+  if (params.q) search.set('q', params.q);
+  if (params.page) search.set('page', String(params.page));
+  if (params.limit) search.set('limit', String(params.limit));
+  const qs = search.toString();
+  return request<Paginated<CampaignStudentRosterRow>>(`/v1/campaigns/${campaignId}/roster${qs ? `?${qs}` : ''}`);
+}
+
+export interface UpdateCampaignStudentRosterRowInput {
+  studentCode?: string;
+  studentName?: string;
+  citizenId?: string;
+  className?: string;
+  major?: string;
+  academicYear?: string;
+}
+
+export const updateCampaignStudentRosterRow = (
+  campaignId: string,
+  rowId: string,
+  input: UpdateCampaignStudentRosterRowInput
+) =>
+  request<CampaignStudentRosterRow>(`/v1/campaigns/${campaignId}/roster/${rowId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(input),
+  });
+
+export const deleteCampaignStudentRosterRow = (campaignId: string, rowId: string) =>
+  request<{ id: string }>(`/v1/campaigns/${campaignId}/roster/${rowId}`, { method: 'DELETE' });
+
+export const clearCampaignStudentRoster = (campaignId: string) =>
+  request<{ removed: number }>(`/v1/campaigns/${campaignId}/roster`, { method: 'DELETE' });
+
+/**
+ * `POST /v1/campaigns/:id/roster/import` (multipart) — mirrors
+ * `uploadReplacePhoto`'s reasoning for why this isn't the plain `request()`
+ * helper: needs a `FormData` body, no `Content-Type` set manually (the
+ * browser adds the multipart boundary), but still returns the normal
+ * `{ data }` envelope.
+ */
+export async function importCampaignStudentRoster(campaignId: string, file: File): Promise<RosterImportResult> {
+  const form = new FormData();
+  form.append('file', file);
+
+  const res = await fetch(`${baseUrl()}/v1/campaigns/${campaignId}/roster/import`, {
+    method: 'POST',
+    headers: { ...authHeaders() },
+    body: form,
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    let message = text.slice(0, 300) || res.statusText;
+    let code: number | undefined;
+    try {
+      const parsed = JSON.parse(text) as { message?: string; error?: string; errorCode?: number };
+      message = parsed.message || parsed.error || message;
+      code = parsed.errorCode;
+    } catch {
+      /* not JSON; the raw text is the best available */
+    }
+    throw new ApiError(message, res.status, code);
+  }
+
+  const envelope = (await res.json()) as { data: RosterImportResult };
+  return envelope.data;
+}
 
 /**
  * List capture sessions (Phase 11), filterable and paginated — mirrors

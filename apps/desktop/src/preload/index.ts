@@ -92,8 +92,19 @@ export interface ApprovalStepInfo {
   capturedAt?: string;
 }
 
-export type CameraRole = 'CENTER' | 'LEFT' | 'RIGHT';
+// Widened 2026-09-09 (item 2, angle-related settings audit) to match
+// `@face/core`'s real `CameraRole` — this used to omit UP/DOWN, which this
+// file's callers never noticed only because every `faceAPI` call site casts
+// through `(window as any).faceAPI`, but a type this narrow is misleading on
+// its own and now backs `CameraPhysicalAngleMap` below, which needs all five.
+export type CameraRole = 'CENTER' | 'LEFT' | 'RIGHT' | 'UP' | 'DOWN';
 export type CameraRoleMapping = Partial<Record<CameraRole, string>>;
+/** One logical camera role's physical mounting yaw/pitch, in degrees — mirrors `secrets.ts`'s `CameraPhysicalAngles`. */
+export interface CameraPhysicalAngles {
+  yaw: number;
+  pitch: number;
+}
+export type CameraPhysicalAngleMap = Partial<Record<CameraRole, CameraPhysicalAngles>>;
 
 /**
  * The CB Help extended-display window's capture-frames snapshot (§3.5,
@@ -141,6 +152,37 @@ export interface CbHelpPublishState {
   currentStepId: string | null;
   frames: CbHelpFrame[];
   greeting: CbHelpGreeting | null;
+  /**
+   * Item 12b (2026-09-09): a periodic still of the main window's own live
+   * CENTER camera, pushed a few times a second, so CbHelpFrames.tsx's CENTER
+   * tile can render this instead of opening its own competing `getUserMedia`
+   * for the same physical device the main window already has open — see
+   * `packages/ui`'s copy of this type for the full field-bug reasoning.
+   * `null`/absent outside `phase: 'live'` (or on a build/bridge with no
+   * camera to snapshot).
+   */
+  centerPreviewDataUrl?: string | null;
+  /**
+   * CCCD-scan capture-identification (2026-09-09): set only for the brief
+   * window between a scanned CCCD number failing to match the campaign
+   * roster and the operator scanning again — mirrors `greeting`'s own
+   * "presence, not `phase`, is what the renderer branches on" convention.
+   * `null`/absent the rest of the time. See `packages/ui`'s copy of this
+   * type for the full reasoning.
+   */
+  errorMessage?: string | null;
+}
+
+/**
+ * CCCD-scan capture-identification (2026-09-09) — mirrors
+ * `apps/desktop/src/main/cccdScanFile.ts`'s `ParsedCccdScan`, the same
+ * duplicate-the-IPC-payload-shape convention every other `faceAPI` type here
+ * already follows.
+ */
+export interface CccdScan {
+  citizenId: string;
+  fullName: string;
+  dateOfBirth: string | null;
 }
 
 export interface CampaignConfig {
@@ -245,6 +287,8 @@ export interface FaceAPIBridge {
     subjectName?: string;
     /** className/major/academicYear, when a subject was looked up — no dedicated column exists for these, they ride along as free-form metadata. */
     metadata?: Record<string, unknown>;
+    /** See uploads.ts's SessionReportPayload.operatorUserId doc comment. */
+    operatorUserId?: string;
   }) => Promise<ApproveSessionUploadResult>;
 
   getUploadStatus: () => Promise<UploadStatus>;
@@ -343,6 +387,15 @@ export interface FaceAPIBridge {
   onCbHelpUpdate: (callback: (state: CbHelpPublishState) => void) => () => void;
 
   /**
+   * CCCD-scan capture-identification (2026-09-09) — subscribes to every scan
+   * `cccdWatcher.ts` reports off the external scanner's output file. Push-only,
+   * main → renderer, same shape as `onCbHelpUpdate`; returns an unsubscribe
+   * function. See `FaceCaptureApp.tsx`'s `handleCccdScan` for what happens
+   * with each scan (a roster lookup, then FOUND/NOT_FOUND branching).
+   */
+  onCccdScan: (callback: (scan: CccdScan) => void) => () => void;
+
+  /**
    * Local video recording (§3.1) — registers a row before any bytes exist.
    * See `streams.ts`'s own doc comment for the two-call start/end shape.
    */
@@ -371,6 +424,10 @@ export interface FaceAPIBridge {
   /** Runtime camera role mapping (§2.1) — set from the camera setup screen. */
   getCameraRoleMapping: () => Promise<CameraRoleMapping>;
   setCameraRoleMapping: (mapping: CameraRoleMapping) => Promise<boolean>;
+
+  /** Per-role physical camera mounting angle (§3.9) — set from the camera setup screen, read by round planning. */
+  getCameraPhysicalAngles: () => Promise<CameraPhysicalAngleMap>;
+  setCameraPhysicalAngles: (angles: CameraPhysicalAngleMap) => Promise<boolean>;
 
   /**
    * Opens the CB-Help camera setup window on demand — the same window
@@ -474,12 +531,20 @@ const faceAPI: FaceAPIBridge = {
     return () => ipcRenderer.removeListener('cbhelp:update', listener);
   },
 
+  onCccdScan: (callback) => {
+    const listener = (_: unknown, scan: CccdScan) => callback(scan);
+    ipcRenderer.on('cccd:scan', listener);
+    return () => ipcRenderer.removeListener('cccd:scan', listener);
+  },
+
   startVideoStream: (payload) => ipcRenderer.invoke('stream:start', payload),
   endVideoStream: (payload) => ipcRenderer.invoke('stream:end', payload),
   discardSessionVideos: (sessionId) => ipcRenderer.invoke('stream:discardSession', sessionId),
 
   getCameraRoleMapping: () => ipcRenderer.invoke('camera:getRoleMapping'),
   setCameraRoleMapping: (mapping) => ipcRenderer.invoke('camera:setRoleMapping', mapping),
+  getCameraPhysicalAngles: () => ipcRenderer.invoke('camera:getPhysicalAngles'),
+  setCameraPhysicalAngles: (angles) => ipcRenderer.invoke('camera:setPhysicalAngles', angles),
   openCameraSetup: () => ipcRenderer.invoke('camera:openSetup'),
   getCaptureSequencing: () => ipcRenderer.invoke('capture:getSequencing'),
   setCaptureSequencing: (value) => ipcRenderer.invoke('capture:setSequencing', value),

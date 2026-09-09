@@ -171,7 +171,17 @@ export const FrameTile: React.FC<FrameTileProps> = ({
         {STATUS_LABEL_VI[status]}
       </div>
 
-      {status === 'COMPLETED' && imagePath && (
+      {/*
+        Item 12b (2026-09-09): generalized from `status === 'COMPLETED'`
+        alone so a caller can show a still in place of a live stream this
+        tile isn't holding one for — CB Help's CENTER tile does exactly this
+        (a periodic preview snapshot pushed over IPC, see
+        `CbHelpFrames.tsx`), while every existing caller (this tile's
+        COMPLETED thumbnail, everywhere else) is unaffected: none of them
+        ever pass `imagePath` together with a non-COMPLETED status AND a live
+        `stream` at the same time.
+      */}
+      {imagePath && (status === 'COMPLETED' || !stream) && (
         isLarge ? (
           // Fill the tile edge-to-edge, same footprint as the live video,
           // so the frozen shot reads just as large from a distance — the

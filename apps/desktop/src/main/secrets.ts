@@ -41,6 +41,7 @@ export type SecretKey =
   | 'device.lastVerified'
   | 'device.fingerprint'
   | 'camera.roleMapping'
+  | 'camera.physicalAngles'
   | 'capture.sequencing';
 
 const electronCrypto: CryptoProvider = {
@@ -441,6 +442,62 @@ export function sanitizeCameraRoleMapping(input: unknown): CameraRoleMapping {
 
 export function setCameraRoleMapping(mapping: CameraRoleMapping): void {
   setSecret('camera.roleMapping', JSON.stringify(mapping));
+}
+
+/** One logical camera role's physical mounting yaw/pitch, in degrees — see `packages/ui/src/lib/multiFrame.ts`'s `PhysicalCameraAngles`. */
+export interface CameraPhysicalAngles {
+  yaw: number;
+  pitch: number;
+}
+
+/** Per-role override of `multiFrame.ts`'s `DEFAULT_PHYSICAL_ANGLES` — mirrors that file's own `PhysicalAngleMap`. */
+export type CameraPhysicalAngleMap = Partial<Record<CameraRole, CameraPhysicalAngles>>;
+
+/**
+ * Per-role physical camera mounting angle (§3.9, "Cài đặt thiết bị") — how
+ * far off straight-ahead each role's camera is actually bolted, so
+ * `planCaptureRounds` (packages/ui/src/lib/multiFrame.ts) can translate a
+ * step's subject-facing pose target into the correct gate pose for whichever
+ * physical camera actually resolves that step, instead of always assuming
+ * `DEFAULT_PHYSICAL_ANGLES`. Same storage/reasoning as `camera.roleMapping`
+ * above: not a secret, just reusing the already-established per-machine
+ * local-config store. An unset/missing role falls back to
+ * `DEFAULT_PHYSICAL_ANGLES` at the call site (this function returns only the
+ * overrides actually saved, same as `getCameraRoleMapping` returning only
+ * roles actually mapped).
+ */
+export function getCameraPhysicalAngles(): CameraPhysicalAngleMap {
+  const raw = getSecret('camera.physicalAngles');
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw) as CameraPhysicalAngleMap;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Filters an untrusted payload (the `camera:setPhysicalAngles` IPC argument)
+ * down to known roles with finite numeric yaw/pitch — same reasoning as
+ * `sanitizeCameraRoleMapping`.
+ */
+export function sanitizeCameraPhysicalAngles(input: unknown): CameraPhysicalAngleMap {
+  const sanitized: CameraPhysicalAngleMap = {};
+  if (!input || typeof input !== 'object') return sanitized;
+  for (const role of CAMERA_ROLES) {
+    const value = (input as Record<string, unknown>)[role];
+    if (!value || typeof value !== 'object') continue;
+    const yaw = (value as Record<string, unknown>).yaw;
+    const pitch = (value as Record<string, unknown>).pitch;
+    if (typeof yaw === 'number' && Number.isFinite(yaw) && typeof pitch === 'number' && Number.isFinite(pitch)) {
+      sanitized[role] = { yaw, pitch };
+    }
+  }
+  return sanitized;
+}
+
+export function setCameraPhysicalAngles(angles: CameraPhysicalAngleMap): void {
+  setSecret('camera.physicalAngles', JSON.stringify(angles));
 }
 
 /**

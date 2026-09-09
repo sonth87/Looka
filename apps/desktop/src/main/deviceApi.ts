@@ -1,4 +1,5 @@
 import type { CaptureStep, CaptureTriggerMode } from '@face/core';
+import { FsError, FS_ERROR_CODES } from '@face/fs-client';
 import {
   getDeviceCredentials,
   hasDeviceCredentials,
@@ -6,6 +7,15 @@ import {
   setLastVerifiedDeviceState,
 } from './secrets.js';
 import { parseRejectReason, type DeviceRejectReason } from './deviceAuth.js';
+
+/** Body for `POST /v1/devices/photos` — see `DeviceApiClient.pushDevicePhoto`. */
+export interface DevicePhotoInput {
+  photoId: string;
+  sessionId: string;
+  stepId: string;
+  attempt: number;
+  dataUrl: string;
+}
 
 export interface CampaignConfig {
   id: string;
@@ -175,6 +185,54 @@ export class DeviceApiClient {
       console.error('[deviceApi] events push failed:', (err as Error).message);
       return 'failed';
     }
+  }
+
+  /**
+   * Pushes one captured photo's actual bytes to `POST /v1/devices/photos`
+   * (Part A of the "route kiosk photo uploads through apps/api" work) — the
+   * target `ApiPhotoUploadClient` (uploads.ts) POSTs to instead of fs-core
+   * directly, for anything that isn't a video (see that class's own doc
+   * comment for why video is untouched).
+   *
+   * Throws `FsError` on any failure, mirroring `FsClient`'s own error
+   * contract — `ApiPhotoUploadClient` is a drop-in `FsClient` substitute for
+   * `UploadWorker` (packages/fs-client), which decides retry-vs-permanent
+   * purely off `FsError.retryable` (httpStatus 0/429/5xx). A non-FsError
+   * here would default to "always retryable", which is the wrong behaviour
+   * for e.g. a validation 400 that will never succeed on retry.
+   */
+  async pushDevicePhoto(input: DevicePhotoInput): Promise<{ photoId: string }> {
+    const creds = getDeviceCredentials();
+    if (!creds || !creds.apiBaseUrl) {
+      throw new FsError(0, FS_ERROR_CODES.NETWORK, 'No device credentials/apiBaseUrl configured');
+    }
+
+    let res: Response;
+    try {
+      res = await this.fetchImpl(`${creds.apiBaseUrl}/v1/devices/photos`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-device-id': creds.deviceId,
+          'x-device-secret': creds.deviceSecret,
+        },
+        body: JSON.stringify(input),
+      });
+    } catch (err) {
+      throw new FsError(0, FS_ERROR_CODES.NETWORK, (err as Error).message);
+    }
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new FsError(
+        res.status,
+        FS_ERROR_CODES.HTTP,
+        `devices/photos ${res.status}: ${text.slice(0, 300)}`
+      );
+    }
+
+    const envelope = (await res.json()) as { data: { photoId: string } };
+    return envelope.data;
   }
 }
 

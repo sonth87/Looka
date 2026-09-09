@@ -77,6 +77,26 @@ export interface CbHelpPublishState {
   currentStepId: string | null;
   frames: CbHelpFrame[];
   greeting: CbHelpGreeting | null;
+  /**
+   * Item 12b (2026-09-09, replaces the "this window opens its own CENTER
+   * getUserMedia" design that field reports showed contending with the main
+   * window's already-open CENTER stream for the same physical device on
+   * common Windows webcam drivers) — a periodic still of the main window's
+   * own live CENTER feed, pushed a few times a second via
+   * `FaceCaptureApp.tsx`'s `publishCbHelpState`. `CbHelpFrames.tsx` renders
+   * this for the CENTER tile instead of opening a competing stream of its
+   * own; every other (non-CENTER) tile is unaffected and still opens its own
+   * `getUserMedia`, same as before.
+   */
+  centerPreviewDataUrl?: string | null;
+  /**
+   * CCCD-scan capture-identification (2026-09-09) — set only for the brief
+   * window between a scanned CCCD number failing to match the campaign
+   * roster and the next scan attempt (`FaceCaptureApp.tsx`'s
+   * `handleCccdScan`). Same "presence, not `phase`, drives the renderer"
+   * convention as `greeting`. `null`/absent the rest of the time.
+   */
+  errorMessage?: string | null;
 }
 
 const EMPTY_CBHELP_STATE: CbHelpPublishState = {
@@ -86,6 +106,8 @@ const EMPTY_CBHELP_STATE: CbHelpPublishState = {
   currentStepId: null,
   frames: [],
   greeting: null,
+  centerPreviewDataUrl: null,
+  errorMessage: null,
 };
 
 let cbHelpState: CbHelpPublishState = EMPTY_CBHELP_STATE;
@@ -123,6 +145,8 @@ export function sanitizeCbHelpState(raw: unknown): CbHelpPublishState {
         attempt: Number.isFinite(f.attempt) ? Number(f.attempt) : 0,
       })),
     greeting: sanitizeGreeting(payload?.greeting),
+    centerPreviewDataUrl: typeof payload?.centerPreviewDataUrl === 'string' ? payload.centerPreviewDataUrl : null,
+    errorMessage: typeof payload?.errorMessage === 'string' ? payload.errorMessage : null,
   };
 }
 
@@ -209,14 +233,17 @@ export function openCbHelpWindow(excludeDisplayId?: number): void {
   cbHelpWindow.setMenuBarVisibility(false);
 
   // This window's own renderer (CbHelpFrames.tsx) opens its own independent
-  // getUserMedia streams — including one for CENTER, alongside the main
-  // kiosk window's already-open CENTER stream — and only ever logs a
-  // failure to open one (`[cb-help] failed to open camera ...`) to this
-  // window's own DevTools console, which nobody has open on a kiosk.
-  // Forwarded to main.log the same way `attachRendererDiagnostics` already
-  // does for the main window, so a blank tile here (2026-09-08 field
-  // report — every tile showing black, including the currently-capturing
-  // one) is diagnosable from the log instead of invisible.
+  // getUserMedia streams for every non-CENTER tile (CENTER itself is fed by
+  // a periodic preview pushed over IPC instead, as of item 12b 2026-09-09 —
+  // see CbHelpFrames.tsx's own doc comment for why: those streams used to
+  // compete with the main kiosk window's already-open CENTER stream for the
+  // same physical device, which is exactly the "CENTER tile stays blank"
+  // field report this fix addresses) and only ever logs a failure to open
+  // one (`[cb-help] failed to open camera ...`) to this window's own
+  // DevTools console, which nobody has open on a kiosk. Forwarded to
+  // main.log the same way `attachRendererDiagnostics` already does for the
+  // main window, so a blank side-frame tile is still diagnosable from the
+  // log instead of invisible.
   cbHelpWindow.webContents.on('console-message', (details) => {
     const level = details.level;
     if (level === 'warning' || level === 'error') {

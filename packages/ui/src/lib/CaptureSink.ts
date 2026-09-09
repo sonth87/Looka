@@ -97,7 +97,16 @@ export interface CaptureSink {
     sessionId: string,
     steps?: ApprovalStepInfo[],
     videoSessionId?: string,
-    subject?: StudentSubjectInfo
+    subject?: StudentSubjectInfo,
+    /**
+     * The logged-in operator's server-side `users.id` (2026-09-09,
+     * "thống kê phần giảng viên chụp") — see
+     * `FaceCaptureAppProps.operatorUserId`'s own doc comment in
+     * `FaceCaptureApp.tsx`. `ElectronCaptureSink` forwards it into the
+     * SESSION_REPORT the kiosk builds; `HttpCaptureSink` ignores it (a
+     * no-op sink, same as `videoSessionId`/`subject`).
+     */
+    operatorUserId?: string | null
   ): Promise<void>;
 }
 
@@ -199,9 +208,10 @@ export class HttpCaptureSink implements CaptureSink {
     _sessionId?: string,
     _steps?: ApprovalStepInfo[],
     _videoSessionId?: string,
-    _subject?: StudentSubjectInfo
+    _subject?: StudentSubjectInfo,
+    _operatorUserId?: string | null
   ): Promise<void> {
-    // Intentionally does nothing, including with `_steps`/`_videoSessionId`/`_subject` — see method doc comment.
+    // Intentionally does nothing, including with `_steps`/`_videoSessionId`/`_subject`/`_operatorUserId` — see method doc comment.
   }
 }
 
@@ -289,7 +299,8 @@ export class ElectronCaptureSink implements CaptureSink {
     sessionId: string,
     steps?: ApprovalStepInfo[],
     videoSessionId?: string,
-    subject?: StudentSubjectInfo
+    subject?: StudentSubjectInfo,
+    operatorUserId?: string | null
   ): Promise<void> {
     const faceAPI = (window as any).faceAPI;
     if (!faceAPI?.approveSessionUpload) {
@@ -304,6 +315,7 @@ export class ElectronCaptureSink implements CaptureSink {
       metadata: subject
         ? { className: subject.className, major: subject.major, academicYear: subject.academicYear }
         : undefined,
+      operatorUserId: operatorUserId ?? undefined,
     });
     if (!result?.ok) {
       throw new Error(result?.error ?? 'approveSessionUpload failed');
@@ -475,7 +487,11 @@ export class RunScopedCaptureSession {
    * component mid-run; surfacing that as a real, visible error is what lets
    * an operator notice instead of walking away thinking the upload went out.
    */
-  public async approve(steps?: ApprovalStepInfo[], videoSessionId?: string): Promise<void> {
+  public async approve(
+    steps?: ApprovalStepInfo[],
+    videoSessionId?: string,
+    operatorUserId?: string | null
+  ): Promise<void> {
     if (!this.sink) throw new Error('No CaptureSink configured.');
     const sessionId = this.sessionId;
     if (!sessionId) {
@@ -483,7 +499,7 @@ export class RunScopedCaptureSession {
         'No active capture session to approve — the app may have hot-reloaded mid-session. Please fully reload and recapture.'
       );
     }
-    await this.sink.approveUpload(sessionId, steps, videoSessionId, this.pendingSubject);
+    await this.sink.approveUpload(sessionId, steps, videoSessionId, this.pendingSubject, operatorUserId);
   }
 
   /** The run finished naturally: tell the sink, then drop the cached id. */

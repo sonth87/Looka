@@ -65,6 +65,38 @@ interface SessionContext {
 const uploadedFileMimeAllowed = (mimeType: string) => ALLOWED_UPLOAD_MIME_TYPES.includes(mimeType.toLowerCase());
 
 /**
+ * Extracts a real diagnostic message from anything this module's sidecar
+ * call sites (`reprocess`/`aiEdit`/`uploadVariant`) can catch —
+ * `SidecarError` and `CustomException` (e.g. `FileStorageService`'s own
+ * throws, hit when `readSourcePhotoBytes`/`fetchBytesFromFileStorage` falls
+ * back to fs-core) both carry their real text somewhere OTHER than the
+ * plain `.message` a generic `catch` would read.
+ *
+ * `CustomException.message` specifically is NOT the message it was
+ * constructed with, for every `CustomException` anywhere in this app: Nest's
+ * own `HttpException` only populates `.message` from a string response or a
+ * `.message` key on an object response, and `CustomException` passes
+ * `{ error }` to it (see that class's own constructor) — so `.message`
+ * silently reads back as the generic "Custom Exception" (Nest's fallback,
+ * derived from the constructor's class name) instead of the real text,
+ * which only ever lands on `.payload.error`. Confirmed live during this
+ * task's own end-to-end verification (an AUTO_FAILED variant's `note` read
+ * literally "Custom Exception" until this fix). A genuine, pre-existing bug
+ * in the shared `CustomException` class — worked around here rather than
+ * fixed at the source, to keep this task's changes scoped to the
+ * photo-review module; worth a follow-up across the rest of the app, where
+ * the same silent-message-loss can happen anywhere a `CustomException` is
+ * caught and logged rather than left to the global exception filter (which
+ * reads the response object directly, not `.message`, so this bug never
+ * reaches an actual HTTP response).
+ */
+function extractSidecarFailureMessage(error: unknown): string {
+  if (error instanceof SidecarError) return error.message;
+  if (error instanceof CustomException) return error.payload?.error ?? error.message;
+  return (error as Error)?.message ?? String(error);
+}
+
+/**
  * Core service for the "Duyệt ảnh" (photo review) module —
  * docs/plans/cms-photo-review-plan.md. Owns every state-changing action in
  * §7's API table except `photo_kinds` CRUD (see `PhotoKindService`), and
@@ -198,6 +230,61 @@ export class PhotoReviewService {
 
   private extForMime(mimeType: string): string {
     return mimeType.toLowerCase() === 'image/png' ? 'png' : 'jpg';
+  }
+
+  /**
+   * Resolves actual bytes for a source `photos` row, for handing to the AI
+   * sidecar (which only ever accepts base64 bytes — see
+   * `PhotoReviewSidecarService`'s own doc comment, "the sidecar has no
+   * url-fetching code anywhere").
+   *
+   * Prefers `upload_outbox.content` — Part A of the "route kiosk photo
+   * uploads through apps/api" work put real bytes there immediately, in
+   * this same Postgres instance, well before fs-core has anything, which is
+   * exactly what lets `ensureSetForApprovedSession`'s auto-trigger (see
+   * `DeviceEventService.recordBatch`) run its first `CARD_AUTO` the instant
+   * a session is approved rather than waiting on any upload to complete.
+   * Falls back to a short-lived fs-core view-link + HTTP fetch when the
+   * outbox has already cleared `content` (a normal completed upload — see
+   * `UploadWorkerService.send()`, which blanks `content` once fs-core has
+   * confirmed the bytes) or never had a row at all (a photo captured before
+   * Part A landed, or a web-path photo whose outbox row was pruned).
+   *
+   * Raw SQL against `upload_outbox` — same cross-module-boundary pattern as
+   * every other read in this service (see the class doc comment): that
+   * table belongs to the `capture` module, which this module must not
+   * structurally depend on.
+   */
+  private async readSourcePhotoBytes(
+    photo: FrontSourcePhoto,
+    tenantName?: string,
+  ): Promise<Buffer> {
+    const rows: Array<{ content: Buffer | null }> = await this.dataSource.query(
+      `SELECT content FROM upload_outbox
+        WHERE photo_id = $1 AND content IS NOT NULL AND length(content) > 0
+        ORDER BY created_at DESC LIMIT 1`,
+      [photo.id],
+    );
+    if (rows[0]?.content) {
+      return rows[0].content;
+    }
+
+    if (!photo.fsFileId) {
+      throw new SidecarError(
+        'Source photo has no bytes available yet — not staged locally, and not yet uploaded to the file-service',
+      );
+    }
+    return this.fetchBytesFromFileStorage(photo.fsFileId, tenantName);
+  }
+
+  /** Bytes for something that lives ONLY on fs-core — a `photo_variants` row, which `uploadCardBytes` always uploads there directly (no local-outbox equivalent for this module's own uploads). */
+  private async fetchBytesFromFileStorage(fsFileId: string, tenantName?: string): Promise<Buffer> {
+    const link = await this.fileStorage.issueViewLink(fsFileId, 'photo-review-sidecar', tenantName);
+    const res = await fetch(link.url);
+    if (!res.ok) {
+      throw new SidecarError(`Failed to fetch bytes from the file-service: HTTP ${res.status}`);
+    }
+    return Buffer.from(await res.arrayBuffer());
   }
 
   private buildVirtualPath(sessionId: string, year: number, prefix: string, version: number, ext: string): string {
@@ -600,18 +687,10 @@ export class PhotoReviewService {
     });
 
     try {
-      if (!frontPhoto.fsFileId) {
-        throw new SidecarError('Source photo has not reached the file-service yet');
-      }
-      const sourceLink = await this.fileStorage.issueViewLink(
-        frontPhoto.fsFileId,
-        'photo-review-sidecar',
-        sessionContext.tenantName,
-      );
+      const sourceBytes = await this.readSourcePhotoBytes(frontPhoto, sessionContext.tenantName);
       const result = await this.sidecar.cardPhoto({
-        sourceImageUrl: sourceLink.url,
+        imageBase64: sourceBytes.toString('base64'),
         cardSpec: kind.cardSpec,
-        kindCode: kind.code,
       });
 
       const ext = this.extForMime(result.mimeType);
@@ -629,8 +708,7 @@ export class PhotoReviewService {
         virtualPath: virtualPath.replace(/\.[^.]+$/, '.json'),
         idempotencyKey: `photo-review:${variant.id}:auto:meta`,
         metadata: {
-          algorithmVersion: result.algorithmVersion,
-          qualityReport: result.qualityReport,
+          warnings: result.warnings,
           cardSpec: kind.cardSpec,
         },
       });
@@ -646,8 +724,12 @@ export class PhotoReviewService {
         variant.width = result.width ?? null;
         variant.height = result.height ?? null;
         variant.dpi = result.dpi ?? null;
-        variant.qualityReport = result.qualityReport ?? null;
-        variant.algorithmVersion = result.algorithmVersion ?? null;
+        // The sidecar does not version its own pipeline output today (see
+        // SidecarCardPhotoResult's own doc comment) — left null rather than
+        // a made-up constant, matching "never a fabricated value" elsewhere
+        // in this module's own sidecar-result handling.
+        variant.qualityReport = result.warnings.length ? { warnings: result.warnings } : null;
+        variant.algorithmVersion = null;
         await repo.save(variant);
 
         lockedSet.currentCardVariantId = variant.id;
@@ -663,7 +745,7 @@ export class PhotoReviewService {
         return variant;
       });
     } catch (error) {
-      const message = error instanceof SidecarError ? error.message : (error as Error).message;
+      const message = extractSidecarFailureMessage(error);
       this.logger.warn(`reprocess failed for set ${setId}: ${message}`);
       await this.dataSource.transaction(async (manager) => {
         const lockedSet = await this.lockSet(manager, setId);
@@ -764,16 +846,12 @@ export class PhotoReviewService {
     });
 
     try {
-      const sourceLink = await this.fileStorage.issueViewLink(
-        fromVariantFsFileId,
-        'photo-review-sidecar',
-        sessionContext.tenantName,
-      );
+      const sourceBytes = await this.fetchBytesFromFileStorage(fromVariantFsFileId, sessionContext.tenantName);
       const result = await this.sidecar.edit({
-        sourceImageUrl: sourceLink.url,
+        imageBase64: sourceBytes.toString('base64'),
         prompt: dto.prompt,
         region: dto.region,
-        cardSpec: kind.cardSpec,
+        fromVariantId: fromVariant.id,
       });
 
       const ext = this.extForMime(result.mimeType);
@@ -816,7 +894,7 @@ export class PhotoReviewService {
       // giờ tự đặt bản AI làm ảnh hiện tại". A reviewer must call
       // POST /v1/review/variants/:id/accept explicitly.
     } catch (error) {
-      const message = error instanceof SidecarError ? error.message : (error as Error).message;
+      const message = extractSidecarFailureMessage(error);
       this.logger.warn(`ai-edit failed for set ${setId}: ${message}`);
       variant.status = PhotoVariantStatus.FAILED;
       variant.note = message;
@@ -954,7 +1032,7 @@ export class PhotoReviewService {
     const kind = await this.photoKindService.findKindEntityOrFail(set.kindId);
     const sessionContext = await this.resolveSessionContext(set.sourceSessionId);
     const frontPhoto = await this.findFrontSourcePhoto(set.sourceSessionId);
-    if (!frontPhoto?.fsFileId) {
+    if (!frontPhoto) {
       throw new CustomException(
         'Reference (FRONT) photo is not available yet — cannot verify identity',
         PHOTO_REVIEW_ERROR_CODE.SOURCE_PHOTO_NOT_FOUND,
@@ -962,21 +1040,22 @@ export class PhotoReviewService {
       );
     }
 
-    const referenceLink = await this.fileStorage.issueViewLink(
-      frontPhoto.fsFileId,
-      'photo-review-sidecar',
-      sessionContext.tenantName,
-    );
-
     let similarity: number;
     try {
+      // readSourcePhotoBytes prefers upload_outbox.content (Part A) over a
+      // file-service round trip — resolved here, inside the try, so a photo
+      // with no bytes available anywhere yet (not staged locally, not on
+      // fs-core) surfaces through the exact same SIDECAR_UNREACHABLE 503
+      // this catch block already produces, rather than a second bespoke
+      // error path.
+      const referenceBytes = await this.readSourcePhotoBytes(frontPhoto, sessionContext.tenantName);
       const simResult = await this.sidecar.identitySimilarity({
-        referenceImageUrl: referenceLink.url,
+        referenceImageBase64: referenceBytes.toString('base64'),
         candidateImageBase64: file.buffer.toString('base64'),
       });
       similarity = simResult.similarity;
     } catch (error) {
-      const message = error instanceof SidecarError ? error.message : (error as Error).message;
+      const message = extractSidecarFailureMessage(error);
       // Unlike reprocess: this check is a safety requirement, not a
       // best-effort pipeline step — a sidecar outage must fail the request
       // clearly rather than let an unverified photo through.
@@ -1001,12 +1080,11 @@ export class PhotoReviewService {
     // fs-core and so pass a short-lived view-link URL instead.
     const cardResult = await this.sidecar
       .cardPhoto({
-        sourceImageBase64: file.buffer.toString('base64'),
+        imageBase64: file.buffer.toString('base64'),
         cardSpec: kind.cardSpec,
-        kindCode: kind.code,
       })
       .catch((error) => {
-        const message = error instanceof SidecarError ? error.message : (error as Error).message;
+        const message = extractSidecarFailureMessage(error);
         throw new CustomException(
           `Card-photo pipeline failed for the uploaded image: ${message}`,
           PHOTO_REVIEW_ERROR_CODE.SIDECAR_UNREACHABLE,
@@ -1052,8 +1130,8 @@ export class PhotoReviewService {
           height: cardResult.height ?? null,
           dpi: cardResult.dpi ?? null,
           identitySimilarity: similarity,
-          qualityReport: cardResult.qualityReport ?? null,
-          algorithmVersion: cardResult.algorithmVersion ?? null,
+          qualityReport: cardResult.warnings.length ? { warnings: cardResult.warnings } : null,
+          algorithmVersion: null,
           createdByUserId: actorUserId,
         }),
       );
@@ -1346,15 +1424,14 @@ export class PhotoReviewService {
    * that just got approved/completed — plan §4: "phiên chụp được xác nhận
    * → (tạo/cập nhật hồ sơ, source_session_id = phiên này) → PENDING_AUTO".
    *
-   * **Not wired to any call site by this pass** — the actual trigger point
-   * (kiosk session approval in `CaptureReportService.applySessionReport`,
-   * or the web path's `POST /v1/sessions/:id/complete` in
-   * `SessionService.completeSession`) lives in the `capture` module, which
-   * this task explicitly forbids editing (owned/edited by another agent
-   * concurrently). Calling this method from either of those two spots is a
-   * one-line follow-up for whoever owns that module — see this module's
-   * final report for the exact call shape
-   * (`photoReviewService.ensureSetForApprovedSession(session.id)`).
+   * Called from both capture paths' own approval points:
+   * `SessionService.completeSession` (web) and `DeviceEventService.recordBatch`
+   * (kiosk, right after it applies a `SESSION_REPORT`) — both best-effort,
+   * outside their own transaction, exactly as documented here originally.
+   * `DeviceEventService.recordBatch` additionally uses this call's
+   * `pendingAuto` flag to auto-trigger the first `CARD_AUTO` — see that
+   * method's own comment for why the flag (not just the returned id) is
+   * what decides whether to fire.
    *
    * Reads the session's `subject_code`/`subject_name`/`campaign_id`
    * straight off the `sessions` table (read-only, same cross-boundary
@@ -1368,12 +1445,16 @@ export class PhotoReviewService {
    * current variant untouched (the newer session id is still recorded, so
    * a reviewer can later choose to reprocess against it) rather than being
    * silently reset to `PENDING_AUTO` — "giữ bản đã duyệt, hiện cảnh báo …
-   * để cán bộ tự quyết". Any other status resets to `PENDING_AUTO`,
-   * locking the set until `reprocess` is called again (this pass has no
-   * background worker auto-triggering that first `CARD_AUTO` — `reprocess`
-   * is the one endpoint that creates it, per the task brief).
+   * để cán bộ tự quyết" — `pendingAuto: false` in that case, specifically so
+   * the caller's auto-trigger does NOT fire a fresh `CARD_AUTO` over an
+   * already-reviewed set. Any other status resets to `PENDING_AUTO`
+   * (`pendingAuto: true`), which used to lock the set until an operator
+   * manually clicked "reprocess" — now, per the caller's own auto-trigger,
+   * that first `CARD_AUTO` runs immediately instead.
    */
-  async ensureSetForApprovedSession(sessionId: string): Promise<string | null> {
+  async ensureSetForApprovedSession(
+    sessionId: string,
+  ): Promise<{ setId: string; pendingAuto: boolean } | null> {
     const sessionRows: Array<{ subject_code: string | null; subject_name: string | null; campaign_id: string | null }> =
       await this.dataSource.query(`SELECT subject_code, subject_name, campaign_id FROM sessions WHERE id = $1`, [
         sessionId,
@@ -1406,13 +1487,13 @@ export class PhotoReviewService {
         existing.status = PhotoReviewSetStatus.PENDING_AUTO;
         if (subjectName) existing.subjectName = subjectName;
         await this.setRepository.save(existing);
-      } else {
-        // Keep the approved variant current; just record that a newer
-        // session exists so a reviewer can decide (R-Q10).
-        existing.sourceSessionId = sessionId;
-        await this.setRepository.save(existing);
+        return { setId: existing.id, pendingAuto: true };
       }
-      return existing.id;
+      // Keep the approved variant current; just record that a newer
+      // session exists so a reviewer can decide (R-Q10).
+      existing.sourceSessionId = sessionId;
+      await this.setRepository.save(existing);
+      return { setId: existing.id, pendingAuto: false };
     }
 
     const created = await this.setRepository.save(
@@ -1425,6 +1506,6 @@ export class PhotoReviewService {
         status: PhotoReviewSetStatus.PENDING_AUTO,
       }),
     );
-    return created.id;
+    return { setId: created.id, pendingAuto: true };
   }
 }

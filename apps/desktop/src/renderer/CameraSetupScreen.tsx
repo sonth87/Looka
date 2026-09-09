@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { CAMERA_ROLES, defaultCameraRoleForStepType, type CameraRole, type CaptureStep } from '@face/core';
-import { getSettings, updateSettings } from '@face/ui';
+import { getSettings, updateSettings, DEFAULT_PHYSICAL_ANGLES, type PhysicalCameraAngles } from '@face/ui';
 import type { CaptureTriggerMode } from '@face/core';
 
 type CameraRoleMapping = Partial<Record<CameraRole, string>>;
+/** Every role's *effective* physical mounting angle — always fully populated (defaults filled in), unlike the sparse override map this screen saves/loads. */
+type PhysicalAngleState = Record<CameraRole, PhysicalCameraAngles>;
 
 interface DeviceEntry {
   id: string;
@@ -86,6 +88,16 @@ function deriveNeededRoles(steps: CaptureStep[]): RoleNeed[] {
 export default function CameraSetupScreen() {
   const [devices, setDevices] = useState<DeviceEntry[]>([]);
   const [mapping, setMapping] = useState<CameraRoleMapping>({});
+  // Physical mounting angle (§3.9, item 2 2026-09-09) — "góc lắp camera",
+  // separate from `mapping` (which camera plays a role): this is how far off
+  // straight-ahead that role's camera is actually bolted, which
+  // `planCaptureRounds` (packages/ui/src/lib/multiFrame.ts) needs to
+  // translate a step's subject-facing pose target into the correct gate pose
+  // for whichever physical camera resolves that step. Always fully
+  // populated with `DEFAULT_PHYSICAL_ANGLES` until the saved override (if
+  // any) for a role is loaded, so every input always shows a sensible value
+  // rather than blank/0.
+  const [physicalAngles, setPhysicalAngles] = useState<PhysicalAngleState>({ ...DEFAULT_PHYSICAL_ANGLES });
   const [neededRoles, setNeededRoles] = useState<RoleNeed[]>(ALL_ROLES_NEEDED);
   const [otherOpen, setOtherOpen] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -203,6 +215,17 @@ export default function CameraSetupScreen() {
           setMapping(existing);
         }
 
+        const savedAngles = (await faceAPI?.getCameraPhysicalAngles?.()) ?? {};
+        if (!cancelledRef.current) {
+          setPhysicalAngles((prev) => {
+            const next = { ...prev };
+            for (const role of ROLES) {
+              if (savedAngles[role]) next[role] = savedAngles[role];
+            }
+            return next;
+          });
+        }
+
         // A permission prompt for *some* camera is needed before labels are
         // populated at all — enumerateDevices() reports blank labels/ids
         // otherwise. Requesting on the first device found is enough to
@@ -264,9 +287,15 @@ export default function CameraSetupScreen() {
     );
   };
 
+  const handleAngleChange = (role: CameraRole, axis: 'yaw' | 'pitch', value: number) => {
+    setPhysicalAngles((prev) => ({ ...prev, [role]: { ...prev[role], [axis]: value } }));
+    setSaved(false);
+  };
+
   const handleSave = async () => {
     const faceAPI = (window as any).faceAPI;
     await faceAPI?.setCameraRoleMapping?.(mapping);
+    await faceAPI?.setCameraPhysicalAngles?.(physicalAngles);
     await faceAPI?.setCaptureSequencing?.(sequencing);
     updateSettings({
       captureMode,
@@ -274,6 +303,17 @@ export default function CameraSetupScreen() {
       allowedGestures: allowGesture ? ['VICTORY', 'THUMBS_UP', 'OPEN_PALM'] : [],
     });
     setSaved(true);
+    // Item 9 (2026-09-09): this screen only ever runs inside the
+    // `#camera-setup` popup (see cameraSetupWindow.ts) — never the main
+    // window — so a plain `window.close()` closes exactly this popup, no IPC
+    // needed (Electron's renderer is allowed to close a window it lives in,
+    // same as any browser tab closing itself). `faceAPI.closeWindow()` is
+    // NOT the right call here: its `window:close` IPC handler is hardcoded
+    // to `mainWindow.close()` (see main/index.ts), so calling it from this
+    // screen would close the whole kiosk app instead of just this popup.
+    // Delayed slightly so the operator actually sees "Đã lưu" land before
+    // the window disappears, rather than it flashing shut instantly.
+    setTimeout(() => window.close(), 600);
   };
 
   const otherRoles = ROLES.filter((r) => !neededRoles.some((n) => n.role === r));
@@ -350,6 +390,8 @@ export default function CameraSetupScreen() {
             videoRefs={videoRefs}
             streamsRef={streamsRef}
             onAssign={assignRole}
+            angles={physicalAngles[need.role]}
+            onAngleChange={handleAngleChange}
           />
         ))}
       </div>
@@ -373,6 +415,8 @@ export default function CameraSetupScreen() {
                   videoRefs={videoRefs}
                   streamsRef={streamsRef}
                   onAssign={assignRole}
+                  angles={physicalAngles[role]}
+                  onAngleChange={handleAngleChange}
                 />
               ))}
             </div>
@@ -471,10 +515,12 @@ interface RoleRowProps {
   videoRefs: React.MutableRefObject<Map<CameraRole, HTMLVideoElement | null>>;
   streamsRef: React.MutableRefObject<Map<string, MediaStream>>;
   onAssign: (role: CameraRole, deviceId: string) => void;
+  angles: PhysicalCameraAngles;
+  onAngleChange: (role: CameraRole, axis: 'yaw' | 'pitch', value: number) => void;
 }
 
 /** One capture-angle row: live preview of whatever camera is currently assigned, plus the `<select>` that assigns it. */
-function RoleRow({ role, need, mapping, devices, videoRefs, streamsRef, onAssign }: RoleRowProps) {
+function RoleRow({ role, need, mapping, devices, videoRefs, streamsRef, onAssign, angles, onAngleChange }: RoleRowProps) {
   const deviceId = mapping[role] ?? '';
   const connected = !!deviceId && devices.some((d) => d.id === deviceId);
 
@@ -517,6 +563,31 @@ function RoleRow({ role, need, mapping, devices, videoRefs, streamsRef, onAssign
             );
           })}
         </select>
+        <div className="mt-2 flex items-center gap-3 text-xs text-slate-400">
+          <span className="shrink-0">Góc lắp camera</span>
+          <label className="flex items-center gap-1">
+            yaw
+            <input
+              type="number"
+              step={1}
+              value={angles.yaw}
+              onChange={(e) => onAngleChange(role, 'yaw', Number(e.target.value))}
+              className="w-16 bg-slate-950 border border-slate-700 rounded px-2 py-1 text-slate-200"
+            />
+            °
+          </label>
+          <label className="flex items-center gap-1">
+            pitch
+            <input
+              type="number"
+              step={1}
+              value={angles.pitch}
+              onChange={(e) => onAngleChange(role, 'pitch', Number(e.target.value))}
+              className="w-16 bg-slate-950 border border-slate-700 rounded px-2 py-1 text-slate-200"
+            />
+            °
+          </label>
+        </div>
       </div>
     </div>
   );

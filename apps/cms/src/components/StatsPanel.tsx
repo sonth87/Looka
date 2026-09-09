@@ -222,6 +222,36 @@ export function StatsPanel({ campaignId }: { campaignId: string }) {
             </div>
           )}
 
+          {stats.byOperator.length > 0 && (
+            <div className="mt-5">
+              <h3 className="text-sm font-medium text-gray-700 mb-2">Theo cán bộ chụp</h3>
+              <table className="w-full text-sm border-collapse bg-white rounded-xl border border-gray-200 overflow-hidden">
+                <thead>
+                  <tr className="text-left text-gray-500 border-b border-gray-200 bg-gray-50">
+                    <th className="py-2 px-3">Cán bộ chụp</th>
+                    <th className="py-2 px-3">Phiên</th>
+                    <th className="py-2 px-3">Ảnh READY</th>
+                    <th className="py-2 px-3">Ảnh lỗi</th>
+                    <th className="py-2 px-3">Lần chụp cuối</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {stats.byOperator.map((o) => (
+                    <tr key={o.operatorUserId ?? 'unknown'} className="border-b border-gray-100 last:border-0">
+                      <td className="py-2 px-3 text-gray-900">{o.operatorName}</td>
+                      <td className="py-2 px-3 text-gray-500 tabular-nums">{o.sessions}</td>
+                      <td className="py-2 px-3 text-gray-500 tabular-nums">{o.photosReady}</td>
+                      <td className="py-2 px-3 text-gray-500 tabular-nums">{o.photosFailed}</td>
+                      <td className="py-2 px-3 text-gray-500">
+                        {o.lastCaptureAt ? new Date(o.lastCaptureAt).toLocaleString('vi-VN') : '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
           {stats.byDay.length > 0 && (
             <div className="mt-5">
               <h3 className="text-sm font-medium text-gray-700 mb-2">30 ngày gần nhất</h3>

@@ -521,6 +521,7 @@ test('ElectronCaptureSink.approveUpload forwards sessionId, steps, and videoSess
       subjectCode: undefined,
       subjectName: undefined,
       metadata: undefined,
+      operatorUserId: undefined,
     },
   ]);
 });
@@ -554,6 +555,7 @@ test('ElectronCaptureSink.approveUpload forwards videoSessionId as undefined whe
       subjectCode: undefined,
       subjectName: undefined,
       metadata: undefined,
+      operatorUserId: undefined,
     },
   ]);
 });
@@ -586,6 +588,7 @@ test('ElectronCaptureSink.approveUpload forwards a student subject as subjectCod
       subjectCode: 'SV001',
       subjectName: 'Nguyễn Văn An',
       metadata: { className: 'CNTT01', major: 'Công nghệ thông tin', academicYear: '2025-2026' },
+      operatorUserId: undefined,
     },
   ]);
 });
