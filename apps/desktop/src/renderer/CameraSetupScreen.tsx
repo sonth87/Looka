@@ -6,6 +6,22 @@ type CameraRoleMapping = Partial<Record<CameraRole, string>>;
 /** Every role's *effective* physical mounting angle — always fully populated (defaults filled in), unlike the sparse override map this screen saves/loads. */
 type PhysicalAngleState = Record<CameraRole, PhysicalCameraAngles>;
 
+/** One logical camera role's CB Help visibility/order — mirrors `secrets.ts`'s `CbHelpCameraVisibility`. */
+interface CbHelpCameraVisibility {
+  visible: boolean;
+  order: number;
+}
+type CbHelpVisibilityMap = Partial<Record<CameraRole, CbHelpCameraVisibility>>;
+/** Every role's *effective* CB Help visibility/order — always fully populated, same "defaults filled in" reasoning as `PhysicalAngleState`. Mirrors `secrets.ts`'s `DEFAULT_CB_HELP_VISIBILITY`/`resolveCbHelpVisibility` — duplicated rather than imported since this renderer file cannot reach the main process's `secrets.ts` directly, same convention every other `faceAPI`-backed setting on this screen already follows. */
+type CbHelpVisibilityState = Record<CameraRole, CbHelpCameraVisibility>;
+const DEFAULT_CB_HELP_VISIBILITY: CbHelpVisibilityState = {
+  CENTER: { visible: true, order: 0 },
+  LEFT: { visible: false, order: 1 },
+  RIGHT: { visible: false, order: 2 },
+  UP: { visible: false, order: 3 },
+  DOWN: { visible: false, order: 4 },
+};
+
 interface DeviceEntry {
   id: string;
   label: string;
@@ -115,6 +131,10 @@ export default function CameraSetupScreen() {
   // default is needed at all going forward, so this whole control is gone
   // rather than made to persist too.
   const [sequencing, setSequencing] = useState<'sequential' | 'simultaneous'>('sequential');
+  /** CB Help "hiện trên màn mở rộng" + thứ tự per role (2026-09-10) — same "always fully populated, defaults filled in" shape as `physicalAngles`. */
+  const [cbHelpVisibility, setCbHelpVisibility] = useState<CbHelpVisibilityState>({ ...DEFAULT_CB_HELP_VISIBILITY });
+  /** "Lưới 3x3" (2026-09-10) — see secrets.ts's `getGrid3x3Enabled` doc comment. */
+  const [grid3x3, setGrid3x3] = useState(false);
   const streamsRef = useRef<Map<string, MediaStream>>(new Map());
   const videoRefs = useRef<Map<CameraRole, HTMLVideoElement | null>>(new Map());
   const cancelledRef = useRef(false);
@@ -129,6 +149,17 @@ export default function CameraSetupScreen() {
     faceAPI?.getCaptureSequencing?.().then((v: 'sequential' | 'simultaneous') => {
       if (v) setSequencing(v);
     });
+    faceAPI?.getCbHelpVisibility?.().then((saved: CbHelpVisibilityMap) => {
+      if (!saved) return;
+      setCbHelpVisibility((prev) => {
+        const next = { ...prev };
+        for (const role of ROLES) {
+          if (saved[role]) next[role] = saved[role]!;
+        }
+        return next;
+      });
+    });
+    faceAPI?.getGrid3x3Enabled?.().then((v: boolean) => setGrid3x3(!!v));
   }, []);
 
   useEffect(() => {
@@ -297,11 +328,18 @@ export default function CameraSetupScreen() {
     setSaved(false);
   };
 
+  const handleCbHelpVisibilityChange = (role: CameraRole, patch: Partial<CbHelpCameraVisibility>) => {
+    setCbHelpVisibility((prev) => ({ ...prev, [role]: { ...prev[role], ...patch } }));
+    setSaved(false);
+  };
+
   const handleSave = async () => {
     const faceAPI = (window as any).faceAPI;
     await faceAPI?.setCameraRoleMapping?.(mapping);
     await faceAPI?.setCameraPhysicalAngles?.(physicalAngles);
     await faceAPI?.setCaptureSequencing?.(sequencing);
+    await faceAPI?.setCbHelpVisibility?.(cbHelpVisibility);
+    await faceAPI?.setGrid3x3Enabled?.(grid3x3);
     setSaved(true);
     // Item 9 (2026-09-09): this screen only ever runs inside the
     // `#camera-setup` popup (see cameraSetupWindow.ts) — never the main
@@ -392,6 +430,8 @@ export default function CameraSetupScreen() {
             onAssign={assignRole}
             angles={physicalAngles[need.role]}
             onAngleChange={handleAngleChange}
+            cbHelpVisibility={cbHelpVisibility[need.role]}
+            onCbHelpVisibilityChange={handleCbHelpVisibilityChange}
           />
         ))}
       </div>
@@ -417,6 +457,8 @@ export default function CameraSetupScreen() {
                   onAssign={assignRole}
                   angles={physicalAngles[role]}
                   onAngleChange={handleAngleChange}
+                  cbHelpVisibility={cbHelpVisibility[role]}
+                  onCbHelpVisibilityChange={handleCbHelpVisibilityChange}
                 />
               ))}
             </div>
@@ -425,6 +467,14 @@ export default function CameraSetupScreen() {
       )}
 
       <div className="mt-8 pt-6 border-t border-slate-800 space-y-5">
+        <div>
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={grid3x3} onChange={(e) => setGrid3x3(e.target.checked)} />
+            <span className="font-semibold">Lưới 3x3</span>
+            <span className="text-slate-400">— luôn xếp tối đa 3 camera mỗi hàng khi chụp đồng thời</span>
+          </label>
+        </div>
+
         <div>
           <p className="font-semibold mb-2">Cách chụp</p>
           <div className="flex gap-4 text-sm">
@@ -471,10 +521,24 @@ interface RoleRowProps {
   onAssign: (role: CameraRole, deviceId: string) => void;
   angles: PhysicalCameraAngles;
   onAngleChange: (role: CameraRole, axis: 'yaw' | 'pitch', value: number) => void;
+  cbHelpVisibility: CbHelpCameraVisibility;
+  onCbHelpVisibilityChange: (role: CameraRole, patch: Partial<CbHelpCameraVisibility>) => void;
 }
 
 /** One capture-angle row: live preview of whatever camera is currently assigned, plus the `<select>` that assigns it. */
-function RoleRow({ role, need, mapping, devices, videoRefs, streamsRef, onAssign, angles, onAngleChange }: RoleRowProps) {
+function RoleRow({
+  role,
+  need,
+  mapping,
+  devices,
+  videoRefs,
+  streamsRef,
+  onAssign,
+  angles,
+  onAngleChange,
+  cbHelpVisibility,
+  onCbHelpVisibilityChange,
+}: RoleRowProps) {
   const deviceId = mapping[role] ?? '';
   const connected = !!deviceId && devices.some((d) => d.id === deviceId);
 
@@ -541,6 +605,28 @@ function RoleRow({ role, need, mapping, devices, videoRefs, streamsRef, onAssign
             />
             °
           </label>
+        </div>
+        <div className="mt-2 flex items-center gap-3 text-xs text-slate-400">
+          <label className="flex items-center gap-1.5">
+            <input
+              type="checkbox"
+              checked={cbHelpVisibility.visible}
+              onChange={(e) => onCbHelpVisibilityChange(role, { visible: e.target.checked })}
+            />
+            Hiện trên màn mở rộng
+          </label>
+          {cbHelpVisibility.visible && (
+            <label className="flex items-center gap-1">
+              Thứ tự
+              <input
+                type="number"
+                step={1}
+                value={cbHelpVisibility.order}
+                onChange={(e) => onCbHelpVisibilityChange(role, { order: Number(e.target.value) })}
+                className="w-14 bg-slate-950 border border-slate-700 rounded px-2 py-1 text-slate-200"
+              />
+            </label>
+          )}
         </div>
       </div>
     </div>

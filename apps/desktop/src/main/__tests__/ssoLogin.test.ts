@@ -58,7 +58,7 @@ describe('parseCallback', () => {
     assert.equal(parseCallback('http://localhost:3200/desktop-callback?refresh_token=def456'), null);
   });
 
-  test('email/user_code default to empty string when SSO omits them', () => {
+  test('email/user_code default to empty string when SSO omits them — login must work without either', () => {
     const url = 'http://localhost:3200/desktop-callback?access_token=abc123&refresh_token=def456';
     assert.deepEqual(parseCallback(url), {
       accessToken: 'abc123',

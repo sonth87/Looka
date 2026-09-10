@@ -28,6 +28,13 @@
 export interface RosterRecord {
   /** The CCCD number — the only field ever matched against a scan. Always a non-empty, trimmed string on anything this parser returns; records missing it are dropped, never surfaced with an empty/placeholder value. */
   identityNumber: string;
+  /**
+   * `user_code` (2026-09-10) — a distinct field from `student_code` below,
+   * required same as `identityNumber`: a roster row with no `user_code` is
+   * dropped entirely rather than surfaced with an empty value, per this
+   * module's own "never a placeholder" convention.
+   */
+  userCode: string;
   /** `student_code` — what the rest of this platform already treats as a person's identity for a captured session (`sessions.subject_code`). `null` if the roster row had none. */
   studentCode: string | null;
   /** `full_name`. */
@@ -71,8 +78,12 @@ function parseRecord(el: unknown): RosterRecord | null {
   const identityNumber = stringOrNull(obj.identity_number);
   if (!identityNumber) return null;
 
+  const userCode = stringOrNull(obj.user_code);
+  if (!userCode) return null;
+
   return {
     identityNumber,
+    userCode,
     studentCode: stringOrNull(obj.student_code),
     fullName: stringOrNull(obj.full_name),
     className: stringOrNull(obj.class_name),

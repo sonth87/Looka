@@ -31,6 +31,14 @@ export type StudentLookupResult =
        * under — never used for matching itself, that already happened.
        */
       identityNumber?: string;
+      /**
+       * `user_code` from the external roster (2026-09-10 CCCD-scan feature)
+       * — `undefined` for the manual "nhập mã sinh viên" path, same as
+       * `identityNumber`. Threaded through to `StudentSubjectInfo`/
+       * `sessions.metadata`, same mechanism, purely so it rides along with
+       * the rest of the looked-up identity.
+       */
+      userCode?: string;
     }
   | { status: 'NOT_FOUND'; code: string };
 

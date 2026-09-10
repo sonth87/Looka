@@ -10,6 +10,8 @@ export interface MultiFrameGridProps {
   frames: MultiFrameGridFrame[];
   theme?: 'dark' | 'light';
   className?: string;
+  /** "Lưới 3x3" kiosk setting (2026-09-10) — always lays out 3 tiles per row (wrapping to further rows) instead of the default per-count layout below. There are only ever up to 5 camera roles (CENTER/LEFT/RIGHT/UP/DOWN — see `@face/core`'s `CAMERA_ROLES`), so this never produces a literal 9-cell grid; it's "3 per row, however many rows that takes." */
+  forceThreePerRow?: boolean;
 }
 
 /**
@@ -18,9 +20,15 @@ export interface MultiFrameGridProps {
  * classes (not string-interpolated) so the JIT scanner actually picks them
  * up — see Tailwind's static-analysis requirement.
  */
-export const MultiFrameGrid: React.FC<MultiFrameGridProps> = ({ frames, theme = 'dark', className }) => {
-  const gridColsClass =
-    frames.length <= 1
+export const MultiFrameGrid: React.FC<MultiFrameGridProps> = ({
+  frames,
+  theme = 'dark',
+  className,
+  forceThreePerRow = false,
+}) => {
+  const gridColsClass = forceThreePerRow
+    ? 'grid-cols-1 sm:grid-cols-3'
+    : frames.length <= 1
       ? 'grid-cols-1'
       : frames.length === 2
       ? 'grid-cols-1 sm:grid-cols-2'

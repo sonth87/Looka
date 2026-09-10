@@ -63,7 +63,16 @@ export interface SsoLoginResult {
   userCode: string;
 }
 
-/** Parses the same four query params LOGIN.md §3.3 documents; `null` if this URL isn't (yet) the callback carrying them. */
+/**
+ * Parses the same four query params LOGIN.md §3.3 documents; `null` if this
+ * URL isn't (yet) the callback carrying them.
+ *
+ * `user_code` is NOT required for login (2026-09-10 correction — an earlier
+ * pass required it here, same as `access_token`/`refresh_token`, but that
+ * was wrong: login must work without one). It defaults to `''`, same as
+ * `email`, and is still saved when present — see `ssoAuthClient.ts`'s
+ * `StoredSsoIdentity.userCode`/`getUserCode()`.
+ */
 export function parseCallback(url: string): SsoLoginResult | null {
   if (!url.startsWith(callbackUrl())) return null;
   const query = new URL(url).searchParams;

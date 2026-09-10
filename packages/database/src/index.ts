@@ -35,3 +35,12 @@ export type { StatsEventItem, StatsEventType, EnqueueStatsEventInput } from './r
 export { PersonRepository } from './repositories/PersonRepository.js';
 export { FaceProfileRepository } from './repositories/FaceProfileRepository.js';
 export type { SaveProfileParams, ModelIdentity } from './repositories/FaceProfileRepository.js';
+export { EmbeddingEnrollmentRepository } from './repositories/EmbeddingEnrollmentRepository.js';
+export type {
+  EmbeddingEnrollmentItem,
+  EmbeddingEnrollmentStatus,
+  EmbeddingEnrollmentFailureKind,
+  EnqueueEmbeddingInput,
+  MarkDoneInput,
+  MarkFailedInput,
+} from './repositories/EmbeddingEnrollmentRepository.js';

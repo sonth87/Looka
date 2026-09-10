@@ -22,6 +22,7 @@ class CardSpec(BaseModel):
 class CardPhotoRequest(BaseModel):
     image_data: str
     card_spec: CardSpec
+    mirror: bool = False
 
 
 class CardPhotoResponse(BaseModel):
@@ -53,6 +54,7 @@ def card_photo_endpoint(req: CardPhotoRequest):
             background_color=spec.backgroundColor,
             head_height_ratio=spec.headHeightRatio,
             eye_line_ratio=spec.eyeLineRatio,
+            mirror=req.mirror,
         )
     except Exception as exc:  # noqa: BLE001 - surfaced as a client-facing 422, not a 500
         raise HTTPException(status_code=422, detail=f"card-photo pipeline failed: {exc}") from exc

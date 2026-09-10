@@ -35,6 +35,14 @@ interface StoredSsoIdentity extends AuthenticatedIdentity {
    * reports no operator, same as any other pre-this-feature session.
    */
   userId?: string;
+  /**
+   * The SSO's own `user_code` (2026-09-10 — previously parsed off the
+   * callback and used only as a one-off `displayName` fallback below, then
+   * discarded; now required by `parseCallback` and kept here so callers can
+   * actually read it back via `getUserCode()`, same pattern as
+   * `getOperatorUserId()`).
+   */
+  userCode: string;
 }
 
 function readStored(): StoredSsoIdentity | null {
@@ -64,6 +72,11 @@ export class SsoAuthClient implements AuthClient {
   /** See `StoredSsoIdentity.userId`'s own doc comment. `null` if not logged in, or if `fetchMe()` never resolved during login. */
   getOperatorUserId(): string | null {
     return readStored()?.userId ?? null;
+  }
+
+  /** See `StoredSsoIdentity.userCode`'s own doc comment. `null` if not logged in. */
+  getUserCode(): string | null {
+    return readStored()?.userCode ?? null;
   }
 
   authHeaders(): Record<string, string> {
@@ -99,6 +112,7 @@ export class SsoAuthClient implements AuthClient {
       accessToken: result.accessToken,
       refreshToken: result.refreshToken,
       userId,
+      userCode: result.userCode,
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(identity));
     return { displayName: identity.displayName, email: identity.email };

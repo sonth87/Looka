@@ -172,10 +172,24 @@ def process_card_photo(
     background_color: str,
     head_height_ratio: Tuple[float, float] = (0.70, 0.80),
     eye_line_ratio: Tuple[float, float] = (0.40, 0.45),
+    mirror: bool = False,
 ) -> tuple[np.ndarray, list[str]]:
     """Full pipeline: detect face -> rotate level to eyes -> crop to the
     target head/eye ratios -> replace background -> resize to the exact
-    target pixel dimensions. Returns (result_bgr, warnings)."""
+    target pixel dimensions. Returns (result_bgr, warnings).
+
+    `mirror` (product decision 2026-09-10, "chup anh the phai giong anh
+    soi guong, khong lat anh"): the live kiosk preview is deliberately
+    mirrored, but the captured still is saved unmirrored (raw sensor
+    image) by design. Passing `mirror=True` flips the input horizontally
+    BEFORE detection so the generated card photo matches the mirrored
+    preview the subject actually saw, instead of the raw unmirrored
+    still. Everything downstream (detection, rotation, crop, background
+    replace) then runs consistently on the already-flipped array.
+    """
+    if mirror:
+        image_bgr = cv2.flip(image_bgr, 1)
+
     warnings: list[str] = []
     target_w, target_h = get_target_pixels(size, dpi)
 

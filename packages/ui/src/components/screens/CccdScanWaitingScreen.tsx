@@ -1,6 +1,4 @@
 import { useEffect, useRef, useState } from 'react';
-import type { Worker } from 'tesseract.js';
-import { createCccdWorker, recognizeWithWorker } from '../../lib/cccdOcr.js';
 
 /**
  * Pre-session "quét thẻ CCCD" overlay (2026-09-09) — the kiosk's full
@@ -12,14 +10,14 @@ import { createCccdWorker, recognizeWithWorker } from '../../lib/cccdOcr.js';
  * attached — `apps/web`).
  *
  * No form here: there is nothing for the operator to submit manually — the
- * scanning corner below (`ScanMonitorCorner`) does its own continuous OCR
- * and, once it gets a stable read, asks the kiosk's main process whether
- * that citizen id matches anyone in the external student roster (see
- * `onScanResult`'s own doc comment). 2026-09-09 architecture correction:
- * this used to write the OCR result to `response.json` (on the wrong
- * assumption that file was a per-scan write target the main process's
- * `cccdWatcher.ts` then read back) — it is now a read-only lookup, with no
- * file write of any kind from this app.
+ * scan-monitor corner below (`ScanMonitorCorner`) listens for a dedicated
+ * barcode/QR scanner reading the card and, once it gets a clean read, asks
+ * the kiosk's main process whether that citizen id matches anyone in the
+ * external student roster (see `onScanResult`'s own doc comment).
+ * 2026-09-10: replaced the original bridged-phone-camera + Tesseract OCR
+ * corner outright (removed, not toggled — a dedicated hardware scanner is
+ * now required on every kiosk) — see `ScanMonitorCorner`'s own doc comment
+ * for how a physical scanner is actually read.
  *
  * The wrapper below is `pointer-events-none` (only the two islands inside
  * it — the status card and the scan-monitor corner — are
@@ -69,22 +67,22 @@ export function CccdScanWaitingScreen({ submitting, error, onScanResult }: CccdS
   );
 }
 
-const SCAN_MONITOR_DEVICE_ID_KEY = 'looka.cccdScanMonitor.deviceId';
-
-/** Same floor as `apps/cccd-scanner`'s own scan loop — see that app's `App.tsx` doc comment for why 2 (not 1, not more) is the right number. */
-const STABILITY_COUNT = 2;
-/** How long a stable read stays visible before the roster lookup fires — an operator glance-check, not a blocking gate. */
-const STABLE_DISPLAY_MS = 1200;
-/** How long the found/not-found flash stays up before the corner resumes scanning for the next student. */
+/** Max gap, in ms, between two keystrokes still considered part of the same scanner burst — see `ScanMonitorCorner`'s own doc comment for why this is how a scan is told apart from ordinary typing. */
+const SCAN_BURST_GAP_MS = 80;
+/** How long a clean scan's parsed number stays visible before the roster lookup fires — an operator glance-check, not a blocking gate. */
+const STABLE_DISPLAY_MS = 400;
+/** How long the found/not-found flash stays up before the corner resumes listening for the next student. */
 const SUCCESS_DISPLAY_MS = 1800;
-/** Gap between OCR polls once a frame finishes processing. */
-const POLL_GAP_MS = 300;
 
-type ScanPhase = 'idle' | 'initializing' | 'scanning' | 'stable' | 'checking' | 'check-error' | 'found' | 'not-found';
+/** Vietnamese CCCD numbers are exactly 12 digits — the acceptance gate for the scanner's decoded first field, same shape the old OCR path enforced on its own recognized text. */
+const CCCD_NUMBER_PATTERN = /^\d{12}$/;
+
+type ScanPhase = 'idle' | 'stable' | 'checking' | 'check-error' | 'found' | 'not-found';
 
 /** One roster record's display-relevant fields — mirrors `apps/desktop/src/main/cccdRoster.ts`'s `RosterRecord` (the duplicate-the-IPC-payload-shape convention every `faceAPI` caller in this package already follows, since this package cannot import apps/desktop's own types). */
 export interface CccdRosterLookupRecord {
   identityNumber: string;
+  userCode: string;
   studentCode: string | null;
   fullName: string | null;
   className: string | null;
@@ -105,32 +103,47 @@ export interface CccdRosterLookupRecord {
 export type CccdRosterLookupResult = { found: true; record: CccdRosterLookupRecord } | { found: false };
 
 /**
- * Bottom-right "watch what the CCCD scan sees" corner — 2026-09-09, folding
- * the standalone `apps/cccd-scanner` app's own continuous-scan flow directly
- * into the kiosk ("cccd scanner sẽ là góc nhỏ bên phải rồi nên không cần mở
- * 1 tab nữa" — the operator's own framing). Same architecture as that app's
- * `App.tsx`: a long-lived Tesseract worker, a poll loop that captures a
- * frame from the live `<video>`, runs the two-pass OCR, and only acts once
- * the SAME 12-digit number has been read `STABILITY_COUNT` times in a row —
- * see `cccdOcr.ts`'s `extractCitizenId` doc comment for why a single frame
- * is never trusted alone. Entirely independent of the kiosk's own
- * capture-camera streams (a different physical device — the phone bridged
- * via Camo/Iriun/DroidCam — and a separate `getUserMedia` call).
+ * Pulls the CCCD number out of a decoded QR payload. A Vietnamese chip-based
+ * CCCD's front-side QR code encodes one pipe-delimited string:
+ * `<số CCCD>|<số CMND cũ, có thể rỗng>|<họ tên>|<ngày sinh>|<giới tính>|<địa chỉ>|<ngày cấp>`
+ * — only the first field is ever used here (matching, not display; the
+ * roster lookup already returns the subject's real name/class/major once
+ * matched). `null` for anything that doesn't start with a clean 12-digit
+ * token — a garbled/partial read (e.g. a keystroke lost to focus moving
+ * mid-scan) must never be treated as a match, the same "only a clean read
+ * counts" gate the old OCR path enforced via `extractCitizenId`.
+ */
+export function extractCitizenIdFromQrPayload(raw: string): string | null {
+  const firstField = raw.split('|')[0]?.trim() ?? '';
+  return CCCD_NUMBER_PATTERN.test(firstField) ? firstField : null;
+}
+
+/**
+ * Bottom-right "CCCD scanner" status corner — 2026-09-10, replaces the
+ * previous bridged-phone-camera + Tesseract OCR corner outright (a
+ * dedicated hardware scanner is now required on every kiosk, not an
+ * optional/toggleable alternative).
  *
- * Once stable, this asks the main process's in-memory roster cache whether
- * the number matches anyone (`faceAPI.lookupCccdByIdentityNumber` —
- * 2026-09-09 architecture correction, replacing a `writeCccdScanResult`
- * file-write call this same day) and reports the result up via
- * `onScanResult` — this component owns "get a stable number, ask if it
- * matches, report back" only, the same "camera + OCR only" scope it already
- * had; it never touches greeting/session-start/error-message logic itself.
+ * Every commercial USB/Bluetooth barcode/QR scanner emulates a keyboard by
+ * default ("HID keyboard wedge" mode — no driver or SDK needed): scanning a
+ * code "types" its decoded contents into whichever element currently has
+ * keyboard focus, then sends Enter. So this listens for keystrokes at the
+ * `document` level instead of opening a camera.
  *
- * `paused` (true while the parent's own handling of a previous result —
+ * Telling a genuine scan apart from ordinary typing elsewhere on the page:
+ * a scanner delivers every character of one decode within a few ms of the
+ * previous one — see `SCAN_BURST_GAP_MS`. Any gap larger than that resets
+ * the buffer, so no plausible human typing speed can ever accumulate into a
+ * false scan. Belt-and-suspenders: any keystroke while a real
+ * `<input>`/`<textarea>`/contenteditable element has focus is ignored
+ * outright, so an operator legitimately typing into a real form elsewhere
+ * on the page is never mistaken for a scan.
+ *
+ * `paused` (true while the parent's handling of a previous result —
  * greeting, session start — is still in flight, i.e. `submitting`) stops
- * the scan loop without tearing down the camera stream or the OCR worker —
- * resuming is then just "start polling again", not "reopen everything from
- * scratch", so the corner doesn't visibly flicker/reset between one
- * student's scan and the next.
+ * accepting new keystrokes without unmounting anything, matching the old
+ * corner's own pause behaviour so the corner doesn't visibly flicker/reset
+ * between one student's scan and the next.
  */
 function ScanMonitorCorner({
   paused,
@@ -139,198 +152,72 @@ function ScanMonitorCorner({
   paused: boolean;
   onScanResult: (result: CccdRosterLookupResult) => void;
 }) {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const workerRef = useRef<Worker | null>(null);
-
-  const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
-  const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
-  const [pickerOpen, setPickerOpen] = useState(false);
-  const [cameraError, setCameraError] = useState<string | null>(null);
-  const [workerReady, setWorkerReady] = useState(false);
-
   const [phase, setPhase] = useState<ScanPhase>('idle');
   const [statusText, setStatusText] = useState<string | null>(null);
-  const [stableResult, setStableResult] = useState<{ citizenId: string; fullName: string | null } | null>(null);
+  const [stableCitizenId, setStableCitizenId] = useState<string | null>(null);
 
-  // Enumerate once, restoring the operator's last pick if it's still a
-  // connected device — labels only populate post-permission.
+  const bufferRef = useRef('');
+  const lastKeyAtRef = useRef(0);
+
   useEffect(() => {
-    let cancelled = false;
-    navigator.mediaDevices
-      .enumerateDevices()
-      .then((all) => {
-        if (cancelled) return;
-        const cams = all.filter((d) => d.kind === 'videoinput');
-        setDevices(cams);
-        const saved = localStorage.getItem(SCAN_MONITOR_DEVICE_ID_KEY);
-        if (saved && cams.some((d) => d.deviceId === saved)) {
-          setSelectedDeviceId(saved);
-        }
-      })
-      .catch(() => {
-        /* no camera permission granted anywhere yet — picker just stays empty until the operator opens it and grants one via the browser's own prompt */
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    if (paused) return;
 
-  // Opens/closes the camera stream as the operator's device pick changes.
-  useEffect(() => {
-    if (!selectedDeviceId) return;
-    let cancelled = false;
-    setCameraError(null);
-    setPhase('initializing');
+    function onKeyDown(e: KeyboardEvent) {
+      const target = e.target as HTMLElement | null;
+      const isRealInput =
+        target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable);
+      if (isRealInput) return;
 
-    navigator.mediaDevices
-      .getUserMedia({ video: { deviceId: { exact: selectedDeviceId } } })
-      .then((stream) => {
-        if (cancelled) {
-          stream.getTracks().forEach((t) => t.stop());
+      const now = Date.now();
+      if (now - lastKeyAtRef.current > SCAN_BURST_GAP_MS) {
+        bufferRef.current = '';
+      }
+      lastKeyAtRef.current = now;
+
+      if (e.key === 'Enter') {
+        const raw = bufferRef.current;
+        bufferRef.current = '';
+        if (!raw) return;
+        const citizenId = extractCitizenIdFromQrPayload(raw);
+        if (!citizenId) {
+          setStatusText('Đọc thẻ không thành công, vui lòng quét lại.');
           return;
         }
-        streamRef.current = stream;
-        if (videoRef.current) videoRef.current.srcObject = stream;
-        navigator.mediaDevices.enumerateDevices().then((all) => {
-          if (!cancelled) setDevices(all.filter((d) => d.kind === 'videoinput'));
-        });
-      })
-      .catch((err) => {
-        if (!cancelled) {
-          setCameraError(err instanceof Error ? err.message : String(err));
-          setPhase('idle');
-        }
-      });
-
-    return () => {
-      cancelled = true;
-      streamRef.current?.getTracks().forEach((t) => t.stop());
-      streamRef.current = null;
-    };
-  }, [selectedDeviceId]);
-
-  // One long-lived Tesseract worker for the life of this corner — see
-  // `cccdOcr.ts`'s own doc comment on why continuous polling needs this
-  // instead of a create-per-frame worker.
-  useEffect(() => {
-    if (!selectedDeviceId) return;
-    let cancelled = false;
-    void createCccdWorker().then((worker) => {
-      if (cancelled) {
-        void worker.terminate();
-        return;
-      }
-      workerRef.current = worker;
-      setWorkerReady(true);
-    });
-    return () => {
-      cancelled = true;
-      setWorkerReady(false);
-      const worker = workerRef.current;
-      workerRef.current = null;
-      if (worker) void worker.terminate();
-    };
-  }, [selectedDeviceId]);
-
-  // Kick off scanning once camera + worker are both ready, and whenever an
-  // in-flight roster lookup (`paused`) finishes.
-  useEffect(() => {
-    if (!paused && workerReady && selectedDeviceId && !cameraError && (phase === 'initializing' || phase === 'idle')) {
-      setPhase('scanning');
-    }
-    if (paused && phase === 'scanning') setPhase('initializing'); // parked, not torn down — see this component's own doc comment
-  }, [paused, workerReady, selectedDeviceId, cameraError, phase]);
-
-  // The continuous poll loop itself.
-  useEffect(() => {
-    if (phase !== 'scanning') return;
-    let cancelled = false;
-    let streak = 0;
-    let streakCitizenId: string | null = null;
-    let streakFullName: string | null = null;
-
-    async function pollOnce() {
-      const video = videoRef.current;
-      const canvas = canvasRef.current;
-      const worker = workerRef.current;
-      if (!video || !canvas || !worker || video.videoWidth === 0) return;
-
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return;
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      const dataUrl = canvas.toDataURL('image/png');
-
-      let result;
-      try {
-        result = await recognizeWithWorker(worker, dataUrl);
-      } catch {
-        return; // a one-off OCR hiccup — skip this poll, try again next tick
-      }
-      if (cancelled) return;
-
-      if (!result.citizenId) {
-        streak = 0;
-        streakCitizenId = null;
-        streakFullName = null;
-        setStatusText('Đang tìm số CCCD...');
-        return;
-      }
-
-      if (result.citizenId === streakCitizenId) {
-        streak += 1;
-      } else {
-        streak = 1;
-        streakCitizenId = result.citizenId;
-      }
-      streakFullName = result.fullName ?? streakFullName;
-      setStatusText(`Đang đọc: ${result.citizenId} (${streak}/${STABILITY_COUNT})`);
-
-      if (streak >= STABILITY_COUNT) {
-        setStableResult({ citizenId: streakCitizenId, fullName: streakFullName });
+        setStableCitizenId(citizenId);
         setPhase('stable');
+        return;
+      }
+
+      // Single printable characters only — ignores modifier/navigation keys
+      // (Shift, Control, ArrowLeft, ...) so they don't contribute to the
+      // buffer, without treating them as a burst-breaking pause either
+      // (`lastKeyAtRef` above is already updated regardless of this check).
+      if (e.key.length === 1) {
+        bufferRef.current += e.key;
       }
     }
 
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    async function loop() {
-      while (!cancelled) {
-        await pollOnce();
-        if (cancelled) return;
-        await new Promise<void>((resolve) => {
-          timer = setTimeout(resolve, POLL_GAP_MS);
-        });
-      }
-    }
-    void loop();
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [paused]);
 
-    return () => {
-      cancelled = true;
-      if (timer) clearTimeout(timer);
-    };
-  }, [phase]);
-
-  // Stable read -> brief glance window -> roster lookup. Same "auto-confirm
-  // after a stable read, shown briefly for a glance, not a blocking tap"
-  // product decision as `apps/cccd-scanner` itself already made — only the
-  // step after the glance window changed (a lookup, not a file write).
+  // Clean read -> brief glance window -> roster lookup. Same "auto-confirm,
+  // shown briefly for a glance, not a blocking tap" product decision the
+  // OCR path already made — no per-read stability streak needed here (a
+  // scanner decode is an exact read, not a noisy repeated guess).
   useEffect(() => {
-    if (phase !== 'stable' || !stableResult) return;
-    const citizenId = stableResult.citizenId;
+    if (phase !== 'stable' || !stableCitizenId) return;
+    const citizenId = stableCitizenId;
     const timer = setTimeout(() => {
       setPhase('checking');
       const faceAPI = (window as any).faceAPI;
       const lookup = faceAPI?.lookupCccdByIdentityNumber;
       if (!lookup) {
         // Web build, or no bridge — nothing to check against here; go back
-        // to scanning rather than getting stuck. This component is only
-        // ever mounted on the kiosk build in practice (see
-        // `FaceCaptureApp.tsx`'s own render gate), so this is defensive,
-        // not an expected path.
-        setPhase('scanning');
+        // to idle rather than getting stuck. This component is only ever
+        // mounted on the kiosk build in practice (see `FaceCaptureApp.tsx`'s
+        // own render gate), so this is defensive, not an expected path.
+        setPhase('idle');
         return;
       }
       lookup({ identityNumber: citizenId })
@@ -338,9 +225,9 @@ function ScanMonitorCorner({
           onScanResult(result);
           setPhase(result.found ? 'found' : 'not-found');
           setTimeout(() => {
-            setStableResult(null);
+            setStableCitizenId(null);
             setStatusText(null);
-            setPhase('scanning');
+            setPhase('idle');
           }, SUCCESS_DISPLAY_MS);
         })
         .catch((err: unknown) => {
@@ -350,109 +237,51 @@ function ScanMonitorCorner({
     }, STABLE_DISPLAY_MS);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase, stableResult]);
+  }, [phase, stableCitizenId]);
 
   function retryAfterCheckError() {
-    setStableResult(null);
+    setStableCitizenId(null);
     setStatusText(null);
-    setPhase('scanning');
-  }
-
-  function choose(deviceId: string) {
-    setSelectedDeviceId(deviceId);
-    setPickerOpen(false);
-    setStableResult(null);
-    setStatusText(null);
-    if (deviceId) localStorage.setItem(SCAN_MONITOR_DEVICE_ID_KEY, deviceId);
-    else localStorage.removeItem(SCAN_MONITOR_DEVICE_ID_KEY);
+    setPhase('idle');
   }
 
   return (
-    <div className="pointer-events-auto absolute bottom-6 right-6 flex flex-col items-end gap-1.5">
-      {pickerOpen && (
-        <div className="w-56 rounded-xl border border-slate-700/60 bg-slate-950/90 backdrop-blur-md p-2 shadow-xl">
-          <p className="px-1 pb-1 text-[11px] font-medium text-slate-400">Camera quét CCCD</p>
-          <button
-            type="button"
-            onClick={() => choose('')}
-            className={`block w-full rounded-lg px-2 py-1.5 text-left text-xs ${
-              !selectedDeviceId ? 'bg-sky-600 text-white' : 'text-slate-300 hover:bg-slate-800'
-            }`}
-          >
-            Tắt
-          </button>
-          {devices.map((d, i) => (
-            <button
-              key={d.deviceId}
-              type="button"
-              onClick={() => choose(d.deviceId)}
-              className={`block w-full truncate rounded-lg px-2 py-1.5 text-left text-xs ${
-                selectedDeviceId === d.deviceId ? 'bg-sky-600 text-white' : 'text-slate-300 hover:bg-slate-800'
-              }`}
-            >
-              {d.label || `Camera ${i + 1}`}
-            </button>
-          ))}
-          {devices.length === 0 && <p className="px-2 py-1.5 text-xs text-slate-500">Không tìm thấy camera nào.</p>}
+    <div className="pointer-events-auto absolute bottom-6 right-6 w-44 overflow-hidden rounded-xl border border-slate-700/60 bg-slate-950/90 shadow-xl">
+      <div className="flex flex-col items-center justify-center gap-1 px-2 py-4 text-center">
+        <span className="text-lg">🪪</span>
+        <span className="text-[10px] text-slate-500">Máy quét mã CCCD</span>
+      </div>
+
+      {phase === 'stable' && stableCitizenId && (
+        <div className="bg-sky-600/95 px-2 py-1 text-center text-[10px] font-semibold text-white">
+          {stableCitizenId}
         </div>
       )}
-
-      <div className="relative w-44 aspect-video overflow-hidden rounded-xl border border-slate-700/60 bg-slate-950/90 shadow-xl">
-        {selectedDeviceId && !cameraError ? (
-          <video ref={videoRef} autoPlay muted playsInline className="h-full w-full object-cover" />
-        ) : (
-          <div className="flex h-full w-full flex-col items-center justify-center gap-1 px-2 text-center">
-            <span className="text-lg">📷</span>
-            <span className="text-[10px] text-slate-500">
-              {cameraError ? 'Không mở được camera' : 'Chưa chọn camera quét'}
-            </span>
-          </div>
-        )}
-        <canvas ref={canvasRef} className="hidden" />
-
-        {phase === 'stable' && stableResult && (
-          <div className="absolute inset-x-0 bottom-0 bg-sky-600/95 px-2 py-1 text-center text-[10px] font-semibold text-white">
-            {stableResult.citizenId}
-          </div>
-        )}
-        {phase === 'checking' && (
-          <div className="absolute inset-x-0 bottom-0 bg-slate-900/90 px-2 py-1 text-center text-[10px] text-slate-200">
-            Đang kiểm tra...
-          </div>
-        )}
-        {phase === 'found' && (
-          <div className="absolute inset-x-0 bottom-0 bg-emerald-600/95 px-2 py-1 text-center text-[10px] font-semibold text-white">
-            Đã tìm thấy ✓
-          </div>
-        )}
-        {phase === 'not-found' && (
-          <div className="absolute inset-x-0 bottom-0 bg-amber-600/95 px-2 py-1 text-center text-[10px] font-semibold text-white">
-            Không có trong danh sách
-          </div>
-        )}
-        {phase === 'check-error' && (
-          <button
-            type="button"
-            onClick={retryAfterCheckError}
-            className="absolute inset-x-0 bottom-0 bg-rose-600/95 px-2 py-1 text-center text-[10px] font-semibold text-white"
-          >
-            Lỗi kiểm tra — chạm để quét lại
-          </button>
-        )}
-        {phase === 'scanning' && !stableResult && (
-          <div className="absolute inset-x-0 bottom-0 truncate bg-slate-950/80 px-2 py-1 text-center text-[10px] text-slate-300">
-            {statusText ?? 'Đang quét...'}
-          </div>
-        )}
-
+      {phase === 'checking' && (
+        <div className="bg-slate-900/90 px-2 py-1 text-center text-[10px] text-slate-200">Đang kiểm tra...</div>
+      )}
+      {phase === 'found' && (
+        <div className="bg-emerald-600/95 px-2 py-1 text-center text-[10px] font-semibold text-white">
+          Đã tìm thấy ✓
+        </div>
+      )}
+      {phase === 'not-found' && (
+        <div className="bg-amber-600/95 px-2 py-1 text-center text-[10px] font-semibold text-white">
+          Không có trong danh sách
+        </div>
+      )}
+      {phase === 'check-error' && (
         <button
           type="button"
-          onClick={() => setPickerOpen((v) => !v)}
-          className="absolute top-1 right-1 rounded-md bg-slate-950/80 px-1.5 py-0.5 text-[10px] font-medium text-slate-300 hover:bg-slate-800"
+          onClick={retryAfterCheckError}
+          className="w-full bg-rose-600/95 px-2 py-1 text-center text-[10px] font-semibold text-white"
         >
-          Chọn cam
+          Lỗi kiểm tra — chạm để quét lại
         </button>
-      </div>
+      )}
+      {phase === 'idle' && statusText && (
+        <div className="bg-slate-950/80 px-2 py-1 text-center text-[10px] text-slate-300">{statusText}</div>
+      )}
     </div>
   );
 }

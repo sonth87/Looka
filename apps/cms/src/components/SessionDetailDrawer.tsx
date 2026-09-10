@@ -31,22 +31,10 @@ const SESSION_STATUS_LABEL: Record<SessionStatus, string> = {
   CANCELLED: 'Đã huỷ',
 };
 
-const FS_STATUS_READY = ['READY'];
-const FS_STATUS_PENDING = ['SCANNING', 'UPLOADING', 'SCAN_PENDING'];
-const FS_STATUS_FAILED = ['QUARANTINED', 'FAILED'];
-
 /** A photo's camera role, when known; otherwise fall back to the kiosk step - see the plan's mapping. */
 function roleLabel(photo: SessionPhoto): string {
   if (photo.cameraRole && ROLE_LABEL[photo.cameraRole]) return ROLE_LABEL[photo.cameraRole];
   return photo.stepType ?? photo.stepId;
-}
-
-function fsStatusBadgeClass(fsStatus?: string): string {
-  if (!fsStatus) return 'bg-gray-50 border-gray-200 text-gray-500';
-  if (FS_STATUS_READY.includes(fsStatus)) return 'bg-emerald-50 border-emerald-200 text-emerald-700';
-  if (FS_STATUS_PENDING.includes(fsStatus)) return 'bg-amber-50 border-amber-200 text-amber-700';
-  if (FS_STATUS_FAILED.includes(fsStatus)) return 'bg-red-50 border-red-200 text-red-700';
-  return 'bg-gray-50 border-gray-200 text-gray-500';
 }
 
 function formatDateTime(iso?: string): string {
@@ -136,10 +124,21 @@ export function SessionDetailDrawer({ sessionId, onClose }: { sessionId: string;
         if (cancelled) return;
         setSession(detail);
 
-        // Only photos that already reached the file server get a link request -
-        // the rest show "chưa upload" from their own fsStatus badge instead.
-        const withFile = detail.photos.filter((p) => p.fsFileId);
-        const videosWithFile = detail.videos.filter((v) => v.fsFileId);
+        // Every photo/video gets a link request, not just ones that already
+        // reached fs-core (fsFileId set) — 2026-09-10 fix. The server's own
+        // `resolveViewSource` (photo.controller.ts's view-link doc comment)
+        // already falls back to this API's locally held bytes when a photo
+        // has no fsFileId at all (never even reached fs-core) or has one but
+        // fsStatus is FAILED/QUARANTINED — the old `fsFileId`-only filter
+        // here meant that fallback was built server-side but never actually
+        // reachable from this drawer: a photo whose very first upload
+        // attempt failed (no fsFileId ever assigned) stayed permanently
+        // blank ("chưa upload") instead of showing the safely-stored local
+        // copy. A genuinely-nothing-viewable-yet photo still degrades
+        // gracefully — `resolveViewSource` throws, `classifyLinkError` turns
+        // that into the existing small inline error state, not a crash.
+        const withFile = detail.photos;
+        const videosWithFile = detail.videos;
         if (withFile.length > 0) {
           setLinks(Object.fromEntries(withFile.map((p) => [p.id, { status: 'loading' as const }])));
         }
@@ -263,14 +262,8 @@ export function SessionDetailDrawer({ sessionId, onClose }: { sessionId: string;
                 return (
                   <div key={photo.id} className="border border-gray-200 rounded-xl overflow-hidden bg-gray-50">
                     <div className="aspect-[3/4] bg-gray-100 flex items-center justify-center text-center text-xs text-gray-400 px-3">
-                      {!photo.fsFileId && <span>Chưa upload lên file server</span>}
-                      {photo.fsFileId && (!link || link.status === 'loading') && <span>Đang tải ảnh...</span>}
-                      {photo.fsFileId && link && link.status === 'not_ready' && <span>Chưa có trên file server</span>}
-                      {photo.fsFileId && link && link.status === 'upstream_error' && (
-                        <span>File server không phản hồi</span>
-                      )}
-                      {photo.fsFileId && link && link.status === 'error' && <span>{link.message}</span>}
-                      {photo.fsFileId && link && link.status === 'ready' && (
+                      {(!link || link.status === 'loading') && <span>Đang tải ảnh...</span>}
+                      {link && link.status === 'ready' && (
                         <img
                           src={link.url}
                           onError={() => retryLink(photo.id)}
@@ -285,13 +278,7 @@ export function SessionDetailDrawer({ sessionId, onClose }: { sessionId: string;
                           {roleLabel(photo)}
                           {photo.attempt > 1 ? ` · lần ${photo.attempt}` : ''}
                         </span>
-                        <span
-                          className={`px-1.5 py-0.5 rounded-full border text-xs font-medium shrink-0 ${fsStatusBadgeClass(photo.fsStatus)}`}
-                        >
-                          {photo.fsStatus ?? 'chưa upload'}
-                        </span>
                       </div>
-                      {photo.localStatus && <div className="text-xs text-gray-400">Cục bộ: {photo.localStatus}</div>}
                       <div className="flex gap-2 pt-1">
                         <button
                           onClick={() =>
@@ -328,14 +315,8 @@ export function SessionDetailDrawer({ sessionId, onClose }: { sessionId: string;
                   return (
                     <div key={video.id} className="border border-gray-200 rounded-xl overflow-hidden bg-gray-50">
                       <div className="aspect-video bg-gray-100 flex items-center justify-center text-center text-xs text-gray-400 px-3">
-                        {!video.fsFileId && <span>Chưa upload lên file server</span>}
-                        {video.fsFileId && (!link || link.status === 'loading') && <span>Đang tải video...</span>}
-                        {video.fsFileId && link && link.status === 'not_ready' && <span>Chưa có trên file server</span>}
-                        {video.fsFileId && link && link.status === 'upstream_error' && (
-                          <span>File server không phản hồi</span>
-                        )}
-                        {video.fsFileId && link && link.status === 'error' && <span>{link.message}</span>}
-                        {video.fsFileId && link && link.status === 'ready' && (
+                        {(!link || link.status === 'loading') && <span>Đang tải video...</span>}
+                        {link && link.status === 'ready' && (
                           <video
                             controls
                             src={link.url}
@@ -349,13 +330,7 @@ export function SessionDetailDrawer({ sessionId, onClose }: { sessionId: string;
                           <span className="font-medium text-gray-900 text-sm">
                             {videoRoleLabel(video)} · {formatDurationMs(video.durationMs)}
                           </span>
-                          <span
-                            className={`px-1.5 py-0.5 rounded-full border text-xs font-medium shrink-0 ${fsStatusBadgeClass(video.fsStatus)}`}
-                          >
-                            {video.fsStatus ?? 'chưa upload'}
-                          </span>
                         </div>
-                        {video.localStatus && <div className="text-xs text-gray-400">Cục bộ: {video.localStatus}</div>}
                         <div className="flex gap-2 pt-1">
                           <button
                             onClick={() =>

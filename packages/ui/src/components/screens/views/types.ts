@@ -46,6 +46,8 @@ export interface MultiFrameViewFrame {
  */
 export interface MultiFrameViewProps {
   frames: MultiFrameViewFrame[];
+  /** "Lưới 3x3" kiosk setting (2026-09-10) — see `MultiFrameGrid`'s own `forceThreePerRow` doc comment. */
+  grid3x3Enabled?: boolean;
   /** Non-null once a preflight has run; `!blocked.ok` means the session must not start. */
   blocked: FramePreflight | null;
   onOpenCameraSetup: () => void;

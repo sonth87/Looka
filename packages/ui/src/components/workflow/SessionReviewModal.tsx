@@ -33,6 +33,18 @@ export interface SessionReviewModalProps {
    * that ambiguity is what invited the second tap in the first place.
    */
   isAccepting?: boolean;
+  /**
+   * Embedding enrollment notice for one step's photo
+   * (docs/plans/face-embedding-server-integration-plan.md §6) — a 409
+   * duplicate-identity or 422 image-rejected result from `embedding:enrollFace`,
+   * surfaced here so the operator sees it while reviewing that exact step's
+   * tile, not just as a transient banner on the live capture screen. Keyed
+   * by `stepId` rather than assumed to be any particular step: only the
+   * CENTER step calls `enrollFace` today (a 2026-09-10 product decision),
+   * but this renders correctly regardless of which step it names. `null`/
+   * absent renders nothing extra.
+   */
+  embeddingNotice?: { stepId: string; kind: string; message: string } | null;
 }
 
 export const SessionReviewModal: React.FC<SessionReviewModalProps> = ({
@@ -44,6 +56,7 @@ export const SessionReviewModal: React.FC<SessionReviewModalProps> = ({
   className,
   mirrored = false,
   isAccepting = false,
+  embeddingNotice = null,
 }) => {
   const [exportNotice, setExportNotice] = useState<{ path: string; count: number } | null>(null);
 
@@ -190,6 +203,20 @@ export const SessionReviewModal: React.FC<SessionReviewModalProps> = ({
                   </>
                 )}
               </div>
+
+              {/* Embedding enrollment notice (plan §6) — only rendered for the step it names. */}
+              {embeddingNotice && embeddingNotice.stepId === step.stepId && (
+                <div
+                  className={cn(
+                    'px-2 py-1.5 rounded-lg text-[10px] sm:text-[11px] font-semibold leading-snug',
+                    embeddingNotice.kind === 'DUPLICATE_IDENTITY'
+                      ? 'bg-rose-950/70 border border-rose-500/50 text-rose-200'
+                      : 'bg-amber-950/70 border border-amber-500/50 text-amber-200'
+                  )}
+                >
+                  {embeddingNotice.message}
+                </div>
+              )}
             </div>
           ))}
         </div>

@@ -882,6 +882,7 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                 className="w-full shrink-0 px-1 pb-1"
                 frames={multiFrame.frames}
                 theme={theme}
+                forceThreePerRow={multiFrame.grid3x3Enabled}
               />
             )}
           </div>

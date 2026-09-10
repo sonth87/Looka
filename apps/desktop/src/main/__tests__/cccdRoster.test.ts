@@ -4,6 +4,7 @@ import { parseRosterFile, findByIdentityNumber } from '../cccdRoster.js';
 
 const SAMPLE_RECORD = {
   student_id: '97861199-3EB0-4EA8-89DA-96D97C67AAA5',
+  user_code: 'U2077020020',
   student_code: '2077020020',
   full_name: 'Vũ Phan Quỳnh Anh',
   gender: 'Nữ',
@@ -21,6 +22,7 @@ test('parseRosterFile extracts a well-formed array', () => {
   assert.deepEqual(parseRosterFile(raw), [
     {
       identityNumber: '014203003990',
+      userCode: 'U2077020020',
       studentCode: '2077020020',
       fullName: 'Vũ Phan Quỳnh Anh',
       className: 'TT 20 - 18',
@@ -41,6 +43,13 @@ test('parseRosterFile skips an element missing identity_number', () => {
   const parsed = parseRosterFile(raw);
   assert.equal(parsed?.length, 1);
   assert.equal(parsed?.[0]?.identityNumber, '014203003990');
+});
+
+test('parseRosterFile skips an element missing user_code — required, same as identity_number', () => {
+  const raw = JSON.stringify([{ ...SAMPLE_RECORD, user_code: undefined }, SAMPLE_RECORD]);
+  const parsed = parseRosterFile(raw);
+  assert.equal(parsed?.length, 1);
+  assert.equal(parsed?.[0]?.userCode, 'U2077020020');
 });
 
 test('parseRosterFile skips a non-object element without failing the rest', () => {

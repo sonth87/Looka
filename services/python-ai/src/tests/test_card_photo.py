@@ -7,7 +7,7 @@ import numpy as np
 from fastapi.testclient import TestClient
 
 from src.api.app import app
-from src.models.card_photo_pipeline import CARD_PHOTO_PIXEL_TABLE, get_target_pixels
+from src.models.card_photo_pipeline import CARD_PHOTO_PIXEL_TABLE, get_target_pixels, process_card_photo
 
 FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "fixtures", "sample_face.jpg")
 
@@ -100,6 +100,68 @@ class TestCardPhotoEndpoint(unittest.TestCase):
         )
         # Pydantic Literal validation rejects this before it reaches the pipeline.
         self.assertEqual(response.status_code, 422)
+
+
+class TestCardPhotoMirror(unittest.TestCase):
+    """`mirror` flag (2026-09-10, "chup anh the phai giong anh soi guong,
+    khong lat anh"): `process_card_photo(mirror=True)` must flip the input
+    horizontally BEFORE face detection/rotation/crop/background-replace run.
+
+    Proof strategy: flipping the input ourselves and then asking the
+    pipeline to flip it back (`mirror=True`) should cancel out, landing
+    close to the same result as running `mirror=False` on the original,
+    un-flipped image — a mean-abs-pixel-difference threshold rather than
+    exact equality, since JPEG re-encode / background replace introduce
+    minor non-determinism. If the flip happened AFTER detection (or not at
+    all), this would not hold: detection would run on mismatched geometry
+    and the crop/rotation would diverge well past the threshold.
+    """
+
+    def setUp(self):
+        self.image = cv2.imread(FIXTURE_PATH)
+        self.assertIsNotNone(self.image, "fixture image failed to load")
+
+    @staticmethod
+    def _mean_abs_diff(a: np.ndarray, b: np.ndarray) -> float:
+        return float(cv2.absdiff(a, b).astype(np.float32).mean())
+
+    def test_mirror_before_detection_cancels_out_a_pre_flipped_input(self):
+        result_plain, _ = process_card_photo(
+            self.image, size="4x6", dpi=300, background_color="#FFFFFF", mirror=False
+        )
+
+        pre_flipped_input = cv2.flip(self.image, 1)
+        result_mirrored, _ = process_card_photo(
+            pre_flipped_input, size="4x6", dpi=300, background_color="#FFFFFF", mirror=True
+        )
+
+        self.assertEqual(result_plain.shape, result_mirrored.shape)
+        mean_diff = self._mean_abs_diff(result_plain, result_mirrored)
+        self.assertLess(
+            mean_diff,
+            5.0,
+            f"mirror=True on a pre-flipped input should closely match mirror=False on "
+            f"the original (mean abs pixel diff was {mean_diff}); this only holds if "
+            f"the flip happens BEFORE detection/rotation/crop, not after",
+        )
+
+    def test_mirror_flag_has_a_real_effect_on_the_output(self):
+        # Same source image, only `mirror` differs -- proves the flag is
+        # actually wired through to the pipeline rather than silently
+        # ignored (the two outputs must NOT be near-identical).
+        result_plain, _ = process_card_photo(
+            self.image, size="4x6", dpi=300, background_color="#FFFFFF", mirror=False
+        )
+        result_mirrored, _ = process_card_photo(
+            self.image, size="4x6", dpi=300, background_color="#FFFFFF", mirror=True
+        )
+        mean_diff = self._mean_abs_diff(result_plain, result_mirrored)
+        self.assertGreater(
+            mean_diff,
+            5.0,
+            "mirror=True produced an output indistinguishable from mirror=False -- "
+            "the flag appears to have no effect",
+        )
 
 
 if __name__ == "__main__":

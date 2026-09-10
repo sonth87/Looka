@@ -68,6 +68,8 @@ interface FrontSourcePhoto {
 interface SessionContext {
   tenantName?: string;
   year: number;
+  /** `sessions.metadata->>'identityNumber'` (2026-09-10, "lưu ảnh làm mịn vào thư mục CCCD") — the subject's CCCD, when known, same field `StudentSubjectInfo.identityNumber` rides into `sessions.metadata` under. `undefined` for a session with no student lookup at all (manual entry with no CCCD, or an older session predating this). */
+  identityNumber?: string;
 }
 
 /** A very small (16-byte) 1x1 JPEG-ish sniff is not attempted — MIME + size only, matching `PhotoService.addPhoto`'s own validation depth for this pass. */
@@ -218,8 +220,9 @@ export class PhotoReviewService {
    * rather than importing anything from `capture`.
    */
   private async resolveSessionContext(sessionId: string): Promise<SessionContext> {
-    const rows: Array<{ at: Date }> = await this.dataSource.query(
-      `SELECT COALESCE(captured_at, created_at) AS at FROM sessions WHERE id = $1`,
+    const rows: Array<{ at: Date; identity_number: string | null }> = await this.dataSource.query(
+      `SELECT COALESCE(captured_at, created_at) AS at, metadata->>'identityNumber' AS identity_number
+         FROM sessions WHERE id = $1`,
       [sessionId],
     );
     const row = rows[0];
@@ -233,6 +236,7 @@ export class PhotoReviewService {
     return {
       tenantName: undefined,
       year: new Date(row.at).getFullYear(),
+      identityNumber: row.identity_number ?? undefined,
     };
   }
 
@@ -537,7 +541,29 @@ export class PhotoReviewService {
     return { data: rows[0].content, mimeType: rows[0].mime_type };
   }
 
-  private buildVirtualPath(sessionId: string, year: number, prefix: string, version: number, ext: string): string {
+  /**
+   * `students/<CCCD>/final_card/<prefix>-v<version>.<ext>` when the source
+   * session has a known CCCD (2026-09-10, "ảnh làm mịn lưu vào thư mục mã
+   * căn cước, folder final_card, dễ truy xuất") — same
+   * `students/<CCCD>/...` convention `photo.service.ts`'s `addDevicePhoto`
+   * and `session-video.service.ts`'s `addDeviceVideo` already use for raw
+   * captures, so a student's whole folder (raw photos, video, and every
+   * processed card variant) lives together. Falls back to the original
+   * session-id-based path when no CCCD is known (manual entry, or a session
+   * predating the CCCD-scan feature) — never a placeholder identity.
+   */
+  private buildVirtualPath(
+    sessionId: string,
+    year: number,
+    prefix: string,
+    version: number,
+    ext: string,
+    identityNumber?: string,
+  ): string {
+    const safeIdentity = identityNumber?.replace(/[^\w-]/g, '');
+    if (safeIdentity) {
+      return `students/${safeIdentity}/final_card/${prefix}-v${version}.${ext}`;
+    }
     return `card/${year}/${sessionId}/${prefix}-v${version}.${ext}`;
   }
 
@@ -981,10 +1007,18 @@ export class PhotoReviewService {
       const result = await this.sidecar.cardPhoto({
         imageBase64: sourceBytes.toString('base64'),
         cardSpec: kind.cardSpec,
+        mirror: true,
       });
 
       const ext = this.extForMime(result.mimeType);
-      const virtualPath = this.buildVirtualPath(set.sourceSessionId, sessionContext.year, 'auto', variant.version, ext);
+      const virtualPath = this.buildVirtualPath(
+        set.sourceSessionId,
+        sessionContext.year,
+        'auto',
+        variant.version,
+        ext,
+        sessionContext.identityNumber,
+      );
       const data = Buffer.from(result.imageBase64, 'base64');
 
       const readyVariant = await this.dataSource.transaction(async (manager) => {
@@ -1167,7 +1201,14 @@ export class PhotoReviewService {
       });
 
       const ext = this.extForMime(result.mimeType);
-      const virtualPath = this.buildVirtualPath(set.sourceSessionId, sessionContext.year, 'ai', variant.version, ext);
+      const virtualPath = this.buildVirtualPath(
+        set.sourceSessionId,
+        sessionContext.year,
+        'ai',
+        variant.version,
+        ext,
+        sessionContext.identityNumber,
+      );
       const data = Buffer.from(result.imageBase64, 'base64');
 
       await this.dataSource.transaction(async (manager) => {
@@ -1406,6 +1447,7 @@ export class PhotoReviewService {
       .cardPhoto({
         imageBase64: file.buffer.toString('base64'),
         cardSpec: kind.cardSpec,
+        mirror: true,
       })
       .catch((error) => {
         const message = extractSidecarFailureMessage(error);
@@ -1422,7 +1464,14 @@ export class PhotoReviewService {
       const repo = manager.getRepository(PhotoVariant);
 
       const ext = this.extForMime(cardResult.mimeType);
-      const virtualPath = this.buildVirtualPath(set.sourceSessionId, sessionContext.year, 'upload', version, ext);
+      const virtualPath = this.buildVirtualPath(
+        set.sourceSessionId,
+        sessionContext.year,
+        'upload',
+        version,
+        ext,
+        sessionContext.identityNumber,
+      );
       const data = Buffer.from(cardResult.imageBase64, 'base64');
 
       // Created first, without bytes/fsFileId — `storeVariantBytesLocalFirst`
@@ -1471,7 +1520,14 @@ export class PhotoReviewService {
       // means this warns and skips.
       await this.uploadMetadataBestEffort({
         tenantName: sessionContext.tenantName,
-        virtualPath: this.buildVirtualPath(set.sourceSessionId, sessionContext.year, 'upload', version, 'source.json'),
+        virtualPath: this.buildVirtualPath(
+          set.sourceSessionId,
+          sessionContext.year,
+          'upload',
+          version,
+          'source.json',
+          sessionContext.identityNumber,
+        ),
         idempotencyKey: `photo-review:${setId}:upload:v${version}:meta`,
         metadata: { identitySimilarity: similarity, originalMimeType: file.mimetype },
       });

@@ -1,7 +1,7 @@
 import { CustomException, ERROR_CODE } from '@app/common/errors';
 import type { Visibility } from '@face/core';
 import { FsClient, FsError } from '@face/fs-client';
-import type { FsFileInfo } from '@face/fs-client';
+import type { FsFileInfo, UpdateResult } from '@face/fs-client';
 import { HttpStatus, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
@@ -84,6 +84,25 @@ export class FileStorageService implements OnModuleInit {
   /** Current scan/lifecycle state for a file already accepted by the server. */
   getFile(fileId: string): Promise<FsFileInfo> {
     return this.client.getFile(fileId);
+  }
+
+  /**
+   * Overwrite an existing file's content in place (new version, same
+   * `virtual_path`/`fileId`) - used by `UploadWorkerService` to resolve an
+   * `ALREADY_REGISTERED` conflict on a flat, session-agnostic virtual path
+   * (e.g. a kiosk retake landing on the same `students/<CCCD>/...` path an
+   * earlier session already registered - see that service's own doc comment
+   * for the live-confirmed scenario this closes). `uploadRaw`/`upload`
+   * always POST a brand-new file and can never repair this themselves: the
+   * server keys `virtual_path` uniqueness ahead of `Idempotency-Key`, so a
+   * second session's genuinely different key is rejected outright rather
+   * than treated as a silent overwrite.
+   */
+  updateContent(
+    fileId: string,
+    input: { etag: string; data: Uint8Array; mimeType: string },
+  ): Promise<UpdateResult> {
+    return this.client.updateContent(fileId, input);
   }
 
   /**
