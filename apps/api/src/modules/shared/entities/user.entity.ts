@@ -1,6 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Column, Entity, Index } from 'typeorm';
-import { BaseEntity } from '../common/base.entity';
+import { BaseEntity } from '../../../shared/database/base.entity';
 
 /**
  * A person who has logged into the CMS or a kiosk/web client via the

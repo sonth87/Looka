@@ -1,5 +1,5 @@
-import { CustomException, ERROR_CODE } from '@app/common/errors';
-import { CommonService } from '@app/modules/shared/common/common.service';
+import { CustomException, ERROR_CODE } from '@app/shared/errors/legacy';
+import { CommonService } from '@app/shared/common/common.service';
 import type { Visibility } from '@face/core';
 import { HttpStatus, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';

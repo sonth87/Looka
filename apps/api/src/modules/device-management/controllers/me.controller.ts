@@ -1,5 +1,5 @@
-import { ApiResponseArrayDecorator } from '@app/common/decorators';
-import { SsoAuthGuard, type AuthenticatedUser } from '@app/common/guards';
+import { ApiResponseArrayDecorator } from '@app/shared/http/api-response.decorator';
+import { SsoAuthGuard, type AuthenticatedUser } from '@app/shared/auth/index';
 import { Controller, Get, Req, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Request } from 'express';

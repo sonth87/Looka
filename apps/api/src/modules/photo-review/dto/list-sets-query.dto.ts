@@ -1,4 +1,4 @@
-import { QueryPaginateDto } from '@app/common/dto';
+import { QueryPaginateDto } from '@app/shared/http/query-paginate.dto';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform, Type } from 'class-transformer';
 import { IsBoolean, IsEnum, IsInt, IsOptional, IsPositive, IsString, IsUUID, Max } from 'class-validator';

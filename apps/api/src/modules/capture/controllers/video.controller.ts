@@ -1,7 +1,7 @@
 import { Body, Controller, Param, Post, Req, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Request } from 'express';
-import { SsoAuthGuard } from '@app/common/guards';
+import { SsoAuthGuard } from '@app/shared/auth/index';
 import {
   FileStorageService,
   PhotoViewLink,

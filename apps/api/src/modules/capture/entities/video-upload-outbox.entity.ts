@@ -1,4 +1,4 @@
-import { BaseEntity } from '@app/modules/shared/common/base.entity';
+import { BaseEntity } from '@app/shared/database/base.entity';
 import type { Visibility } from '@face/core';
 import { Column, Entity, Index, JoinColumn, ManyToOne } from 'typeorm';
 import { SessionVideo } from './session-video.entity';

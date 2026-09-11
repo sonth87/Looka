@@ -1,7 +1,7 @@
-import { CustomException } from '@app/common/errors';
-import { toDao } from '@app/common/helpers';
+import { CustomException } from '@app/shared/errors/legacy';
+import { toDao } from '@app/shared/http/to-dao.helper';
 import { FileStorageService } from '@app/modules/file-storage/services/file-storage.service';
-import { Pagination } from '@app/modules/shared/common/pagination';
+import { Pagination } from '@app/shared/http/pagination';
 import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';

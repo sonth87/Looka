@@ -1,4 +1,4 @@
-import { CustomException, ERROR_CODE } from '@app/common/errors';
+import { CustomException, ERROR_CODE } from '@app/shared/errors/legacy';
 import {
   CanActivate,
   ExecutionContext,

@@ -1,4 +1,4 @@
-import { SsoAuthGuard } from '@app/common/guards';
+import { SsoAuthGuard } from '@app/shared/auth/index';
 import { Body, Controller, ForbiddenException, Get, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Request } from 'express';

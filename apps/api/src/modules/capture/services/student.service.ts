@@ -1,6 +1,6 @@
-import { CustomException, ERROR_CODE } from '@app/common/errors';
-import { toDao } from '@app/common/helpers';
-import { Pagination } from '@app/modules/shared/common/pagination';
+import { CustomException, ERROR_CODE } from '@app/shared/errors/legacy';
+import { toDao } from '@app/shared/http/to-dao.helper';
+import { Pagination } from '@app/shared/http/pagination';
 import { FileStorageService } from '@app/modules/file-storage/services/file-storage.service';
 import { HttpStatus, Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';

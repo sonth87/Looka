@@ -1,6 +1,6 @@
-import { ApiResponseDecorator } from '@app/common/decorators';
-import { CustomException, ERROR_CODE } from '@app/common/errors';
-import { toDao } from '@app/common/helpers';
+import { ApiResponseDecorator } from '@app/shared/http/api-response.decorator';
+import { CustomException, ERROR_CODE } from '@app/shared/errors/legacy';
+import { toDao } from '@app/shared/http/to-dao.helper';
 import { AddDevicePhotoDto, AddDeviceVideoDto } from '@app/modules/capture/dto';
 import { PhotoService } from '@app/modules/capture/services/photo.service';
 import { SessionVideoService } from '@app/modules/capture/services/session-video.service';

@@ -1,6 +1,6 @@
-import { CustomException } from '@app/common/errors';
-import { toDao } from '@app/common/helpers';
-import { CommonService } from '@app/modules/shared/common/common.service';
+import { CustomException } from '@app/shared/errors/legacy';
+import { toDao } from '@app/shared/http/to-dao.helper';
+import { CommonService } from '@app/shared/common/common.service';
 import { HttpStatus, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';

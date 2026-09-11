@@ -1,8 +1,8 @@
 import {
   ApiResponseDecorator,
   ApiResponsePaginatedDecorator,
-} from '@app/common/decorators';
-import { ApiKeyOrSsoGuard } from '@app/common/guards';
+} from '@app/shared/http/api-response.decorator';
+import { ApiKeyOrSsoGuard } from '@app/shared/auth/index';
 import { Controller, Get, Param, Query, UseGuards } from '@nestjs/common';
 import { ApiOperation, ApiSecurity, ApiTags } from '@nestjs/swagger';
 import { StudentDetailDao, StudentListItemDao } from '../dao';

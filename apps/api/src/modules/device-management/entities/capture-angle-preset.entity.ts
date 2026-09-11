@@ -1,7 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import type { CameraRole, PoseTarget } from '@face/core';
 import { Column, Entity } from 'typeorm';
-import { BaseEntity } from '../../shared/common/base.entity';
+import { BaseEntity } from '../../../shared/database/base.entity';
 
 /**
  * The dynamic capture-angle catalog — docs/plans/campaign-config-sso-card-photo-discussion.md

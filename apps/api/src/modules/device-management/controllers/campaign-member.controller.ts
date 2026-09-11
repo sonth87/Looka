@@ -1,8 +1,8 @@
 import {
   ApiResponseDecorator,
   ApiResponsePaginatedDecorator,
-} from '@app/common/decorators';
-import { SsoAuthGuard } from '@app/common/guards';
+} from '@app/shared/http/api-response.decorator';
+import { SsoAuthGuard } from '@app/shared/auth/index';
 import {
   Body,
   Controller,

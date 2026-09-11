@@ -1,7 +1,7 @@
 import { Global, Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { User } from './entities/user.entity';
-import { DainamStudentInfoClient } from './services/dainam-student-info.client';
+import { DainamStudentInfoClient } from '../../shared/integrations/dainam-student/student-directory.adapter';
 
 /**
  * Global module for cross-cutting providers shared across feature modules.

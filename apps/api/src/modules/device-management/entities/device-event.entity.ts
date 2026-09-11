@@ -1,6 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Column, Entity, Index } from 'typeorm';
-import { BaseEntity } from '../../shared/common/base.entity';
+import { BaseEntity } from '../../../shared/database/base.entity';
 
 export enum DeviceEventType {
   SESSION_COMPLETED = 'SESSION_COMPLETED',

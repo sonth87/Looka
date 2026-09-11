@@ -1,4 +1,4 @@
-import { SsoAuthGuard } from '@app/common/guards';
+import { SsoAuthGuard } from '@app/shared/auth/index';
 import {
   Body,
   Controller,
@@ -35,7 +35,7 @@ import {
 import { ReviewerRoleGuard } from '../guards/reviewer-role.guard';
 import { MAX_UPLOAD_BYTES, PhotoReviewSetStatus } from '../photo-review.constants';
 import { PhotoReviewService } from '../services/photo-review.service';
-import { Pagination } from '@app/modules/shared/common/pagination';
+import { Pagination } from '@app/shared/http/pagination';
 
 /**
  * Multer's own runtime shape for `@UploadedFile()` — declared locally

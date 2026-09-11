@@ -1,6 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Column, Entity, Index, JoinColumn, ManyToOne } from 'typeorm';
-import { BaseEntity } from '../../shared/common/base.entity';
+import { BaseEntity } from '../../../shared/database/base.entity';
 import { Campaign } from './campaign.entity';
 
 export enum DeviceStatus {

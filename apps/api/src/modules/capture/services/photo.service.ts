@@ -1,6 +1,6 @@
-import { CustomException, ERROR_CODE } from '@app/common/errors';
-import { toDao } from '@app/common/helpers';
-import { CommonService } from '@app/modules/shared/common/common.service';
+import { CustomException, ERROR_CODE } from '@app/shared/errors/legacy';
+import { toDao } from '@app/shared/http/to-dao.helper';
+import { CommonService } from '@app/shared/common/common.service';
 import type { Visibility } from '@face/core';
 import { HttpStatus, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';

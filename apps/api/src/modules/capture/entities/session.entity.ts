@@ -1,4 +1,4 @@
-import { BaseEntity } from '@app/modules/shared/common/base.entity';
+import { BaseEntity } from '@app/shared/database/base.entity';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Column, Entity, OneToMany } from 'typeorm';
 import { SessionSource, SessionStatus } from '../capture.constants';

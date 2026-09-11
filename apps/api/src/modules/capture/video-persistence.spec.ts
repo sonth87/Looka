@@ -1,4 +1,4 @@
-import { ERROR_CODE } from '@app/common/errors';
+import { ERROR_CODE } from '@app/shared/errors/legacy';
 import { Test, TestingModule } from '@nestjs/testing';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';

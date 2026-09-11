@@ -1,4 +1,4 @@
-import { CustomException, ERROR_CODE } from '@app/common/errors';
+import { CustomException, ERROR_CODE } from '@app/shared/errors/legacy';
 import type { Visibility } from '@face/core';
 import { FsClient, FsError } from '@face/fs-client';
 import type { FsFileInfo, UpdateResult } from '@face/fs-client';

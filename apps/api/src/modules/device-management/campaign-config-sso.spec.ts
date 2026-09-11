@@ -1,4 +1,4 @@
-import { ERROR_CODE } from '@app/common/errors';
+import { ERROR_CODE } from '@app/shared/errors/legacy';
 import { FileStorageService } from '@app/modules/file-storage/services/file-storage.service';
 import { PhotoReviewService } from '@app/modules/photo-review/services/photo-review.service';
 import { Test, TestingModule } from '@nestjs/testing';
