@@ -1,4 +1,4 @@
-import { SsoAuthGuard } from '@app/common/guards';
+import { SsoAuthGuard } from '@app/shared/auth/index';
 import { FileStorageModule } from '@app/modules/file-storage/file-storage.module';
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';

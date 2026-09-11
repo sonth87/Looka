@@ -1,4 +1,4 @@
-import { QueryPaginateDto } from '@app/common/dto';
+import { QueryPaginateDto } from '@app/shared/http/query-paginate.dto';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { IsIn, IsOptional } from 'class-validator';
 import type { CampaignMemberStatus } from '../entities/campaign-member.entity';

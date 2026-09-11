@@ -2,9 +2,9 @@ import {
   ApiResponseArrayDecorator,
   ApiResponseDecorator,
   ApiResponsePaginatedDecorator,
-} from '@app/common/decorators';
-import { SsoAuthGuard } from '@app/common/guards';
-import { Pagination } from '@app/modules/shared/common/pagination';
+} from '@app/shared/http/api-response.decorator';
+import { SsoAuthGuard } from '@app/shared/auth/index';
+import { Pagination } from '@app/shared/http/pagination';
 import {
   Body,
   Controller,

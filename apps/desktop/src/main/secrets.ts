@@ -42,7 +42,9 @@ export type SecretKey =
   | 'device.fingerprint'
   | 'camera.roleMapping'
   | 'camera.physicalAngles'
-  | 'capture.sequencing';
+  | 'camera.cbHelpVisibility'
+  | 'capture.sequencing'
+  | 'display.grid3x3';
 
 const electronCrypto: CryptoProvider = {
   isAvailable: () => safeStorage.isEncryptionAvailable(),
@@ -500,6 +502,82 @@ export function setCameraPhysicalAngles(angles: CameraPhysicalAngleMap): void {
   setSecret('camera.physicalAngles', JSON.stringify(angles));
 }
 
+/** One logical camera role's CB Help extend-display setting — whether its tile shows there at all, and in what order relative to the other visible roles (ascending, ties broken by `CAMERA_ROLES` order). */
+export interface CbHelpCameraVisibility {
+  visible: boolean;
+  order: number;
+}
+
+/** Per-role CB Help visibility/order override — mirrors `CameraRoleMapping`/`CameraPhysicalAngleMap`'s own shape and storage. */
+export type CbHelpVisibilityMap = Partial<Record<CameraRole, CbHelpCameraVisibility>>;
+
+/**
+ * Which camera roles show on the CB Help extended display, and in what
+ * order (2026-09-10, "màn extend default hiển thị camera chính diện, các
+ * cam khác ẩn đi, có nút setup mở các camera đó lên... có thể di chuyển thứ
+ * tự"). Before this, CB Help showed every workflow step's camera
+ * unconditionally, in step order — see `FaceCaptureApp.tsx`'s
+ * `buildCbHelpFrames`, which now filters/sorts by this map instead.
+ *
+ * An unset/missing role falls back to CENTER visible (order 0), everything
+ * else hidden — see `resolveCbHelpVisibility` below, the single place that
+ * default is expressed, so a role explicitly saved as `{ visible: false }`
+ * for CENTER (an unusual but valid operator choice) is still honoured
+ * rather than silently overridden back to visible.
+ */
+export function getCbHelpVisibility(): CbHelpVisibilityMap {
+  const raw = getSecret('camera.cbHelpVisibility');
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw) as CbHelpVisibilityMap;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Filters an untrusted payload (the `camera:setCbHelpVisibility` IPC
+ * argument) down to known roles with a boolean `visible` and a finite
+ * numeric `order` — same reasoning as `sanitizeCameraPhysicalAngles`.
+ */
+export function sanitizeCbHelpVisibility(input: unknown): CbHelpVisibilityMap {
+  const sanitized: CbHelpVisibilityMap = {};
+  if (!input || typeof input !== 'object') return sanitized;
+  for (const role of CAMERA_ROLES) {
+    const value = (input as Record<string, unknown>)[role];
+    if (!value || typeof value !== 'object') continue;
+    const visible = (value as Record<string, unknown>).visible;
+    const order = (value as Record<string, unknown>).order;
+    if (typeof visible === 'boolean' && typeof order === 'number' && Number.isFinite(order)) {
+      sanitized[role] = { visible, order };
+    }
+  }
+  return sanitized;
+}
+
+export function setCbHelpVisibility(map: CbHelpVisibilityMap): void {
+  setSecret('camera.cbHelpVisibility', JSON.stringify(map));
+}
+
+/** The default `resolveCbHelpVisibility` uses for a role with no saved entry — see that function's own doc comment. */
+const DEFAULT_CB_HELP_VISIBILITY: Record<CameraRole, CbHelpCameraVisibility> = {
+  CENTER: { visible: true, order: 0 },
+  LEFT: { visible: false, order: 1 },
+  RIGHT: { visible: false, order: 2 },
+  UP: { visible: false, order: 3 },
+  DOWN: { visible: false, order: 4 },
+};
+
+/** `getCbHelpVisibility()`'s map, with every role resolved against `DEFAULT_CB_HELP_VISIBILITY` — the one place "unset means CENTER-only" is decided, so every caller (main process and renderer alike) agrees on it. */
+export function resolveCbHelpVisibility(map: CbHelpVisibilityMap): Record<CameraRole, CbHelpCameraVisibility> {
+  const resolved = { ...DEFAULT_CB_HELP_VISIBILITY };
+  for (const role of CAMERA_ROLES) {
+    const saved = map[role];
+    if (saved) resolved[role] = saved;
+  }
+  return resolved;
+}
+
 /**
  * "Cách chụp" — Tuần tự / Đồng thời (discussion doc §3.9, ui-redesign-plan.md
  * S7). A kiosk-local setting, same reasoning as `camera.roleMapping`: it
@@ -517,4 +595,20 @@ export function getCaptureSequencing(): CaptureSequencing {
 
 export function setCaptureSequencing(value: CaptureSequencing): void {
   setSecret('capture.sequencing', value === 'simultaneous' ? 'simultaneous' : 'sequential');
+}
+
+/**
+ * "Lưới 3x3" (2026-09-10) — forces the multi-camera capture grid
+ * (`MultiFrameGrid`) to always lay out 3 tiles per row, instead of its
+ * default per-count layout (1→1 col, 2→2, 3→3, 4→2x2, 5→3+2). Kiosk-local,
+ * same reasoning as `capture.sequencing`. Defaults to `false` (the existing
+ * adaptive layout) when unset, so an upgraded kiosk's grid looks exactly as
+ * it did before until an operator opts in.
+ */
+export function getGrid3x3Enabled(): boolean {
+  return getSecret('display.grid3x3') === 'true';
+}
+
+export function setGrid3x3Enabled(value: boolean): void {
+  setSecret('display.grid3x3', value ? 'true' : 'false');
 }

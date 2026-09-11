@@ -23,6 +23,15 @@ import {
 } from './db.js';
 import { pingAiService } from './aiService.js';
 import {
+  startEmbeddingEnroll,
+  stopEmbeddingEnroll,
+  embeddingHealth,
+  enrollFaceForStep,
+  listEnrolledFaces,
+  deleteEnrolledFace,
+  deleteAllEnrolledFaces,
+} from './embeddingEnroll.js';
+import {
   startUploads,
   stopUploads,
   queueCapture,
@@ -50,6 +59,11 @@ import {
   sanitizeCameraPhysicalAngles,
   getCaptureSequencing,
   setCaptureSequencing,
+  getCbHelpVisibility,
+  setCbHelpVisibility,
+  sanitizeCbHelpVisibility,
+  getGrid3x3Enabled,
+  setGrid3x3Enabled,
   getOrCreateDeviceFingerprint,
   getHostname,
   storeSelfEnrolledDevice,
@@ -343,6 +357,15 @@ app.whenReady().then(async () => {
     // returns 'failed' with no baseUrl/creds), same offline-first shape as
     // uploads. See statsEvents.ts's own doc comment.
     startStatsEventPush();
+
+    // Enrollment half of docs/plans/face-embedding-server-integration-plan.md
+    // — see embeddingEnroll.ts's own doc comment. Optional, same shape as
+    // uploads: EMBEDDING_SERVER_BASE_URL unset just means the feature stays
+    // off (no enroll calls, no retry queue), not a startup failure.
+    const embeddingEnrollRunning = startEmbeddingEnroll();
+    if (!embeddingEnrollRunning) {
+      console.warn('[main] EMBEDDING_SERVER_BASE_URL not set; face enrollment is disabled');
+    }
   }
 
   ipcMain.handle('app:getVersion', () => app.getVersion());
@@ -497,6 +520,86 @@ app.whenReady().then(async () => {
   });
 
   /**
+   * Enrollment side of docs/plans/face-embedding-server-integration-plan.md
+   * (§7's IPC list) — see embeddingEnroll.ts's own doc comment for the full
+   * design. Deliberately separate from the `attendance:*` handlers above:
+   * those still front the old MOCK embedding pipeline (untouched by this
+   * work — a later task rewrites attendance.ts to use this same external
+   * server for the recognition/`/search` side, per the plan's §5.2).
+   *
+   * `embedding:health` — preflight before starting a capture session, same
+   * idea as `app:getStatus`'s own `aiServiceReachable` ping for the Python
+   * sidecar (plan §6's "models_loaded: false" row).
+   */
+  ipcMain.handle('embedding:health', () => embeddingHealth());
+
+  /**
+   * Enrolls one capture's image under `userCode`. The renderer only ever
+   * calls this for the CENTER/FRONT step (2026-09-10 product decision — see
+   * FaceCaptureApp.tsx's own call site) and only when a real `userCode` is
+   * known (no CCCD-scan lookup on the manual "nhập mã sinh viên" path skips
+   * this entirely, never falls back to `subjectCode` — see the integration
+   * task's own decision 2). Always resolves, never rejects: every outcome
+   * (success, a real rejection like 409/422, or "queued for background
+   * retry" on a network failure) is reported in the returned `EnrollFaceOutcome`
+   * so the renderer can react without a try/catch.
+   */
+  ipcMain.handle(
+    'embedding:enrollFace',
+    (
+      _,
+      payload: { sessionId?: unknown; stepId?: unknown; attempt?: unknown; userCode?: unknown; dataUrl?: unknown }
+    ) => {
+      const sessionId = String(payload?.sessionId ?? '');
+      const stepId = String(payload?.stepId ?? '');
+      const userCode = String(payload?.userCode ?? '');
+      const attempt = Number(payload?.attempt ?? 1) || 1;
+      const dataUrl = String(payload?.dataUrl ?? '');
+      if (!sessionId || !stepId || !userCode || !dataUrl) {
+        return Promise.resolve({ ok: false, kind: 'EMPTY_OR_UNREADABLE' as const });
+      }
+      return enrollFaceForStep({ sessionId, stepId, attempt, userCode, dataUrl });
+    }
+  );
+
+  /** Admin/audit: images the server currently has registered for one userCode (§7 — "màn hình quản trị... CB Help sửa sai"). */
+  ipcMain.handle('embedding:listFaces', async (_, userCode: unknown) => {
+    if (typeof userCode !== 'string' || !userCode) return { ok: false, error: 'userCode is required' };
+    try {
+      const result = await listEnrolledFaces(userCode);
+      return { ok: true, ...result };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  });
+
+  /** Admin/audit: removes one registered image by the server's own embeddingId. */
+  ipcMain.handle('embedding:deleteFace', async (_, payload: { userCode?: unknown; embeddingId?: unknown }) => {
+    const userCode = typeof payload?.userCode === 'string' ? payload.userCode : '';
+    const embeddingId = Number(payload?.embeddingId);
+    if (!userCode || !Number.isFinite(embeddingId)) {
+      return { ok: false, error: 'userCode and embeddingId are required' };
+    }
+    try {
+      const result = await deleteEnrolledFace(userCode, embeddingId);
+      return { ok: true, ...result };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  });
+
+  /** Admin/audit: removes every image registered for one userCode — e.g. when a student is deleted from the central roster (plan §7's retention question). */
+  ipcMain.handle('embedding:deleteAllFaces', async (_, userCode: unknown) => {
+    if (typeof userCode !== 'string' || !userCode) return { ok: false, error: 'userCode is required' };
+    try {
+      const result = await deleteAllEnrolledFaces(userCode);
+      return { ok: true, ...result };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  });
+
+  /**
    * Opens/closes the CB Help extended-display window on demand — the same
    * action `Ctrl/Cmd+Shift+H` triggers (registered below) and the kiosk
    * UI's "Màn hình mở rộng" button calls. See cbHelpWindow.ts's own doc
@@ -594,6 +697,20 @@ app.whenReady().then(async () => {
   ipcMain.handle('capture:getSequencing', () => getCaptureSequencing());
   ipcMain.handle('capture:setSequencing', (_, value: unknown) => {
     setCaptureSequencing(value === 'simultaneous' ? 'simultaneous' : 'sequential');
+    return true;
+  });
+
+  /** Which camera roles show on CB Help, and in what order — set from Camera Setup (2026-09-10). */
+  ipcMain.handle('camera:getCbHelpVisibility', () => getCbHelpVisibility());
+  ipcMain.handle('camera:setCbHelpVisibility', (_, map: unknown) => {
+    setCbHelpVisibility(sanitizeCbHelpVisibility(map));
+    return true;
+  });
+
+  /** "Lưới 3x3" — always 3 tiles/row in the multi-camera capture grid, set from Camera Setup (2026-09-10). */
+  ipcMain.handle('display:getGrid3x3Enabled', () => getGrid3x3Enabled());
+  ipcMain.handle('display:setGrid3x3Enabled', (_, value: unknown) => {
+    setGrid3x3Enabled(value === true);
     return true;
   });
 
@@ -1015,6 +1132,7 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   stopUploads();
+  stopEmbeddingEnroll();
   stopStatsEventPush();
   stopCccdRosterWatcher();
   closeDatabase();
@@ -1023,6 +1141,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   stopUploads();
+  stopEmbeddingEnroll();
   stopStatsEventPush();
   stopCccdRosterWatcher();
   closeDatabase();

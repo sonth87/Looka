@@ -1,4 +1,4 @@
-import { BaseEntity } from '@app/modules/shared/common/base.entity';
+import { BaseEntity } from '@app/shared/database/base.entity';
 import { Column, Entity, Index, JoinColumn, ManyToOne } from 'typeorm';
 import { OutboxStatus } from '../capture.constants';
 import { Photo } from './photo.entity';

@@ -10,6 +10,7 @@ import { MIGRATION_007_STATS_EVENTS } from './007-stats-events.js';
 import { MIGRATION_008_OUTBOX_ATTEMPT } from './008-outbox-attempt.js';
 import { MIGRATION_009_VIDEO_OUTBOX } from './009-video-outbox.js';
 import { MIGRATION_010_CAPTURED_STUDENTS } from './010-captured-students.js';
+import { MIGRATION_011_EMBEDDING_ENROLLMENTS } from './011-embedding-enrollments.js';
 
 export interface Migration {
   version: number;
@@ -33,6 +34,7 @@ export const MIGRATIONS: Migration[] = [
   MIGRATION_008_OUTBOX_ATTEMPT,
   MIGRATION_009_VIDEO_OUTBOX,
   MIGRATION_010_CAPTURED_STUDENTS,
+  MIGRATION_011_EMBEDDING_ENROLLMENTS,
 ];
 
 const MIGRATION_TABLE = `
@@ -98,3 +100,4 @@ export { MIGRATION_007_STATS_EVENTS } from './007-stats-events.js';
 export { MIGRATION_008_OUTBOX_ATTEMPT } from './008-outbox-attempt.js';
 export { MIGRATION_009_VIDEO_OUTBOX } from './009-video-outbox.js';
 export { MIGRATION_010_CAPTURED_STUDENTS } from './010-captured-students.js';
+export { MIGRATION_011_EMBEDDING_ENROLLMENTS } from './011-embedding-enrollments.js';

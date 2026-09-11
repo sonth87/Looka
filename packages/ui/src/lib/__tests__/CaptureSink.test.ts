@@ -270,6 +270,7 @@ test('setSubject() before the first capture makes ensure() send it to startSessi
         major: 'Công nghệ thông tin',
         academicYear: '2025-2026',
         identityNumber: undefined,
+        userCode: undefined,
       },
     },
   ]);
@@ -299,7 +300,13 @@ test('with no setSubject() call, ensure() sends startSession an all-undefined su
     {
       subjectCode: undefined,
       subjectName: undefined,
-      metadata: { className: undefined, major: undefined, academicYear: undefined, identityNumber: undefined },
+      metadata: {
+        className: undefined,
+        major: undefined,
+        academicYear: undefined,
+        identityNumber: undefined,
+        userCode: undefined,
+      },
     },
   ]);
 });
@@ -611,6 +618,7 @@ test('ElectronCaptureSink.approveUpload forwards a student subject as subjectCod
         major: 'Công nghệ thông tin',
         academicYear: '2025-2026',
         identityNumber: undefined,
+        userCode: undefined,
       },
       operatorUserId: undefined,
     },

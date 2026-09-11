@@ -6,6 +6,8 @@ export interface SidecarCardPhotoInput {
   /** Raw image bytes, base64 — no `data:` prefix required (the sidecar tolerates one, but never sends it), matching `services/python-ai/src/models/image_codec.py`'s `decode_image()`. */
   imageBase64: string;
   cardSpec: Record<string, unknown>;
+  /** Mirrors the input horizontally before face detection (`services/python-ai/src/models/card_photo_pipeline.py`'s `process_card_photo(mirror=...)`) — product decision 2026-09-10: the live kiosk preview is deliberately mirrored, but the captured still is saved unmirrored by design, so callers producing a card photo from that still pass `mirror: true` to make the result match what the subject saw in the mirror rather than the raw sensor image. Defaults to `false` (sidecar default) when omitted. */
+  mirror?: boolean;
 }
 
 export interface SidecarCardPhotoResult {
@@ -85,8 +87,9 @@ export class SidecarError extends Error {
  * mounted under `/api/v1` (`services/python-ai/src/api/app.py`), and every
  * request/response body below is read straight off that side's own Pydantic
  * models (`card_photo.py`/`edit.py`/`identity.py`), not invented here:
- * - `POST /api/v1/card-photo` `{ image_data, card_spec }` →
- *   `{ image_data, width, height, dpi, warnings }`
+ * - `POST /api/v1/card-photo` `{ image_data, card_spec, mirror? }` →
+ *   `{ image_data, width, height, dpi, warnings }` — `mirror` (default
+ *   `false`) flips the input horizontally before face detection.
  * - `POST /api/v1/edit` `{ image_data, prompt, region?, fromVariantId? }` —
  *   the route validates the prompt and defines the contract but has no
  *   generative model wired in this environment (`services/python-ai/src/api/routes/edit.py`'s
@@ -131,6 +134,7 @@ export class PhotoReviewSidecarService {
     }>('/card-photo', {
       image_data: input.imageBase64,
       card_spec: input.cardSpec,
+      mirror: input.mirror ?? false,
     });
     return {
       imageBase64: res.image_data,

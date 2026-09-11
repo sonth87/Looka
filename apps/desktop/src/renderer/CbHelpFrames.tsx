@@ -103,8 +103,10 @@ const EMPTY_STATE: CbHelpPublishState = {
  * arriving first (see the collapse effect below) also collapses it
  * immediately, so a mismatch here only affects how long the greeting looks
  * "held" with nothing behind it yet — never how long recording is delayed.
+ * Trimmed to 2000 (2026-09-10 perf pass) to match `FaceCaptureApp.tsx`'s own
+ * value after its own trim — keep these two in sync.
  */
-const GREETING_DURATION_MS = 3000;
+const GREETING_DURATION_MS = 2000;
 
 /**
  * Whether `frame` should have a live camera stream open in this window right
@@ -405,8 +407,20 @@ export default function CbHelpFrames() {
 
   if (state.phase === 'idle' || state.frames.length === 0) {
     return (
-      <div className="relative w-screen h-screen bg-slate-950 text-slate-100 flex items-center justify-center overflow-hidden">
+      <div className="relative w-screen h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center gap-6 overflow-hidden">
         {cornerBadge}
+        {/* Live CENTER camera feed (2026-09-10, "camera live vẫn phải hiển
+            thị") — proves the kiosk's cameras are actively working between
+            students instead of leaving this screen fully blank; publisher
+            side already stopped gating this on an active session, see
+            FaceCaptureApp.tsx's own centerPreviewDataUrl doc comment. */}
+        {state.centerPreviewDataUrl && (
+          <img
+            src={state.centerPreviewDataUrl}
+            alt="Camera trực tiếp"
+            className="w-full max-w-3xl aspect-video object-cover rounded-2xl border border-slate-800"
+          />
+        )}
         <p className="text-slate-500 text-3xl sm:text-4xl font-semibold text-center px-8">
           Chưa có phiên chụp nào đang diễn ra
         </p>

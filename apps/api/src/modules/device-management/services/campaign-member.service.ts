@@ -1,8 +1,8 @@
-import { toDao } from '@app/common/helpers';
-import { CustomException, ERROR_CODE } from '@app/common/errors';
+import { toDao } from '@app/shared/http/to-dao.helper';
+import { CustomException, ERROR_CODE } from '@app/shared/errors/legacy';
 import { User } from '@app/modules/shared/entities/user.entity';
-import { CommonService } from '@app/modules/shared/common/common.service';
-import { Pagination } from '@app/modules/shared/common/pagination';
+import { CommonService } from '@app/shared/common/common.service';
+import { Pagination } from '@app/shared/http/pagination';
 import { HttpStatus, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';

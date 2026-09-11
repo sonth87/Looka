@@ -82,7 +82,13 @@ export function ReviewDetailContent({ id, onClose }: { id: string; onClose?: () 
     let cancelled = false;
     retriedPhotoRef.current = new Set();
 
-    const withFile = set.originalPhotos.filter((p) => p.fsFileId);
+    // Every original photo gets a link request, not just ones that already
+    // reached fs-core (fsFileId set) — 2026-09-10 fix, same as
+    // SessionDetailDrawer's identical fix: the server's resolveViewSource
+    // already falls back to this API's locally held bytes for a photo with
+    // no fsFileId at all, but that path was unreachable from here since this
+    // effect never even requested a link for such a photo.
+    const withFile = set.originalPhotos;
     if (withFile.length === 0) {
       setPhotoLinks({});
       return;
@@ -191,32 +197,12 @@ export function ReviewDetailContent({ id, onClose }: { id: string; onClose?: () 
                   disabled={link?.status !== 'ready'}
                   className="aspect-square rounded-lg overflow-hidden bg-gray-50 border border-gray-200 relative"
                 >
-                  {!photo.fsFileId && (
-                    <span className="text-[10px] text-gray-400 flex items-center justify-center h-full px-1 text-center">
-                      Chưa upload
-                    </span>
-                  )}
-                  {photo.fsFileId && (!link || link.status === 'loading') && (
+                  {(!link || link.status === 'loading') && (
                     <span className="text-[10px] text-gray-400 flex items-center justify-center h-full px-1 text-center">
                       Đang tải...
                     </span>
                   )}
-                  {photo.fsFileId && link?.status === 'not_ready' && (
-                    <span className="text-[10px] text-gray-400 flex items-center justify-center h-full px-1 text-center">
-                      Chưa có
-                    </span>
-                  )}
-                  {photo.fsFileId && link?.status === 'upstream_error' && (
-                    <span className="text-[10px] text-gray-400 flex items-center justify-center h-full px-1 text-center">
-                      Lỗi file server
-                    </span>
-                  )}
-                  {photo.fsFileId && link?.status === 'error' && (
-                    <span className="text-[10px] text-gray-400 flex items-center justify-center h-full px-1 text-center">
-                      {link.message}
-                    </span>
-                  )}
-                  {photo.fsFileId && link?.status === 'ready' && (
+                  {link?.status === 'ready' && (
                     <img
                       src={link.url}
                       onError={() => retryPhotoLink(photo.id)}

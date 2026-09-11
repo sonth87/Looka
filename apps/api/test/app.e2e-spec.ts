@@ -1,9 +1,9 @@
 import {
   HttpExceptionFilter,
   TypeOrmExceptionFilter,
-} from '@app/common/filters';
-import { ResponseTransformInterceptor } from '@app/common/interceptors/response.transform.interceptor';
-import { validationPipes } from '@app/common/pipes';
+} from '@app/shared/errors/index';
+import { ResponseTransformInterceptor } from '@app/shared/http/response.transform.interceptor';
+import { validationPipes } from '@app/shared/http/validation.pipes';
 import { INestApplication, VersioningType } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import request from 'supertest';

@@ -1,6 +1,6 @@
-import { ApiKeyMiddleware } from '@app/common/middlewares';
-import * as configs from '@app/config';
-import { TypeOrmConfigService } from '@app/database/database.service';
+import { ApiKeyMiddleware } from '@app/shared/auth/api-key.middleware';
+import * as configs from '@app/shared/config';
+import { TypeOrmConfigService } from '@app/shared/database/database.service';
 import { CaptureModule } from '@app/modules/capture/capture.module';
 import { PhotoController } from '@app/modules/capture/controllers/photo.controller';
 import { SessionController } from '@app/modules/capture/controllers/session.controller';
@@ -8,12 +8,22 @@ import { SharedModule } from '@app/modules/shared/shared.module';
 import { DeviceManagementModule } from '@app/modules/device-management/device-management.module';
 import { DeviceExpiryMiddleware } from '@app/modules/device-management/middlewares/device-expiry.middleware';
 import { PhotoReviewModule } from '@app/modules/photo-review/photo-review.module';
-import { MiddlewareConsumer, Module, NestModule, RequestMethod } from '@nestjs/common';
+import { FoundationModule } from '@app/shared/foundation.module';
+import {
+  MiddlewareConsumer,
+  Module,
+  NestModule,
+  RequestMethod,
+} from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AppController } from './app.controller';
 
+// SERVICE_TYPE=all (default, dev) — everything in one process, unchanged
+// behaviour from before docs/plans/backend-layering-plan.md Phase 0. See
+// app-command.module.ts / app-query.module.ts / app-worker.module.ts for
+// the split this mirrors; main.ts picks one of the four by SERVICE_TYPE.
 @Module({
   imports: [
     ConfigModule.forRoot({
@@ -22,6 +32,7 @@ import { AppController } from './app.controller';
     }),
     ScheduleModule.forRoot(),
     TypeOrmModule.forRootAsync({ useClass: TypeOrmConfigService }),
+    FoundationModule,
     SharedModule,
     CaptureModule,
     DeviceManagementModule,

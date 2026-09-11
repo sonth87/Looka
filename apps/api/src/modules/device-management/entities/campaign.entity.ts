@@ -1,7 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { CameraRole, CaptureStep, CaptureTriggerMode } from '@face/core';
 import { Column, Entity, OneToMany } from 'typeorm';
-import { BaseEntity } from '../../shared/common/base.entity';
+import { BaseEntity } from '../../../shared/database/base.entity';
 import { Device } from './device.entity';
 
 export enum CampaignPurpose {

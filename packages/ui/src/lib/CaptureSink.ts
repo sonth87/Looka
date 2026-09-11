@@ -49,6 +49,13 @@ export interface StudentSubjectInfo {
    * `FaceCaptureApp.tsx`'s `handleLookupResult`.
    */
   identityNumber?: string;
+  /**
+   * The subject's `user_code` from the external roster (2026-09-10
+   * CCCD-scan feature) — `undefined` for the manual "nhập mã sinh viên"
+   * path, same as `identityNumber`. Rides along in `metadata`, same
+   * mechanism as `className`/`major`/`academicYear`/`identityNumber` above.
+   */
+  userCode?: string;
 }
 
 export interface CaptureSink {
@@ -345,6 +352,7 @@ export class ElectronCaptureSink implements CaptureSink {
             major: subject.major,
             academicYear: subject.academicYear,
             identityNumber: subject.identityNumber,
+            userCode: subject.userCode,
           }
         : undefined,
       operatorUserId: operatorUserId ?? undefined,
@@ -479,6 +487,7 @@ export class RunScopedCaptureSession {
             major: subject.major,
             academicYear: subject.academicYear,
             identityNumber: subject.identityNumber,
+            userCode: subject.userCode,
           },
         })
         .catch((err) => {

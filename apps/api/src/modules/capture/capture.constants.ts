@@ -54,3 +54,15 @@ export const ALLOWED_VIDEO_MIME_TYPES = ['video/webm', 'video/mp4'];
 
 /** Postgres advisory-free backoff cap: a long outage doesn't push a retry days out. */
 export const OUTBOX_MAX_RETRY_DELAY_SECONDS = 300;
+
+/**
+ * Max re-attempts for a photo/video/variant the file-service accepted and
+ * then silently purged during its own async scan (2026-09-10) — distinct
+ * from `computeNextRetryAt`'s exponent cap, which bounds the *delay*
+ * between attempts, not how many are made. Without this, a file the
+ * file-service genuinely, permanently rejects on every retry (not just a
+ * transient purge) would burn a retry slot forever instead of settling
+ * back to `FAILED` for a human to notice. 5 gives a purge several real
+ * chances to not recur before giving up.
+ */
+export const PURGE_RETRY_MAX_ATTEMPTS = 5;

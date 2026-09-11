@@ -105,6 +105,12 @@ export interface CameraPhysicalAngles {
   pitch: number;
 }
 export type CameraPhysicalAngleMap = Partial<Record<CameraRole, CameraPhysicalAngles>>;
+/** One logical camera role's CB Help visibility/order — mirrors `secrets.ts`'s `CbHelpCameraVisibility`. */
+export interface CbHelpCameraVisibility {
+  visible: boolean;
+  order: number;
+}
+export type CbHelpVisibilityMap = Partial<Record<CameraRole, CbHelpCameraVisibility>>;
 
 /**
  * The CB Help extended-display window's capture-frames snapshot (§3.5,
@@ -182,6 +188,7 @@ export interface CbHelpPublishState {
  */
 export interface CccdRosterRecord {
   identityNumber: string;
+  userCode: string;
   studentCode: string | null;
   fullName: string | null;
   className: string | null;
@@ -191,6 +198,50 @@ export interface CccdRosterRecord {
 
 /** `cccd:lookupByIdentityNumber`'s result shape — `found: false` is a normal, expected outcome, never an error. */
 export type CccdLookupResult = { found: true; record: CccdRosterRecord } | { found: false };
+
+/**
+ * Enrollment side of docs/plans/face-embedding-server-integration-plan.md —
+ * mirrors `apps/desktop/src/main/embeddingEnroll.ts`'s own `EnrollFaceOutcome`,
+ * duplicated across the IPC boundary the same way every other faceAPI
+ * payload/result type in this file already is (see `CbHelpFrame`'s own doc
+ * comment for that convention).
+ */
+export type EmbeddingEnrollOutcome =
+  | { ok: true; embeddingId: number | null; sourceImagePath: string }
+  | { ok: false; kind: 'NOT_CONFIGURED' }
+  | { ok: false; kind: 'NETWORK_ERROR'; queued: true; cause?: unknown }
+  | { ok: false; kind: 'EMPTY_OR_UNREADABLE' }
+  | { ok: false; kind: 'FILE_TOO_LARGE' }
+  | { ok: false; kind: 'DUPLICATE_IDENTITY'; conflictUserCode: string; conflictSimilarity: number }
+  | { ok: false; kind: 'IMAGE_REJECTED'; detail: string };
+
+export interface EmbeddingHealthResult {
+  /** False when EMBEDDING_SERVER_BASE_URL is unset — a supported "feature off" state, not an error. */
+  configured: boolean;
+  ok: boolean;
+  modelsLoaded: boolean;
+}
+
+export interface EnrolledFaceItem {
+  id: number;
+  sourceImagePath: string;
+  createdAt: string;
+}
+
+export interface EmbeddingListFacesResult {
+  ok: boolean;
+  userCode?: string;
+  count?: number;
+  images?: EnrolledFaceItem[];
+  error?: string;
+}
+
+export interface EmbeddingDeleteResult {
+  ok: boolean;
+  userCode?: string;
+  deleted?: number;
+  error?: string;
+}
 
 export interface CampaignConfig {
   id: string;
@@ -245,6 +296,30 @@ export interface FaceAPIBridge {
   attendanceListPersons: () => Promise<Person[]>;
   attendanceProcessFrame: () => Promise<AttendanceResult>;
   attendanceResetSession: () => Promise<boolean>;
+
+  /**
+   * Enrollment side of docs/plans/face-embedding-server-integration-plan.md
+   * — the external "Attendance — Face Enrollment API"
+   * (`EMBEDDING_SERVER_BASE_URL`), unrelated to the `attendance*` MOCK-model
+   * methods above. `embeddingHealth` is a preflight (call before starting a
+   * capture session, same idea as `getSystemStatus().aiServiceReachable` for
+   * the Python sidecar); `enrollFace` is called once per CENTER-step capture
+   * from `FaceCaptureApp.tsx`, never rejects, and reports every outcome
+   * (success, a real rejection, or "queued for background retry") in the
+   * resolved `EmbeddingEnrollOutcome`. The remaining three are admin/audit
+   * operations against the server's own registered-image list.
+   */
+  embeddingHealth: () => Promise<EmbeddingHealthResult>;
+  enrollFace: (payload: {
+    sessionId: string;
+    stepId: string;
+    attempt: number;
+    userCode: string;
+    dataUrl: string;
+  }) => Promise<EmbeddingEnrollOutcome>;
+  listEnrolledFaces: (userCode: string) => Promise<EmbeddingListFacesResult>;
+  deleteEnrolledFace: (payload: { userCode: string; embeddingId: number }) => Promise<EmbeddingDeleteResult>;
+  deleteAllEnrolledFaces: (userCode: string) => Promise<EmbeddingDeleteResult>;
 
   /**
    * Store a capture and queue it for upload.
@@ -460,6 +535,14 @@ export interface FaceAPIBridge {
   getCaptureSequencing: () => Promise<'sequential' | 'simultaneous'>;
   setCaptureSequencing: (value: 'sequential' | 'simultaneous') => Promise<boolean>;
 
+  /** Which camera roles show on CB Help and in what order (2026-09-10) — unset roles default to CENTER-only, see `secrets.ts`'s `resolveCbHelpVisibility`. */
+  getCbHelpVisibility: () => Promise<CbHelpVisibilityMap>;
+  setCbHelpVisibility: (map: CbHelpVisibilityMap) => Promise<boolean>;
+
+  /** "Lưới 3x3" — always 3 tiles/row in the multi-camera capture grid, a kiosk-local setting (2026-09-10). */
+  getGrid3x3Enabled: () => Promise<boolean>;
+  setGrid3x3Enabled: (value: boolean) => Promise<boolean>;
+
   /**
    * Real Microsoft 365 SSO login — opens `ssoLogin.ts`'s `BrowserWindow` and
    * resolves with the tokens LOGIN.md §3.3 hands back, or `null` if the
@@ -523,6 +606,12 @@ const faceAPI: FaceAPIBridge = {
   attendanceProcessFrame: () => ipcRenderer.invoke('attendance:processFrame'),
   attendanceResetSession: () => ipcRenderer.invoke('attendance:resetSession'),
 
+  embeddingHealth: () => ipcRenderer.invoke('embedding:health'),
+  enrollFace: (payload) => ipcRenderer.invoke('embedding:enrollFace', payload),
+  listEnrolledFaces: (userCode) => ipcRenderer.invoke('embedding:listFaces', userCode),
+  deleteEnrolledFace: (payload) => ipcRenderer.invoke('embedding:deleteFace', payload),
+  deleteAllEnrolledFaces: (userCode) => ipcRenderer.invoke('embedding:deleteAllFaces', userCode),
+
   queueCapture: (payload) => ipcRenderer.invoke('capture:queue', payload),
   approveSessionUpload: (payload) => ipcRenderer.invoke('session:approveUpload', payload),
   getUploadStatus: () => ipcRenderer.invoke('uploads:status'),
@@ -561,6 +650,10 @@ const faceAPI: FaceAPIBridge = {
   openCameraSetup: () => ipcRenderer.invoke('camera:openSetup'),
   getCaptureSequencing: () => ipcRenderer.invoke('capture:getSequencing'),
   setCaptureSequencing: (value) => ipcRenderer.invoke('capture:setSequencing', value),
+  getCbHelpVisibility: () => ipcRenderer.invoke('camera:getCbHelpVisibility'),
+  setCbHelpVisibility: (map) => ipcRenderer.invoke('camera:setCbHelpVisibility', map),
+  getGrid3x3Enabled: () => ipcRenderer.invoke('display:getGrid3x3Enabled'),
+  setGrid3x3Enabled: (value) => ipcRenderer.invoke('display:setGrid3x3Enabled', value),
 
   ssoLogin: () => ipcRenderer.invoke('auth:ssoLogin'),
 

@@ -1,7 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import type { CaptureStep } from '@face/core';
 import { Column, Entity } from 'typeorm';
-import { BaseEntity } from '../../shared/common/base.entity';
+import { BaseEntity } from '../../../shared/database/base.entity';
 import type { CardSpec } from './campaign.entity';
 
 /**

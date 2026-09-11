@@ -1,9 +1,9 @@
 import {
   ApiResponseArrayDecorator,
   ApiResponseDecorator,
-} from '@app/common/decorators';
-import { CustomException, ERROR_CODE } from '@app/common/errors';
-import { SsoAuthGuard } from '@app/common/guards';
+} from '@app/shared/http/api-response.decorator';
+import { CustomException, ERROR_CODE } from '@app/shared/errors/legacy';
+import { SsoAuthGuard } from '@app/shared/auth/index';
 import {
   Controller,
   Get,

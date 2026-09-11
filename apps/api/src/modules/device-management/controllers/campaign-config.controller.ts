@@ -1,6 +1,6 @@
-import { ApiResponseDecorator } from '@app/common/decorators';
-import { toDao } from '@app/common/helpers';
-import { SsoAuthGuard } from '@app/common/guards';
+import { ApiResponseDecorator } from '@app/shared/http/api-response.decorator';
+import { toDao } from '@app/shared/http/to-dao.helper';
+import { SsoAuthGuard } from '@app/shared/auth/index';
 import { Controller, Get, Param, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CampaignConfigDao } from '../dao/campaign-config.dao';

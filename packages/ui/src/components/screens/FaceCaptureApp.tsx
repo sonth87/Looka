@@ -78,6 +78,7 @@ import { CccdScanWaitingScreen, type CccdRosterLookupResult } from './CccdScanWa
 import { lookupStudent, type StudentLookupResult } from '../../lib/studentLookup.js';
 import type { AuthClient } from '../../lib/authClient.js';
 import { SessionReviewModal } from '../workflow/SessionReviewModal.js';
+import type { CapturedListRecentEntry } from '../workflow/CapturedListPanel.js';
 import { CAPTURE_MIRRORED } from '../camera/CameraPreview.js';
 import { StepItem } from '../workflow/StepProgress.js';
 import { TooltipProvider, Tooltip, TooltipTrigger, TooltipContent } from '../ui/tooltip.js';
@@ -85,6 +86,7 @@ import { getSettings, updateSettings } from '../../lib/settingsStore.js';
 import { CaptureSink, RunScopedCaptureSession } from '../../lib/CaptureSink.js';
 import type { ApprovalStepInfo, StudentSubjectInfo } from '../../lib/CaptureSink.js';
 import { SQLiteStorageAdapter, SessionRepository } from '@face/database';
+import { cn } from '../../lib/utils.js';
 
 const defaultWorkflow: CaptureWorkflow = {
   id: 'workflow_standard_5step',
@@ -336,6 +338,62 @@ function reportStatsEvent(type: StatsEventType, metadata?: Record<string, unknow
   }
 }
 
+export interface EmbeddingNotice {
+  stepId: string;
+  kind: 'DUPLICATE_IDENTITY' | 'IMAGE_REJECTED' | 'NETWORK_ERROR' | 'REJECTED';
+  message: string;
+}
+
+/**
+ * Vietnamese operator copy for one `embedding:enrollFace` outcome — see
+ * docs/plans/face-embedding-server-integration-plan.md §6's error table.
+ * `outcome` is whatever `window.faceAPI.enrollFace()` resolved with
+ * (`EnrollFaceOutcome` in `apps/desktop/src/preload/index.ts`, duplicated
+ * across the IPC boundary the same way every other faceAPI payload is —
+ * untyped here on purpose since `@face/ui` does not depend on the desktop
+ * app's preload types). Returns `null` for anything that needs no banner:
+ * success, the feature being off (`NOT_CONFIGURED`), or a rare
+ * system-level rejection this plan treats as "should not happen" rather
+ * than a distinct operator message (400/413 — see §6's own row for why
+ * those are lumped under one generic notice instead of dedicated copy).
+ */
+export function embeddingNoticeFromOutcome(stepId: string, outcome: unknown): EmbeddingNotice | null {
+  const o = outcome as { ok?: boolean; kind?: string; conflictUserCode?: string; conflictSimilarity?: number } | null;
+  if (!o || o.ok) return null;
+
+  switch (o.kind) {
+    case 'DUPLICATE_IDENTITY': {
+      const pct = Math.round((o.conflictSimilarity ?? 0) * 100);
+      return {
+        stepId,
+        kind: 'DUPLICATE_IDENTITY',
+        message: `Khuôn mặt này có vẻ đã đăng ký cho mã "${o.conflictUserCode}" (độ giống ${pct}%) — vui lòng báo cán bộ hỗ trợ để kiểm tra, không tự động chặn phiên.`,
+      };
+    }
+    case 'IMAGE_REJECTED':
+      return {
+        stepId,
+        kind: 'IMAGE_REJECTED',
+        message: 'Ảnh góc chính diện chưa đạt yêu cầu nhận diện khuôn mặt — vui lòng chụp lại góc này (đúng 1 khuôn mặt, đủ gần camera).',
+      };
+    case 'NETWORK_ERROR':
+      return {
+        stepId,
+        kind: 'NETWORK_ERROR',
+        message: 'Không kết nối được máy chủ nhận diện khuôn mặt — ảnh vẫn được lưu trên máy, hệ thống sẽ tự động đăng ký lại khi có mạng.',
+      };
+    case 'EMPTY_OR_UNREADABLE':
+    case 'FILE_TOO_LARGE':
+      return {
+        stepId,
+        kind: 'REJECTED',
+        message: 'Không đăng ký được ảnh khuôn mặt cho góc chính diện (lỗi hệ thống) — vui lòng thử chụp lại góc này.',
+      };
+    default:
+      return null;
+  }
+}
+
 /**
  * The CB Help extended-display window's own capture-frames snapshot (§3.5,
  * 2026-09-05 product decision — the window shows only the capture frames
@@ -452,6 +510,22 @@ interface CbHelpPublishState {
  * qualified as "live" and stayed blank even though the same camera was
  * clearly showing in the main window.
  */
+/** One logical camera role's CB Help visibility/order — mirrors `apps/desktop/src/main/secrets.ts`'s `CbHelpCameraVisibility` (duplicated across the IPC boundary, same convention every other `faceAPI`-backed setting in this file already follows). */
+interface CbHelpCameraVisibility {
+  visible: boolean;
+  order: number;
+}
+/** Every role's *effective* CB Help visibility/order — always fully populated (defaults filled in), same "sparse saved map, fully-resolved local state" shape `cameraRoleMapping`/`cameraPhysicalAngles` already use elsewhere in this file. */
+type CbHelpVisibilityState = Record<CameraRole, CbHelpCameraVisibility>;
+/** Mirrors `secrets.ts`'s `DEFAULT_CB_HELP_VISIBILITY` — CENTER shows by default, every other role starts hidden until an operator opts it in from Camera Setup. */
+const DEFAULT_CB_HELP_VISIBILITY: CbHelpVisibilityState = {
+  CENTER: { visible: true, order: 0 },
+  LEFT: { visible: false, order: 1 },
+  RIGHT: { visible: false, order: 2 },
+  UP: { visible: false, order: 3 },
+  DOWN: { visible: false, order: 4 },
+};
+
 function buildCbHelpFrames(
   workflow: CaptureWorkflow,
   session: CaptureSession | null,
@@ -459,9 +533,15 @@ function buildCbHelpFrames(
   simultaneous: boolean,
   roleMapping: Record<string, string>,
   currentDeviceId: string,
-  connectedDevices: CameraDevice[]
+  connectedDevices: CameraDevice[],
+  cbHelpVisibility: CbHelpVisibilityState
 ): CbHelpFrame[] {
-  return framesForWorkflow(workflow).map((frame, idx) => {
+  // Mapped first, over the workflow's own step order — `idx === currentStepIndex`
+  // below indexes into THIS original order, so filtering/sorting must happen
+  // afterward, on the already-built CbHelpFrame[] (see this function's own
+  // return statement), never before the map.
+  return framesForWorkflow(workflow)
+    .map((frame, idx) => {
     const sessionStep = session?.steps.find((st) => st.stepId === frame.stepId);
     const isCompleted = sessionStep?.status === 'COMPLETED';
     const isCurrent = !isCompleted && idx === currentStepIndex;
@@ -499,7 +579,12 @@ function buildCbHelpFrames(
       capturedDataUrl: sessionStep?.capturedImagePath,
       attempt: sessionStep?.attempts ?? 0,
     };
-  });
+  })
+    .filter((f) => cbHelpVisibility[f.role as CameraRole]?.visible !== false)
+    .sort(
+      (a, b) =>
+        (cbHelpVisibility[a.role as CameraRole]?.order ?? 0) - (cbHelpVisibility[b.role as CameraRole]?.order ?? 0)
+    );
 }
 
 /**
@@ -731,6 +816,51 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    */
   const [thankYouStudent, setThankYouStudent] = useState<StudentSubjectInfo | null>(null);
   /**
+   * "Đã chụp" side panel's real data (2026-09-10, "thông tin những người
+   * chụp xong chưa hiển thị ở bên góc phải") — `CapturedListPanel` was
+   * built pure-presentation-only with `recent` hardcoded to `[]` (see its
+   * own doc comment: "a later integration pass supplies current/recent").
+   * That pass is this: reads the exact same local `captured_students`
+   * SQLite index `RecentStudentsScreen.tsx` already exposes via
+   * `faceAPI.listRecentStudents` — one row per student, most recent capture
+   * first — so no new backend tracking is needed. Refreshed on mount and
+   * again right after every successful approve (below), so a session that
+   * just finished shows up promptly instead of waiting for the next reload.
+   */
+  const [recentStudents, setRecentStudents] = useState<CapturedListRecentEntry[]>([]);
+  const refreshRecentStudents = useCallback(() => {
+    const faceAPI = (window as any).faceAPI;
+    faceAPI?.listRecentStudents
+      ?.(20)
+      .then((rows: Array<{ subjectCode: string; subjectName: string | null; photoCount: number; approvedAt: number }>) => {
+        setRecentStudents(
+          rows.map((r) => ({
+            subjectCode: r.subjectCode,
+            subjectName: r.subjectName ?? undefined,
+            // No separate "target photo count" in this local index — every
+            // row here is by definition an already-approved session, so
+            // showing photoCount/photoCount ("N/N ảnh") is accurate, not a
+            // guess.
+            photoCount: r.photoCount,
+            photoTotal: r.photoCount,
+            capturedAt: r.approvedAt,
+            // This local index is kiosk-local only (no device field in it
+            // at all — see CapturedStudentRepository's own doc comment), so
+            // every row is, by construction, from this device.
+            isThisDevice: true,
+          }))
+        );
+      })
+      .catch(() => {
+        // Best-effort UI polish, not core capture functionality — a failed
+        // refresh just leaves the panel showing its last-known (or empty)
+        // list rather than surfacing an error anywhere.
+      });
+  }, []);
+  useEffect(() => {
+    refreshRecentStudents();
+  }, [refreshRecentStudents]);
+  /**
    * Ref mirror of `awaitingStudent` — read from `handleCccdScan`, which
    * `CccdScanWaitingScreen`'s `onScanResult` prop calls as a plain closure
    * captured once at render time inside a JSX callback, not from a
@@ -796,6 +926,25 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   useEffect(() => {
     simultaneousCaptureRef.current = simultaneousCapture;
   }, [simultaneousCapture]);
+  /** "Lưới 3x3" kiosk-local display setting (2026-09-10, Camera Setup) — a pure layout preference, so a one-time fetch at mount is enough; no per-session refresh needed the way workflow-affecting settings get. */
+  const [grid3x3Enabled, setGrid3x3Enabled] = useState<boolean>(false);
+  useEffect(() => {
+    const faceAPI = (window as any).faceAPI;
+    faceAPI?.getGrid3x3Enabled?.().then((v: boolean) => setGrid3x3Enabled(!!v));
+  }, []);
+  /** Which camera roles show on CB Help and in what order (2026-09-10, Camera Setup) — read into `publishCbHelpState`'s own `buildCbHelpFrames` call via a ref (not state) since that function runs from the 800ms heartbeat/event handlers, not React's render path. */
+  const cbHelpVisibilityRef = useRef<CbHelpVisibilityState>({ ...DEFAULT_CB_HELP_VISIBILITY });
+  useEffect(() => {
+    const faceAPI = (window as any).faceAPI;
+    faceAPI?.getCbHelpVisibility?.().then((saved: Partial<Record<CameraRole, CbHelpCameraVisibility>>) => {
+      if (!saved) return;
+      const next = { ...DEFAULT_CB_HELP_VISIBILITY };
+      for (const role of Object.keys(next) as CameraRole[]) {
+        if (saved[role]) next[role] = saved[role]!;
+      }
+      cbHelpVisibilityRef.current = next;
+    });
+  }, []);
 
   /**
    * Campaign-level "Quay video trong lúc chụp" switch (§3.1, 2026-09-05) —
@@ -1374,8 +1523,8 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     return true;
   };
 
-  /** How long the greeting stays on the CB Help window before the capture session (and recording) starts — picked from the requested 2-5s range. */
-  const GREETING_DURATION_MS = 3000;
+  /** How long the greeting stays on the CB Help window before the capture session (and recording) starts — picked from the requested 2-5s range, trimmed to that range's floor (2026-09-10 perf pass) since this is a flat delay added to every single successful scan before the workflow even starts. Must match `CbHelpFrames.tsx`'s own duplicate of this constant — see that file's doc comment. */
+  const GREETING_DURATION_MS = 2000;
   /** How long the post-save "Cảm ơn" overlay stays up before the screen falls back to awaiting the next student — see `thankYouStudent`'s own doc comment. */
   const THANK_YOU_DURATION_MS = 3000;
 
@@ -1444,6 +1593,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
       major: result.major,
       academicYear: result.academicYear,
       identityNumber: result.identityNumber,
+      userCode: result.userCode,
     };
     // Cached for RunScopedCaptureSession's own startSession()/approveUpload()
     // calls, made further down inside handleStartWorkflow()/onAccept — see
@@ -1578,6 +1728,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
             // see `apps/desktop/src/main/cccdRoster.ts`'s own doc comment.
             academicYear: scanResult.record.courseYear ?? '',
             identityNumber: scanResult.record.identityNumber,
+            userCode: scanResult.record.userCode,
           }
         : { status: 'NOT_FOUND', code: '' };
       await handleLookupResult(result, {
@@ -1751,6 +1902,22 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   /** Set when a capture could not be stored; surfaced, never swallowed. */
   const [storeError, setStoreError] = useState<string | null>(null);
   /**
+   * Enrollment side of docs/plans/face-embedding-server-integration-plan.md
+   * §6's error table — set from `enrollCenterStepIfNeeded`'s outcome,
+   * independent of `storeError` above (which is about the local capture,
+   * never the embedding call — see that plan section's note that the two
+   * are "hai luồng song song, độc lập"). `null` on success, on the feature
+   * being off (`NOT_CONFIGURED`), and on the manual "nhập mã sinh viên" path
+   * with no `userCode` (enrollment is skipped there entirely, not attempted
+   * and failed). Also handed to `SessionReviewModal` so the CENTER step's
+   * tile can carry the same notice into the review screen.
+   */
+  const [embeddingNotice, setEmbeddingNotice] = useState<{
+    stepId: string;
+    kind: 'DUPLICATE_IDENTITY' | 'IMAGE_REJECTED' | 'NETWORK_ERROR' | 'REJECTED';
+    message: string;
+  } | null>(null);
+  /**
    * Fixed at no-zoom/centred now that auto-zoom has been removed (see the
    * removal note further down) — CameraPreview still takes scale/origin
    * props, so these stay as the values that mean "native framing."
@@ -1842,6 +2009,53 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   }, [faceState]);
 
   /**
+   * Enrollment call for one capture — docs/plans/face-embedding-server-integration-plan.md
+   * §5.1, narrowed by a 2026-09-10 product decision to the CENTER/FRONT step
+   * only (not every step the plan's own sequence diagram shows — a
+   * deliberately simpler first pass; the local schema this feeds
+   * (`embedding:enrollFace`'s own `stepId`) stays generic per-step so
+   * enrolling more angles later needs no schema change, just another call
+   * site like this one). Independent of `storePhoto`'s own local-disk save —
+   * see that function's own doc comment and the plan's "hai luồng song
+   * song, độc lập" note — so this runs alongside it, not nested inside its
+   * try/catch.
+   */
+  const enrollCenterStepIfNeeded = async (stepId: string, dataUrl: string, attempt: number) => {
+    const faceAPI = (window as any).faceAPI;
+    if (!faceAPI?.enrollFace) return; // web build, or a desktop build with no bridge — feature simply unavailable there
+
+    const frame = framesForWorkflow(activeWorkflowRef.current).find((f) => f.stepId === stepId);
+    if (frame?.role !== 'CENTER') return; // only the CENTER step is sent for enrollment right now — see this function's own doc comment
+
+    const userCode = currentStudentRef.current?.userCode;
+    if (!userCode) {
+      // Manual "nhập mã sinh viên" path (no CCCD scan) has no userCode at
+      // all — skip enrollment entirely rather than falling back to
+      // subjectCode: sending the wrong kind of identifier to an external
+      // biometric-matching API would be a real correctness bug (a student
+      // matched under subjectCode in one place and userCode in another
+      // could silently create duplicate/wrong identities server-side) —
+      // see StudentSubjectInfo.userCode's own doc comment in CaptureSink.ts.
+      return;
+    }
+
+    // Shares RunScopedCaptureSession's own memoized ensure() with
+    // storePhoto()'s savePhoto() call below — safe to call concurrently
+    // (see ensure()'s own doc comment on simultaneous capture already
+    // relying on exactly this), so both converge on the same sessionId
+    // regardless of which of the two fires first.
+    const sessionId = await runSessionRef.current.ensure();
+    if (!sessionId) return;
+
+    try {
+      const outcome = await faceAPI.enrollFace({ sessionId, stepId, attempt, userCode, dataUrl });
+      setEmbeddingNotice(embeddingNoticeFromOutcome(stepId, outcome));
+    } catch (err) {
+      console.error('[FaceCaptureApp] enrollFace IPC call failed:', err);
+    }
+  };
+
+  /**
    * Store one capture as its step completes.
    *
    * A failure is shown rather than logged: the operator is the only one who can
@@ -1852,6 +2066,12 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    * empty sessions behind.
    */
   const storePhoto = async (stepId: string, dataUrl: string, attempt: number) => {
+    // Independent of the local-storage save below — see
+    // enrollCenterStepIfNeeded's own doc comment for why enroll failing (or
+    // the feature simply being off) must never block a photo being kept,
+    // and vice versa.
+    void enrollCenterStepIfNeeded(stepId, dataUrl, attempt);
+
     if (!sink) {
       setStoreError('Chưa cấu hình nơi lưu ảnh — ảnh chụp sẽ không được giữ lại.');
       return;
@@ -2849,14 +3069,20 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
               simultaneousCaptureRef.current,
               cameraRoleMappingRef.current,
               selectedDeviceIdRef.current,
-              devicesRef.current
+              devicesRef.current,
+              cbHelpVisibilityRef.current
             )
           : [],
         greeting: cbHelpOverlayRef.current.greeting,
-        // Item 12b: only meaningful while genuinely live — `captureController`'s
-        // own snapshot path (reused here, not a second implementation) already
+        // Item 12b, widened 2026-09-10 ("camera live vẫn phải hiển thị" —
+        // the extend display should keep proving the cameras are working
+        // between students, not go fully blank): no longer gated on
+        // `running` — the CENTER camera's own stream stays open regardless
+        // of session state (it's the same stream the main kiosk window's
+        // live preview always shows), so this snapshot is meaningful in
+        // every phase, not just 'live'. `captureBase64Snapshot()` already
         // no-ops safely to `null` if the video element isn't ready yet.
-        centerPreviewDataUrl: running ? cameraServiceRef.current?.captureBase64Snapshot() ?? null : null,
+        centerPreviewDataUrl: cameraServiceRef.current?.captureBase64Snapshot() ?? null,
         errorMessage: cbHelpOverlayRef.current.errorMessage,
         thankYou: cbHelpOverlayRef.current.thankYou,
       };
@@ -3595,6 +3821,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           onRecheck: () => {
             void runFramePreflight(activeWorkflow);
           },
+          grid3x3Enabled,
         }
       : undefined;
 
@@ -3823,6 +4050,32 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           </button>
         </div>
       )}
+      {/*
+        Embedding enrollment notice (docs/plans/face-embedding-server-integration-plan.md
+        §6) — a separate banner from storeError above since the two are
+        independent (see enrollCenterStepIfNeeded's own doc comment): a
+        409/422 here never means the photo itself failed to save. Stacked
+        below storeError (top-9) rather than replacing it, so both can be
+        visible at once in the rare case they fire together.
+      */}
+      {embeddingNotice && (
+        <div
+          className={cn(
+            'absolute top-9 inset-x-0 z-[100] text-xs font-semibold px-4 py-2 flex items-center justify-center gap-2 shadow-lg',
+            embeddingNotice.kind === 'DUPLICATE_IDENTITY'
+              ? 'bg-rose-500 text-white'
+              : embeddingNotice.kind === 'NETWORK_ERROR'
+                ? 'bg-slate-700 text-slate-100'
+                : 'bg-amber-500 text-slate-950'
+          )}
+        >
+          <span>{embeddingNotice.kind === 'DUPLICATE_IDENTITY' ? '⛔' : '⚠️'}</span>
+          <span>{embeddingNotice.message}</span>
+          <button onClick={() => setEmbeddingNotice(null)} className="ml-2 underline cursor-pointer">
+            Ẩn
+          </button>
+        </div>
+      )}
       <GuidedCaptureScreen
         stream={stream}
         zoomScale={digitalZoomScale}
@@ -3887,14 +4140,21 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           photoCount: activeSession?.steps.filter((s) => s.status === 'COMPLETED').length ?? 0,
           photoTotal: activeSession?.steps.length ?? activeWorkflow.steps.length,
         }}
-        // ui-redesign-plan.md S5 right zone — real "đang chụp"/"đã chụp"
-        // data (Q19/Q20) is a later integration pass; this proves the
-        // layout renders with the panel's own empty state.
-        capturedList={{ current: null, recent: [], onOpenSession: () => {} }}
+        // ui-redesign-plan.md S5 right zone — "đã chụp" (recent) is real
+        // data now (see recentStudents' own doc comment); "đang chụp"
+        // (current) and onOpenSession stay as the panel's own no-op/null
+        // defaults — Q20 explicitly rules out edit/delete from this panel,
+        // and no session-detail drawer exists on the kiosk side to open.
+        capturedList={{ current: null, recent: recentStudents, onOpenSession: () => {} }}
       />
 
       {showReviewModal && (
         <SessionReviewModal
+          // Embedding enrollment notice (plan §6) for the step it belongs
+          // to — currently only ever the CENTER step, but keyed by stepId
+          // rather than assumed so the modal needs no change once more
+          // steps enroll. `null`/absent renders nothing extra.
+          embeddingNotice={embeddingNotice}
           // activeSession is the engine's own live session object — it already
           // has whichever steps have been captured so far. `session` (React
           // state) is only ever set by the 'completed' handler below, so
@@ -3975,6 +4235,12 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
             const approved = await approveUpload(steps, completedSession?.id);
             if (!approved) return;
             await finishSession();
+            // Refresh the "Đã chụp" panel now that this session's row has
+            // landed in the local student index (see recentStudents' own
+            // doc comment) — the main-process write happens synchronously
+            // as part of approveUpload's own IPC round trip, so it's already
+            // there by the time this resolves.
+            refreshRecentStudents();
             // The one true "this session is done" moment — the operator
             // confirmed it and approval actually succeeded, not merely that
             // the last capture step was reached (see this handler's own
@@ -4042,7 +4308,27 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
             publishCbHelpState({ thankYou: { name: currentStudentRef.current?.subjectName ?? '' } });
             setTimeout(() => {
               setThankYouStudent(null);
-              publishCbHelpState({ thankYou: null });
+              // `phase: 'idle'` here (2026-09-10, "clear dữ liệu trên UI sau
+              // lời cảm ơn") — without it, `cbHelpPhaseOverrideRef` stays on
+              // whatever the completed session last set ('review'/'done'),
+              // so `showFrames`/`buildCbHelpFrames` in publishCbHelpState
+              // keep rendering THIS student's just-finished frame grid on
+              // the extend display through the entire "awaiting next
+              // student" window. Explicitly idling clears `frames` and
+              // `centerPreviewDataUrl` (both computed from `phase` there),
+              // and CbHelpFrames.tsx's own greeting-collapse effect already
+              // clears the leftover greeting the moment phase goes idle with
+              // no frames — no separate greeting/frame clearing needed here.
+              publishCbHelpState({ thankYou: null, phase: 'idle' });
+              // Clears the "Người được chụp" badge on the main kiosk screen
+              // too (2026-09-10, "thông tin của sinh viên vừa chụp vẫn phải
+              // clear") — currentStudentRef is what SubjectInfoBadge's
+              // `subject` prop reads every render, and nothing ever reset it
+              // before, so it kept showing the just-finished student through
+              // the whole "awaiting next student" window. Setting a ref
+              // alone wouldn't re-render anything, but `setAwaitingStudent`
+              // right after it already does.
+              currentStudentRef.current = null;
               setAwaitingStudent(true);
             }, THANK_YOU_DURATION_MS);
             } finally {

@@ -204,24 +204,7 @@ export function SessionsPanel({
                     {s.subjectCode || s.subjectName ? `${s.subjectCode ?? ''} ${s.subjectName ?? ''}`.trim() : '—'}
                   </td>
                   <td className="py-2.5 px-4">
-                    <div className="flex flex-wrap items-center gap-1">
-                      <span className="text-gray-900 tabular-nums">{s.photoCount}</span>
-                      {s.photosReady > 0 && (
-                        <span className="px-1.5 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-medium">
-                          READY {s.photosReady}
-                        </span>
-                      )}
-                      {s.photosPending > 0 && (
-                        <span className="px-1.5 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-700 text-xs font-medium">
-                          chờ {s.photosPending}
-                        </span>
-                      )}
-                      {s.photosFailed > 0 && (
-                        <span className="px-1.5 py-0.5 rounded-full bg-red-50 border border-red-200 text-red-700 text-xs font-medium">
-                          lỗi {s.photosFailed}
-                        </span>
-                      )}
-                    </div>
+                    <span className="text-gray-900 tabular-nums">{s.photoCount}</span>
                   </td>
                   <td className="py-2.5 px-4 text-gray-500">{s.source === 'KIOSK' ? 'Kiosk' : 'Web'}</td>
                 </tr>

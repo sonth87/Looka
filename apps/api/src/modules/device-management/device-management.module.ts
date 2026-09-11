@@ -1,4 +1,4 @@
-import { SsoAuthGuard } from '@app/common/guards';
+import { SsoAuthGuard } from '@app/shared/auth/index';
 import { CaptureModule } from '@app/modules/capture/capture.module';
 import { PhotoReviewModule } from '@app/modules/photo-review/photo-review.module';
 import { Module } from '@nestjs/common';

@@ -7,13 +7,14 @@ export type {
   UploadWorkerOptions,
   WorkerEvent,
 } from './UploadWorker.js';
-export { FsError, FS_ERROR_CODES } from './types.js';
+export { FsError, FS_ERROR_CODES, FS_SERVER_CODES } from './types.js';
 export type {
   FsClientConfig,
   FsFileStatus,
   FsFileInfo,
   UploadInput,
   UploadResult,
+  UpdateResult,
   DownloadLink,
   FsUsage,
 } from './types.js';

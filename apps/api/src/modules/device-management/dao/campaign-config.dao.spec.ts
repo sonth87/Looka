@@ -1,4 +1,4 @@
-import { toDao } from '@app/common/helpers';
+import { toDao } from '@app/shared/http/to-dao.helper';
 import { CampaignConfigDao } from './campaign-config.dao';
 
 /**

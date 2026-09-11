@@ -3,7 +3,7 @@ import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import { CaptureReportService } from '@app/modules/capture/services/capture-report.service';
 import { PhotoReviewService } from '@app/modules/photo-review/services/photo-review.service';
-import { CommonService } from '@app/modules/shared/common/common.service';
+import { CommonService } from '@app/shared/common/common.service';
 import {
   AllCampaignsStatsDao,
   CampaignDayStatsDao,
