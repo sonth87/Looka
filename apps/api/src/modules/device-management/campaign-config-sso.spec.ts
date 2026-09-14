@@ -533,7 +533,7 @@ describeDb('campaign config / SSO membership / self-enroll', () => {
       expect(page1.meta.totalPages).toBe(2);
     });
 
-    test('listCampaignsForUser: NONE when no membership row exists, reflects real status when one does, and excludes manually CLOSED campaigns', async () => {
+    test('listCampaignsForUser(userId, isAdmin=true): NONE when no membership row exists, reflects real status when one does, and excludes manually CLOSED campaigns — unfiltered, same as before the 2026-09-14 assignment pivot', async () => {
       const user = await createTestUser('mecampaigns');
       const openCampaign = await campaignService.createCampaign({
         name: 'Me: open, no membership',
@@ -548,12 +548,53 @@ describeDb('campaign config / SSO membership / self-enroll', () => {
 
       await campaignMemberService.joinCampaign(memberCampaign.id, user.id);
 
-      const list = await campaignMemberService.listCampaignsForUser(user.id);
+      // isAdmin=true: admins keep the full not-CLOSED list regardless of
+      // their own membership status (NONE/PENDING included) — see this
+      // service method's own doc comment.
+      const list = await campaignMemberService.listCampaignsForUser(
+        user.id,
+        true,
+      );
       const byId = new Map(list.map((c) => [c.id, c]));
 
       expect(byId.get(openCampaign.id)?.membership.status).toBe('NONE');
       expect(byId.get(memberCampaign.id)?.membership.status).toBe('PENDING');
       expect(byId.has(closedCampaign.id)).toBe(false);
+    });
+
+    test('listCampaignsForUser(userId, isAdmin=false): only campaigns with an APPROVED membership row are returned — NONE/PENDING/REJECTED campaigns are filtered out entirely', async () => {
+      const user = await createTestUser('mecampaigns-nonadmin');
+      const noMembershipCampaign = await campaignService.createCampaign({
+        name: 'Me/non-admin: no membership',
+      });
+      const pendingCampaign = await campaignService.createCampaign({
+        name: 'Me/non-admin: pending',
+      });
+      const approvedCampaign = await campaignService.createCampaign({
+        name: 'Me/non-admin: approved',
+      });
+
+      await campaignMemberService.joinCampaign(pendingCampaign.id, user.id);
+      await campaignMemberService.joinCampaign(approvedCampaign.id, user.id);
+      await campaignMemberService.decide(
+        approvedCampaign.id,
+        user.id,
+        { action: 'approve' },
+        user.id,
+      );
+
+      const list = await campaignMemberService.listCampaignsForUser(
+        user.id,
+        false,
+      );
+      const ids = new Set(list.map((c) => c.id));
+
+      expect(ids.has(noMembershipCampaign.id)).toBe(false);
+      expect(ids.has(pendingCampaign.id)).toBe(false);
+      expect(ids.has(approvedCampaign.id)).toBe(true);
+      expect(
+        list.find((c) => c.id === approvedCampaign.id)?.membership.status,
+      ).toBe('APPROVED');
     });
   });
 

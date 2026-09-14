@@ -39,9 +39,20 @@ export const MultiFrameGrid: React.FC<MultiFrameGridProps> = ({
       : 'grid-cols-2 sm:grid-cols-3'; // 5 frames: 3 + 2
 
   return (
-    <div className={cn('grid gap-2 w-full', gridColsClass, className)}>
-      {frames.map(({ stepId, ...tileProps }) => (
-        <FrameTile key={stepId} {...tileProps} theme={theme} />
+    <div
+      className={cn(
+        // Kiosk panel treatment (docs plan "Sửa UI desktop app Looka theo 7
+        // ảnh mockup" — bước 5): a bordered navy panel around the tiles
+        // instead of a bare grid sitting directly on the camera-stage
+        // background, matching the mockup's grid framing. Column-count logic
+        // above is untouched — only spacing/background changed.
+        'grid gap-3 w-full p-3 rounded-2xl border border-kiosk-border bg-kiosk-surface/60',
+        gridColsClass,
+        className
+      )}
+    >
+      {frames.map(({ stepId, ...tileProps }, idx) => (
+        <FrameTile key={stepId} {...tileProps} index={idx} theme={theme} />
       ))}
     </div>
   );

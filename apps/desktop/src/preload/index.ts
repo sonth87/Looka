@@ -111,6 +111,11 @@ export interface CbHelpCameraVisibility {
   order: number;
 }
 export type CbHelpVisibilityMap = Partial<Record<CameraRole, CbHelpCameraVisibility>>;
+/** Audio-calibration volumes (voice-prompt + alert/chime) — mirrors `secrets.ts`'s `AudioVolumeSettings`. Duplicated rather than imported, same convention as every other `faceAPI` payload type here. */
+export interface AudioVolumeSettings {
+  voicePct: number;
+  alertPct: number;
+}
 
 /**
  * The CB Help extended-display window's capture-frames snapshot (§3.5,
@@ -543,6 +548,10 @@ export interface FaceAPIBridge {
   getGrid3x3Enabled: () => Promise<boolean>;
   setGrid3x3Enabled: (value: boolean) => Promise<boolean>;
 
+  /** Audio-calibration volumes ("Hệ thống âm thanh & loa thông báo", camera setup screen) — voice-prompt volume + alert/chime volume, kiosk-local. */
+  getAudioVolume: () => Promise<AudioVolumeSettings>;
+  setAudioVolume: (value: AudioVolumeSettings) => Promise<boolean>;
+
   /**
    * Real Microsoft 365 SSO login — opens `ssoLogin.ts`'s `BrowserWindow` and
    * resolves with the tokens LOGIN.md §3.3 hands back, or `null` if the
@@ -654,6 +663,9 @@ const faceAPI: FaceAPIBridge = {
   setCbHelpVisibility: (map) => ipcRenderer.invoke('camera:setCbHelpVisibility', map),
   getGrid3x3Enabled: () => ipcRenderer.invoke('display:getGrid3x3Enabled'),
   setGrid3x3Enabled: (value) => ipcRenderer.invoke('display:setGrid3x3Enabled', value),
+
+  getAudioVolume: () => ipcRenderer.invoke('audio:getVolume'),
+  setAudioVolume: (value) => ipcRenderer.invoke('audio:setVolume', value),
 
   ssoLogin: () => ipcRenderer.invoke('auth:ssoLogin'),
 

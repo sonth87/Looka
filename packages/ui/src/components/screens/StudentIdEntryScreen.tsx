@@ -1,29 +1,39 @@
 import { useState, type FormEvent } from 'react';
+import { Button } from '../ui/button.js';
+import { Card, CardContent, CardHeader, CardTitle } from '../ui/card.js';
+import { StudentProfileCard } from './StudentProfileCard.js';
 
 /**
- * Pre-session "nhập mã sinh viên" overlay (2026-09-07 product request) —
- * shown before every capture session, including automatically again after
+ * Full-screen "BƯỚC 2: CHECK-IN & ĐỐI SOÁT HỒ SƠ" step (ui-redesign-plan.md,
+ * "Bước 4 — Check-in & đối soát hồ sơ" — mockup #5), 2026-09-14 restyle, for
+ * the non-kiosk/legacy build (`apps/web`, or the legacy per-device-secret
+ * desktop path) — see `CccdScanWaitingScreen.tsx`'s own doc comment for why
+ * the kiosk's campaign+login path uses that component instead. Neither build
+ * has a CCCD scanner attached, so this screen's left column only ever offers
+ * the manual "nhập mã sinh viên" form — no QR/VNeID quick-link stubs here
+ * (unlike `CccdScanWaitingScreen`'s left column), since there is no
+ * alternative input method to fall back to on this build at all.
+ *
+ * Was previously a translucent `absolute inset-0 pointer-events-none`
+ * overlay anchored at the bottom of the screen, letting a live camera
+ * preview show through behind it — see git history for that version if it's
+ * ever needed for reference. This is now a fully opaque, full-bleed 2-column
+ * step screen instead, matching `CccdScanWaitingScreen.tsx`'s new layout.
+ * Mounted inside the shared `KioskShell`'s content area by
+ * `FaceCaptureApp.tsx` (unchanged `awaitingStudent` gating), so it does not
+ * draw its own header/clock/brand bar.
+ *
+ * Shown before every capture session, including automatically again after
  * one finishes (see `FaceCaptureApp.tsx`'s `SessionReviewModal.onAccept`),
  * so the kiosk behaves as a walk-up loop: one student's session ends, the
  * kiosk falls straight back to this screen for the next one.
  *
- * Same footprint as the `deviceBlockedReason` overlay in `FaceCaptureApp.tsx`
- * (full-screen `absolute inset-0`), one z-index below it (`z-[150]` vs
- * `z-[200]`) — a blocked device must still win if both were ever true at
- * once. Unlike that overlay, the background here is translucent
- * (2026-09-08 product feedback): the live camera preview underneath must
- * stay visible while a student's code is being entered, both so the
- * operator can already see whether the next person is framed correctly and
- * so the screen doesn't look "frozen" during the walk-up loop's idle wait —
- * and `pointer-events-none` (only this screen's own small card is
- * `pointer-events-auto`) lets clicks fall through to the capture view
- * underneath, including its "Bắt đầu"/"Màn hình mở rộng"/"Cài đặt camera"
- * controls, on purpose: the toolbar controls must stay reachable at any
- * time, and "Bắt đầu" starting a session before a student is identified is
- * prevented at the function level instead — see `handleStartWorkflow`'s own
- * `fromIdentification` doc comment in `FaceCaptureApp.tsx` (2026-09-09 —
- * blocking pointer events at this overlay was tried first and reverted, see
- * that comment for why).
+ * Right column: unlike `CccdScanWaitingScreen`, this screen can never show a
+ * matched student's profile — `onSubmit` below is a plain `(code: string) =>
+ * void`, so no lookup result is ever threaded back down to this component
+ * (the lookup and everything after it happens entirely in
+ * `FaceCaptureApp.tsx`). Shown honestly as a waiting placeholder at all
+ * times rather than faking a result.
  */
 export interface StudentIdEntryScreenProps {
   onSubmit: (code: string) => void;
@@ -44,33 +54,55 @@ export function StudentIdEntryScreen({ onSubmit, submitting, error }: StudentIdE
   };
 
   return (
-    <div className="absolute inset-0 z-[150] flex flex-col items-center justify-end pb-16 px-8 text-center pointer-events-none">
-      <div className="pointer-events-auto flex w-full max-w-sm flex-col items-center gap-4 rounded-2xl border border-slate-700/60 bg-slate-950/70 backdrop-blur-md px-6 py-6 shadow-2xl">
-        <span className="text-4xl">🎓</span>
-        <h2 className="text-xl font-semibold">Nhập mã sinh viên</h2>
-        <p className="text-sm text-slate-300">Vui lòng nhập mã sinh viên để bắt đầu phiên chụp.</p>
-        <form onSubmit={handleSubmit} className="flex w-full flex-col items-center gap-3">
-          <input
-            autoFocus
-            value={code}
-            onChange={(e) => setCode(e.target.value)}
-            placeholder="Mã sinh viên"
-            disabled={submitting}
-            className="w-full rounded-lg border border-slate-700 bg-slate-900/90 px-4 py-3 text-center text-lg text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-sky-500 disabled:opacity-50"
+    <div className="absolute inset-0 z-[150] flex flex-col overflow-y-auto bg-kiosk-bg text-kiosk-text">
+      <div className="shrink-0 px-8 pt-6 pb-2">
+        <div className="text-xs font-bold uppercase tracking-[0.2em] text-kiosk-accent">Bước 2</div>
+        <h1 className="text-2xl font-bold">Check-in &amp; đối soát hồ sơ</h1>
+      </div>
+
+      <div className="grid flex-1 grid-cols-1 gap-6 px-8 pb-8 lg:grid-cols-2">
+        {/* Left column — manual lookup, the only method this build has */}
+        <div className="flex flex-col gap-4">
+          <Card variant="panel">
+            <CardHeader>
+              <CardTitle>Nhập mã sinh viên</CardTitle>
+            </CardHeader>
+            <CardContent className="flex flex-col items-center gap-4 text-center">
+              <span className="text-4xl" aria-hidden>
+                🎓
+              </span>
+              <p className="text-sm text-kiosk-text-muted">
+                Vui lòng nhập mã sinh viên để bắt đầu phiên chụp.
+              </p>
+              <form onSubmit={handleSubmit} className="flex w-full flex-col items-center gap-3">
+                <input
+                  autoFocus
+                  value={code}
+                  onChange={(e) => setCode(e.target.value)}
+                  placeholder="Mã sinh viên"
+                  disabled={submitting}
+                  className="w-full rounded-lg border border-kiosk-border bg-kiosk-surface-2 px-4 py-3 text-center text-lg text-kiosk-text placeholder:text-kiosk-text-muted focus:outline-none focus:ring-2 focus:ring-kiosk-accent/60 disabled:opacity-50"
+                />
+                <Button type="submit" size="lg" className="w-full" disabled={submitting || !code.trim()}>
+                  {submitting ? 'Đang xử lý...' : 'Xác nhận'}
+                </Button>
+              </form>
+              {error && (
+                <div className="w-full rounded-lg border border-kiosk-danger/40 bg-kiosk-danger/10 px-4 py-3 text-sm text-kiosk-danger">
+                  {error}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+
+        {/* Right column — no lookup result ever reaches this component (see doc comment above), so always the waiting state */}
+        <div className="flex flex-col">
+          <StudentProfileCard
+            subject={null}
+            waitingMessage={submitting ? 'Đang tra cứu hồ sơ…' : 'Đang chờ nhập mã sinh viên…'}
           />
-          <button
-            type="submit"
-            disabled={submitting || !code.trim()}
-            className="w-full rounded-lg bg-sky-600 py-3 text-base font-semibold text-white hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {submitting ? 'Đang xử lý...' : 'Xác nhận'}
-          </button>
-        </form>
-        {error && (
-          <div className="w-full rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-300">
-            {error}
-          </div>
-        )}
+        </div>
       </div>
     </div>
   );

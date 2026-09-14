@@ -64,6 +64,9 @@ import {
   sanitizeCbHelpVisibility,
   getGrid3x3Enabled,
   setGrid3x3Enabled,
+  getAudioVolume,
+  setAudioVolume,
+  sanitizeAudioVolume,
   getOrCreateDeviceFingerprint,
   getHostname,
   storeSelfEnrolledDevice,
@@ -711,6 +714,17 @@ app.whenReady().then(async () => {
   ipcMain.handle('display:getGrid3x3Enabled', () => getGrid3x3Enabled());
   ipcMain.handle('display:setGrid3x3Enabled', (_, value: unknown) => {
     setGrid3x3Enabled(value === true);
+    return true;
+  });
+
+  /**
+   * Audio-calibration volumes ("Hệ thống âm thanh & loa thông báo" section,
+   * camera setup screen) — voice-prompt volume + alert/chime volume,
+   * kiosk-local, same persistence as the camera settings above.
+   */
+  ipcMain.handle('audio:getVolume', () => getAudioVolume());
+  ipcMain.handle('audio:setVolume', (_, value: unknown) => {
+    setAudioVolume(sanitizeAudioVolume(value));
     return true;
   });
 

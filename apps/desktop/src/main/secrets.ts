@@ -44,7 +44,8 @@ export type SecretKey =
   | 'camera.physicalAngles'
   | 'camera.cbHelpVisibility'
   | 'capture.sequencing'
-  | 'display.grid3x3';
+  | 'display.grid3x3'
+  | 'audio.volume';
 
 const electronCrypto: CryptoProvider = {
   isAvailable: () => safeStorage.isEncryptionAvailable(),
@@ -611,4 +612,65 @@ export function getGrid3x3Enabled(): boolean {
 
 export function setGrid3x3Enabled(value: boolean): void {
   setSecret('display.grid3x3', value ? 'true' : 'false');
+}
+
+/**
+ * Audio-calibration volumes ("Hệ thống âm thanh & loa thông báo", camera
+ * setup screen §ui-redesign-plan.md) — `voicePct` is the student-facing
+ * guidance-voice volume, `alertPct` is the warning-chime/completion-tone
+ * volume. Kiosk-local, same reasoning as `capture.sequencing`/
+ * `display.grid3x3`: lives on the machine, not the campaign. Defaults to
+ * `{ voicePct: 80, alertPct: 60 }` when nothing has been saved yet.
+ */
+export interface AudioVolumeSettings {
+  voicePct: number;
+  alertPct: number;
+}
+
+const DEFAULT_AUDIO_VOLUME: AudioVolumeSettings = { voicePct: 80, alertPct: 60 };
+
+export function getAudioVolume(): AudioVolumeSettings {
+  const raw = getSecret('audio.volume');
+  if (!raw) return { ...DEFAULT_AUDIO_VOLUME };
+  try {
+    const parsed = JSON.parse(raw) as Partial<AudioVolumeSettings>;
+    return {
+      voicePct:
+        typeof parsed.voicePct === 'number' && Number.isFinite(parsed.voicePct)
+          ? parsed.voicePct
+          : DEFAULT_AUDIO_VOLUME.voicePct,
+      alertPct:
+        typeof parsed.alertPct === 'number' && Number.isFinite(parsed.alertPct)
+          ? parsed.alertPct
+          : DEFAULT_AUDIO_VOLUME.alertPct,
+    };
+  } catch {
+    return { ...DEFAULT_AUDIO_VOLUME };
+  }
+}
+
+/**
+ * Filters an untrusted payload (the `audio:setVolume` IPC argument) down to
+ * finite 0-100 volumes — same reasoning as `sanitizeCameraPhysicalAngles`.
+ * A missing/invalid field falls back to the module default rather than
+ * rejecting the whole payload.
+ */
+export function sanitizeAudioVolume(input: unknown): AudioVolumeSettings {
+  if (!input || typeof input !== 'object') return { ...DEFAULT_AUDIO_VOLUME };
+  const voicePct = (input as Record<string, unknown>).voicePct;
+  const alertPct = (input as Record<string, unknown>).alertPct;
+  return {
+    voicePct:
+      typeof voicePct === 'number' && Number.isFinite(voicePct)
+        ? Math.min(100, Math.max(0, voicePct))
+        : DEFAULT_AUDIO_VOLUME.voicePct,
+    alertPct:
+      typeof alertPct === 'number' && Number.isFinite(alertPct)
+        ? Math.min(100, Math.max(0, alertPct))
+        : DEFAULT_AUDIO_VOLUME.alertPct,
+  };
+}
+
+export function setAudioVolume(value: AudioVolumeSettings): void {
+  setSecret('audio.volume', JSON.stringify(value));
 }

@@ -15,6 +15,16 @@ export interface StepProgressProps {
   theme?: 'dark' | 'light';
   compact?: boolean;
   className?: string;
+  /**
+   * 'horizontal' (default) — the existing dot-and-connector timeline pill
+   * (header usage, unchanged). 'vertical' — a compact top-to-bottom
+   * checklist on the shared kiosk navy/cyan tokens, added for the bước-5
+   * 4-cam sidebar ("TIẾN ĐỘ THU NHẬN KHUNG ẢNH" checklist, docs plan
+   * "Sửa UI desktop app Looka theo 7 ảnh mockup") — same `steps`/
+   * `currentStepIndex` data, just a different layout, so both views always
+   * agree on which step is current/completed/failed.
+   */
+  orientation?: 'horizontal' | 'vertical';
 }
 
 export const StepProgress: React.FC<StepProgressProps> = ({
@@ -23,8 +33,55 @@ export const StepProgress: React.FC<StepProgressProps> = ({
   theme = 'light',
   compact = false,
   className,
+  orientation = 'horizontal',
 }) => {
   if (!steps || steps.length === 0) return null;
+
+  if (orientation === 'vertical') {
+    return (
+      <div className={cn('flex flex-col gap-1.5 w-full', className)}>
+        {steps.map((step, idx) => {
+          const isCurrent = idx === currentStepIndex;
+          const isCompleted = step.status === 'COMPLETED' || idx < currentStepIndex;
+          const isFailed = step.status === 'FAILED';
+
+          const rowClass = isCompleted
+            ? 'bg-kiosk-accent-2/10 border-kiosk-accent-2/30 text-kiosk-accent-2'
+            : isCurrent
+            ? 'bg-kiosk-accent/10 border-kiosk-accent/40 text-kiosk-accent'
+            : isFailed
+            ? 'bg-kiosk-danger/10 border-kiosk-danger/30 text-kiosk-danger'
+            : 'bg-transparent border-kiosk-border text-kiosk-text-muted';
+
+          const dotClass = isCompleted
+            ? 'bg-kiosk-accent-2 text-kiosk-bg'
+            : isCurrent
+            ? 'bg-kiosk-accent text-kiosk-bg'
+            : isFailed
+            ? 'bg-kiosk-danger text-kiosk-bg'
+            : 'bg-kiosk-surface-2 text-kiosk-text-muted';
+
+          return (
+            <div
+              key={step.id}
+              data-step-id={step.id}
+              className={cn('flex items-center gap-2 rounded-lg border px-2 py-1.5 transition-colors', rowClass)}
+            >
+              <span
+                className={cn(
+                  'flex items-center justify-center w-5 h-5 rounded-full shrink-0 text-[10px] font-bold',
+                  dotClass
+                )}
+              >
+                {isCompleted ? <Check className="w-3 h-3 stroke-[3]" /> : idx + 1}
+              </span>
+              <span className="text-xs font-medium truncate">{step.label}</span>
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
 
   return (
     <div
