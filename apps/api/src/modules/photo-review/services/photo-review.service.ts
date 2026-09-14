@@ -643,7 +643,17 @@ export class PhotoReviewService {
         mimeType: 'application/json',
         data,
         idempotencyKey: input.idempotencyKey,
-        visibility: 'private' as const,
+        // 'public' (not 'private'): file-service's owner-based ACL always
+        // denies reads to private files here — Looka never sends
+        // X-Owner-User-Id (it authenticates with a pure API key, so
+        // owner_user_id stays null server-side), and viewerId passed to
+        // issueViewLink is a per-module label, not a stable identity that
+        // could ever match an owner. Access control is Looka's own
+        // @RequirePermission guards before a link is ever minted; the
+        // file-service key + share-token is the only thing that can reach
+        // this URL. See D:\Work\file-service\projects\fs-engine\authz\authz.go
+        // Decide() step 6 and shared.go's ResolveFileOwnership doc comment.
+        visibility: 'public' as const,
       };
       if (input.tenantName) {
         await (
