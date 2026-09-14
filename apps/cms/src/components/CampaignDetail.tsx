@@ -5,14 +5,16 @@ import { StatsPanel } from './StatsPanel';
 import { SessionsPanel } from './SessionsPanel';
 import { CampaignDangerActions } from './CampaignDangerActions';
 import { CampaignStudentsPanel } from './CampaignStudentsPanel';
+import { CampaignAssignmentsPanel } from './CampaignAssignmentsPanel';
 import { EFFECTIVE_STATUS_BADGE_CLASS, EFFECTIVE_STATUS_LABEL, PURPOSE_LABEL, computeEffectiveStatus, formatExpiry, isExpired } from '../campaignFormat';
 
-type Tab = 'stats' | 'sessions' | 'students' | 'settings';
+type Tab = 'stats' | 'sessions' | 'students' | 'assignments' | 'settings';
 
 const TABS: { key: Tab; label: string }[] = [
   { key: 'stats', label: 'Thống kê' },
   { key: 'sessions', label: 'Phiên chụp' },
   { key: 'students', label: 'Sinh viên' },
+  { key: 'assignments', label: 'Thiết bị & Nhân sự' },
   { key: 'settings', label: 'Cài đặt' },
 ];
 
@@ -52,12 +54,25 @@ const TABS: { key: Tab; label: string }[] = [
  * CampaignGate.tsx`) and re-attaches whichever campaign the operator picks
  * next, so a *per-campaign* device roster/register-reissue-revoke workflow
  * no longer matches reality — a device is never really "this campaign's."
- * `DevicesPanel.tsx` is deleted outright (nothing else imports it); the
+ * `DevicesPanel.tsx` was left orphaned on disk (nothing imports it); the
  * backend device endpoints (`POST .../devices`, `/reissue`, `/revoke`,
  * `/activate`) are untouched — an admin may still need to revoke a lost or
  * compromised kiosk, just not through a per-campaign management screen.
  * `listDevices`/the `devices` list itself stays: `SessionsPanel`'s own
  * device filter dropdown (Phiên chụp tab) still reads it directly.
+ *
+ * 2026-09-14 UPDATE — both removals above are partially reversed by new
+ * product direction: an admin now needs to assign a staff user to a
+ * specific kiosk *within* a campaign (reusing the existing, already-live
+ * `campaign_kiosk_assignments` "1 person ↔ 1 kiosk" mechanism, not the old
+ * `campaign_members` approval-queue UI) — see the new "Thiết bị & Nhân sự"
+ * tab (`CampaignAssignmentsPanel`) below. This is deliberately a fresh,
+ * narrower component (assign/unassign only, driven by
+ * `GET /v1/campaigns/:id/kiosks`), not a restoration of the deleted
+ * `DevicesPanel`/`MembersPanel` — see `CampaignAssignmentsPanel.tsx`'s own
+ * doc comment for why. Assigning a kiosk auto-approves the assignee's
+ * `campaign_members` row as a side effect server-side, so there is still no
+ * separate "add member" step in the CMS.
  * Settings editing stays on its own page (`EditCampaignPage`,
  * `/campaigns/:id/edit`) — the "Cài đặt" tab here is a read-only summary
  * plus a link to it, rather than embedding the full 3-section
@@ -170,6 +185,8 @@ export function CampaignDetail() {
       {tab === 'sessions' && <SessionsPanel campaignId={id} devices={devices} focusDeviceId={focusDeviceId} />}
 
       {tab === 'students' && <CampaignStudentsPanel campaignId={id} />}
+
+      {tab === 'assignments' && <CampaignAssignmentsPanel campaignId={id} />}
 
       {tab === 'settings' && (
         <div className="p-5 rounded-2xl border border-gray-200 bg-white shadow-sm space-y-3">

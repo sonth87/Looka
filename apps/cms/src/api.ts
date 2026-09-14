@@ -615,6 +615,107 @@ export const updateCampaignMember = (
     body: JSON.stringify({ action, note }),
   });
 
+// --- Campaign kiosk assignments ("Thiết bị & Nhân sự") -----------------------
+// 2026-09-14 — reverses the 2026-09-08 removal of the "Cán bộ chụp"/"Thiết
+// bị" tabs (see CampaignDetail.tsx's own doc comment for that history) under
+// new product direction: gán (assign) a staff user to a specific kiosk
+// device within a campaign. Backed by `campaign_kiosk_assignments`
+// (device-management module, apps/api), a *different* resource from the
+// dead `CampaignMember`/`listCampaignMembers`/`updateCampaignMember` code
+// just above (`campaign_members`/`/members`) — that dead code is left
+// untouched as a pattern reference only, per this task's own spec. Assigning
+// a kiosk auto-approves the assignee's `campaign_members` row server-side as
+// a side effect (`CampaignKioskAssignmentService.assign`, D-Q4 "gán = tự
+// duyệt") — there is no separate "add member" API call from this client.
+
+export interface CampaignKioskAssignment {
+  id: string;
+  campaignId: string;
+  deviceId: string;
+  /** Merged in server-side from `devices`, not a real column — same pattern as `CampaignMember.email` above. */
+  deviceName?: string;
+  userId: string;
+  userEmail?: string;
+  userDisplayName?: string | null;
+  assignedByUserId?: string | null;
+  assignedAt: string;
+  note?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * `GET /v1/campaigns/:id/kiosks` row — one per kiosk device already set up
+ * under this campaign, with its current assignee (if any) and a completed-
+ * session count merged in server-side (`CampaignKioskAssignmentService.listKiosksForCampaign`).
+ * `CampaignAssignmentsPanel` renders its table directly off this endpoint
+ * rather than cross-referencing `listDevices()` + `listCampaignAssignments()`
+ * itself, since this is a real, separate endpoint from `/assignments` (not
+ * just an alias) purpose-built for exactly this dashboard-detail shape.
+ */
+export interface CampaignKioskSummary {
+  deviceId: string;
+  deviceName: string;
+  status: DeviceStatus;
+  assignedUserId?: string | null;
+  assignedUserEmail?: string | null;
+  assignedUserDisplayName?: string | null;
+  sessionsCompleted: number;
+}
+
+/** `GET /v1/campaigns/:id/assignments` — every kiosk↔person assignment row for this campaign. Added per this task's spec alongside `listCampaignKiosks`; `CampaignAssignmentsPanel` itself uses the richer `/kiosks` endpoint below, not this one. */
+export const listCampaignAssignments = (campaignId: string) =>
+  request<CampaignKioskAssignment[]>(`/v1/campaigns/${campaignId}/assignments`);
+
+export const listCampaignKiosks = (campaignId: string) =>
+  request<CampaignKioskSummary[]>(`/v1/campaigns/${campaignId}/kiosks`);
+
+/** `PUT /v1/campaigns/:id/assignments/:deviceId` — idempotent upsert by `(campaignId, deviceId)`; also works as "đổi người" for an already-assigned kiosk. Requires `campaign:write` (`AssignCampaignKioskDto` server-side). */
+export const assignCampaignKiosk = (campaignId: string, deviceId: string, userId: string, note?: string) =>
+  request<CampaignKioskAssignment>(`/v1/campaigns/${campaignId}/assignments/${deviceId}`, {
+    method: 'PUT',
+    body: JSON.stringify({ userId, note }),
+  });
+
+/** `DELETE /v1/campaigns/:id/assignments/:deviceId` — requires `campaign:write`. Does not revoke the underlying `campaign_members` APPROVED row (left as-is server-side, same as the assign side never touching it as a separate step). */
+export const unassignCampaignKiosk = (campaignId: string, deviceId: string) =>
+  request<{ campaignId: string; deviceId: string }>(`/v1/campaigns/${campaignId}/assignments/${deviceId}`, {
+    method: 'DELETE',
+  });
+
+// --- Users (search, for the kiosk-assignment picker) -------------------------
+// `GET /v1/users?q=` — apps/api/src/modules/identity's UserQueryController
+// (`ListUsersQueryDto`/`UserReadModel`), the one real search-by-name/email
+// listing endpoint found in this repo (requires `user:read` permission,
+// separate from the `campaign:write` the assign/unassign calls above need —
+// an admin missing `user:read` sees a clear inline error in the picker
+// rather than a crash, see `CampaignAssignmentsPanel`). Only the fields this
+// client actually uses are declared here, not `UserReadModel`'s full shape.
+
+export interface UserListItem {
+  id: string;
+  email: string;
+  displayName?: string | null;
+  code?: string | null;
+  isAdmin: boolean;
+  status: 'ACTIVE' | 'DISABLED';
+}
+
+export interface ListUsersParams {
+  q?: string;
+  page?: number;
+  limit?: number;
+}
+
+export function listUsers(params: ListUsersParams = {}): Promise<Paginated<UserListItem>> {
+  const search = new URLSearchParams();
+  if (params.q) search.set('q', params.q);
+  if (params.page) search.set('page', String(params.page));
+  if (params.limit) search.set('limit', String(params.limit));
+  const qs = search.toString();
+  return request<Paginated<UserListItem>>(`/v1/users${qs ? `?${qs}` : ''}`);
+}
+
 /**
  * `Authorization`/`x-refresh-token` for every apps/api call - read fresh on
  * each request rather than cached, same reasoning as authApi.ts's own

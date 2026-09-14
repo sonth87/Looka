@@ -194,13 +194,31 @@ export class CampaignMemberService extends CommonService<CampaignMember> {
    * `(campaignId, userId)`, computed in JS from a single membership lookup
    * rather than a SQL left join (campaign counts are small; this keeps the
    * query shape identical to `findCampaignsNotClosed`'s own simple list).
+   *
+   * `isAdmin` gates a second, non-admin-only filter (assignment pivot,
+   * 2026-09-14): admins keep exactly today's behavior — the full
+   * not-CLOSED list, with real membership status attached (including
+   * `NONE`/`PENDING`). Non-admins only ever get back campaigns where their
+   * own membership row is `APPROVED` — plain JS `.filter()` right here,
+   * where `campaigns` and `membershipByCampaignId` are already both in
+   * scope, rather than pushing the condition into `findCampaignsNotClosed`'s
+   * query or a SQL join.
    */
-  async listCampaignsForUser(userId: string): Promise<MeCampaignDao[]> {
-    const campaigns = await this.campaignService.findCampaignsNotClosed();
+  async listCampaignsForUser(
+    userId: string,
+    isAdmin: boolean,
+  ): Promise<MeCampaignDao[]> {
+    const allCampaigns = await this.campaignService.findCampaignsNotClosed();
     const memberships = await this.repository.find({ where: { userId } });
     const membershipByCampaignId = new Map(
       memberships.map((m) => [m.campaignId, m.status]),
     );
+
+    const campaigns = isAdmin
+      ? allCampaigns
+      : allCampaigns.filter(
+          (c) => membershipByCampaignId.get(c.id) === 'APPROVED',
+        );
 
     // D-Q17 — one batched query across every listed campaign, never one
     // query per campaign (same batching discipline `attachIdentity` uses).

@@ -4027,6 +4027,13 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
             submitting={studentSubmitting}
             error={studentLookupError}
             onScanResult={(result) => void handleCccdScan(result)}
+            // 2026-09-14 Bước-4 redesign: the approved mockup shows a manual
+            // "nhập mã sinh viên" fallback alongside the CCCD scan on this
+            // same screen — reuses the exact same handler the legacy path
+            // below already calls, see `CccdScanWaitingScreenProps.onManualSubmit`'s
+            // own doc comment for why this doesn't change anything about
+            // `handleStudentSubmit` itself.
+            onManualSubmit={(code) => void handleStudentSubmit(code)}
           />
         ) : (
           <StudentIdEntryScreen

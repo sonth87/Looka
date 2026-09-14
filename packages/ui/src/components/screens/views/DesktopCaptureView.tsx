@@ -28,7 +28,6 @@ import {
 } from "lucide-react";
 import { SharedCaptureViewProps } from "./types.js";
 import { CameraPreview, CAPTURE_MIRRORED } from "../../camera/CameraPreview.js";
-import { LookaIcon } from "../../theme/LookaIcon.js";
 import { CameraSelector } from "../../camera/CameraSelector.js";
 import { FaceOverlay } from "../../face/FaceOverlay.js";
 import { GestureOverlay } from "../../face/GestureOverlay.js";
@@ -40,8 +39,15 @@ import { StabilityProgress } from "../../workflow/StabilityProgress.js";
 import { CountdownTimer } from "../../workflow/CountdownTimer.js";
 import { SubjectInfoBadge } from "../../workflow/SubjectInfoBadge.js";
 import { CapturedListPanel } from "../../workflow/CapturedListPanel.js";
+import {
+  PhotoQualityChecklist,
+  PhotoQualityCheckItem,
+  PhotoQualityCheckStatus,
+} from "../../workflow/PhotoQualityChecklist.js";
 import { MultiFrameGrid } from "../../camera/MultiFrameGrid.js";
 import { FramesBlockedPanel } from "../../camera/FramesBlockedPanel.js";
+import { Button } from "../../ui/button.js";
+import { Card } from "../../ui/card.js";
 import {
   TooltipProvider,
   Tooltip,
@@ -136,15 +142,144 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
   } = props;
 
   const [showTelemetryDrawer, setShowTelemetryDrawer] = useState(false);
-  const [activeSidebarTab, setActiveSidebarTab] = useState<"debug" | "overlay">(
-    "debug",
-  );
+  const [activeSidebarTab, setActiveSidebarTab] = useState<
+    "debug" | "overlay" | "captured"
+  >("debug");
 
   // Multi-frame simultaneous capture (§ desktop kiosk multi-camera capture) —
   // `multiFrame` is only ever passed while the campaign's `simultaneousCapture`
   // flag is on and the kiosk is in live mode; undefined otherwise, which
   // keeps every branch below a no-op for the sequential single-camera path.
   const framesBlocked = !!(multiFrame?.blocked && !multiFrame.blocked.ok);
+
+  // ── Bước 5 (4-cam grid) vs bước 6 (gương soi/mirror) — docs plan "Sửa UI
+  // desktop app Looka theo 7 ảnh mockup". Both mockups are driven by this
+  // exact same branch the rest of the file already uses for MultiFrameGrid.
+  const hasMultiFrame = !!(multiFrame && multiFrame.frames.length > 0);
+  const isMirrorMode = !hasMultiFrame;
+  // The circular "gương soi" framing only applies outside fullscreen — in
+  // fullscreen this view already strips all chrome (header, sidebars) down
+  // to a bare full-bleed preview, and a giant circle clipped to the window
+  // edges would look broken rather than intentional.
+  const showMirrorChrome = isMirrorMode && !isFullscreen;
+
+  const currentStep = steps[guidance.currentStepIndex] ?? null;
+
+  // "●REC" + elapsed timer (bước 5 sidebar) — no per-channel "is this camera
+  // actually recording right now" signal reaches this component (see
+  // SharedCaptureViewProps.recordingFailed's own doc comment: only *failed*
+  // channels are exposed, not a live recording flag), so this reads on the
+  // one real signal that IS available here — `isWorkflowStarted`, the
+  // multi-round capture session actually being underway — rather than
+  // inventing a fake per-camera recording indicator. Elapsed time is
+  // measured locally from the moment the session starts.
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  React.useEffect(() => {
+    if (!isWorkflowStarted) {
+      setElapsedSeconds(0);
+      return;
+    }
+    const startedAt = Date.now();
+    const id = setInterval(() => {
+      setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [isWorkflowStarted]);
+  const elapsedLabel = `${String(Math.floor(elapsedSeconds / 60)).padStart(2, "0")}:${String(elapsedSeconds % 60).padStart(2, "0")}`;
+
+  // "TIẾN ĐỘ THU NHẬN KHUNG ẢNH: X/Y" — prefers the session-wide photo
+  // count/target already computed by the caller (subjectInfo.photoCount/
+  // photoTotal, the same numbers SubjectInfoBadge's own pill shows), falling
+  // back to this round's frame-completion count when no subjectInfo was
+  // handed down. Never a hardcoded number either way.
+  const frameProgress = hasMultiFrame && multiFrame
+    ? { count: multiFrame.frames.filter((f) => f.status === "COMPLETED").length, total: multiFrame.frames.length }
+    : null;
+  const progressLabel = subjectInfo
+    ? `${subjectInfo.photoCount}/${subjectInfo.photoTotal}`
+    : frameProgress
+      ? `${frameProgress.count}/${frameProgress.total}`
+      : null;
+
+  // Same face-quality gate the on-canvas ShutterButton already uses (OFF
+  // mode) — reused as-is for the new sidebar CTA button in bước 6, rather
+  // than a second, possibly-drifting copy of the readiness rule.
+  const isFaceReadyForCapture =
+    faceState?.detected === true &&
+    faceState?.presence === "SINGLE_FACE" &&
+    faceState?.quality?.accepted === true;
+  // The sidebar CTA reuses the exact same OFF-mode manual-shutter mechanism
+  // as the existing on-canvas ShutterButton (see that button's own
+  // `captureMode === "OFF" && onShutterCapture` condition below) — AUTO
+  // fires itself once the pose stabilizes and MANUAL waits for a held
+  // gesture, so this button has nothing new to trigger in those modes and
+  // is shown disabled with the same real-time hint instead.
+  const canManualCaptureFromSidebar = captureMode === "OFF" && !!onShutterCapture;
+
+  // Bottom 3-phase progress dots (bước 6 — "Góc trước / Chụp ảnh và Sinh
+  // trắc / Xác nhận thực hiện"). This is a coarser, higher-level phase than
+  // the per-pose `steps` list (front/left/right/... angles), so it is not
+  // built from StepProgress/steps — see this view's own report on why a
+  // plain 3-dot row was used instead of reusing StepProgress here. Derived
+  // from the same two real props already used elsewhere in this file:
+  // `isWorkflowStarted` (actively capturing) and `hasCapturedImages` (at
+  // least one photo saved this session) — `isWorkflowStarted` itself resets
+  // to false both before a session starts AND right after one finishes, so
+  // `hasCapturedImages` is what distinguishes "not started yet" from "just
+  // finished" between sessions.
+  const metaPhaseIndex = isWorkflowStarted ? 1 : hasCapturedImages ? 2 : 0;
+
+  // "KIỂM TRA TIÊU CHUẨN ẢNH THẺ TỰ ĐỘNG" (bước 6 sidebar) — only 2 of the 4
+  // ICAO-style criteria the mockup shows have a real signal anywhere in this
+  // codebase today (brightness/TOO_DARK/TOO_BRIGHT for lighting,
+  // eyeOpenScore/eyesVisible/EYES_CLOSED for eyes); background and attire
+  // have no detector at all, so those two always render 'pending' with a
+  // note rather than a fabricated 'valid' — see PhotoQualityChecklist's own
+  // doc comment.
+  const qualityHintCodes = new Set(guidance.hints.map((h) => h.code));
+  const lightingStatus: PhotoQualityCheckStatus = !faceState?.quality
+    ? "pending"
+    : qualityHintCodes.has("TOO_DARK") || qualityHintCodes.has("TOO_BRIGHT")
+      ? "warning"
+      : faceState.quality.brightness != null
+        ? "valid"
+        : "pending";
+  const eyesStatus: PhotoQualityCheckStatus = !faceState?.quality
+    ? "pending"
+    : qualityHintCodes.has("EYES_CLOSED")
+      ? "warning"
+      : faceState.quality.eyeOpenScore != null || faceState.quality.eyesVisible != null
+        ? "valid"
+        : "pending";
+  const qualityChecklistItems: PhotoQualityCheckItem[] = [
+    {
+      id: "lighting",
+      label: "Ánh sáng đồng đều, không đổ bóng",
+      status: lightingStatus,
+      note: lightingStatus === "pending" ? "Đang chờ đo độ sáng" : undefined,
+    },
+    {
+      id: "background",
+      label: "Nền trơn, màu trắng/kem",
+      status: "pending",
+      // TODO(workflow-engine): no background-segmentation signal exists yet
+      // anywhere in this codebase — always 'pending' until one does.
+      note: "Cần dữ liệu thật từ workflow-engine sau",
+    },
+    {
+      id: "attire",
+      label: "Trang phục lịch sự",
+      status: "pending",
+      // TODO(workflow-engine): no attire-detection signal exists yet either.
+      note: "Cần dữ liệu thật từ workflow-engine sau",
+    },
+    {
+      id: "eyes",
+      label: "Mắt mở rõ nét",
+      status: eyesStatus,
+      note: eyesStatus === "pending" ? "Đang chờ nhận diện mắt" : undefined,
+    },
+  ];
 
   // WorkflowEngine tracks pose stability (guidance.status can read
   // STABILIZING/CAPTURING) regardless of captureMode, but only AUTO mode
@@ -173,63 +308,32 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
         className,
       )}
     >
-      {/* ── Top Header Bar ── */}
+      {/* ── Capture-specific toolbar (secondary bar) ──
+        The persistent brand/clock header now lives in the shared
+        `KioskShell`/`KioskHeader` one level up the tree (CampaignGate.tsx) —
+        this screen renders inside that shell already, so the brand block and
+        "Live Camera Ready"/"Standby" status dot this bar used to show are
+        redundant duplicates of what the shell's own header already displays.
+        Trimmed down to just the capture-specific controls (step pill, camera
+        selector, mode toggle, theme toggle, telemetry-drawer toggle, "Xem
+        kết quả") — docs plan "Sửa UI desktop app Looka theo 7 ảnh mockup".
+        Kept on the fixed kiosk navy tokens (not the `theme`-driven
+        dark/light slate palette the rest of this view still uses below) so
+        it reads as one continuous bar with the shell header sitting directly
+        above it, with no visible seam between the two.
+      */}
       {!isFullscreen && (
         <header
           className={cn(
             // flex-wrap (+ gap-y) so the header degrades to a second line
             // instead of clipping once the right-hand control cluster (mode
             // toggle, camera setup, telemetry, theme) no longer fits beside
-            // the brand block and step pill — measured to overflow the
-            // window's right edge by 100+px at ~800px window width before
-            // this, since none of these shrink-0 groups could shrink or wrap
-            // on their own.
-            "w-full px-3 sm:px-5 py-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-2 shrink-0 border-b z-30 transition-colors duration-300",
-            theme === "dark"
-              ? "border-slate-800/80 bg-slate-950/90 text-slate-100 backdrop-blur-md"
-              : "border-slate-200/90 bg-white/90 text-slate-900 backdrop-blur-md shadow-sm",
+            // the step pill — measured to overflow the window's right edge
+            // before this, since none of these shrink-0 groups could shrink
+            // or wrap on their own.
+            "w-full px-3 sm:px-5 py-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-2 shrink-0 border-b border-kiosk-border bg-kiosk-bg/95 text-kiosk-text backdrop-blur-md z-30 transition-colors duration-300",
           )}
         >
-          {/* Brand & System Status */}
-          <div className="flex items-center gap-3 shrink-0">
-            <div className="flex items-center gap-2">
-              <div className="w-7 h-7 rounded-lg overflow-hidden flex items-center justify-center">
-                <LookaIcon className="w-full h-full" />
-              </div>
-              <div>
-                <h1
-                  className={cn(
-                    "text-xs sm:text-sm font-bold tracking-tight flex items-center gap-1.5",
-                    theme === "dark" ? "text-white" : "text-slate-900",
-                  )}
-                >
-                  Looka
-                  <span className="text-[10px] font-medium px-1.5 py-0.2 rounded bg-blue-500/10 text-blue-500 border border-blue-500/20">
-                    Biometric Capture
-                  </span>
-                </h1>
-              </div>
-            </div>
-
-            {/* Status dot */}
-            <div
-              className={cn(
-                "hidden md:flex items-center gap-1.5 px-2 py-0.5 rounded-full border text-[11px]",
-                theme === "dark"
-                  ? "bg-slate-900 border-slate-800 text-slate-400"
-                  : "bg-slate-100 border-slate-200 text-slate-600",
-              )}
-            >
-              <span
-                className={cn(
-                  "w-2 h-2 rounded-full",
-                  stream ? "bg-emerald-500 animate-pulse" : "bg-amber-500",
-                )}
-              />
-              <span>{stream ? "Live Camera Ready" : "Standby"}</span>
-            </div>
-          </div>
-
           {/* Center: Inline Timeline StepProgress Pill (Collapses cleanly on narrow windows) */}
           {/*
             Was `w-full`, which forces this item to claim 100% of the
@@ -268,16 +372,17 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
             */}
             {modeButton}
 
-            {/* Theme Toggle Button (Identical w-8 h-8 size) */}
+            {/*
+              Theme Toggle Button (Identical w-8 h-8 size). This toolbar's
+              own chrome stays on the fixed kiosk navy tokens regardless of
+              `theme` (see this header's own doc comment above) — only the
+              icon swaps to reflect what `theme` will become for the camera
+              stage/footer/telemetry drawer below, which still do switch.
+            */}
             {onToggleTheme && (
               <button
                 onClick={onToggleTheme}
-                className={cn(
-                  "w-8 h-8 rounded-xl flex items-center justify-center transition-all cursor-pointer border active:scale-95 shadow-sm",
-                  theme === "dark"
-                    ? "bg-slate-900 border-slate-800 text-amber-400 hover:bg-slate-800"
-                    : "bg-white border-slate-200 text-purple-600 hover:bg-slate-100 shadow-slate-200/50",
-                )}
+                className="w-8 h-8 rounded-xl flex items-center justify-center transition-all cursor-pointer border active:scale-95 shadow-sm bg-kiosk-surface border-kiosk-border text-kiosk-warning hover:bg-kiosk-surface-2"
                 title={
                   theme === "dark"
                     ? "Chuyển sang Giao diện Sáng"
@@ -285,9 +390,9 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                 }
               >
                 {theme === "dark" ? (
-                  <Sun className="w-4 h-4 text-amber-400" />
+                  <Sun className="w-4 h-4 text-kiosk-warning" />
                 ) : (
-                  <Moon className="w-4 h-4 text-purple-600" />
+                  <Moon className="w-4 h-4 text-kiosk-accent" />
                 )}
               </button>
             )}
@@ -298,10 +403,8 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
               className={cn(
                 "w-8 h-8 rounded-xl flex items-center justify-center transition-all cursor-pointer border active:scale-95 shadow-sm",
                 showTelemetryDrawer
-                  ? "bg-blue-600/20 border-blue-500/50 text-blue-500"
-                  : theme === "dark"
-                    ? "bg-slate-900 border-slate-800 text-slate-300 hover:bg-slate-800"
-                    : "bg-white border-slate-200 text-slate-700 hover:bg-slate-100 shadow-slate-200/50",
+                  ? "bg-kiosk-accent/20 border-kiosk-accent/50 text-kiosk-accent"
+                  : "bg-kiosk-surface border-kiosk-border text-kiosk-text-muted hover:bg-kiosk-surface-2",
               )}
               title="Ẩn/Hiện thông số AI & Telemetry"
             >
@@ -311,7 +414,7 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
             {hasCapturedImages && onOpenReview && (
               <button
                 onClick={onOpenReview}
-                className="px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-bold text-[11px] shadow-md flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer shrink-0"
+                className="px-2.5 py-1 rounded-lg bg-kiosk-accent hover:brightness-110 text-kiosk-bg font-bold text-[11px] shadow-md flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer shrink-0"
               >
                 <Images className="w-3.5 h-3.5" />
                 <span>Xem kết quả</span>
@@ -421,9 +524,13 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
               // overflow-hidden. min-w-0 lets it shrink to fill whatever
               // space is actually left, same as any ordinary flexible panel.
               "relative flex-1 min-w-0 transition-all duration-300 flex items-center h-full max-h-[85vh]",
-              multiFrame && multiFrame.frames.length > 0
+              hasMultiFrame
                 ? "flex-col justify-start gap-3 overflow-y-auto"
-                : "justify-center",
+                // Bước 6 (gương soi): stacks the circular preview with the
+                // new pose label/instruction text + phase dots below it (see
+                // `showMirrorChrome` block after </CameraPreview>) instead of
+                // just centering the one bare preview like before.
+                : "flex-col justify-center gap-4 overflow-y-auto",
               isFullscreen ? "w-full h-full rounded-none" : cameraWidthClass,
             )}
           >
@@ -584,7 +691,14 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
               </TooltipProvider>
             </div>
 
-            {/* Camera Preview Canvas */}
+            {/*
+              Camera Preview Canvas — bước 6 (gương soi) clips this into a
+              large circular "mirror" viewport with a dashed pose-guide ring
+              drawn over it (below), a CSS wrapper around the exact same
+              preview/overlay stack rather than a second camera-rendering
+              path. Bước 5 (4-cam grid) and fullscreen are both unaffected —
+              same 16:9/"auto" treatment as before.
+            */}
             <CameraPreview
               stream={stream}
               // Product decision 2026-09-05: the capture preview behaves like
@@ -593,7 +707,7 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
               mirrored={CAPTURE_MIRRORED}
               zoomScale={zoomScale}
               zoomOrigin={zoomOrigin}
-              aspectRatio={isFullscreen ? "auto" : "16/9"}
+              aspectRatio={isFullscreen ? "auto" : showMirrorChrome ? "1/1" : "16/9"}
               className={cn(
                 "w-full h-full overflow-hidden transition-all",
                 isFullscreen
@@ -601,6 +715,8 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                   : theme === "dark"
                     ? "rounded-2xl sm:rounded-3xl border border-slate-800 bg-slate-950 shadow-2xl shadow-black/80"
                     : "rounded-2xl sm:rounded-3xl border border-slate-200/90 bg-slate-900 shadow-lg shadow-slate-200/50",
+                showMirrorChrome &&
+                  "rounded-full h-auto w-[min(92%,560px)] max-w-[560px] mx-auto border-2 border-kiosk-accent/60 shadow-[0_0_60px_-12px_rgba(34,211,238,0.5)]",
               )}
             >
               {stream && (
@@ -621,6 +737,38 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                   stabilityProgress={captureMode === "AUTO" ? stabilityProgress : 0}
                   autoHoldMs={autoHoldMs}
                 />
+              )}
+
+              {/*
+                Person-silhouette guide ring (bước 6 gương soi) — a plain
+                dashed head-oval + shoulder-arc drawn with SVG, not an image
+                asset (none exists in this package), just enough to show
+                where to position the face inside the circular viewport.
+              */}
+              {showMirrorChrome && (
+                <div className="absolute inset-0 z-[6] flex items-center justify-center pointer-events-none">
+                  <svg viewBox="0 0 200 200" className="w-[70%] h-[70%] opacity-70">
+                    <ellipse
+                      cx="100"
+                      cy="82"
+                      rx="46"
+                      ry="58"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2.5"
+                      strokeDasharray="7 6"
+                      className="text-kiosk-accent"
+                    />
+                    <path
+                      d="M 18 196 Q 100 128 182 196"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2.5"
+                      strokeDasharray="7 6"
+                      className="text-kiosk-accent"
+                    />
+                  </svg>
+                </div>
               )}
 
               <CountdownTimer value={countdownValue} />
@@ -877,7 +1025,78 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
               )}
             </CameraPreview>
 
-            {multiFrame && multiFrame.frames.length > 0 && (
+            {/*
+              Bước 6 (gương soi) pose label/instruction/description below the
+              circle — every string here comes from real `guidance`/`steps`
+              state (current step index/label, the engine's own live
+              instruction, its hint messages), never hardcoded copy.
+            */}
+            {showMirrorChrome && (
+              <div className="w-full max-w-[560px] mx-auto flex flex-col items-center gap-1.5 text-center px-2">
+                <span className="text-[11px] font-bold uppercase tracking-[0.15em] text-kiosk-accent">
+                  {`Tư thế số ${Math.min(guidance.currentStepIndex + 1, Math.max(steps.length, 1))}${steps.length ? `/${steps.length}` : ""} trong đợt chụp`}
+                </span>
+                <h2
+                  className={cn(
+                    "text-lg sm:text-xl font-black uppercase tracking-wide",
+                    theme === "dark" ? "text-white" : "text-slate-900",
+                  )}
+                >
+                  {guidance.primaryInstruction}
+                </h2>
+                <p className="text-xs text-kiosk-text-muted max-w-sm">
+                  {guidance.hints.length > 0
+                    ? guidance.hints.map((h) => h.message).join(" · ")
+                    : "Giữ đúng tư thế trong khung hình để hệ thống tự động chụp."}
+                </p>
+              </div>
+            )}
+
+            {/*
+              Bottom 3-phase progress dots. Deliberately NOT StepProgress: it
+              would misrepresent per-pose angle steps (front/left/right/...,
+              already shown by the header pill + left thumbnail gallery) as
+              this coarser 3-phase flow, which has different semantics
+              entirely — see `metaPhaseIndex`'s own doc comment above for how
+              this is derived from real props.
+            */}
+            {showMirrorChrome && (
+              <div className="flex items-center gap-2 flex-wrap justify-center">
+                {[
+                  { key: "setup", label: "Góc trước" },
+                  { key: "capture", label: "Chụp ảnh và Sinh trắc" },
+                  { key: "confirm", label: "Xác nhận thực hiện" },
+                ].map((phase, idx) => {
+                  const isDone = idx < metaPhaseIndex;
+                  const isActive = idx === metaPhaseIndex;
+                  return (
+                    <React.Fragment key={phase.key}>
+                      <div
+                        className={cn(
+                          "flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold border",
+                          isDone
+                            ? "bg-kiosk-accent-2/15 text-kiosk-accent-2 border-kiosk-accent-2/40"
+                            : isActive
+                              ? "bg-kiosk-accent/15 text-kiosk-accent border-kiosk-accent/50"
+                              : "bg-kiosk-surface-2 text-kiosk-text-muted border-kiosk-border",
+                        )}
+                      >
+                        <span
+                          className={cn(
+                            "w-1.5 h-1.5 rounded-full shrink-0",
+                            isDone ? "bg-kiosk-accent-2" : isActive ? "bg-kiosk-accent" : "bg-kiosk-text-muted",
+                          )}
+                        />
+                        {idx + 1}. {phase.label}
+                      </div>
+                      {idx < 2 && <span className="w-4 h-px bg-kiosk-border" />}
+                    </React.Fragment>
+                  );
+                })}
+              </div>
+            )}
+
+            {hasMultiFrame && (
               <MultiFrameGrid
                 className="w-full shrink-0 px-1 pb-1"
                 frames={multiFrame.frames}
@@ -888,25 +1107,93 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
           </div>
 
           {/*
-            Right zone (ui-redesign-plan.md S5 "ĐÃ CHỤP · ĐANG CHỤP") — a
-            persistent column (unlike the telemetry/settings drawer below,
-            which is an `absolute` overlay toggled by the header's Activity
-            button); the two can coexist since the drawer floats above this
-            column rather than sharing its layout space. `capturedList`
-            renders with empty/placeholder data until a later integration
-            pass wires real "đang chụp"/"đã chụp" data through
-            FaceCaptureApp — see SharedCaptureViewProps.capturedList's own
-            doc comment.
+            Right sidebar — mode-specific, per the docs plan "Sửa UI desktop
+            app Looka theo 7 ảnh mockup":
+            - Bước 5 (4-cam grid, `hasMultiFrame`): current-pose callout,
+              ●REC/elapsed timer, "TIẾN ĐỘ THU NHẬN KHUNG ẢNH" progress line,
+              and a vertical per-pose checklist (StepProgress's own data,
+              `orientation="vertical"`).
+            - Bước 6 (gương soi/mirror, single-frame): the new
+              PhotoQualityChecklist + the big shutter CTA.
+            The old "ĐÃ CHỤP · ĐANG CHỤP" `CapturedListPanel` that used to
+            live in this column moved into the telemetry drawer's new
+            "Đã chụp" tab below (`activeSidebarTab === "captured"`) — this
+            column no longer has room for it alongside the new mockup content,
+            but the feature/data-wiring itself (`capturedList` prop) is
+            unchanged, just relocated behind the same drawer toggle the
+            debug/overlay panels already use.
           */}
           {!isFullscreen && (
-            <div className="hidden lg:flex flex-col w-[300px] shrink-0 h-full max-h-[82vh] p-1">
-              <CapturedListPanel
-                current={capturedList?.current ?? null}
-                recent={capturedList?.recent ?? []}
-                onOpenSession={capturedList?.onOpenSession ?? (() => {})}
-                theme={theme}
-                className="h-full"
-              />
+            <div className="hidden lg:flex flex-col w-[300px] shrink-0 h-full max-h-[82vh] gap-3 p-1 overflow-y-auto">
+              {hasMultiFrame ? (
+                <>
+                  {/* Current-pose callout — real step label + the engine's own live instruction, never hardcoded. */}
+                  <Card variant="panel" className="p-3.5 flex items-start gap-3 border-kiosk-accent/40">
+                    <div className="shrink-0 w-9 h-9 rounded-xl bg-kiosk-accent/15 text-kiosk-accent flex items-center justify-center">
+                      <Compass className="w-5 h-5" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-[11px] font-bold uppercase tracking-wider text-kiosk-accent">
+                        {`Tư thế ${Math.min(guidance.currentStepIndex + 1, Math.max(steps.length, 1))}${currentStep ? `: ${currentStep.label}` : ""}`}
+                      </div>
+                      <div className="text-sm font-semibold text-kiosk-text mt-0.5 leading-snug">
+                        {guidance.primaryInstruction}
+                      </div>
+                    </div>
+                  </Card>
+
+                  {/* ●REC (session actively running) + progress line — both from real props, see this component's own doc comments above. */}
+                  <div className="flex items-center justify-between px-1 gap-2">
+                    {isWorkflowStarted ? (
+                      <div className="flex items-center gap-1.5 text-kiosk-danger text-xs font-bold shrink-0">
+                        <span className="w-2 h-2 rounded-full bg-kiosk-danger animate-pulse" />
+                        REC {elapsedLabel}
+                      </div>
+                    ) : (
+                      <span />
+                    )}
+                    {progressLabel && (
+                      <span className="text-[11px] font-semibold text-kiosk-text-muted text-right truncate">
+                        Tiến độ thu nhận khung ảnh:{" "}
+                        <span className="text-kiosk-text font-bold">{progressLabel}</span>
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Vertical checklist — same steps/currentStepIndex data as the header's horizontal pill, just restyled for the sidebar. */}
+                  <Card variant="panel" className="p-3 flex-1 min-h-0 overflow-y-auto">
+                    <div className="text-[11px] font-bold uppercase tracking-wider text-kiosk-text-muted mb-2">
+                      Danh sách tư thế
+                    </div>
+                    <StepProgress
+                      steps={steps}
+                      currentStepIndex={guidance.currentStepIndex}
+                      orientation="vertical"
+                    />
+                  </Card>
+                </>
+              ) : (
+                <>
+                  <PhotoQualityChecklist items={qualityChecklistItems} />
+
+                  <div className="mt-auto pt-1 flex flex-col gap-2">
+                    <Button
+                      variant="primary"
+                      size="xl"
+                      className="w-full uppercase tracking-wide"
+                      disabled={!canManualCaptureFromSidebar || !isFaceReadyForCapture}
+                      onClick={canManualCaptureFromSidebar ? onShutterCapture : undefined}
+                    >
+                      Xác nhận chuẩn bị & chụp trong 3 giây
+                    </Button>
+                    {!canManualCaptureFromSidebar && (
+                      <p className="text-center text-[11px] text-kiosk-text-muted">
+                        {displayInstruction}
+                      </p>
+                    )}
+                  </div>
+                </>
+              )}
             </div>
           )}
 
@@ -959,6 +1246,29 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                     <Sliders className="w-3.5 h-3.5" />
                     <span>Overlay</span>
                   </button>
+
+                  {/*
+                    "Đã chụp" tab — the "ĐÃ CHỤP · ĐANG CHỤP" CapturedListPanel
+                    that used to sit in its own persistent right column moved
+                    here once that column became the bước-5/bước-6
+                    mockup-specific sidebar above; still the same
+                    `capturedList` prop/data, just reached through this
+                    existing drawer toggle instead of always being visible.
+                  */}
+                  <button
+                    onClick={() => setActiveSidebarTab("captured")}
+                    className={cn(
+                      "flex-1 py-1.5 rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5 font-bold text-xs",
+                      activeSidebarTab === "captured"
+                        ? "bg-blue-600 text-white shadow-md shadow-blue-500/25"
+                        : theme === "dark"
+                          ? "text-slate-400 hover:text-slate-200"
+                          : "text-slate-600 hover:text-slate-900",
+                    )}
+                  >
+                    <Images className="w-3.5 h-3.5" />
+                    <span>Đã chụp</span>
+                  </button>
                 </div>
 
                 <button
@@ -972,7 +1282,16 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
 
               {/* Sidebar Scrollable Body */}
               <div className="flex-1 overflow-y-auto space-y-3.5 pr-1 text-xs no-scrollbar">
-                {activeSidebarTab === "debug" ? (
+                {activeSidebarTab === "captured" ? (
+                  /* ═══════════ TAB 3: ĐÃ CHỤP · ĐANG CHỤP ═══════════ */
+                  <CapturedListPanel
+                    current={capturedList?.current ?? null}
+                    recent={capturedList?.recent ?? []}
+                    onOpenSession={capturedList?.onOpenSession ?? (() => {})}
+                    theme={theme}
+                    className="h-full"
+                  />
+                ) : activeSidebarTab === "debug" ? (
                   /* ═══════════ TAB 1: DEBUG TELEMETRY ═══════════ */
                   <div className="space-y-3.5 font-mono">
                     {/* Card 1: Performance Meters (Camera & CV Engine FPS) */}

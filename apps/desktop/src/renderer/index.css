@@ -3,6 +3,20 @@
 @source "../../../../packages/ui/src";
 @source "./";
 
+/* Tailwind v4 utility generation (bg-kiosk-*, text-kiosk-*, border-kiosk-*...) — keep in sync with packages/ui/src/styles/globals.css */
+@theme {
+  --color-kiosk-bg: hsl(222 47% 7%);
+  --color-kiosk-surface: hsl(217 40% 13%);
+  --color-kiosk-surface-2: hsl(217 35% 18%);
+  --color-kiosk-border: hsl(217 35% 24%);
+  --color-kiosk-text: hsl(210 40% 96%);
+  --color-kiosk-text-muted: hsl(215 20% 65%);
+  --color-kiosk-accent: hsl(189 94% 55%);
+  --color-kiosk-accent-2: hsl(158 64% 52%);
+  --color-kiosk-warning: hsl(38 92% 50%);
+  --color-kiosk-danger: hsl(350 89% 60%);
+}
+
 @layer base {
   :root {
     --face-primary: 217 91% 60%;
@@ -11,6 +25,18 @@
     --face-error: 0 84% 60%;
     --face-guide: 217 91% 60%;
     --face-overlay: 0 0% 0%;
+
+    /* Kiosk operational UI (navy/cyan) — keep in sync with packages/ui/src/styles/globals.css */
+    --kiosk-bg: 222 47% 7%;
+    --kiosk-surface: 217 40% 13%;
+    --kiosk-surface-2: 217 35% 18%;
+    --kiosk-border: 217 35% 24%;
+    --kiosk-text: 210 40% 96%;
+    --kiosk-text-muted: 215 20% 65%;
+    --kiosk-accent: 189 94% 55%;
+    --kiosk-accent-2: 158 64% 52%;
+    --kiosk-warning: 38 92% 50%;
+    --kiosk-danger: 350 89% 60%;
   }
 
   .dark {
@@ -20,5 +46,16 @@
     --face-error: 0 84% 60%;
     --face-guide: 217 91% 60%;
     --face-overlay: 0 0% 0%;
+
+    --kiosk-bg: 222 47% 7%;
+    --kiosk-surface: 217 40% 13%;
+    --kiosk-surface-2: 217 35% 18%;
+    --kiosk-border: 217 35% 24%;
+    --kiosk-text: 210 40% 96%;
+    --kiosk-text-muted: 215 20% 65%;
+    --kiosk-accent: 189 94% 55%;
+    --kiosk-accent-2: 158 64% 52%;
+    --kiosk-warning: 38 92% 50%;
+    --kiosk-danger: 350 89% 60%;
   }
 }

@@ -15,6 +15,20 @@ export {
   TooltipTrigger,
   TooltipContent,
 } from './components/ui/tooltip.js';
+export { Button } from './components/ui/button.js';
+export type { ButtonProps, ButtonVariant, ButtonSize } from './components/ui/button.js';
+export { Card, CardHeader, CardTitle, CardContent } from './components/ui/card.js';
+export type { CardProps } from './components/ui/card.js';
+export { Badge } from './components/ui/badge.js';
+export type { BadgeProps, BadgeVariant } from './components/ui/badge.js';
+
+// Kiosk shell (shared header/footer chrome)
+export { KioskShell } from './components/shell/KioskShell.js';
+export type { KioskShellProps } from './components/shell/KioskShell.js';
+export { KioskHeader } from './components/shell/KioskHeader.js';
+export type { KioskHeaderProps } from './components/shell/KioskHeader.js';
+export { KioskStatusBar } from './components/shell/KioskStatusBar.js';
+export type { KioskCameraStatus, KioskStatusBarProps } from './components/shell/KioskStatusBar.js';
 
 // Camera
 export { CameraPreview, CAPTURE_MIRRORED } from './components/camera/CameraPreview.js';
@@ -56,12 +70,19 @@ export type {
   CapturedListCurrent,
   CapturedListRecentEntry,
 } from './components/workflow/CapturedListPanel.js';
+// bước-6 "gương soi" ICAO-style checklist (docs plan "Sửa UI desktop app Looka theo 7 ảnh mockup")
+export { PhotoQualityChecklist } from './components/workflow/PhotoQualityChecklist.js';
+export type {
+  PhotoQualityChecklistProps,
+  PhotoQualityCheckItem,
+  PhotoQualityCheckStatus,
+} from './components/workflow/PhotoQualityChecklist.js';
 export { LoginScreen } from './components/screens/LoginScreen.js';
 export type { LoginScreenProps } from './components/screens/LoginScreen.js';
-export { CampaignPickerScreen } from './components/screens/CampaignPickerScreen.js';
-export type { CampaignPickerScreenProps } from './components/screens/CampaignPickerScreen.js';
-export { CampaignHomeScreen } from './components/screens/CampaignHomeScreen.js';
-export type { CampaignHomeScreenProps } from './components/screens/CampaignHomeScreen.js';
+export { StandbyScreen } from './components/screens/StandbyScreen.js';
+export type { StandbyScreenProps } from './components/screens/StandbyScreen.js';
+export { DeviceInitScreen } from './components/screens/DeviceInitScreen.js';
+export type { DeviceInitScreenProps } from './components/screens/DeviceInitScreen.js';
 export type { AuthClient, AuthenticatedIdentity } from './lib/authClient.js';
 export { DevAuthClient } from './lib/authClient.js';
 export type {
@@ -104,6 +125,8 @@ export type { LiquidGlassCardProps } from './components/theme/LiquidGlassCard.js
 export { LookaIcon } from './components/theme/LookaIcon.js';
 
 // Screens
+export { StudentProfileCard } from './components/screens/StudentProfileCard.js';
+export type { StudentProfileCardProps } from './components/screens/StudentProfileCard.js';
 export { GuidedCaptureScreen } from './components/screens/GuidedCaptureScreen.js';
 export { KioskAttendanceScreen } from './components/screens/KioskAttendanceScreen.js';
 export { KioskAttendanceApp } from './components/screens/KioskAttendanceApp.js';

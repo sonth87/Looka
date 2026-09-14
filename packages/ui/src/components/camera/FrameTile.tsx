@@ -1,4 +1,5 @@
 import React, { useEffect, useRef } from 'react';
+import { Check } from 'lucide-react';
 import { cn } from '../../lib/utils.js';
 
 /**
@@ -36,6 +37,14 @@ export interface FrameTileProps {
    * touched by this).
    */
   mirrored?: boolean;
+  /**
+   * This tile's 1-based position in the grid ("CAM 1", "CAM 2", ...) — purely
+   * a display prefix derived from render order (`MultiFrameGrid` passes its
+   * own `.map` index), not a stored/authoritative camera number. Omitted by
+   * `CbHelpFrames.tsx` (renders its own grid without `MultiFrameGrid`), which
+   * simply shows no "CAM N" prefix — unchanged from before this prop existed.
+   */
+  index?: number;
   /**
    * Visual scale for this tile. `'default'` (the kiosk's own multi-frame
    * strip in `DesktopCaptureView.tsx`): unchanged from before — small
@@ -80,10 +89,10 @@ export const FrameTile: React.FC<FrameTileProps> = ({
   stream,
   status,
   imagePath,
-  theme = 'dark',
   className,
   mirrored = true,
   size = 'default',
+  index,
 }) => {
   const isLarge = size === 'large';
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -104,39 +113,45 @@ export const FrameTile: React.FC<FrameTileProps> = ({
     }
   }, [stream, label]);
 
+  // Kiosk navy/cyan palette (docs plan "Sửa UI desktop app Looka theo 7 ảnh
+  // mockup" — bước 5 4-cam grid): READY and COMPLETED share the same "green
+  // ready" ring family (kiosk-accent-2) per the mockup's green ready-ring
+  // treatment; CURRENT (actively being captured) uses the cyan accent;
+  // FAILED/MISSING/UNASSIGNED keep their own distinct danger/warning colors
+  // so a broken vs. unmapped camera never looks identical. Status semantics
+  // (which state maps to which color family) are unchanged from before —
+  // only the actual color values moved from the old ad-hoc
+  // emerald/blue/rose/amber/slate palette onto the shared kiosk tokens.
   const ringClass =
-    status === 'COMPLETED'
-      ? 'ring-emerald-500'
+    status === 'COMPLETED' || status === 'READY'
+      ? 'ring-kiosk-accent-2'
       : status === 'CURRENT'
-      ? 'ring-blue-500'
+      ? 'ring-kiosk-accent'
       : status === 'FAILED'
-      ? 'ring-rose-500'
+      ? 'ring-kiosk-danger'
       : status === 'MISSING' || status === 'UNASSIGNED'
-      ? 'ring-amber-500'
-      : status === 'READY'
-      ? 'ring-emerald-700'
-      : 'ring-slate-700';
+      ? 'ring-kiosk-warning'
+      : 'ring-kiosk-border';
 
   const badgeClass =
-    status === 'COMPLETED'
-      ? 'bg-emerald-500/90 text-white'
+    status === 'COMPLETED' || status === 'READY'
+      ? 'bg-kiosk-accent-2/90 text-kiosk-bg'
       : status === 'CURRENT'
-      ? 'bg-blue-500/90 text-white'
+      ? 'bg-kiosk-accent/90 text-kiosk-bg'
       : status === 'FAILED'
-      ? 'bg-rose-500/90 text-white'
+      ? 'bg-kiosk-danger/90 text-white'
       : status === 'MISSING' || status === 'UNASSIGNED'
-      ? 'bg-amber-500/90 text-slate-950'
-      : status === 'READY'
-      ? 'bg-emerald-700/90 text-white'
-      : 'bg-slate-700/90 text-slate-200';
+      ? 'bg-kiosk-warning/90 text-kiosk-bg'
+      : 'bg-kiosk-surface-2/90 text-kiosk-text-muted';
+
+  const showReadyCheck = status === 'READY' || status === 'COMPLETED';
 
   return (
     <div
       className={cn(
-        'relative overflow-hidden rounded-xl ring-2 transition-colors',
+        'relative overflow-hidden rounded-xl ring-2 transition-colors bg-kiosk-surface',
         !isLarge && 'aspect-video',
         ringClass,
-        theme === 'dark' ? 'bg-slate-950' : 'bg-slate-900',
         className
       )}
       data-frame-step-label={label}
@@ -149,6 +164,23 @@ export const FrameTile: React.FC<FrameTileProps> = ({
         className={cn('w-full h-full object-cover', mirrored && 'scale-x-[-1]')}
       />
 
+      {/*
+        Pose-guide outline for the tile actively being captured — a plain
+        dashed circle rather than a real silhouette asset (no such asset
+        exists in this package yet), just enough to draw the eye to where the
+        subject should be centered while this camera is live.
+      */}
+      {status === 'CURRENT' && (
+        <div className="absolute inset-0 z-[5] flex items-center justify-center pointer-events-none">
+          <div
+            className={cn(
+              'aspect-square rounded-full border-2 border-dashed border-kiosk-accent/70 animate-pulse',
+              isLarge ? 'w-[55%]' : 'w-[45%]'
+            )}
+          />
+        </div>
+      )}
+
       <div
         className={cn(
           'absolute inset-x-0 top-0 z-10 flex items-center justify-between gap-1 bg-gradient-to-b from-black/70 to-transparent font-semibold text-white',
@@ -156,6 +188,7 @@ export const FrameTile: React.FC<FrameTileProps> = ({
         )}
       >
         <span className="truncate">
+          {typeof index === 'number' ? `CAM ${index + 1} · ` : ''}
           {label} · {roleLabel}
         </span>
         <span className="truncate opacity-80">{deviceLabel ?? 'Chưa gán camera'}</span>
@@ -163,11 +196,12 @@ export const FrameTile: React.FC<FrameTileProps> = ({
 
       <div
         className={cn(
-          'absolute z-10 rounded-full font-bold uppercase',
-          isLarge ? 'top-2 right-2 px-3 py-1 text-sm sm:text-base' : 'top-1 right-1 px-1.5 py-0.5 text-[9px]',
+          'absolute z-10 rounded-full font-bold uppercase flex items-center',
+          isLarge ? 'top-2 right-2 px-3 py-1 text-sm sm:text-base gap-1.5' : 'top-1 right-1 px-1.5 py-0.5 text-[9px] gap-0.5',
           badgeClass
         )}
       >
+        {showReadyCheck && <Check className={isLarge ? 'w-4 h-4' : 'w-2.5 h-2.5'} strokeWidth={3} />}
         {STATUS_LABEL_VI[status]}
       </div>
 

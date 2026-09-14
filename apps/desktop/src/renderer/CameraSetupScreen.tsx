@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { CAMERA_ROLES, defaultCameraRoleForStepType, type CameraRole, type CaptureStep } from '@face/core';
-import { DEFAULT_PHYSICAL_ANGLES, type PhysicalCameraAngles } from '@face/ui';
+import { Badge, Button, Card, DEFAULT_PHYSICAL_ANGLES, type BadgeVariant, type PhysicalCameraAngles } from '@face/ui';
 
 type CameraRoleMapping = Partial<Record<CameraRole, string>>;
 /** Every role's *effective* physical mounting angle — always fully populated (defaults filled in), unlike the sparse override map this screen saves/loads. */
@@ -21,6 +21,13 @@ const DEFAULT_CB_HELP_VISIBILITY: CbHelpVisibilityState = {
   UP: { visible: false, order: 3 },
   DOWN: { visible: false, order: 4 },
 };
+
+/** Audio-calibration volumes ("Hệ thống âm thanh & loa thông báo") — mirrors preload's/`secrets.ts`'s `AudioVolumeSettings`. Duplicated rather than imported, same convention as every other `faceAPI`-backed setting on this screen. */
+interface AudioVolumeSettings {
+  voicePct: number;
+  alertPct: number;
+}
+const DEFAULT_AUDIO_VOLUME: AudioVolumeSettings = { voicePct: 80, alertPct: 60 };
 
 interface DeviceEntry {
   id: string;
@@ -77,6 +84,41 @@ function deriveNeededRoles(steps: CaptureStep[]): RoleNeed[] {
 }
 
 /**
+ * Plays a short synthesized tone via the Web Audio API, standing in for
+ * "Test Speak"/"Test Beep" — there is no existing voice-prompt/alert audio
+ * asset anywhere in this repo (checked `apps/desktop/` and `packages/` for
+ * `.mp3`/`.wav`/`.ogg`) and adding a real recorded asset is out of scope for
+ * this pass, so a synthesized tone is the least-effort stand-in until a real
+ * voice-prompt asset exists. `kind` picks a distinguishable frequency/
+ * duration pair so the two test buttons are told apart by ear, not just by
+ * label. `volumePct` (0-100) is scaled down (`* 0.3` headroom) so a 100%
+ * setting doesn't blast the kiosk speakers at full gain during a quick test.
+ */
+function playTestTone(kind: 'voice' | 'alert', volumePct: number) {
+  try {
+    const AudioContextCtor: typeof AudioContext | undefined =
+      window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioContextCtor) return;
+    const ctx = new AudioContextCtor();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = kind === 'voice' ? 440 : 880;
+    gain.gain.value = (Math.max(0, Math.min(100, volumePct)) / 100) * 0.3;
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    const durationMs = kind === 'voice' ? 550 : 220;
+    setTimeout(() => {
+      osc.stop();
+      void ctx.close();
+    }, durationMs);
+  } catch (err) {
+    console.error('[CameraSetupScreen] test tone failed:', err);
+  }
+}
+
+/**
  * Camera-to-angle assignment for CB Help — see
  * docs/plans/multi-camera-device-management-discussion.md §3.6 for the
  * 2026-09-05 product decision this screen implements: "Gán camera cho các
@@ -99,6 +141,13 @@ function deriveNeededRoles(steps: CaptureStep[]): RoleNeed[] {
  * already-used camera for a new role *moves* it there (cleared from the role
  * that had it) rather than blocking the change, with a short inline note so
  * the move isn't silent.
+ *
+ * Reskinned (ui-redesign-plan.md, "CameraSetupScreen (cửa sổ riêng)" section)
+ * to the navy/cyan kiosk theme as a 2-column card grid (`RoleCard`, replacing
+ * the old vertical `RoleRow` list), and gained a new "Hệ thống âm thanh & loa
+ * thông báo" section (`AudioVolumeRow`) — all device-enumeration/role-
+ * assignment/save logic below is unchanged, only the render layer and the
+ * new audio-volume state are new.
  */
 export default function CameraSetupScreen() {
   const [devices, setDevices] = useState<DeviceEntry[]>([]);
@@ -135,6 +184,8 @@ export default function CameraSetupScreen() {
   const [cbHelpVisibility, setCbHelpVisibility] = useState<CbHelpVisibilityState>({ ...DEFAULT_CB_HELP_VISIBILITY });
   /** "Lưới 3x3" (2026-09-10) — see secrets.ts's `getGrid3x3Enabled` doc comment. */
   const [grid3x3, setGrid3x3] = useState(false);
+  /** Audio-calibration volumes — new (ui-redesign-plan.md), persisted via `faceAPI.getAudioVolume/setAudioVolume`, independent of the camera settings' "Lưu" button (saved on slider release instead, see `commitAudioVolume`). */
+  const [audioVolume, setAudioVolume] = useState<AudioVolumeSettings>({ ...DEFAULT_AUDIO_VOLUME });
   const streamsRef = useRef<Map<string, MediaStream>>(new Map());
   const videoRefs = useRef<Map<CameraRole, HTMLVideoElement | null>>(new Map());
   const cancelledRef = useRef(false);
@@ -143,6 +194,15 @@ export default function CameraSetupScreen() {
   // without risking a stale read the one time it matters (attaching a
   // just-opened stream to the row of the role it's already assigned to).
   const mappingRef = useRef<CameraRoleMapping>({});
+  // Synchronous mirror of `audioVolume`, read by `commitAudioVolume` (fired
+  // from a slider's onMouseUp/onTouchEnd/onKeyUp handler) so the save always
+  // sees the latest dragged value rather than whatever was captured in the
+  // handler's closure at render time.
+  const audioVolumeRef = useRef<AudioVolumeSettings>(audioVolume);
+
+  useEffect(() => {
+    audioVolumeRef.current = audioVolume;
+  }, [audioVolume]);
 
   useEffect(() => {
     const faceAPI = (window as any).faceAPI;
@@ -160,6 +220,13 @@ export default function CameraSetupScreen() {
       });
     });
     faceAPI?.getGrid3x3Enabled?.().then((v: boolean) => setGrid3x3(!!v));
+    faceAPI?.getAudioVolume?.().then((v: Partial<AudioVolumeSettings> | undefined) => {
+      if (!v) return;
+      setAudioVolume({
+        voicePct: typeof v.voicePct === 'number' ? v.voicePct : DEFAULT_AUDIO_VOLUME.voicePct,
+        alertPct: typeof v.alertPct === 'number' ? v.alertPct : DEFAULT_AUDIO_VOLUME.alertPct,
+      });
+    });
   }, []);
 
   useEffect(() => {
@@ -348,6 +415,11 @@ export default function CameraSetupScreen() {
     setTimeout(() => window.close(), 600);
   };
 
+  /** Persists the audio volume sliders — called on release (mouse/touch/key-up), not on every drag tick, to avoid spamming the IPC/secrets-file write while dragging. Independent of `handleSave`'s "Lưu" button by design (see the `audioVolume` state's own doc comment). */
+  const commitAudioVolume = () => {
+    (window as any).faceAPI?.setAudioVolume?.(audioVolumeRef.current);
+  };
+
   const otherRoles = ROLES.filter((r) => !neededRoles.some((n) => n.role === r));
 
   // Warning banner: a needed role still has no connected camera, or two
@@ -378,25 +450,33 @@ export default function CameraSetupScreen() {
     );
   }
 
+  const connectedNeededCount = neededRoles.filter((n) => {
+    const id = mapping[n.role];
+    return !!id && devices.some((d) => d.id === id);
+  }).length;
+
   return (
-    <div className="w-screen h-screen bg-slate-950 text-slate-100 p-8 overflow-y-auto">
+    <div className="w-screen h-screen bg-kiosk-bg text-kiosk-text p-6 md:p-8 overflow-y-auto">
       <header className="mb-6">
-        <h1 className="text-2xl font-bold">Gán camera cho từng góc chụp</h1>
-        <p className="text-slate-400 mt-1">
-          Mỗi góc chụp cần một camera riêng — chọn camera cho từng góc bằng cách xem preview trực tiếp bên dưới.
-        </p>
-        <p className="text-slate-500 mt-1 text-sm">
-          Chiến dịch chụp đồng thời cần mỗi góc một camera khác nhau; nếu hai góc dùng chung một camera, phiên chụp sẽ
-          bị chặn.
+        <h1 className="text-xl md:text-2xl font-bold tracking-wide">
+          BẢNG CẤU HÌNH &amp; HIỆU CHUẨN THIẾT BỊ NGOẠI VI
+          <span className="block md:inline md:ml-2 text-kiosk-accent text-sm md:text-base font-semibold align-middle">
+            (HARDWARE CONTROL &amp; AUDIO HUB)
+          </span>
+        </h1>
+        <p className="text-kiosk-text-muted mt-2 text-sm">
+          Kiosk Station · Đang kết nối {connectedNeededCount}/{neededRoles.length} Camera &amp; Hệ thống Loa Stereo
         </p>
       </header>
 
       {error && (
-        <div className="mb-6 p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300">{error}</div>
+        <div className="mb-6 p-4 rounded-xl bg-kiosk-danger/10 border border-kiosk-danger/30 text-kiosk-danger">
+          {error}
+        </div>
       )}
 
       {warnings.length > 0 && (
-        <div className="mb-6 p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 space-y-1">
+        <div className="mb-6 p-4 rounded-xl bg-kiosk-warning/10 border border-kiosk-warning/30 text-kiosk-warning space-y-1">
           {warnings.map((w, i) => (
             <p key={i}>{w}</p>
           ))}
@@ -404,74 +484,111 @@ export default function CameraSetupScreen() {
       )}
 
       {moveNotice && (
-        <div className="mb-6 p-3 rounded-xl bg-blue-500/10 border border-blue-500/30 text-blue-300 text-sm">
+        <div className="mb-6 p-3 rounded-xl bg-kiosk-accent/10 border border-kiosk-accent/30 text-kiosk-accent text-sm">
           {moveNotice}
         </div>
       )}
 
-      {devices.length === 0 && !error && <p className="text-slate-500 mb-4">Đang tìm camera...</p>}
+      {devices.length === 0 && !error && <p className="text-kiosk-text-muted mb-4">Đang tìm camera...</p>}
 
-      <div className="space-y-4">
-        {neededRoles.map((need) => (
-          <RoleRow
-            key={need.role}
-            role={need.role}
-            need={need}
-            mapping={mapping}
-            devices={devices}
-            videoRefs={videoRefs}
-            streamsRef={streamsRef}
-            onAssign={assignRole}
-            angles={physicalAngles[need.role]}
-            onAngleChange={handleAngleChange}
-            cbHelpVisibility={cbHelpVisibility[need.role]}
-            onCbHelpVisibilityChange={handleCbHelpVisibilityChange}
-          />
-        ))}
-      </div>
-
-      {otherRoles.length > 0 && (
-        <div className="mt-6">
-          <button
-            onClick={() => setOtherOpen((v) => !v)}
-            className="text-sm text-slate-400 hover:text-slate-200"
-          >
-            {otherOpen ? '▾' : '▸'} Góc khác ({otherRoles.length})
-          </button>
-          {otherOpen && (
-            <div className="mt-3 space-y-4">
-              {otherRoles.map((role) => (
-                <RoleRow
-                  key={role}
-                  role={role}
-                  mapping={mapping}
-                  devices={devices}
-                  videoRefs={videoRefs}
-                  streamsRef={streamsRef}
-                  onAssign={assignRole}
-                  angles={physicalAngles[role]}
-                  onAngleChange={handleAngleChange}
-                  cbHelpVisibility={cbHelpVisibility[role]}
-                  onCbHelpVisibilityChange={handleCbHelpVisibilityChange}
-                />
-              ))}
-            </div>
-          )}
+      <section className="mb-8">
+        <h2 className="text-sm font-semibold tracking-wide text-kiosk-text-muted mb-3">
+          CẤU HÌNH CỤM CAMERA ĐỒNG BỘ ({neededRoles.length} KÊNH GÓC ĐỘ)
+        </h2>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {neededRoles.map((need, idx) => (
+            <RoleCard
+              key={need.role}
+              index={idx + 1}
+              role={need.role}
+              need={need}
+              mapping={mapping}
+              devices={devices}
+              videoRefs={videoRefs}
+              streamsRef={streamsRef}
+              onAssign={assignRole}
+              angles={physicalAngles[need.role]}
+              onAngleChange={handleAngleChange}
+              cbHelpVisibility={cbHelpVisibility[need.role]}
+              onCbHelpVisibilityChange={handleCbHelpVisibilityChange}
+            />
+          ))}
         </div>
-      )}
 
-      <div className="mt-8 pt-6 border-t border-slate-800 space-y-5">
+        {otherRoles.length > 0 && (
+          <div className="mt-5">
+            <button
+              onClick={() => setOtherOpen((v) => !v)}
+              className="text-sm text-kiosk-text-muted hover:text-kiosk-text"
+            >
+              {otherOpen ? '▾' : '▸'} Góc khác ({otherRoles.length})
+            </button>
+            {otherOpen && (
+              <div className="mt-3 grid grid-cols-1 lg:grid-cols-2 gap-4">
+                {otherRoles.map((role, idx) => (
+                  <RoleCard
+                    key={role}
+                    index={neededRoles.length + idx + 1}
+                    role={role}
+                    mapping={mapping}
+                    devices={devices}
+                    videoRefs={videoRefs}
+                    streamsRef={streamsRef}
+                    onAssign={assignRole}
+                    angles={physicalAngles[role]}
+                    onAngleChange={handleAngleChange}
+                    cbHelpVisibility={cbHelpVisibility[role]}
+                    onCbHelpVisibilityChange={handleCbHelpVisibilityChange}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </section>
+
+      <section className="mb-8">
+        <h2 className="text-sm font-semibold tracking-wide text-kiosk-text-muted mb-3">
+          HỆ THỐNG ÂM THANH &amp; LOA THÔNG BÁO (AUDIO &amp; VOICE PROMPTS)
+        </h2>
+        <Card className="divide-y divide-kiosk-border">
+          <AudioVolumeRow
+            label="Giọng nói hướng dẫn sinh viên"
+            value={audioVolume.voicePct}
+            onChange={(v) => {
+              setAudioVolume((prev) => ({ ...prev, voicePct: v }));
+              setSaved(false);
+            }}
+            onCommit={commitAudioVolume}
+            onTest={() => playTestTone('voice', audioVolume.voicePct)}
+            testLabel="Test Speak"
+          />
+          <AudioVolumeRow
+            label="Chuông cảnh báo & âm hoàn tất"
+            value={audioVolume.alertPct}
+            onChange={(v) => {
+              setAudioVolume((prev) => ({ ...prev, alertPct: v }));
+              setSaved(false);
+            }}
+            onCommit={commitAudioVolume}
+            onTest={() => playTestTone('alert', audioVolume.alertPct)}
+            testLabel="Test Beep"
+          />
+        </Card>
+      </section>
+
+      <Card className="p-6 space-y-5">
         <div>
           <label className="flex items-center gap-2 text-sm">
             <input type="checkbox" checked={grid3x3} onChange={(e) => setGrid3x3(e.target.checked)} />
             <span className="font-semibold">Lưới 3x3</span>
-            <span className="text-slate-400">— luôn xếp tối đa 3 camera mỗi hàng khi chụp đồng thời</span>
+            <span className="text-kiosk-text-muted">— luôn xếp tối đa 3 camera mỗi hàng khi chụp đồng thời</span>
           </label>
         </div>
 
         <div>
-          <p className="font-semibold mb-2">Cách chụp</p>
-          <div className="flex gap-4 text-sm">
+          <p className="font-semibold mb-2 text-sm">Cách chụp</p>
+          <div className="flex flex-wrap gap-4 text-sm">
             <label className="flex items-center gap-2">
               <input
                 type="radio"
@@ -491,21 +608,20 @@ export default function CameraSetupScreen() {
           </div>
         </div>
 
-        <div className="flex items-center gap-4">
-          <button
-            onClick={handleSave}
-            className="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 font-semibold"
-          >
+        <div className="flex items-center gap-4 pt-2">
+          <Button onClick={handleSave} size="lg">
             Lưu
-          </button>
-          {saved && <span className="text-emerald-400 text-sm">Đã lưu</span>}
+          </Button>
+          {saved && <span className="text-kiosk-accent-2 text-sm">Đã lưu</span>}
         </div>
-      </div>
+      </Card>
     </div>
   );
 }
 
-interface RoleRowProps {
+interface RoleCardProps {
+  /** 1-based display index for "CAM 01 · ..." — needed-roles cards are numbered first, "Góc khác" cards continue the count. */
+  index: number;
   role: CameraRole;
   need?: RoleNeed;
   mapping: CameraRoleMapping;
@@ -519,8 +635,16 @@ interface RoleRowProps {
   onCbHelpVisibilityChange: (role: CameraRole, patch: Partial<CbHelpCameraVisibility>) => void;
 }
 
-/** One capture-angle row: live preview of whatever camera is currently assigned, plus the `<select>` that assigns it. */
-function RoleRow({
+/**
+ * One capture-angle card: live preview of whatever camera is currently
+ * assigned, the `<select>` that assigns it, mounting-angle inputs, CB Help
+ * visibility, and two calibration-action buttons. Reskinned card-grid layout
+ * (ui-redesign-plan.md, "CameraSetupScreen" section) replacing the old
+ * vertical `RoleRow` list — same props/logic as that component, only the
+ * visual shell changed.
+ */
+function RoleCard({
+  index,
   role,
   need,
   mapping,
@@ -532,36 +656,65 @@ function RoleRow({
   onAngleChange,
   cbHelpVisibility,
   onCbHelpVisibilityChange,
-}: RoleRowProps) {
+}: RoleCardProps) {
   const deviceId = mapping[role] ?? '';
   const connected = !!deviceId && devices.some((d) => d.id === deviceId);
 
+  // "Cân nét tự động (AF)" / "Test Frame" are UI-only placeholder
+  // interactions — there is no real autofocus or frame-test hardware API for
+  // these USB cameras, so clicking either button just shows a transient "Đã
+  // kiểm tra" note (self-clearing after a few seconds) rather than
+  // performing, or claiming to perform, a real check. A genuine
+  // autofocus/frame-test integration is a separate, hardware-dependent
+  // follow-up.
+  const [afNote, setAfNote] = useState<string | null>(null);
+  const [testFrameNote, setTestFrameNote] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!afNote) return;
+    const id = setTimeout(() => setAfNote(null), 2500);
+    return () => clearTimeout(id);
+  }, [afNote]);
+
+  useEffect(() => {
+    if (!testFrameNote) return;
+    const id = setTimeout(() => setTestFrameNote(null), 2500);
+    return () => clearTimeout(id);
+  }, [testFrameNote]);
+
+  const statusVariant: BadgeVariant = !deviceId ? 'neutral' : connected ? 'success' : 'warning';
+  const statusLabel = !deviceId ? 'Chưa gán camera' : connected ? 'Đã kết nối' : 'Mất kết nối';
+
   return (
-    <div className="flex gap-4 rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
-      <video
-        ref={(el) => {
-          videoRefs.current.set(role, el);
-          if (el && deviceId && streamsRef.current.has(deviceId)) el.srcObject = streamsRef.current.get(deviceId)!;
-        }}
-        autoPlay
-        muted
-        playsInline
-        className="w-56 aspect-video rounded-xl bg-black object-cover shrink-0"
-      />
-      <div className="flex-1 min-w-0">
-        <p className="font-semibold">
-          {ROLE_LABEL[role]}
+    <Card className="p-4">
+      <div className="relative rounded-xl overflow-hidden bg-black aspect-video">
+        <video
+          ref={(el) => {
+            videoRefs.current.set(role, el);
+            if (el && deviceId && streamsRef.current.has(deviceId)) el.srcObject = streamsRef.current.get(deviceId)!;
+          }}
+          autoPlay
+          muted
+          playsInline
+          className="w-full h-full object-cover"
+        />
+        <Badge variant={statusVariant} className="absolute top-2 right-2">
+          {statusLabel}
+        </Badge>
+      </div>
+
+      <div className="mt-3">
+        <p className="font-semibold text-sm tracking-wide">
+          CAM {String(index).padStart(2, '0')} · {ROLE_LABEL[role].toUpperCase()}
           {need && need.stepTypes.length > 0 && (
-            <span className="ml-2 text-xs font-normal text-slate-400">({need.stepTypes.join(', ')})</span>
+            <span className="ml-2 text-xs font-normal text-kiosk-text-muted">({need.stepTypes.join(', ')})</span>
           )}
         </p>
-        <p className={`mt-1 text-xs ${connected ? 'text-emerald-400' : 'text-amber-400'}`}>
-          {!deviceId ? 'Chưa gán camera' : connected ? 'Đã kết nối' : 'Camera đã gán bị mất kết nối'}
-        </p>
+
         <select
           value={deviceId}
           onChange={(e) => onAssign(role, e.target.value)}
-          className="mt-2 w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm"
+          className="mt-2 w-full bg-kiosk-bg border border-kiosk-border rounded-lg px-3 py-2 text-sm text-kiosk-text"
         >
           <option value="">Chưa gán</option>
           {deviceId && !connected && <option value={deviceId}>Camera đã gán (mất kết nối)</option>}
@@ -575,7 +728,8 @@ function RoleRow({
             );
           })}
         </select>
-        <div className="mt-2 flex items-center gap-3 text-xs text-slate-400">
+
+        <div className="mt-3 flex items-center gap-3 text-xs text-kiosk-text-muted">
           <span className="shrink-0">Góc lắp camera</span>
           <label className="flex items-center gap-1">
             yaw
@@ -584,7 +738,7 @@ function RoleRow({
               step={1}
               value={angles.yaw}
               onChange={(e) => onAngleChange(role, 'yaw', Number(e.target.value))}
-              className="w-16 bg-slate-950 border border-slate-700 rounded px-2 py-1 text-slate-200"
+              className="w-16 bg-kiosk-bg border border-kiosk-border rounded px-2 py-1 text-kiosk-text"
             />
             °
           </label>
@@ -595,12 +749,13 @@ function RoleRow({
               step={1}
               value={angles.pitch}
               onChange={(e) => onAngleChange(role, 'pitch', Number(e.target.value))}
-              className="w-16 bg-slate-950 border border-slate-700 rounded px-2 py-1 text-slate-200"
+              className="w-16 bg-kiosk-bg border border-kiosk-border rounded px-2 py-1 text-kiosk-text"
             />
             °
           </label>
         </div>
-        <div className="mt-2 flex items-center gap-3 text-xs text-slate-400">
+
+        <div className="mt-3 flex items-center gap-3 text-xs text-kiosk-text-muted">
           <label className="flex items-center gap-1.5">
             <input
               type="checkbox"
@@ -617,12 +772,62 @@ function RoleRow({
                 step={1}
                 value={cbHelpVisibility.order}
                 onChange={(e) => onCbHelpVisibilityChange(role, { order: Number(e.target.value) })}
-                className="w-14 bg-slate-950 border border-slate-700 rounded px-2 py-1 text-slate-200"
+                className="w-14 bg-kiosk-bg border border-kiosk-border rounded px-2 py-1 text-kiosk-text"
               />
             </label>
           )}
         </div>
+
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          <Button type="button" variant="outline" size="sm" onClick={() => setAfNote('Đã kiểm tra')}>
+            Cân nét tự động (AF)
+          </Button>
+          <Button type="button" variant="outline" size="sm" onClick={() => setTestFrameNote('Đã kiểm tra')}>
+            Test Frame
+          </Button>
+          {afNote && <span className="text-xs text-kiosk-accent-2">AF: {afNote}</span>}
+          {testFrameNote && <span className="text-xs text-kiosk-accent-2">Frame: {testFrameNote}</span>}
+        </div>
       </div>
+    </Card>
+  );
+}
+
+interface AudioVolumeRowProps {
+  label: string;
+  value: number;
+  onChange: (value: number) => void;
+  /** Fired on slider release (mouse/touch/key up) — persists via `faceAPI.setAudioVolume`, not on every drag tick. */
+  onCommit: () => void;
+  onTest: () => void;
+  testLabel: string;
+}
+
+/** One audio-calibration row: label, 0-100% volume slider, and a test-tone button. */
+function AudioVolumeRow({ label, value, onChange, onCommit, onTest, testLabel }: AudioVolumeRowProps) {
+  return (
+    <div className="p-5 flex flex-col md:flex-row md:items-center gap-4">
+      <div className="flex-1 min-w-0">
+        <p className="font-medium text-sm">{label}</p>
+        <div className="mt-2 flex items-center gap-3">
+          <input
+            type="range"
+            min={0}
+            max={100}
+            step={1}
+            value={value}
+            onChange={(e) => onChange(Number(e.target.value))}
+            onMouseUp={onCommit}
+            onTouchEnd={onCommit}
+            onKeyUp={onCommit}
+            className="w-full accent-kiosk-accent"
+          />
+          <span className="w-12 text-right text-sm tabular-nums text-kiosk-text-muted">{value}%</span>
+        </div>
+      </div>
+      <Button type="button" variant="secondary" size="sm" onClick={onTest} className="shrink-0">
+        {testLabel}
+      </Button>
     </div>
   );
 }

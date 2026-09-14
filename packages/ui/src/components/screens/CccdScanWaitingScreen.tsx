@@ -1,37 +1,39 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
+import type { StudentSubjectInfo } from '../../lib/CaptureSink.js';
+import { cn } from '../../lib/utils.js';
+import { Badge } from '../ui/badge.js';
+import { Button } from '../ui/button.js';
+import { Card, CardContent, CardHeader, CardTitle } from '../ui/card.js';
+import { StudentProfileCard } from './StudentProfileCard.js';
 
 /**
- * Pre-session "quét thẻ CCCD" overlay (2026-09-09) — the kiosk's full
- * replacement for `StudentIdEntryScreen`'s manual "nhập mã sinh viên" form,
- * per the product decision that CCCD scanning replaces manual entry
- * outright rather than the two coexisting (see `FaceCaptureApp.tsx`'s own
- * doc comment on `handleCccdScan` for why `StudentIdEntryScreen` itself is
- * kept, unmodified, for the non-kiosk/legacy path that has no scanner
- * attached — `apps/web`).
+ * Full-screen "BƯỚC 2: CHECK-IN & ĐỐI SOÁT HỒ SƠ" step (ui-redesign-plan.md,
+ * "Bước 4 — Check-in & đối soát hồ sơ" — mockup #5), 2026-09-14 restyle.
  *
- * No form here: there is nothing for the operator to submit manually — the
- * scan-monitor corner below (`ScanMonitorCorner`) listens for a dedicated
- * barcode/QR scanner reading the card and, once it gets a clean read, asks
- * the kiosk's main process whether that citizen id matches anyone in the
- * external student roster (see `onScanResult`'s own doc comment).
- * 2026-09-10: replaced the original bridged-phone-camera + Tesseract OCR
- * corner outright (removed, not toggled — a dedicated hardware scanner is
- * now required on every kiosk) — see `ScanMonitorCorner`'s own doc comment
- * for how a physical scanner is actually read.
+ * Was previously a non-blocking `absolute inset-0 pointer-events-none`
+ * overlay with two small floating islands over a live camera preview — see
+ * git history for that version if it's ever needed for reference. This is
+ * now a fully opaque, full-bleed 2-column step screen instead (confirmed
+ * safe: `ScanMonitorCorner`'s scanner listener below is a `document`-level
+ * keydown listener, not something that ever needed click-through/
+ * `pointer-events-none` to keep working — that was only ever about letting
+ * clicks reach the camera-preview toolbar underneath, which this step no
+ * longer needs to expose). Mounted inside the shared `KioskShell`'s content
+ * area by `FaceCaptureApp.tsx` (unchanged `awaitingStudent` gating), so it
+ * does not draw its own header/clock/brand bar.
  *
- * The wrapper below is `pointer-events-none` (only the two islands inside
- * it — the status card and the scan-monitor corner — are
- * `pointer-events-auto`) — clicks elsewhere fall through to whatever the
- * underlying capture view renders, INCLUDING its "Bắt đầu"/"Màn hình mở
- * rộng"/"Cài đặt camera" controls. That's deliberate, not an oversight
- * (2026-09-09, reverted from a brief attempt at blocking the whole
- * overlay): the toolbar controls must stay reachable at any time regardless
- * of identification state (operator/admin controls, not student-facing),
- * and "Bắt đầu" starting a session before a student is identified is
- * prevented at the function level instead — see `handleStartWorkflow`'s own
- * `fromIdentification` doc comment in `FaceCaptureApp.tsx` — so blocking
- * clicks here was never actually necessary for that, and blocking the
- * toolbar along with it was collateral damage worth avoiding.
+ * Left column: CCCD-scan status (this screen's original purpose, logic
+ * unchanged — see `ScanMonitorCorner` below) plus, as of this redesign, a
+ * manual "nhập mã sinh viên" fallback field and QR/VNeID stub buttons,
+ * because the approved Bước-4 mockup shows both on the same screen. This
+ * supersedes the narrower 2026-09-09 decision described further down (manual
+ * entry "replaced outright" on the kiosk/campaign path) — flagged here since
+ * that was a deliberate product call at the time; the manual field only
+ * renders when a caller actually supplies `onManualSubmit` for it.
+ * Right column: the matched student's profile (`StudentProfileCard`) once a
+ * scan resolves FOUND, otherwise a waiting placeholder. Only the CCCD-scan
+ * path can populate this today — see `onManualSubmit`'s own doc comment for
+ * why the manual-entry fallback can't (yet).
  */
 export interface CccdScanWaitingScreenProps {
   /** True while a scanned CCCD is being looked up against the roster, or during the post-FOUND greeting wait — same "form stays disabled" meaning `StudentIdEntryScreen.submitting` already has. */
@@ -40,28 +42,146 @@ export interface CccdScanWaitingScreenProps {
   error: string | null;
   /** Forwarded straight through to `ScanMonitorCorner` — see that component's own `onScanResult` doc comment. */
   onScanResult: (result: CccdRosterLookupResult) => void;
+  /**
+   * Manual "nhập mã sinh viên" fallback for this same screen (2026-09-14
+   * redesign — see this file's top doc comment). `undefined` skips
+   * rendering the manual-entry section entirely rather than showing a dead
+   * form; `FaceCaptureApp.tsx` wires this to the exact same
+   * `handleStudentSubmit` callback the legacy `StudentIdEntryScreen` path
+   * already uses.
+   *
+   * That function's own signature is `(code: string) => void` — it does not
+   * hand back the matched record the way `onScanResult` does, so a code
+   * entered through this field starts a session exactly like today but
+   * cannot (yet) populate the right-column `StudentProfileCard` the way a
+   * CCCD scan can; only the scan path has the matched record available
+   * locally before forwarding it up (see `handleScanResult` below).
+   */
+  onManualSubmit?: (code: string) => void;
 }
 
-export function CccdScanWaitingScreen({ submitting, error, onScanResult }: CccdScanWaitingScreenProps) {
+export function CccdScanWaitingScreen({
+  submitting,
+  error,
+  onScanResult,
+  onManualSubmit,
+}: CccdScanWaitingScreenProps) {
+  const [foundSubject, setFoundSubject] = useState<StudentSubjectInfo | null>(null);
+  const [manualCode, setManualCode] = useState('');
+  const manualInputRef = useRef<HTMLInputElement>(null);
+
+  // The scan corner already has the matched roster record in hand before
+  // forwarding it up via `onScanResult` — captured here, purely for local
+  // display in the right column, without changing that callback's contract
+  // (the parent still receives the exact same `CccdRosterLookupResult`).
+  const handleScanResult = (result: CccdRosterLookupResult) => {
+    setFoundSubject(result.found ? cccdRecordToSubject(result.record) : null);
+    onScanResult(result);
+  };
+
+  const handleManualSubmit = (e: FormEvent) => {
+    e.preventDefault();
+    const trimmed = manualCode.trim();
+    if (!trimmed || submitting || !onManualSubmit) return;
+    onManualSubmit(trimmed);
+  };
+
+  const focusManualInput = () => manualInputRef.current?.focus();
+
   return (
-    <div className="absolute inset-0 z-[150] flex flex-col items-center justify-end pb-16 px-8 text-center pointer-events-none">
-      <ScanMonitorCorner paused={submitting} onScanResult={onScanResult} />
-      <div className="pointer-events-auto flex w-full max-w-sm flex-col items-center gap-4 rounded-2xl border border-slate-700/60 bg-slate-950/70 backdrop-blur-md px-6 py-6 shadow-2xl">
-        <span className="text-4xl">🪪</span>
-        <h2 className="text-xl font-semibold">Quét thẻ căn cước công dân</h2>
-        <p className="text-sm text-slate-300">
-          {submitting ? 'Đang kiểm tra thông tin...' : 'Vui lòng đưa thẻ CCCD vào đầu đọc để bắt đầu phiên chụp.'}
-        </p>
-        {submitting && (
-          <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-800">
-            <div className="h-full w-1/3 animate-pulse rounded-full bg-sky-500" />
-          </div>
-        )}
-        {error && (
-          <div className="w-full rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-300">
-            {error}
-          </div>
-        )}
+    <div className="absolute inset-0 z-[150] flex flex-col overflow-y-auto bg-kiosk-bg text-kiosk-text">
+      <div className="shrink-0 px-8 pt-6 pb-2">
+        <div className="text-xs font-bold uppercase tracking-[0.2em] text-kiosk-accent">Bước 2</div>
+        <h1 className="text-2xl font-bold">Check-in &amp; đối soát hồ sơ</h1>
+      </div>
+
+      <div className="grid flex-1 grid-cols-1 gap-6 px-8 pb-8 lg:grid-cols-2">
+        {/* Left column — lookup panel */}
+        <div className="flex flex-col gap-4">
+          <Card variant="panel">
+            <CardHeader>
+              <CardTitle>Quét thẻ căn cước công dân</CardTitle>
+            </CardHeader>
+            <CardContent className="flex flex-col items-center gap-4 text-center">
+              <span className="text-4xl" aria-hidden>
+                🪪
+              </span>
+              <p className="text-sm text-kiosk-text-muted">
+                {submitting
+                  ? 'Đang kiểm tra thông tin...'
+                  : 'Vui lòng đưa thẻ CCCD vào đầu đọc để bắt đầu phiên chụp.'}
+              </p>
+              {submitting && (
+                <div className="h-1.5 w-full overflow-hidden rounded-full bg-kiosk-surface-2">
+                  <div className="h-full w-1/3 animate-pulse rounded-full bg-kiosk-accent" />
+                </div>
+              )}
+              {error && (
+                <div className="w-full rounded-lg border border-kiosk-danger/40 bg-kiosk-danger/10 px-4 py-3 text-sm text-kiosk-danger">
+                  {error}
+                </div>
+              )}
+              <ScanMonitorCorner paused={submitting} onScanResult={handleScanResult} />
+            </CardContent>
+          </Card>
+
+          {onManualSubmit && (
+            <Card variant="panel">
+              <CardHeader>
+                <CardTitle>Hoặc nhập mã sinh viên thủ công</CardTitle>
+              </CardHeader>
+              <CardContent className="flex flex-col gap-3">
+                <div className="flex flex-wrap gap-2">
+                  {/*
+                    Stubs: no QR/VNeID integration exists yet, so these just
+                    focus the manual-entry field below rather than fabricating
+                    a scan flow that doesn't exist (honest placeholder per
+                    the Bước-4 spec).
+                  */}
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={focusManualInput}
+                    title="Chưa có tích hợp quét QR — tạm chuyển sang nhập mã thủ công"
+                  >
+                    Quét QR
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={focusManualInput}
+                    title="Chưa có tích hợp VNeID — tạm chuyển sang nhập mã thủ công"
+                  >
+                    VNeID
+                  </Button>
+                  <Button type="button" variant="outline" size="sm" onClick={focusManualInput}>
+                    Nhập mã thủ công
+                  </Button>
+                </div>
+                <form onSubmit={handleManualSubmit} className="flex flex-col gap-3 sm:flex-row">
+                  <input
+                    ref={manualInputRef}
+                    value={manualCode}
+                    onChange={(e) => setManualCode(e.target.value)}
+                    placeholder="Mã sinh viên"
+                    disabled={submitting}
+                    className="flex-1 rounded-lg border border-kiosk-border bg-kiosk-surface-2 px-4 py-3 text-base text-kiosk-text placeholder:text-kiosk-text-muted focus:outline-none focus:ring-2 focus:ring-kiosk-accent/60 disabled:opacity-50"
+                  />
+                  <Button type="submit" size="lg" disabled={submitting || !manualCode.trim()}>
+                    {submitting ? 'Đang xử lý...' : 'Xác nhận'}
+                  </Button>
+                </form>
+              </CardContent>
+            </Card>
+          )}
+        </div>
+
+        {/* Right column — matched student profile */}
+        <div className="flex flex-col">
+          <StudentProfileCard subject={foundSubject} />
+        </div>
       </div>
     </div>
   );
@@ -103,6 +223,28 @@ export interface CccdRosterLookupRecord {
 export type CccdRosterLookupResult = { found: true; record: CccdRosterLookupRecord } | { found: false };
 
 /**
+ * Maps a roster record onto `StudentSubjectInfo` — kept as a local, private
+ * mirror of the exact same mapping `FaceCaptureApp.tsx`'s `handleCccdScan`
+ * does (this package has no shared helper for it, and that function's
+ * mapping is not exported). Used only for this screen's own right-column
+ * preview; `FaceCaptureApp.tsx` still builds its own `StudentSubjectInfo`
+ * independently from the raw `CccdRosterLookupResult` this component forwards
+ * unchanged via `onScanResult`, so a mismatch here can never affect what
+ * actually gets recorded for the session.
+ */
+function cccdRecordToSubject(record: CccdRosterLookupRecord): StudentSubjectInfo {
+  return {
+    subjectCode: record.studentCode ?? '',
+    subjectName: record.fullName ?? '',
+    className: record.className ?? '',
+    major: record.majorName ?? '',
+    academicYear: record.courseYear ?? '',
+    identityNumber: record.identityNumber,
+    userCode: record.userCode,
+  };
+}
+
+/**
  * Pulls the CCCD number out of a decoded QR payload. A Vietnamese chip-based
  * CCCD's front-side QR code encodes one pipe-delimited string:
  * `<số CCCD>|<số CMND cũ, có thể rỗng>|<họ tên>|<ngày sinh>|<giới tính>|<địa chỉ>|<ngày cấp>`
@@ -119,10 +261,14 @@ export function extractCitizenIdFromQrPayload(raw: string): string | null {
 }
 
 /**
- * Bottom-right "CCCD scanner" status corner — 2026-09-10, replaces the
- * previous bridged-phone-camera + Tesseract OCR corner outright (a
- * dedicated hardware scanner is now required on every kiosk, not an
- * optional/toggleable alternative).
+ * "Trạng thái đầu đọc" status strip — 2026-09-10, replaces the previous
+ * bridged-phone-camera + Tesseract OCR corner outright (a dedicated hardware
+ * scanner is now required on every kiosk, not an optional/toggleable
+ * alternative). 2026-09-14: un-cornered — was a fixed `absolute bottom-6
+ * right-6` floating box over a live camera preview; now sits inline in the
+ * left column's scan card instead, since the screen around it is no longer
+ * a see-through overlay. Its event-handling/timers below are UNCHANGED by
+ * that move — only the returned JSX's layout classes are.
  *
  * Every commercial USB/Bluetooth barcode/QR scanner emulates a keyboard by
  * default ("HID keyboard wedge" mode — no driver or SDK needed): scanning a
@@ -137,7 +283,8 @@ export function extractCitizenIdFromQrPayload(raw: string): string | null {
  * false scan. Belt-and-suspenders: any keystroke while a real
  * `<input>`/`<textarea>`/contenteditable element has focus is ignored
  * outright, so an operator legitimately typing into a real form elsewhere
- * on the page is never mistaken for a scan.
+ * on the page (including this same screen's own manual-entry field) is
+ * never mistaken for a scan.
  *
  * `paused` (true while the parent's handling of a previous result —
  * greeting, session start — is still in flight, i.e. `submitting`) stops
@@ -246,42 +393,26 @@ function ScanMonitorCorner({
   }
 
   return (
-    <div className="pointer-events-auto absolute bottom-6 right-6 w-44 overflow-hidden rounded-xl border border-slate-700/60 bg-slate-950/90 shadow-xl">
-      <div className="flex flex-col items-center justify-center gap-1 px-2 py-4 text-center">
-        <span className="text-lg">🪪</span>
-        <span className="text-[10px] text-slate-500">Máy quét mã CCCD</span>
-      </div>
-
-      {phase === 'stable' && stableCitizenId && (
-        <div className="bg-sky-600/95 px-2 py-1 text-center text-[10px] font-semibold text-white">
-          {stableCitizenId}
-        </div>
-      )}
-      {phase === 'checking' && (
-        <div className="bg-slate-900/90 px-2 py-1 text-center text-[10px] text-slate-200">Đang kiểm tra...</div>
-      )}
-      {phase === 'found' && (
-        <div className="bg-emerald-600/95 px-2 py-1 text-center text-[10px] font-semibold text-white">
-          Đã tìm thấy ✓
-        </div>
-      )}
-      {phase === 'not-found' && (
-        <div className="bg-amber-600/95 px-2 py-1 text-center text-[10px] font-semibold text-white">
-          Không có trong danh sách
-        </div>
-      )}
+    <div className="flex w-full items-center justify-center gap-2 border-t border-kiosk-border pt-3">
+      <span className="text-xs text-kiosk-text-muted">Trạng thái đầu đọc:</span>
+      {phase === 'idle' && !statusText && <Badge variant="neutral">Sẵn sàng</Badge>}
+      {phase === 'stable' && stableCitizenId && <Badge variant="info">{stableCitizenId}</Badge>}
+      {phase === 'checking' && <Badge variant="neutral">Đang kiểm tra...</Badge>}
+      {phase === 'found' && <Badge variant="success">Đã tìm thấy ✓</Badge>}
+      {phase === 'not-found' && <Badge variant="warning">Không có trong danh sách</Badge>}
       {phase === 'check-error' && (
         <button
           type="button"
           onClick={retryAfterCheckError}
-          className="w-full bg-rose-600/95 px-2 py-1 text-center text-[10px] font-semibold text-white"
+          className={cn(
+            'rounded-full px-2.5 py-1 text-xs font-medium',
+            'bg-kiosk-danger/15 text-kiosk-danger ring-1 ring-kiosk-danger/30 hover:bg-kiosk-danger/25'
+          )}
         >
           Lỗi kiểm tra — chạm để quét lại
         </button>
       )}
-      {phase === 'idle' && statusText && (
-        <div className="bg-slate-950/80 px-2 py-1 text-center text-[10px] text-slate-300">{statusText}</div>
-      )}
+      {phase === 'idle' && statusText && <Badge variant="neutral">{statusText}</Badge>}
     </div>
   );
 }

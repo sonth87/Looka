@@ -27,6 +27,12 @@ import { computeEffectiveStatus } from '../utils/campaign-status.util';
  * Effective-status is checked first: even an already-APPROVED member can't
  * fetch a campaign's config while it's UPCOMING/EXPIRED/PAUSED/CLOSED — an
  * approval never expires the "campaign must actually be open" requirement.
+ *
+ * `isAdmin` bypasses everything above (2026-09-14, assignment pivot —
+ * admins always capture/operate, no membership needed), checked before the
+ * campaign is even looked up. Prior to this the guard had no admin bypass
+ * at all — an admin without a personal `campaign_members` row would 403
+ * here just like anyone else, which is the gap this closes.
  */
 @Injectable()
 export class CampaignMemberGuard implements CanActivate {
@@ -37,6 +43,9 @@ export class CampaignMemberGuard implements CanActivate {
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const req = context.switchToHttp().getRequest<Request>();
+
+    if (req.user?.isAdmin) return true;
+
     const rawCampaignId = req.params.id ?? req.params.campaignId;
     const campaignId = Array.isArray(rawCampaignId)
       ? rawCampaignId[0]

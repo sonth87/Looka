@@ -139,4 +139,11 @@ describe('CampaignMemberGuard', () => {
     );
     expect(campaignService.findCampaignEntityOrFail).not.toHaveBeenCalled();
   });
+
+  test('allows an admin unconditionally — no campaign/membership lookup at all, even for a campaign that is not OPEN and with no membership row', async () => {
+    const req = { params: { id: 'c2' }, user: { id: 'u1', isAdmin: true } };
+    await expect(guard.canActivate(contextWithReq(req))).resolves.toBe(true);
+    expect(campaignService.findCampaignEntityOrFail).not.toHaveBeenCalled();
+    expect(campaignMemberService.findMembership).not.toHaveBeenCalled();
+  });
 });
