@@ -36,7 +36,10 @@ export class User extends BaseEntity {
   displayName?: string | null;
 
   @Column('boolean', { default: false, name: 'is_admin' })
-  @ApiProperty({ description: 'Có quyền quản trị CMS (campaign/thiết bị/duyệt tài khoản) hay không' })
+  @ApiProperty({
+    description:
+      'Có quyền quản trị CMS (campaign/thiết bị/duyệt tài khoản) hay không',
+  })
   isAdmin: boolean;
 
   /**
@@ -48,10 +51,52 @@ export class User extends BaseEntity {
    * gates the *campaign/device* CMS area specifically).
    */
   @Column('jsonb', { default: () => "'[]'", name: 'roles' })
-  @ApiProperty({ description: 'Vai trò ứng dụng (VD: REVIEWER)', type: [String] })
+  @ApiProperty({
+    description: 'Vai trò ứng dụng (VD: REVIEWER)',
+    type: [String],
+  })
   roles: string[];
 
   @Column('timestamptz', { nullable: true, name: 'last_login_at' })
   @ApiPropertyOptional({ description: 'Lần đăng nhập gần nhất' })
   lastLoginAt?: Date | null;
+
+  // Profile fields added 2026-09-14 for the "Người dùng & phân quyền"
+  // screen (cms-8-screens-api-plan.md §2.8, migration
+  // 1810000000000-UsersProfileFields.ts). `modules/identity` reads/writes
+  // these via `@InjectRepository(User)` — it does not yet own this entity
+  // file (that extraction is backend-layering-plan.md §6 Giai đoạn 3), it
+  // just adds columns to the table `SsoAuthGuard.upsertUser()` still
+  // manages the SSO-sourced half of.
+  @Column('varchar', { length: 255, nullable: true })
+  @ApiPropertyOptional({ description: 'Chức danh' })
+  title?: string | null;
+
+  @Column('varchar', { length: 50, nullable: true, unique: true })
+  @ApiPropertyOptional({ description: 'Mã nội bộ, chỉ có ở người thêm tay' })
+  code?: string | null;
+
+  @Column('varchar', { length: 20, nullable: true })
+  @ApiPropertyOptional({ description: 'Số điện thoại' })
+  phone?: string | null;
+
+  @Column('uuid', { nullable: true, name: 'avatar_fs_file_id' })
+  @ApiPropertyOptional({ description: 'Id ảnh thẻ trên file-service, nếu có' })
+  avatarFsFileId?: string | null;
+
+  /** `ACTIVE` | `DISABLED` — a disabled account still passes `SsoAuthGuard` (SSO itself doesn't know) but should be blocked at `PermissionsGuard`/application level; wiring that check is a follow-up, this column only records the state today. */
+  @Column('varchar', { length: 10, default: 'ACTIVE' })
+  @ApiProperty({
+    description: 'ACTIVE hoặc DISABLED',
+    enum: ['ACTIVE', 'DISABLED'],
+  })
+  status: 'ACTIVE' | 'DISABLED';
+
+  /** `SSO` (upserted by login) | `MANUAL` (added via CMS, `sso_user_code` is a synthetic `MANUAL:<uuid>` placeholder until a real SSO login on the same email is wired to merge — see `create-user.handler.ts`'s own doc comment) | `SYNC` (from `POST /v1/users/sync`, D-Q10). */
+  @Column('varchar', { length: 10, default: 'SSO' })
+  @ApiProperty({
+    description: 'SSO, MANUAL, hoặc SYNC',
+    enum: ['SSO', 'MANUAL', 'SYNC'],
+  })
+  source: 'SSO' | 'MANUAL' | 'SYNC';
 }

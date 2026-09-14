@@ -8,6 +8,11 @@ import { SharedModule } from '@app/modules/shared/shared.module';
 import { DeviceManagementModule } from '@app/modules/device-management/device-management.module';
 import { DeviceExpiryMiddleware } from '@app/modules/device-management/middlewares/device-expiry.middleware';
 import { PhotoReviewModule } from '@app/modules/photo-review/photo-review.module';
+import { IdentityModule } from '@app/modules/identity/identity.module';
+import { WorkflowModule } from '@app/modules/workflow/workflow.module';
+import { StatsModule } from '@app/modules/stats/stats.module';
+import { CardTemplateModule } from '@app/modules/card-template/card-template.module';
+import { PrintModule } from '@app/modules/print/print.module';
 import { FoundationModule } from '@app/shared/foundation.module';
 import {
   MiddlewareConsumer,
@@ -37,6 +42,11 @@ import { AppController } from './app.controller';
     CaptureModule,
     DeviceManagementModule,
     PhotoReviewModule,
+    IdentityModule,
+    WorkflowModule,
+    StatsModule,
+    CardTemplateModule,
+    PrintModule,
   ],
   controllers: [AppController],
   providers: [ApiKeyMiddleware, DeviceExpiryMiddleware],

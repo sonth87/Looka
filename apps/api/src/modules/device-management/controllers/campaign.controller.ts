@@ -3,6 +3,9 @@ import {
   ApiResponseDecorator,
 } from '@app/shared/http/api-response.decorator';
 import { SsoAuthGuard } from '@app/shared/auth/index';
+import { Pagination } from '@app/shared/http/pagination';
+import { PermissionsGuard } from '@app/modules/identity/presentation/guards/permissions.guard';
+import { RequirePermission } from '@app/modules/identity/presentation/guards/require-permission.decorator';
 import {
   Body,
   Controller,
@@ -24,6 +27,7 @@ import {
 import {
   CreateCampaignDto,
   GetCampaignsTimeseriesQueryDto,
+  ListCampaignsQueryDto,
   UpdateCampaignDto,
 } from '../dto';
 import { CampaignService } from '../services/campaign.service';
@@ -34,6 +38,15 @@ import { DeviceEventService } from '../services/device-event.service';
  * CMS. Moved from the shared `x-api-key` to `SsoAuthGuard` as part of the
  * 2026-09-07 decision to retire api-key from CMS/admin surfaces now that the
  * CMS has real SSO login (docs/LOGIN.md).
+ *
+ * Create/update/delete gained `PermissionsGuard` on 2026-09-11
+ * (cms-8-screens-api-plan.md §7 I-Q — "any authenticated SSO user could
+ * delete a campaign", since this controller previously had only
+ * `SsoAuthGuard`). `isAdmin` accounts are unaffected (the guard's fast
+ * path); everyone else needs `campaign:write`/`campaign:delete` granted
+ * via a role (`modules/identity`). Read routes (list/get/stats) are
+ * deliberately left as `SsoAuthGuard`-only, unchanged — narrowing those
+ * too is a separate product decision, not bundled into this fix.
  */
 @Controller({ path: 'campaigns', version: '1' })
 @ApiTags('device-management')
@@ -46,6 +59,8 @@ export class CampaignController {
   ) {}
 
   @Post()
+  @UseGuards(PermissionsGuard)
+  @RequirePermission('campaign:write', 'Tạo đợt chụp')
   @ApiOperation({
     summary:
       'Create a campaign — a named group of devices sharing one expiry/consent/capture config',
@@ -55,11 +70,27 @@ export class CampaignController {
     return this.campaignService.createCampaign(dto);
   }
 
+  /**
+   * §9.1 backward-compat rule 6: returns the legacy plain array (no
+   * filters) when `page` is omitted, and only switches to `{items, meta}`
+   * — with the new `status`/`workflowId`/`from`/`to`/`q` filters and
+   * `progress` — once the caller opts in by passing `page`. See
+   * `ListCampaignsQueryDto`'s own doc comment for why `page` has no default
+   * value here (unlike every other paginated list in this codebase).
+   */
   @Get()
-  @ApiOperation({ summary: 'List campaigns' })
+  @ApiOperation({
+    summary:
+      'List campaigns — plain array if `page` is omitted (legacy), paginated+filtered otherwise',
+  })
   @ApiResponseArrayDecorator(CampaignDao)
-  listCampaigns(): Promise<CampaignDao[]> {
-    return this.campaignService.findAllCampaigns();
+  listCampaigns(
+    @Query() query: ListCampaignsQueryDto,
+  ): Promise<CampaignDao[] | Pagination<CampaignDao>> {
+    if (query.page === undefined) {
+      return this.campaignService.findAllCampaigns();
+    }
+    return this.campaignService.listCampaignsPaginated(query);
   }
 
   /**
@@ -120,6 +151,8 @@ export class CampaignController {
    * duplicated onto the device row (see the service's own doc comment).
    */
   @Patch(':id')
+  @UseGuards(PermissionsGuard)
+  @RequirePermission('campaign:write', 'Sửa đợt chụp')
   @ApiOperation({
     summary: 'Update a campaign (expiry, consent, capture config)',
   })
@@ -139,6 +172,8 @@ export class CampaignController {
    * orphaned — both surprising enough to refuse rather than silently do).
    */
   @Delete(':id')
+  @UseGuards(PermissionsGuard)
+  @RequirePermission('campaign:delete', 'Xóa đợt chụp')
   @ApiOperation({
     summary:
       'Delete a campaign — refused with 409 if it still has any devices or capture sessions attached',

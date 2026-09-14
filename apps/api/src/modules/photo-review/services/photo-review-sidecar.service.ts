@@ -120,11 +120,50 @@ export class PhotoReviewSidecarService {
 
   private baseUrl(): string {
     return (
-      this.configService.get<string>('PYTHON_AI_BASE_URL') ?? 'http://127.0.0.1:8321'
+      this.configService.get<string>('PYTHON_AI_BASE_URL') ??
+      'http://127.0.0.1:8321'
     ).replace(/\/$/, '');
   }
 
-  async cardPhoto(input: SidecarCardPhotoInput): Promise<SidecarCardPhotoResult> {
+  /**
+   * `GET /api/v1/health` reachability probe for `AppController`'s
+   * consolidated health check (I-Q9) — deliberately never throws (a down
+   * sidecar is a REPORTED fact, not a request failure) and does not reuse
+   * `postJson` (that helper is POST-only and throws `SidecarError`, the
+   * wrong shape for a check meant to describe rather than propagate a
+   * failure). `modelsLoaded`/raw body are passed through as-is so the I-Q10
+   * mock-vs-real distinction (`model_family`) stays visible in the health
+   * payload without this method needing to know that flag's rules itself.
+   */
+  async health(): Promise<{
+    reachable: boolean;
+    body: unknown;
+    error?: string;
+  }> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), SIDECAR_TIMEOUT_MS);
+    try {
+      const res = await fetch(`${this.baseUrl()}/api/v1/health`, {
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        return { reachable: false, body: null, error: `HTTP ${res.status}` };
+      }
+      return { reachable: true, body: await res.json().catch(() => null) };
+    } catch (error) {
+      return {
+        reachable: false,
+        body: null,
+        error: (error as Error).message,
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async cardPhoto(
+    input: SidecarCardPhotoInput,
+  ): Promise<SidecarCardPhotoResult> {
     const res = await this.postJson<{
       image_data: string;
       width: number;
@@ -160,7 +199,10 @@ export class PhotoReviewSidecarService {
       fromVariantId: input.fromVariantId,
     });
     return {
-      imageBase64: String(res.image_data ?? res.imageBase64 ?? ''),
+      imageBase64:
+        (res.image_data as string | undefined) ??
+        (res.imageBase64 as string | undefined) ??
+        '',
       mimeType: 'image/jpeg',
       width: (res.width as number | undefined) ?? undefined,
       height: (res.height as number | undefined) ?? undefined,
@@ -169,7 +211,10 @@ export class PhotoReviewSidecarService {
         (res.identitySimilarity as number | undefined) ??
         (res.identity_similarity as number | undefined) ??
         undefined,
-      modelId: (res.modelId as string | undefined) ?? (res.model_id as string | undefined) ?? undefined,
+      modelId:
+        (res.modelId as string | undefined) ??
+        (res.model_id as string | undefined) ??
+        undefined,
       algorithmVersion:
         (res.algorithmVersion as string | undefined) ??
         (res.algorithm_version as string | undefined) ??
@@ -180,16 +225,17 @@ export class PhotoReviewSidecarService {
   async identitySimilarity(
     input: SidecarIdentitySimilarityInput,
   ): Promise<SidecarIdentitySimilarityResult> {
-    const res = await this.postJson<{ similarity: number | null; error: string | null }>(
-      '/identity-similarity',
-      {
-        image_data_a: input.referenceImageBase64,
-        image_data_b: input.candidateImageBase64,
-      },
-    );
+    const res = await this.postJson<{
+      similarity: number | null;
+      error: string | null;
+    }>('/identity-similarity', {
+      image_data_a: input.referenceImageBase64,
+      image_data_b: input.candidateImageBase64,
+    });
     if (res.similarity == null) {
       throw new SidecarError(
-        res.error ?? 'identity-similarity: the sidecar returned no similarity value',
+        res.error ??
+          'identity-similarity: the sidecar returned no similarity value',
       );
     }
     return { similarity: res.similarity };
@@ -209,7 +255,9 @@ export class PhotoReviewSidecarService {
         signal: controller.signal,
       });
     } catch (error) {
-      this.logger.warn(`sidecar call to ${path} failed: ${(error as Error).message}`);
+      this.logger.warn(
+        `sidecar call to ${path} failed: ${(error as Error).message}`,
+      );
       throw new SidecarError(`Could not reach the AI sidecar at ${url}`, error);
     } finally {
       clearTimeout(timer);

@@ -119,7 +119,8 @@ export class DeviceSelfController {
    */
   @Post('photos')
   @ApiOperation({
-    summary: "Push one captured photo's actual bytes for durable storage ahead of the file-service",
+    summary:
+      "Push one captured photo's actual bytes for durable storage ahead of the file-service",
   })
   async pushPhoto(
     @Req() req: Request,
@@ -154,7 +155,8 @@ export class DeviceSelfController {
    */
   @Post('videos')
   @ApiOperation({
-    summary: "Push one recorded video's actual bytes for durable storage ahead of the file-service",
+    summary:
+      "Push one recorded video's actual bytes for durable storage ahead of the file-service",
   })
   async pushVideo(
     @Req() req: Request,

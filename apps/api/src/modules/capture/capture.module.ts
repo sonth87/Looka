@@ -1,6 +1,7 @@
 import { ApiKeyOrSsoGuard, SsoAuthGuard } from '@app/shared/auth/index';
 import { FileStorageModule } from '@app/modules/file-storage/file-storage.module';
 import { PhotoReviewModule } from '@app/modules/photo-review/photo-review.module';
+import { StatsModule } from '@app/modules/stats/stats.module';
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { PhotoContentController } from './controllers/photo-content.controller';
@@ -38,6 +39,9 @@ import { VideoUploadWorkerService } from './services/video-upload-worker.service
     // service's own doc comment; the kiosk-path half is wired in
     // DeviceEventService instead, since that's where SESSION_REPORT lands).
     PhotoReviewModule,
+    // For SessionService's CaptureStatsService hook (completeSession, web
+    // path) — cms-8-screens-api-plan.md §2.9/P4.
+    StatsModule,
   ],
   controllers: [
     SessionController,
@@ -66,6 +70,11 @@ import { VideoUploadWorkerService } from './services/video-upload-worker.service
   // SessionVideoService exported alongside PhotoService (2026-09-09) so
   // DeviceManagementModule's DeviceSelfController can push a video the exact
   // same way it already pushes a photo — see DeviceSelfController.pushVideo.
-  exports: [SessionService, PhotoService, SessionVideoService, CaptureReportService],
+  exports: [
+    SessionService,
+    PhotoService,
+    SessionVideoService,
+    CaptureReportService,
+  ],
 })
 export class CaptureModule {}

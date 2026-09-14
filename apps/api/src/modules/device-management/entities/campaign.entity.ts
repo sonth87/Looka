@@ -215,6 +215,43 @@ export class Campaign extends BaseEntity {
   })
   recordVideo: boolean;
 
+  /**
+   * "Nghiệp vụ" the campaign runs — cms-8-screens-api-plan.md §2.2/P2,
+   * migration `1814000000000-CampaignWorkflowRef.ts`. Bare uuid, no FK
+   * (same cross-module convention `campaign_members.user_id` already
+   * uses): `workflows`/`workflow_versions` live in `modules/workflow`,
+   * a module `device-management` depends on, not the reverse.
+   * `workflowVersionId` is the pin — always a PUBLISHED version, resolved
+   * by `CampaignService.toCampaignResponse()` to fill in `captureAngles`/
+   * `cardSpec` when the campaign's own columns are null (override
+   * semantics: campaign column, if set, wins over the workflow's).
+   */
+  @Column('uuid', { nullable: true, name: 'workflow_id' })
+  @ApiPropertyOptional({ description: 'Id nghiệp vụ đợt này dùng, nếu có' })
+  workflowId?: string | null;
+
+  @Column('uuid', { nullable: true, name: 'workflow_version_id' })
+  @ApiPropertyOptional({ description: 'Id version nghiệp vụ đã ghim, nếu có' })
+  workflowVersionId?: string | null;
+
+  /**
+   * "Thời gian cam kết xử lý ảnh (giờ)" — cms-8-screens-api-plan.md §2.1/
+   * §2.3/D-Q6. Used together with `sessions.completed_at` to derive
+   * `subject_photo_sets.due_at` (P4/stats scope, not computed by this
+   * module) — NULL means no SLA configured, "quá hạn" never applies.
+   */
+  @Column('int', { nullable: true, name: 'processing_sla_hours' })
+  @ApiPropertyOptional({ description: 'Thời gian cam kết xử lý ảnh (giờ)' })
+  processingSlaHours?: number | null;
+
+  /**
+   * Free-text location (D-Q7's default — "text tự do trước, sites khi
+   * cần"). Not a `sites` FK — no such table exists yet.
+   */
+  @Column('varchar', { length: 255, nullable: true })
+  @ApiPropertyOptional({ description: 'Địa điểm đợt chụp' })
+  location?: string | null;
+
   @OneToMany(() => Device, (device) => device.campaign)
   devices?: Device[];
 }

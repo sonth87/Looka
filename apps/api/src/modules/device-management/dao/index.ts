@@ -6,3 +6,8 @@ export * from './capture-configuration.dao';
 export * from './device.dao';
 export * from './campaign-stats.dao';
 export * from './me.dao';
+export * from './campaign-kiosk-assignment.dao';
+export * from './campaign-kiosk-summary.dao';
+export * from './campaign-subject-import.dao';
+export * from './campaign-subject.dao';
+export * from './identification-method.dao';

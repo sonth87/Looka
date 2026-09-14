@@ -15,7 +15,13 @@ import {
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { ApiBearerAuth, ApiBody, ApiConsumes, ApiOperation, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBearerAuth,
+  ApiBody,
+  ApiConsumes,
+  ApiOperation,
+  ApiTags,
+} from '@nestjs/swagger';
 import type { Request } from 'express';
 import {
   PhotoVariantDao,
@@ -33,9 +39,16 @@ import {
   SetCurrentDto,
 } from '../dto';
 import { ReviewerRoleGuard } from '../guards/reviewer-role.guard';
-import { MAX_UPLOAD_BYTES, PhotoReviewSetStatus } from '../photo-review.constants';
+import {
+  MAX_UPLOAD_BYTES,
+  PhotoReviewSetStatus,
+} from '../photo-review.constants';
 import { PhotoReviewService } from '../services/photo-review.service';
 import { Pagination } from '@app/shared/http/pagination';
+import { ReviewStatsDao } from '@app/modules/stats/dao';
+import { ReviewStatsQueryDto } from '@app/modules/stats/dto';
+import { StatsQueryService } from '@app/modules/stats/services/stats-query.service';
+import { defaultDateRange } from '@app/modules/stats/util/vn-date.util';
 
 /**
  * Multer's own runtime shape for `@UploadedFile()` — declared locally
@@ -65,7 +78,10 @@ interface UploadedMulterFile {
 @UseGuards(SsoAuthGuard, ReviewerRoleGuard)
 @ApiBearerAuth('sso')
 export class ReviewController {
-  constructor(private readonly photoReviewService: PhotoReviewService) {}
+  constructor(
+    private readonly photoReviewService: PhotoReviewService,
+    private readonly statsQuery: StatsQueryService,
+  ) {}
 
   /**
    * The origin the calling browser actually used to reach THIS request —
@@ -80,27 +96,77 @@ export class ReviewController {
   }
 
   @Get('sets')
-  @ApiOperation({ summary: 'List photo-review sets, filterable and paginated (plan §5.1)' })
-  listSets(@Query() query: ListSetsQueryDto, @Req() req: Request): Promise<Pagination<ReviewSetListItemDao>> {
+  @ApiOperation({
+    summary: 'List photo-review sets, filterable and paginated (plan §5.1)',
+  })
+  listSets(
+    @Query() query: ListSetsQueryDto,
+    @Req() req: Request,
+  ): Promise<Pagination<ReviewSetListItemDao>> {
     return this.photoReviewService.listSets(query, this.apiBaseUrl(req));
   }
 
+  /** cms-8-screens-api-plan.md §2.9/P4 — reads from `stats_daily_review`, `byStatus` is a live count. */
+  @Get('stats')
+  @ApiOperation({
+    summary: 'Thống kê duyệt/không duyệt/dùng AI (plan §2.4/§2.9)',
+  })
+  async reviewStats(
+    @Query() query: ReviewStatsQueryDto,
+  ): Promise<ReviewStatsDao> {
+    const { from, to } = defaultDateRange(query.from, query.to, 30);
+    return this.statsQuery.reviewStats({
+      campaignId: query.campaignId,
+      from,
+      to,
+      reviewerUserId: query.reviewerUserId,
+    });
+  }
+
   @Get('sets/:id')
-  @ApiOperation({ summary: 'Get one set — original photos, video, variants, recent events (plan §5.2)' })
-  getSetDetail(@Param('id') id: string, @Req() req: Request): Promise<ReviewSetDetailDao> {
+  @ApiOperation({
+    summary:
+      'Get one set — original photos, video, variants, recent events (plan §5.2)',
+  })
+  getSetDetail(
+    @Param('id') id: string,
+    @Req() req: Request,
+  ): Promise<ReviewSetDetailDao> {
     return this.photoReviewService.getSetDetail(id, this.apiBaseUrl(req));
   }
 
   @Post('sets/:id/reprocess')
-  @ApiOperation({ summary: 'Regenerate the CARD_AUTO variant — allowed even while the set is locked (plan §4/R-Q1)' })
-  reprocess(@Param('id') id: string, @Req() req: Request): Promise<PhotoVariantDao> {
-    return this.photoReviewService.reprocess(id, req.user?.id ?? null, this.apiBaseUrl(req));
+  @ApiOperation({
+    summary:
+      'Regenerate the CARD_AUTO variant — allowed even while the set is locked (plan §4/R-Q1)',
+  })
+  reprocess(
+    @Param('id') id: string,
+    @Req() req: Request,
+  ): Promise<PhotoVariantDao> {
+    return this.photoReviewService.reprocess(
+      id,
+      req.user?.id ?? null,
+      this.apiBaseUrl(req),
+    );
   }
 
   @Post('sets/:id/ai-edit')
-  @ApiOperation({ summary: 'Request an AI edit — 422 if the prompt hits the forbidden-keyword filter (plan §5.3/§6.3)' })
-  aiEdit(@Param('id') id: string, @Body() dto: AiEditDto, @Req() req: Request): Promise<PhotoVariantDao> {
-    return this.photoReviewService.aiEdit(id, dto, req.user?.id ?? null, this.apiBaseUrl(req));
+  @ApiOperation({
+    summary:
+      'Request an AI edit — 422 if the prompt hits the forbidden-keyword filter (plan §5.3/§6.3)',
+  })
+  aiEdit(
+    @Param('id') id: string,
+    @Body() dto: AiEditDto,
+    @Req() req: Request,
+  ): Promise<PhotoVariantDao> {
+    return this.photoReviewService.aiEdit(
+      id,
+      dto,
+      req.user?.id ?? null,
+      this.apiBaseUrl(req),
+    );
   }
 
   /**
@@ -109,59 +175,127 @@ export class ReviewController {
    * pass.
    */
   @Get('jobs/:id')
-  @ApiOperation({ summary: 'Poll an AI-edit/reprocess job — :id is a photo_variants.id, see service doc comment' })
-  getJob(@Param('id') id: string, @Req() req: Request): Promise<PhotoVariantDao> {
+  @ApiOperation({
+    summary:
+      'Poll an AI-edit/reprocess job — :id is a photo_variants.id, see service doc comment',
+  })
+  getJob(
+    @Param('id') id: string,
+    @Req() req: Request,
+  ): Promise<PhotoVariantDao> {
     return this.photoReviewService.getJob(id, this.apiBaseUrl(req));
   }
 
   @Post('variants/:id/accept')
-  @ApiOperation({ summary: 'Accept a READY CARD_AI/CARD_UPLOAD variant as the current card photo' })
-  acceptVariant(@Param('id') id: string, @Req() req: Request): Promise<PhotoVariantDao> {
-    return this.photoReviewService.acceptVariant(id, req.user?.id ?? null, this.apiBaseUrl(req));
+  @ApiOperation({
+    summary:
+      'Accept a READY CARD_AI/CARD_UPLOAD variant as the current card photo',
+  })
+  acceptVariant(
+    @Param('id') id: string,
+    @Req() req: Request,
+  ): Promise<PhotoVariantDao> {
+    return this.photoReviewService.acceptVariant(
+      id,
+      req.user?.id ?? null,
+      this.apiBaseUrl(req),
+    );
   }
 
   @Post('variants/:id/discard')
-  @ApiOperation({ summary: 'Discard a variant (never allowed on the current variant)' })
-  discardVariant(@Param('id') id: string, @Req() req: Request): Promise<PhotoVariantDao> {
-    return this.photoReviewService.discardVariant(id, req.user?.id ?? null, this.apiBaseUrl(req));
+  @ApiOperation({
+    summary: 'Discard a variant (never allowed on the current variant)',
+  })
+  discardVariant(
+    @Param('id') id: string,
+    @Req() req: Request,
+  ): Promise<PhotoVariantDao> {
+    return this.photoReviewService.discardVariant(
+      id,
+      req.user?.id ?? null,
+      this.apiBaseUrl(req),
+    );
   }
 
   @Post('sets/:id/upload')
-  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_UPLOAD_BYTES } }))
+  @UseInterceptors(
+    FileInterceptor('file', { limits: { fileSize: MAX_UPLOAD_BYTES } }),
+  )
   @ApiConsumes('multipart/form-data')
-  @ApiBody({ schema: { type: 'object', properties: { file: { type: 'string', format: 'binary' } } } })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: { file: { type: 'string', format: 'binary' } },
+    },
+  })
   @ApiOperation({
-    summary: 'Replace the card photo with an uploaded file — mandatory identity check against the original FRONT photo (plan §5.4/R-Q8)',
+    summary:
+      'Replace the card photo with an uploaded file — mandatory identity check against the original FRONT photo (plan §5.4/R-Q8)',
   })
   uploadVariant(
     @Param('id') id: string,
     @UploadedFile() file: UploadedMulterFile,
     @Req() req: Request,
   ): Promise<UploadVariantResultDao> {
-    return this.photoReviewService.uploadVariant(id, file, req.user?.id ?? null, this.apiBaseUrl(req));
+    return this.photoReviewService.uploadVariant(
+      id,
+      file,
+      req.user?.id ?? null,
+      this.apiBaseUrl(req),
+    );
   }
 
   @Post('sets/:id/current')
   @ApiOperation({ summary: 'Switch which variant is the current card photo' })
-  setCurrent(@Param('id') id: string, @Body() dto: SetCurrentDto, @Req() req: Request): Promise<ReviewSetListItemDao> {
-    return this.photoReviewService.setCurrent(id, dto.variantId, req.user?.id ?? null, this.apiBaseUrl(req));
+  setCurrent(
+    @Param('id') id: string,
+    @Body() dto: SetCurrentDto,
+    @Req() req: Request,
+  ): Promise<ReviewSetListItemDao> {
+    return this.photoReviewService.setCurrent(
+      id,
+      dto.variantId,
+      req.user?.id ?? null,
+      this.apiBaseUrl(req),
+    );
   }
 
   @Post('sets/:id/approve')
   @ApiOperation({ summary: 'Approve a set (plan §5.5)' })
-  approve(@Param('id') id: string, @Body() dto: ApproveRejectDto, @Req() req: Request): Promise<ReviewSetListItemDao> {
-    return this.photoReviewService.approve(id, dto, req.user?.id ?? null, this.apiBaseUrl(req));
+  approve(
+    @Param('id') id: string,
+    @Body() dto: ApproveRejectDto,
+    @Req() req: Request,
+  ): Promise<ReviewSetListItemDao> {
+    return this.photoReviewService.approve(
+      id,
+      dto,
+      req.user?.id ?? null,
+      this.apiBaseUrl(req),
+    );
   }
 
   @Post('sets/:id/reject')
   @ApiOperation({ summary: 'Reject a set, with a note (plan §5.5)' })
-  reject(@Param('id') id: string, @Body() dto: ApproveRejectDto, @Req() req: Request): Promise<ReviewSetListItemDao> {
-    return this.photoReviewService.reject(id, dto, req.user?.id ?? null, this.apiBaseUrl(req));
+  reject(
+    @Param('id') id: string,
+    @Body() dto: ApproveRejectDto,
+    @Req() req: Request,
+  ): Promise<ReviewSetListItemDao> {
+    return this.photoReviewService.reject(
+      id,
+      dto,
+      req.user?.id ?? null,
+      this.apiBaseUrl(req),
+    );
   }
 
   @Get('sets/:id/events')
   @ApiOperation({ summary: 'Audit log for a set, newest first, paginated' })
-  listEvents(@Param('id') id: string, @Query() query: ListEventsQueryDto): Promise<Pagination<ReviewEventDao>> {
+  listEvents(
+    @Param('id') id: string,
+    @Query() query: ListEventsQueryDto,
+  ): Promise<Pagination<ReviewEventDao>> {
     return this.photoReviewService.listEvents(id, query);
   }
 
@@ -172,13 +306,24 @@ export class ReviewController {
    */
   @Get('export')
   @Header('Content-Type', 'application/zip')
-  @ApiOperation({ summary: 'Export a zip of every APPROVED set\'s current card photo + manifest.csv (plan R-Q9). ADMIN only.' })
-  async exportApproved(@Query() query: ExportQueryDto, @Req() req: Request): Promise<StreamableFile> {
+  @ApiOperation({
+    summary:
+      "Export a zip of every APPROVED set's current card photo + manifest.csv (plan R-Q9). ADMIN only.",
+  })
+  async exportApproved(
+    @Query() query: ExportQueryDto,
+    @Req() req: Request,
+  ): Promise<StreamableFile> {
     if (!req.user?.isAdmin) {
       throw new ForbiddenException('Requires admin');
     }
     const status = query.status ?? PhotoReviewSetStatus.APPROVED;
-    const zip = await this.photoReviewService.exportApproved(query.campaignId, status);
-    return new StreamableFile(zip, { disposition: `attachment; filename="photo-review-export-${query.campaignId}.zip"` });
+    const zip = await this.photoReviewService.exportApproved(
+      query.campaignId,
+      status,
+    );
+    return new StreamableFile(zip, {
+      disposition: `attachment; filename="photo-review-export-${query.campaignId}.zip"`,
+    });
   }
 }

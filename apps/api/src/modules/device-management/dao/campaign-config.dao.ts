@@ -1,12 +1,13 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { CameraRole, CaptureStep } from '@face/core';
-import { Expose } from 'class-transformer';
+import { Expose, Type } from 'class-transformer';
 import {
   CampaignManualStatus,
   CampaignPurpose,
   CardSpec,
 } from '../entities/campaign.entity';
 import type { EffectiveCampaignStatus } from '../utils/campaign-status.util';
+import { CampaignWorkflowRefDao } from './campaign.dao';
 
 /**
  * `GET /v1/campaigns/:id/config` response (§3.1.4/§3.2.2) — deliberately a
@@ -106,4 +107,9 @@ export class CampaignConfigDao {
   @ApiProperty()
   @Expose()
   updatedAt: Date;
+
+  @ApiPropertyOptional({ type: CampaignWorkflowRefDao })
+  @Expose()
+  @Type(() => CampaignWorkflowRefDao)
+  workflow?: CampaignWorkflowRefDao | null;
 }

@@ -80,7 +80,8 @@ export class CaptureConfigurationService extends CommonService<CaptureConfigurat
     const config = await this.create({
       name: dto.name,
       description: dto.description ?? null,
-      captureAngles: dto.captureAngles as unknown as CaptureConfiguration['captureAngles'],
+      captureAngles:
+        dto.captureAngles as unknown as CaptureConfiguration['captureAngles'],
       cardSpec: dto.cardSpec ?? null,
     });
 
@@ -94,7 +95,9 @@ export class CaptureConfigurationService extends CommonService<CaptureConfigurat
     const config = await this.findCaptureConfigEntityOrFail(id);
 
     const mergedCaptureAngles =
-      dto.captureAngles !== undefined ? dto.captureAngles : config.captureAngles;
+      dto.captureAngles !== undefined
+        ? dto.captureAngles
+        : config.captureAngles;
     const check = validateCaptureAngles(mergedCaptureAngles);
     if (!check.ok) {
       throw new BadRequestException(check.reason);

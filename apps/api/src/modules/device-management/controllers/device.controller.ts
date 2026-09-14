@@ -1,6 +1,7 @@
 import {
   ApiResponseArrayDecorator,
   ApiResponseDecorator,
+  ApiResponsePaginatedDecorator,
 } from '@app/shared/http/api-response.decorator';
 import { CustomException, ERROR_CODE } from '@app/shared/errors/legacy';
 import { SsoAuthGuard } from '@app/shared/auth/index';
@@ -12,6 +13,7 @@ import {
   Param,
   Post,
   Body,
+  Query,
   Req,
   StreamableFile,
   UseGuards,
@@ -19,7 +21,12 @@ import {
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Request } from 'express';
 import { DeviceDao, SelfEnrollDeviceDao } from '../dao';
-import { CreateDeviceDto, ReissueDeviceDto, SelfEnrollDeviceDto } from '../dto';
+import {
+  CreateDeviceDto,
+  ListDevicesQueryDto,
+  ReissueDeviceDto,
+  SelfEnrollDeviceDto,
+} from '../dto';
 import { ActivationPackageService } from '../services/activation-package.service';
 import { CampaignService } from '../services/campaign.service';
 import { DeviceService } from '../services/device.service';
@@ -211,6 +218,22 @@ export class DeviceController {
     @Param('campaignId') campaignId: string,
   ): Promise<DeviceDao[]> {
     return this.deviceService.findAllByCampaign(campaignId);
+  }
+
+  /**
+   * `GET /v1/devices?campaignId&status&q&page&limit` — cms-8-screens-api-plan.md
+   * §2.3/P3, mainly for the "gán 1 người ↔ 1 kiosk" screen to browse
+   * kiosks. A separate, always-paginated route from
+   * `listDevicesByCampaign` above (which stays a plain array — no caller
+   * asked to change it) rather than overloading that one the way
+   * `CampaignController.listCampaigns` does, since this route's shape never
+   * had a legacy plain-array behavior to preserve.
+   */
+  @Get('devices')
+  @ApiOperation({ summary: 'List devices, paginated and filterable' })
+  @ApiResponsePaginatedDecorator(DeviceDao)
+  listDevices(@Query() query: ListDevicesQueryDto) {
+    return this.deviceService.listDevicesPaginated(query);
   }
 
   /**

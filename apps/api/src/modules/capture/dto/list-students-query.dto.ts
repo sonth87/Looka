@@ -32,9 +32,17 @@ export class ListStudentsQueryDto extends QueryPaginateDto {
 
   @ApiPropertyOptional({
     description:
-      'Tìm theo mã SV, tên, số CCCD, hoặc tên lớp (hai trường sau đọc từ sessions.metadata — xem StudentService.listStudents)',
+      'Tìm theo mã SV, tên, số CCCD (một phần), hoặc tên lớp (đọc từ sessions.metadata — xem StudentService.listStudents)',
   })
   @IsOptional()
   @IsString()
   q?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Tìm CHÍNH XÁC theo số CCCD, khớp qua sessions.citizen_id_hash — không đọc/giải mã citizen_id_enc (cms-8-screens-api-plan.md §8 I-Q1). Ưu tiên hơn q khi cả hai cùng truyền.',
+  })
+  @IsOptional()
+  @IsString()
+  citizenId?: string;
 }

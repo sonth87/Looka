@@ -195,12 +195,6 @@ export default function CameraSetupScreen() {
       const all = await navigator.mediaDevices.enumerateDevices();
       const cams = all
         .filter((d) => d.kind === 'videoinput')
-        // Excludes the Camo virtual webcam (2026-09-09) — that phone-bridge
-        // camera is for the separate CCCD scanning tool (apps/cccd-scanner)
-        // only; it has no business being assignable as a CENTER/LEFT/RIGHT
-        // student-photo capture role here, and an operator picking it by
-        // mistake would silently break the actual capture setup.
-        .filter((d) => !/camo/i.test(d.label))
         .map((d, i) => ({ id: d.deviceId, label: d.label || `Camera ${i + 1}` }));
       if (cancelledRef.current) return;
       setDevices(cams);

@@ -10,6 +10,7 @@ import {
   IsObject,
   IsOptional,
   IsString,
+  IsUUID,
   Matches,
   MaxLength,
   Min,
@@ -174,4 +175,30 @@ export class CreateCampaignDto {
   @IsOptional()
   @IsBoolean()
   recordVideo?: boolean;
+
+  /**
+   * "Campaign tham chiếu đến version" — cms-8-screens-api-plan.md §2.2/P2.
+   * Must be a PUBLISHED version's id (an unpublished draft is not
+   * selectable — `CampaignService` looks it up and 400s otherwise).
+   * `workflowId` itself is derived server-side from the version's parent,
+   * not accepted here separately, so the two can never disagree.
+   */
+  @ApiPropertyOptional({
+    description: 'Id version nghiệp vụ đã publish, nếu chọn',
+  })
+  @IsOptional()
+  @IsUUID()
+  workflowVersionId?: string;
+
+  @ApiPropertyOptional({ description: 'Thời gian cam kết xử lý ảnh (giờ)' })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  processingSlaHours?: number;
+
+  @ApiPropertyOptional({ description: 'Địa điểm đợt chụp' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  location?: string;
 }

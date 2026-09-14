@@ -2,6 +2,7 @@ import { CustomException, ERROR_CODE } from '@app/shared/errors/legacy';
 import { toDao } from '@app/shared/http/to-dao.helper';
 import { Pagination } from '@app/shared/http/pagination';
 import { FileStorageService } from '@app/modules/file-storage/services/file-storage.service';
+import { hashCitizenId } from '@app/shared/security/citizen-id.codec';
 import { HttpStatus, Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
@@ -55,7 +56,17 @@ export class StudentService {
       params.push(query.campaignId);
       conditions.push(`s.campaign_id = $${params.length}`);
     }
-    if (query.q) {
+    if (query.citizenId) {
+      // Exact-match only (cms-8-screens-api-plan.md §8 I-Q1) — hashes the
+      // caller's query the same deterministic way `SessionService.createSession`
+      // hashed it at write time, and compares against `citizen_id_hash`.
+      // Never decrypts `citizen_id_enc` to do this, and never does a
+      // partial/ILIKE match on a citizen id (unlike `q` below, which still
+      // can, against the legacy plaintext field, until that field is
+      // retired). Takes priority over `q` per this DTO's own doc comment.
+      params.push(hashCitizenId(query.citizenId));
+      conditions.push(`s.citizen_id_hash = $${params.length}`);
+    } else if (query.q) {
       // Also matches `identityNumber`/`className` inside `sessions.metadata`
       // (2026-09-09, CCCD-scan capture-identification feature — "sau có thể
       // lên cms tìm theo cccd, tên lớp"). Those two have no dedicated
@@ -178,7 +189,21 @@ export class StudentService {
    * the service layer, means neither of those existing routes needs to
    * widen its own guard to accommodate apps/web.
    */
-  async getStudentDetail(subjectCode: string): Promise<StudentDetailDao> {
+  /**
+   * `includeLinks` (plan §8 I-Q17: this route used to mint a view-link for
+   * EVERY photo/video of EVERY session unconditionally — a real fs-core
+   * round trip each, one call minting N of them for a student with a long
+   * capture history). Defaults to `true` (unchanged behavior, §9.1 backward-
+   * compat rule 1 — no existing caller's response shape changes) — pass
+   * `includeLinks=false` to skip minting entirely and get `photos`/`videos`
+   * rows with `viewUrl: undefined`; the CMS can then mint one lazily, on
+   * actual display, via the already-existing `POST /photos/:id/view-link`/
+   * `POST /videos/:id/view-link` (see `PhotoController`/`VideoController`).
+   */
+  async getStudentDetail(
+    subjectCode: string,
+    includeLinks = true,
+  ): Promise<StudentDetailDao> {
     const sessionRows: Array<Record<string, unknown>> =
       await this.dataSource.query(
         `SELECT
@@ -245,22 +270,26 @@ export class StudentService {
       }
     };
 
-    const photoLinks = await Promise.all(
-      photoRows.map((p) =>
-        resolveLink(
-          p.fs_file_id as string | null,
-          tenantBySessionId.get(p.session_id as string),
-        ),
-      ),
-    );
-    const videoLinks = await Promise.all(
-      videoRows.map((v) =>
-        resolveLink(
-          v.fs_file_id as string | null,
-          tenantBySessionId.get(v.session_id as string),
-        ),
-      ),
-    );
+    const photoLinks = includeLinks
+      ? await Promise.all(
+          photoRows.map((p) =>
+            resolveLink(
+              p.fs_file_id as string | null,
+              tenantBySessionId.get(p.session_id as string),
+            ),
+          ),
+        )
+      : photoRows.map(() => null);
+    const videoLinks = includeLinks
+      ? await Promise.all(
+          videoRows.map((v) =>
+            resolveLink(
+              v.fs_file_id as string | null,
+              tenantBySessionId.get(v.session_id as string),
+            ),
+          ),
+        )
+      : videoRows.map(() => null);
 
     const photosBySession = new Map<string, StudentSessionPhotoDao[]>();
     photoRows.forEach((p, i) => {

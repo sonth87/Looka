@@ -6,7 +6,7 @@ import { Pagination } from '@app/shared/http/pagination';
 import { HttpStatus, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
-import { CampaignMemberDao } from '../dao';
+import { CampaignMemberDao, DeviceDao } from '../dao';
 import { MeCampaignDao } from '../dao/me.dao';
 import {
   CampaignMemberDecision,
@@ -17,6 +17,8 @@ import {
   CampaignMember,
   CampaignMemberStatus,
 } from '../entities/campaign-member.entity';
+import { CampaignKioskAssignment } from '../entities/campaign-kiosk-assignment.entity';
+import { Device } from '../entities/device.entity';
 import { CampaignService } from './campaign.service';
 
 @Injectable()
@@ -26,6 +28,14 @@ export class CampaignMemberService extends CommonService<CampaignMember> {
     repository: Repository<CampaignMember>,
     @InjectRepository(User)
     private readonly userRepository: Repository<User>,
+    // Repository, not `CampaignKioskAssignmentService` — that service
+    // injects `Repository<CampaignMember>` right back (to auto-approve on
+    // assign), so two services depending on each other would be a circular
+    // DI cycle. See `CampaignKioskAssignmentService`'s own doc comment.
+    @InjectRepository(CampaignKioskAssignment)
+    private readonly assignmentRepository: Repository<CampaignKioskAssignment>,
+    @InjectRepository(Device)
+    private readonly deviceRepository: Repository<Device>,
     private readonly campaignService: CampaignService,
   ) {
     super(repository);
@@ -40,7 +50,9 @@ export class CampaignMemberService extends CommonService<CampaignMember> {
    * FK to `users` — but a display-layer DAO should never 500 over it).
    */
   private async attachIdentity<T extends CampaignMemberDao>(dao: T): Promise<T>;
-  private async attachIdentity<T extends CampaignMemberDao>(dao: T[]): Promise<T[]>;
+  private async attachIdentity<T extends CampaignMemberDao>(
+    dao: T[],
+  ): Promise<T[]>;
   private async attachIdentity<T extends CampaignMemberDao>(
     dao: T | T[],
   ): Promise<T | T[]> {
@@ -190,6 +202,13 @@ export class CampaignMemberService extends CommonService<CampaignMember> {
       memberships.map((m) => [m.campaignId, m.status]),
     );
 
+    // D-Q17 — one batched query across every listed campaign, never one
+    // query per campaign (same batching discipline `attachIdentity` uses).
+    const assignedDevicesByCampaignId = await this.assignedDevicesForUser(
+      userId,
+      campaigns.map((c) => c.id),
+    );
+
     return Promise.all(
       campaigns.map(async (campaign) => {
         const dao = await this.campaignService.toCampaignResponse(campaign);
@@ -197,8 +216,39 @@ export class CampaignMemberService extends CommonService<CampaignMember> {
         meDao.membership = {
           status: membershipByCampaignId.get(campaign.id) ?? 'NONE',
         };
+        meDao.assignedDevices =
+          assignedDevicesByCampaignId.get(campaign.id) ?? [];
         return meDao;
       }),
     );
+  }
+
+  /** `GET /v1/me/campaigns`'s `assignedDevices[]` (D-Q17) — which kiosk(s) under each campaign are assigned to this user. */
+  private async assignedDevicesForUser(
+    userId: string,
+    campaignIds: string[],
+  ): Promise<Map<string, DeviceDao[]>> {
+    if (campaignIds.length === 0) return new Map();
+    const rows = await this.assignmentRepository.find({
+      where: { userId, campaignId: In(campaignIds) },
+    });
+    if (rows.length === 0) return new Map();
+
+    const deviceIds = [...new Set(rows.map((r) => r.deviceId))];
+    const devices = await this.deviceRepository.find({
+      where: { id: In(deviceIds) },
+    });
+    const deviceDaoById = new Map(
+      devices.map((d) => [d.id, toDao(DeviceDao, d)]),
+    );
+
+    const map = new Map<string, DeviceDao[]>();
+    for (const row of rows) {
+      const deviceDao = deviceDaoById.get(row.deviceId);
+      if (!deviceDao) continue;
+      if (!map.has(row.campaignId)) map.set(row.campaignId, []);
+      map.get(row.campaignId)!.push(deviceDao);
+    }
+    return map;
   }
 }

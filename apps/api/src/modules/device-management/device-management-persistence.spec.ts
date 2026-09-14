@@ -98,7 +98,9 @@ describeDb('device management persistence', () => {
         // without pulling in PhotoReviewModule's own entities/FileStorage setup.
         {
           provide: PhotoReviewService,
-          useValue: { ensureSetForApprovedSession: jest.fn().mockResolvedValue(null) },
+          useValue: {
+            ensureSetForApprovedSession: jest.fn().mockResolvedValue(null),
+          },
         },
       ],
     }).compile();

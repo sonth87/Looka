@@ -8,7 +8,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Request } from 'express';
-import { Repository } from 'typeorm';
+import { ILike, Repository } from 'typeorm';
 import { User } from '../../modules/shared/entities/user.entity';
 import {
   fetchSsoProfile,
@@ -64,6 +64,21 @@ const PROFILE_CACHE_TTL_MS = 60_000;
  *    the natural key) so `isAdmin`/`roles` — concepts the SSO itself has no
  *    notion of — persist locally. See `User` entity's own doc comment for
  *    the `ADMIN_EMAILS` bootstrap rule.
+ *
+ *    **MANUAL-user merge (2026-09-14, cms-8-screens-api-plan.md §2.8's own
+ *    text, previously a documented gap — see `create-user.handler.ts`'s OLD
+ *    doc comment for the full history of why this was deferred out of P1):
+ *    when no row matches the real `sso_user_code` yet, `upsertUser` now
+ *    ALSO checks for an existing `source = 'MANUAL'` row with the same
+ *    email (case-insensitive `ILike`, since a real SSO email's casing is
+ *    not guaranteed to match what a CMS admin typed by hand) before
+ *    falling back to creating a brand-new row. A match is MERGED in place
+ *    — same `id`, so every role/permission already granted to that MANUAL
+ *    row carries over untouched — updating only `ssoUserCode`/`email`/
+ *    `displayName`/`source`(→`'SSO'`)/`lastLoginAt`. A `SYNC`-sourced row
+ *    is never a merge target (it already has its own real identity from
+ *    `POST /v1/users/sync`, D-Q10) — only `MANUAL` rows, which are
+ *    specifically placeholders waiting for exactly this.**
  * 2. **A short (60s) in-memory cache** on the raw `Authorization` header
  *    value, so a kiosk/web client re-checking membership/campaign state
  *    frequently doesn't cost a network round trip to the SSO on every
@@ -238,23 +253,38 @@ export class SsoAuthGuard implements CanActivate {
     const now = new Date();
 
     if (!user) {
-      const anyAdminExists =
-        (await this.userRepo.count({ where: { isAdmin: true } })) > 0;
-      const bootstrapAdmin =
-        !anyAdminExists && adminEmails.includes(ssoUser.email.toLowerCase());
-      user = this.userRepo.create({
-        ssoUserCode: ssoUser.user_code,
-        email: ssoUser.email,
-        displayName: ssoUser.name ?? null,
-        isAdmin: bootstrapAdmin,
-        roles: [],
-        lastLoginAt: now,
+      const manualMatch = await this.userRepo.findOne({
+        where: { source: 'MANUAL', email: ILike(ssoUser.email) },
       });
-      user = await this.userRepo.save(user);
-      if (bootstrapAdmin) {
-        this.logger.warn(
-          `[SsoAuthGuard] Bootstrapped first admin from ADMIN_EMAILS: ${ssoUser.email} (${ssoUser.user_code})`,
+      if (manualMatch) {
+        manualMatch.ssoUserCode = ssoUser.user_code;
+        manualMatch.email = ssoUser.email;
+        manualMatch.displayName = ssoUser.name ?? manualMatch.displayName;
+        manualMatch.source = 'SSO';
+        manualMatch.lastLoginAt = now;
+        user = await this.userRepo.save(manualMatch);
+        this.logger.log(
+          `[SsoAuthGuard] Merged MANUAL user ${manualMatch.id} (${ssoUser.email}) into its first real SSO login (${ssoUser.user_code}) — roles/permissions carried over unchanged`,
         );
+      } else {
+        const anyAdminExists =
+          (await this.userRepo.count({ where: { isAdmin: true } })) > 0;
+        const bootstrapAdmin =
+          !anyAdminExists && adminEmails.includes(ssoUser.email.toLowerCase());
+        user = this.userRepo.create({
+          ssoUserCode: ssoUser.user_code,
+          email: ssoUser.email,
+          displayName: ssoUser.name ?? null,
+          isAdmin: bootstrapAdmin,
+          roles: [],
+          lastLoginAt: now,
+        });
+        user = await this.userRepo.save(user);
+        if (bootstrapAdmin) {
+          this.logger.warn(
+            `[SsoAuthGuard] Bootstrapped first admin from ADMIN_EMAILS: ${ssoUser.email} (${ssoUser.user_code})`,
+          );
+        }
       }
     } else {
       user.email = ssoUser.email;

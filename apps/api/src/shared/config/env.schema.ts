@@ -57,6 +57,19 @@ const EnvSchema = z.object({
   DESKTOP_INSTALLER_PATH_WIN: z.string().optional(),
 
   PYTHON_AI_BASE_URL: z.string().optional(),
+
+  // cms-8-screens-api-plan.md §8 I-Q1 — optional here (not every deployment
+  // needs citizen-id encryption on day one, same posture as
+  // PYTHON_AI_BASE_URL above); `citizen-id.codec.ts` throws its own clear
+  // error at the point of use if a caller needs it and it is unset, rather
+  // than this schema hard-requiring it for every process that boots.
+  CITIZEN_ID_ENCRYPTION_KEY: z.string().optional(),
+
+  // cms-8-screens-api-plan.md §2.8 D-Q10 — `UserDirectoryClient` stub;
+  // unset means "not configured yet", not a boot failure (the real
+  // directory API spec is still pending from the user).
+  USER_DIRECTORY_URL: z.string().optional(),
+  USER_DIRECTORY_API_KEY: z.string().optional(),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

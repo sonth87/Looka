@@ -24,9 +24,13 @@ import { PhotoKind } from './photo-kind.entity';
  * module's own `photo-review.module.ts` top comment.
  */
 @Entity('subject_photo_sets')
-@Index('IDX_subject_photo_sets_unique', ['campaignId', 'subjectCode', 'kindId'], {
-  unique: true,
-})
+@Index(
+  'IDX_subject_photo_sets_unique',
+  ['campaignId', 'subjectCode', 'kindId'],
+  {
+    unique: true,
+  },
+)
 export class SubjectPhotoSet extends BaseEntity {
   @Column('uuid', { name: 'campaign_id' })
   @Index()
@@ -50,7 +54,9 @@ export class SubjectPhotoSet extends BaseEntity {
   kind?: PhotoKind;
 
   @Column('uuid', { name: 'source_session_id' })
-  @ApiProperty({ description: 'Phiên chụp gốc mới nhất mà hồ sơ này bắt nguồn' })
+  @ApiProperty({
+    description: 'Phiên chụp gốc mới nhất mà hồ sơ này bắt nguồn',
+  })
   sourceSessionId: string;
 
   @Column('varchar', { length: 20, default: PhotoReviewSetStatus.PENDING_AUTO })
@@ -59,7 +65,45 @@ export class SubjectPhotoSet extends BaseEntity {
 
   @Column('uuid', { name: 'current_card_variant_id', nullable: true })
   @ApiPropertyOptional({
-    description: 'Phiên bản ảnh thẻ hiện tại (photo_variants.id) — không có FK cứng, xem doc comment của entity',
+    description:
+      'Phiên bản ảnh thẻ hiện tại (photo_variants.id) — không có FK cứng, xem doc comment của entity',
   })
   currentCardVariantId?: string | null;
+
+  /**
+   * Denormalized from `campaign_subjects` (device-management's roster table,
+   * P3) at set-creation/refresh time in `PhotoReviewService.
+   * ensureSetForApprovedSession` — cms-8-screens-api-plan.md §2.4, so
+   * `GET /v1/review/sets` can filter by class/major/CCCD without this module
+   * reaching across to `device-management`'s tables on every list request.
+   * `null` when no roster row matched (no roster imported, or this subject
+   * wasn't in it) — never a guess.
+   */
+  @Column('varchar', { length: 100, name: 'class_name', nullable: true })
+  @ApiPropertyOptional({ description: 'Lớp, lấy từ roster nếu có' })
+  className?: string | null;
+
+  @Column('varchar', { length: 255, nullable: true })
+  @ApiPropertyOptional({ description: 'Ngành, lấy từ roster nếu có' })
+  major?: string | null;
+
+  @Column('varchar', { length: 255, nullable: true })
+  @ApiPropertyOptional({ description: 'Khoa, lấy từ roster nếu có' })
+  faculty?: string | null;
+
+  @Column('varchar', { length: 20, name: 'citizen_id', nullable: true })
+  @ApiPropertyOptional({ description: 'Số CCCD, lấy từ roster nếu có' })
+  citizenId?: string | null;
+
+  /**
+   * `sessions.completed_at + campaigns.processing_sla_hours` — D-Q6's
+   * "quá hạn" formula. `null` when the campaign has no SLA configured
+   * (`processing_sla_hours IS NULL`) — "quá hạn" never applies, not "already
+   * overdue at time zero".
+   */
+  @Column('timestamptz', { name: 'due_at', nullable: true })
+  @ApiPropertyOptional({
+    description: 'Hạn xử lý — null nếu campaign không đặt SLA',
+  })
+  dueAt?: Date | null;
 }

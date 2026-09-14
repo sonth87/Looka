@@ -9,6 +9,7 @@ import {
   IsObject,
   IsOptional,
   IsString,
+  IsUUID,
   Matches,
   MaxLength,
   Min,
@@ -143,4 +144,30 @@ export class UpdateCampaignDto {
   @IsOptional()
   @IsBoolean()
   recordVideo?: boolean;
+
+  /** See `CreateCampaignDto.workflowVersionId`'s own doc comment. `null` clears the pin. */
+  @ApiPropertyOptional({
+    description: 'Id version nghiệp vụ đã publish — null để bỏ ghim',
+  })
+  @IsOptional()
+  @ValidateIf((_, value) => value !== null)
+  @IsUUID()
+  workflowVersionId?: string | null;
+
+  @ApiPropertyOptional({
+    description: 'Thời gian cam kết xử lý ảnh (giờ), hoặc null để bỏ SLA',
+    nullable: true,
+  })
+  @IsOptional()
+  @ValidateIf((_, value) => value !== null)
+  @IsInt()
+  @Min(1)
+  processingSlaHours?: number | null;
+
+  @ApiPropertyOptional({ nullable: true })
+  @IsOptional()
+  @ValidateIf((_, value) => value !== null)
+  @IsString()
+  @MaxLength(255)
+  location?: string | null;
 }

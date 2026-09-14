@@ -1,13 +1,16 @@
 import { toDao } from '@app/shared/http/to-dao.helper';
 import { CustomException, ERROR_CODE } from '@app/shared/errors/legacy';
 import { CommonService } from '@app/shared/common/common.service';
+import { Pagination } from '@app/shared/http/pagination';
 import { SessionService } from '@app/modules/capture/services/session.service';
+import { WorkflowCatalogReadRepository } from '@app/modules/workflow/infrastructure/read/workflow-catalog.read-repository';
 import { BadRequestException, HttpStatus, Injectable } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
 import { DataSource, Repository } from 'typeorm';
 import { CampaignDao } from '../dao';
 import { CreateCampaignDto, UpdateCampaignDto } from '../dto';
+import { ListCampaignsQueryDto } from '../dto/list-campaigns-query.dto';
 import { Campaign, CampaignPurpose } from '../entities/campaign.entity';
 import { Device } from '../entities/device.entity';
 import { computeEffectiveStatus } from '../utils/campaign-status.util';
@@ -29,6 +32,7 @@ export class CampaignService extends CommonService<Campaign> {
     @InjectDataSource()
     private readonly dataSource: DataSource,
     private readonly sessionService: SessionService,
+    private readonly workflowCatalog: WorkflowCatalogReadRepository,
   ) {
     super(repository);
   }
@@ -39,6 +43,8 @@ export class CampaignService extends CommonService<Campaign> {
     if (!captureAnglesCheck.ok) {
       throw new BadRequestException(captureAnglesCheck.reason);
     }
+
+    const workflowId = await this.resolveWorkflowId(dto.workflowVersionId);
 
     let campaign: Campaign;
     try {
@@ -66,12 +72,30 @@ export class CampaignService extends CommonService<Campaign> {
         autoHoldMs: dto.autoHoldMs ?? null,
         simultaneousCapture,
         recordVideo: dto.recordVideo ?? false,
+        workflowId,
+        workflowVersionId: dto.workflowVersionId ?? null,
+        processingSlaHours: dto.processingSlaHours ?? null,
+        location: dto.location ?? null,
       });
     } catch (error) {
       throw this.mapCodeUniqueViolation(error);
     }
 
     return this.toCampaignResponse(campaign);
+  }
+
+  /** Resolves+validates a `workflowVersionId` — throws 400 if it does not exist or is not (yet) published. Returns `null` for `undefined`/no pin. */
+  private async resolveWorkflowId(
+    versionId: string | null | undefined,
+  ): Promise<string | null> {
+    if (!versionId) return null;
+    const ref = await this.workflowCatalog.getVersionRef(versionId);
+    if (!ref) {
+      throw new BadRequestException(
+        `workflowVersionId "${versionId}" không tồn tại hoặc chưa publish.`,
+      );
+    }
+    return ref.workflowId;
   }
 
   async findAllCampaigns(): Promise<CampaignDao[]> {
@@ -110,12 +134,43 @@ export class CampaignService extends CommonService<Campaign> {
     const dao = toDao(CampaignDao, campaign);
     const completedSessions = await this.countCompletedSessions(campaign.id);
     dao.effectiveStatus = computeEffectiveStatus(campaign);
-    dao.requiredCameraCount = computeRequiredCameraCount(
-      campaign.captureAngles,
-    );
     dao.quotaReached =
       campaign.quotaPlanned != null &&
       completedSessions >= campaign.quotaPlanned;
+
+    // cms-8-screens-api-plan.md §2.2/P2 — "gộp config cho … campaigns/:id/config".
+    // When a workflow is pinned, its config fills in `captureAngles`/
+    // `cardSpec` ONLY where the campaign's own columns are still null
+    // (override semantics: an explicit campaign-level value always wins).
+    // `requiredCameraCount` is computed AFTER this merge so a campaign
+    // that only sets angles via its workflow still gets a real hint
+    // instead of the "no angles" default.
+    let effectiveCaptureAngles = campaign.captureAngles;
+    if (campaign.workflowVersionId) {
+      const ref = await this.workflowCatalog.getVersionRef(
+        campaign.workflowVersionId,
+      );
+      if (ref) {
+        dao.workflow = {
+          id: ref.workflowId,
+          code: ref.workflowCode,
+          versionId: campaign.workflowVersionId,
+          version: ref.version,
+        };
+        if (!campaign.captureAngles) {
+          effectiveCaptureAngles = ref.config.capture
+            .angles as unknown as Campaign['captureAngles'];
+          dao.captureAngles = effectiveCaptureAngles;
+        }
+        if (!campaign.cardSpec) {
+          dao.cardSpec = ref.config.output.cardSpec;
+        }
+      }
+    }
+
+    dao.requiredCameraCount = computeRequiredCameraCount(
+      effectiveCaptureAngles,
+    );
     return dao;
   }
 
@@ -225,6 +280,21 @@ export class CampaignService extends CommonService<Campaign> {
     if (dto.recordVideo !== undefined) {
       campaign.recordVideo = dto.recordVideo;
     }
+    if (dto.workflowVersionId !== undefined) {
+      if (dto.workflowVersionId === null) {
+        campaign.workflowId = null;
+        campaign.workflowVersionId = null;
+      } else {
+        campaign.workflowId = await this.resolveWorkflowId(
+          dto.workflowVersionId,
+        );
+        campaign.workflowVersionId = dto.workflowVersionId;
+      }
+    }
+    if (dto.processingSlaHours !== undefined) {
+      campaign.processingSlaHours = dto.processingSlaHours;
+    }
+    if (dto.location !== undefined) campaign.location = dto.location;
 
     // Bump only on an actual change — a no-op PATCH (or one that only
     // touches other fields) must not invalidate every device's already-shown
@@ -287,5 +357,141 @@ export class CampaignService extends CommonService<Campaign> {
     }
 
     await this.delete(id);
+  }
+
+  /**
+   * `GET /v1/campaigns?page&limit&status&workflowId&from&to&q` —
+   * cms-8-screens-api-plan.md §2.3/P3. Only reached when the caller
+   * actually supplies `page` (see `ListCampaignsQueryDto`'s own doc comment
+   * for the §9.1 rule 6 backward-compat reasoning) — `findAllCampaigns()`
+   * above stays the legacy, unfiltered, unpaginated path.
+   *
+   * `status` filters on `effectiveStatus`, which is derived, never stored —
+   * replicated here as a SQL `CASE` mirroring `computeEffectiveStatus()`
+   * exactly, so the two can never silently disagree. `from`/`to` filter on
+   * the campaign's own active window (`startsAt`/`expiresAt`), matching the
+   * screen's "thời gian diễn ra – kết thúc" wording — a campaign whose
+   * window merely overlaps `[from, to]` matches, not one that starts and
+   * ends fully inside it.
+   */
+  async listCampaignsPaginated(
+    query: ListCampaignsQueryDto,
+  ): Promise<Pagination<CampaignDao>> {
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 10;
+
+    const effectiveStatusExpr = `(
+      CASE
+        WHEN c.manual_status IN ('PAUSED', 'CLOSED') THEN c.manual_status
+        WHEN c.starts_at IS NOT NULL AND now() < c.starts_at THEN 'UPCOMING'
+        WHEN c.expires_at IS NOT NULL AND now() >= c.expires_at THEN 'EXPIRED'
+        ELSE 'OPEN'
+      END
+    )`;
+
+    const qb = this.repository.createQueryBuilder('c');
+    if (query.workflowId) {
+      qb.andWhere('c.workflow_id = :workflowId', {
+        workflowId: query.workflowId,
+      });
+    }
+    if (query.q) {
+      qb.andWhere('(c.name ILIKE :q OR c.code ILIKE :q)', {
+        q: `%${query.q}%`,
+      });
+    }
+    if (query.status) {
+      qb.andWhere(`${effectiveStatusExpr} = :status`, { status: query.status });
+    }
+    if (query.from) {
+      qb.andWhere('(c.expires_at IS NULL OR c.expires_at >= :from)', {
+        from: new Date(query.from),
+      });
+    }
+    if (query.to) {
+      qb.andWhere('(c.starts_at IS NULL OR c.starts_at <= :to)', {
+        to: new Date(query.to),
+      });
+    }
+    qb.orderBy('c.created_at', 'DESC');
+
+    const result = await this.paginateQueryBuilder(qb, { page, limit });
+    const campaignIds = result.items.map((c) => c.id);
+    const [capturedByCampaign, approvedByCampaign, validSubjectsByCampaign] =
+      await Promise.all([
+        this.bulkCapturedCounts(campaignIds),
+        this.bulkApprovedSetCounts(campaignIds),
+        this.bulkValidSubjectCounts(campaignIds),
+      ]);
+
+    const items = await Promise.all(
+      result.items.map(async (campaign) => {
+        const dao = await this.toCampaignResponse(campaign);
+        dao.workflowName = dao.workflow?.code ?? null;
+
+        const captured = capturedByCampaign.get(campaign.id) ?? 0;
+        const approved = approvedByCampaign.get(campaign.id) ?? 0;
+        const quota =
+          campaign.quotaPlanned ??
+          validSubjectsByCampaign.get(campaign.id) ??
+          null;
+        dao.progress = {
+          captured,
+          approved,
+          quota,
+          percent: quota ? Math.round((captured / quota) * 100) : null,
+        };
+        return dao;
+      }),
+    );
+
+    return new Pagination(items, result.meta);
+  }
+
+  private async bulkCapturedCounts(
+    campaignIds: string[],
+  ): Promise<Map<string, number>> {
+    if (campaignIds.length === 0) return new Map();
+    const rows: Array<{ campaign_id: string; count: number }> =
+      await this.dataSource.query(
+        `SELECT campaign_id, COUNT(DISTINCT COALESCE(subject_code, id::text))::int AS count
+           FROM sessions
+          WHERE campaign_id = ANY($1) AND status = 'COMPLETED'
+          GROUP BY campaign_id`,
+        [campaignIds],
+      );
+    return new Map(rows.map((r) => [r.campaign_id, r.count]));
+  }
+
+  /** `subject_photo_sets` is photo-review's table — a plain column any module can read, same convention `countCompletedSessions` above already relies on for `sessions`. */
+  private async bulkApprovedSetCounts(
+    campaignIds: string[],
+  ): Promise<Map<string, number>> {
+    if (campaignIds.length === 0) return new Map();
+    const rows: Array<{ campaign_id: string; count: number }> =
+      await this.dataSource.query(
+        `SELECT campaign_id, COUNT(*)::int AS count
+           FROM subject_photo_sets
+          WHERE campaign_id = ANY($1) AND status = 'APPROVED'
+          GROUP BY campaign_id`,
+        [campaignIds],
+      );
+    return new Map(rows.map((r) => [r.campaign_id, r.count]));
+  }
+
+  /** Fallback `quota` when `quotaPlanned` is unset — "số dòng roster hợp lệ" (§2.1). */
+  private async bulkValidSubjectCounts(
+    campaignIds: string[],
+  ): Promise<Map<string, number>> {
+    if (campaignIds.length === 0) return new Map();
+    const rows: Array<{ campaign_id: string; count: number }> =
+      await this.dataSource.query(
+        `SELECT campaign_id, COUNT(*)::int AS count
+           FROM campaign_subjects
+          WHERE campaign_id = ANY($1) AND status = 'VALID'
+          GROUP BY campaign_id`,
+        [campaignIds],
+      );
+    return new Map(rows.map((r) => [r.campaign_id, r.count]));
   }
 }
