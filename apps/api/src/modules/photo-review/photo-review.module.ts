@@ -1,5 +1,6 @@
 import { SsoAuthGuard } from '@app/shared/auth/index';
 import { FileStorageModule } from '@app/modules/file-storage/file-storage.module';
+import { StatsModule } from '@app/modules/stats/stats.module';
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { PhotoKindController } from './controllers/photo-kind.controller';
@@ -52,8 +53,17 @@ import { VariantUploadWorkerService } from './services/variant-upload-worker.ser
       VariantUploadOutboxEntry,
     ]),
     FileStorageModule,
+    // For ReviewStatsService (stats hooks in PhotoReviewService) and
+    // StatsQueryService (`GET /v1/review/stats`, ReviewController) — a
+    // leaf module with no dependency back on this one, see its own doc
+    // comment.
+    StatsModule,
   ],
-  controllers: [ReviewController, PhotoKindController, VariantContentController],
+  controllers: [
+    ReviewController,
+    PhotoKindController,
+    VariantContentController,
+  ],
   providers: [
     PhotoReviewService,
     PhotoKindService,
@@ -67,6 +77,9 @@ import { VariantUploadWorkerService } from './services/variant-upload-worker.ser
     SsoAuthGuard,
     ReviewerRoleGuard,
   ],
-  exports: [PhotoReviewService, PhotoKindService],
+  // `PhotoReviewSidecarService` exported for `AppController`'s consolidated
+  // `GET /health` (I-Q9) to ping the AI sidecar's own reachability —
+  // nothing else outside this module calls it directly.
+  exports: [PhotoReviewService, PhotoKindService, PhotoReviewSidecarService],
 })
 export class PhotoReviewModule {}

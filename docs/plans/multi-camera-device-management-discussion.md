@@ -1,5 +1,11 @@
 # Thảo luận thiết kế: Đa camera, Streaming, Quản lý thiết bị
 
+> **Cập nhật 2026-09-11** — mục §2.3 (tra cứu sinh viên, `GET
+> /v1/identify/lookup`, chờ giao thức hệ thống Admin) được thay bằng roster
+> theo đợt ở server: `GET /v1/campaigns/:id/subjects/lookup?key=` đọc
+> `campaign_subjects` (import Excel) và tùy chọn gọi API ngoài qua adapter
+> `EligibilityApiClient`. Xem `cms-8-screens-api-plan.md` §2.2, §2.3, §9.
+
 > Tài liệu thảo luận (chưa phải spec chốt). Mục đích: đi sâu từng khoảng trống
 > trong sơ đồ luồng đã vẽ, và làm rõ kiến trúc cho 5 tính năng đã nêu, trước khi
 > chuyển sang viết implementation plan chính thức.

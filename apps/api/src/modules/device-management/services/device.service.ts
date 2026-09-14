@@ -1,11 +1,17 @@
 import { toDao } from '@app/shared/http/to-dao.helper';
 import { CustomException, ERROR_CODE } from '@app/shared/errors/legacy';
 import { CommonService } from '@app/shared/common/common.service';
+import { Pagination } from '@app/shared/http/pagination';
 import { HttpStatus, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { DeviceDao, SelfEnrollDeviceDao } from '../dao';
-import { CreateDeviceDto, ReissueDeviceDto, SelfEnrollDeviceDto } from '../dto';
+import {
+  CreateDeviceDto,
+  ListDevicesQueryDto,
+  ReissueDeviceDto,
+  SelfEnrollDeviceDto,
+} from '../dto';
 import { Device, DeviceStatus } from '../entities/device.entity';
 import {
   generateDeviceSecret,
@@ -193,7 +199,12 @@ export class DeviceService extends CommonService<Device> {
 
       const apiBaseUrl = existing.authApiEndpoint || requestApiBaseUrl;
       const campaignId = dto.campaignId ?? existing.campaignId ?? null;
-      return { deviceId: existing.id, deviceSecret: plainSecret, apiBaseUrl, campaignId };
+      return {
+        deviceId: existing.id,
+        deviceSecret: plainSecret,
+        apiBaseUrl,
+        campaignId,
+      };
     }
 
     const plainSecret = generateDeviceSecret();
@@ -362,6 +373,32 @@ export class DeviceService extends CommonService<Device> {
     device.activatedAt = new Date();
     await this.save(device);
     return toDao(DeviceDao, device);
+  }
+
+  /** `GET /v1/devices?campaignId&status&q&page&limit` — cms-8-screens-api-plan.md §2.3/P3, mainly to browse kiosks when assigning them. */
+  async listDevicesPaginated(
+    query: ListDevicesQueryDto,
+  ): Promise<Pagination<DeviceDao>> {
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 10;
+
+    const qb = this.repository.createQueryBuilder('d');
+    if (query.campaignId) {
+      qb.andWhere('d.campaign_id = :campaignId', {
+        campaignId: query.campaignId,
+      });
+    }
+    if (query.status)
+      qb.andWhere('d.status = :status', { status: query.status });
+    if (query.q) {
+      qb.andWhere('(d.name ILIKE :q OR d.hostname ILIKE :q)', {
+        q: `%${query.q}%`,
+      });
+    }
+    qb.orderBy('d.created_at', 'DESC');
+
+    const result = await this.paginateQueryBuilder(qb, { page, limit });
+    return new Pagination(toDao(DeviceDao, result.items), result.meta);
   }
 
   async findAllByCampaign(campaignId: string): Promise<DeviceDao[]> {

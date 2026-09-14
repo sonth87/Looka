@@ -96,7 +96,8 @@ export class SelfEnrollDeviceDao {
   apiBaseUrl: string;
 
   @ApiPropertyOptional({
-    description: 'null nếu request không gửi campaignId — thiết bị chưa gắn campaign nào',
+    description:
+      'null nếu request không gửi campaignId — thiết bị chưa gắn campaign nào',
   })
   @Expose()
   campaignId: string | null;

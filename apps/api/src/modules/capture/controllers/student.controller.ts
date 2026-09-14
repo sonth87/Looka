@@ -37,10 +37,13 @@ export class StudentController {
   @Get(':code')
   @ApiOperation({
     summary:
-      'One student, every session across every campaign, with photos/videos and view-links',
+      'One student, every session across every campaign, with photos/videos and view-links. Pass includeLinks=false to skip minting them (plan §8 I-Q17) and mint lazily per-photo/video instead.',
   })
   @ApiResponseDecorator(StudentDetailDao)
-  getStudent(@Param('code') code: string): Promise<StudentDetailDao> {
-    return this.studentService.getStudentDetail(code);
+  getStudent(
+    @Param('code') code: string,
+    @Query('includeLinks') includeLinks?: string,
+  ): Promise<StudentDetailDao> {
+    return this.studentService.getStudentDetail(code, includeLinks !== 'false');
   }
 }

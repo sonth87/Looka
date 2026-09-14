@@ -33,6 +33,12 @@ interface SessionReportPayload {
   metadata?: Record<string, unknown> | null;
   /** Id of the operator who ran this session, if the kiosk had one signed in - §3.2.3. Same COALESCE-non-regression treatment as `subjectCode`/`subjectName` below. */
   operatorUserId?: string | null;
+  /** `identification_methods.code` used, if any — cms-8-screens-api-plan.md §2.1/§2.2, P3. Optional (§9.1 rule 2): an older kiosk build simply omits it. */
+  identificationMethod?: string | null;
+  /** When identification finished (quét thẻ) — kiosk-local clock, same as `startedAt`/`approvedAt`. */
+  identifiedAt?: string | null;
+  /** When the session fully finished (gửi lời chào) — used for the per-kiosk timing stat. */
+  finishedAt?: string | null;
   photos: SessionReportPhotoInput[];
 }
 
@@ -122,8 +128,9 @@ export class CaptureReportService {
       `INSERT INTO sessions (
           id, source, device_id, campaign_id, status,
           captured_at, completed_at, approved_at, workflow_id,
-          subject_code, subject_name, metadata, operator_user_id
-        ) VALUES ($1, 'KIOSK', $2, $3, 'COMPLETED', $4, $5, $5, $6, $7, $8, $9::jsonb, $10)
+          subject_code, subject_name, metadata, operator_user_id,
+          identification_method, identified_at, finished_at
+        ) VALUES ($1, 'KIOSK', $2, $3, 'COMPLETED', $4, $5, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13)
         ON CONFLICT (id) DO UPDATE SET
           source = 'KIOSK',
           device_id = EXCLUDED.device_id,
@@ -136,7 +143,10 @@ export class CaptureReportService {
           subject_code = COALESCE(EXCLUDED.subject_code, sessions.subject_code),
           subject_name = COALESCE(EXCLUDED.subject_name, sessions.subject_name),
           metadata = sessions.metadata || EXCLUDED.metadata,
-          operator_user_id = COALESCE(EXCLUDED.operator_user_id, sessions.operator_user_id)`,
+          operator_user_id = COALESCE(EXCLUDED.operator_user_id, sessions.operator_user_id),
+          identification_method = COALESCE(EXCLUDED.identification_method, sessions.identification_method),
+          identified_at = COALESCE(EXCLUDED.identified_at, sessions.identified_at),
+          finished_at = COALESCE(EXCLUDED.finished_at, sessions.finished_at)`,
       [
         payload.sessionId,
         deviceId,
@@ -148,6 +158,9 @@ export class CaptureReportService {
         payload.subjectName ?? null,
         JSON.stringify(payload.metadata ?? {}),
         payload.operatorUserId ?? null,
+        payload.identificationMethod ?? null,
+        payload.identifiedAt ? new Date(payload.identifiedAt) : null,
+        payload.finishedAt ? new Date(payload.finishedAt) : null,
       ],
     );
 
@@ -403,6 +416,20 @@ export class CaptureReportService {
     if (m.metadata != null && typeof m.metadata !== 'object') {
       return invalid('metadata must be an object when present');
     }
+    if (
+      m.identifiedAt != null &&
+      (typeof m.identifiedAt !== 'string' ||
+        Number.isNaN(Date.parse(m.identifiedAt)))
+    ) {
+      return invalid('identifiedAt must be an ISO date string when present');
+    }
+    if (
+      m.finishedAt != null &&
+      (typeof m.finishedAt !== 'string' ||
+        Number.isNaN(Date.parse(m.finishedAt)))
+    ) {
+      return invalid('finishedAt must be an ISO date string when present');
+    }
 
     const photos = m.photos.map((rawPhoto, index) => {
       if (!rawPhoto || typeof rawPhoto !== 'object')
@@ -452,6 +479,10 @@ export class CaptureReportService {
       metadata:
         (m.metadata as Record<string, unknown> | null | undefined) ?? null,
       operatorUserId: (m.operatorUserId as string | null | undefined) ?? null,
+      identificationMethod:
+        (m.identificationMethod as string | null | undefined) ?? null,
+      identifiedAt: m.identifiedAt ?? null,
+      finishedAt: m.finishedAt ?? null,
       photos,
     };
   }

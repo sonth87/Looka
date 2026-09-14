@@ -3,9 +3,11 @@ import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import { CaptureReportService } from '@app/modules/capture/services/capture-report.service';
 import { PhotoReviewService } from '@app/modules/photo-review/services/photo-review.service';
+import { CaptureStatsService } from '@app/modules/stats/services/capture-stats.service';
 import { CommonService } from '@app/shared/common/common.service';
 import {
   AllCampaignsStatsDao,
+  CampaignBreakdownCountDao,
   CampaignDayStatsDao,
   CampaignDeviceStatsDao,
   CampaignOperatorStatsDao,
@@ -32,6 +34,7 @@ export class DeviceEventService extends CommonService<DeviceEvent> {
     private readonly dataSource: DataSource,
     private readonly captureReportService: CaptureReportService,
     private readonly photoReview: PhotoReviewService,
+    private readonly captureStats: CaptureStatsService,
   ) {
     super(repository);
   }
@@ -75,7 +78,8 @@ export class DeviceEventService extends CommonService<DeviceEvent> {
             campaignId,
             event.metadata,
           );
-          const sessionId = (event.metadata as { sessionId?: unknown } | null)?.sessionId;
+          const sessionId = (event.metadata as { sessionId?: unknown } | null)
+            ?.sessionId;
           if (typeof sessionId === 'string') approvedSessionIds.push(sessionId);
         } else if (event.type === DeviceEventType.PHOTO_STATUS) {
           await this.captureReportService.applyPhotoStatus(
@@ -97,6 +101,18 @@ export class DeviceEventService extends CommonService<DeviceEvent> {
             event.metadata,
           );
         }
+
+        // cms-8-screens-api-plan.md §2.9/P4 — same transaction as the
+        // event's own audit row and (for SESSION_REPORT) the sessions/
+        // photos upsert above, so a stats counter and its source event
+        // commit or roll back together.
+        await this.captureStats.applyDeviceEvent(manager, {
+          campaignId,
+          deviceId,
+          type: event.type,
+          occurredAt: new Date(event.occurredAt),
+          metadata: event.metadata ?? null,
+        });
       }
 
       const rows = this.creates(
@@ -139,12 +155,14 @@ export class DeviceEventService extends CommonService<DeviceEvent> {
     // the time this runs (no upload to fs-core to wait on first) — see
     // `PhotoReviewService.readSourcePhotoBytes`.
     for (const sessionId of approvedSessionIds) {
-      const result = await this.photoReview.ensureSetForApprovedSession(sessionId).catch((err) => {
-        this.logger.warn(
-          `best-effort photo-review set creation failed for session ${sessionId}: ${(err as Error).message}`,
-        );
-        return null;
-      });
+      const result = await this.photoReview
+        .ensureSetForApprovedSession(sessionId)
+        .catch((err) => {
+          this.logger.warn(
+            `best-effort photo-review set creation failed for session ${sessionId}: ${(err as Error).message}`,
+          );
+          return null;
+        });
       if (result?.pendingAuto) {
         // `reprocess()`'s resolved `PhotoVariantDao` is discarded here (this
         // is a best-effort background trigger, not a request/response flow)
@@ -154,11 +172,13 @@ export class DeviceEventService extends CommonService<DeviceEvent> {
         // from (unlike `ReviewController`'s own routes), so a placeholder is
         // passed rather than threading `ConfigService`/a request object into
         // this service for a value nothing consumes.
-        await this.photoReview.reprocess(result.setId, null, 'http://localhost').catch((err) => {
-          this.logger.warn(
-            `best-effort auto CARD_AUTO reprocess failed for set ${result.setId} (session ${sessionId}): ${(err as Error).message}`,
-          );
-        });
+        await this.photoReview
+          .reprocess(result.setId, null, 'http://localhost')
+          .catch((err) => {
+            this.logger.warn(
+              `best-effort auto CARD_AUTO reprocess failed for set ${result.setId} (session ${sessionId}): ${(err as Error).message}`,
+            );
+          });
       }
     }
 
@@ -207,6 +227,9 @@ export class DeviceEventService extends CommonService<DeviceEvent> {
     stats.byDevice = await this.campaignDeviceStats(campaignId);
     stats.byOperator = await this.campaignOperatorStats(campaignId);
     stats.byDay = await this.campaignDayStats(campaignId);
+    const breakdown = await this.campaignTriggerAndModeStats(campaignId);
+    stats.byTrigger = breakdown.byTrigger;
+    stats.byCaptureMode = breakdown.byCaptureMode;
 
     return stats;
   }
@@ -308,6 +331,10 @@ export class DeviceEventService extends CommonService<DeviceEvent> {
       // here rather than adding N+1 queries for a summary table that never
       // asked to show it.
       item.byOperator = [];
+      // Same reasoning as `byOperator` just above — no bulk grouped-by-
+      // campaign query exists for this cross-campaign overview page.
+      item.byTrigger = [];
+      item.byCaptureMode = [];
       item.byDay = dayStatsByCampaign.get(campaign.id) ?? [];
 
       summary.totalDevices += item.deviceCount;
@@ -520,13 +547,73 @@ export class DeviceEventService extends CommonService<DeviceEvent> {
     return rows.map((r) => {
       const dao = new CampaignOperatorStatsDao();
       dao.operatorUserId = r.operator_user_id;
-      dao.operatorName = r.operator_name ?? 'Không rõ (chưa đăng nhập SSO khi chụp)';
+      dao.operatorName =
+        r.operator_name ?? 'Không rõ (chưa đăng nhập SSO khi chụp)';
       dao.sessions = r.sessions;
       dao.photosReady = r.photos_ready;
       dao.photosFailed = r.photos_failed;
       dao.lastCaptureAt = r.last_capture_at ?? undefined;
       return dao;
     });
+  }
+
+  /**
+   * `byTrigger`/`byCaptureMode` (2026-09-14, cms-8-screens-api-plan.md §2.3
+   * — "thống kê tự động/tay") — grouped from `photos.trigger_source`/
+   * `photos.capture_mode`, the FINAL kept photo's values (see that column's
+   * own doc comment), not `device_events.CAPTURE_TRIGGERED`'s per-shutter-
+   * fire count (which also counts retaken attempts) — one query grouping by
+   * both columns at once, split into two maps in JS to avoid two round
+   * trips. A `null` key groups photos from a kiosk build old enough not to
+   * report either field (§9.1 rule 2) — kept as its own row rather than
+   * dropped, so the counts still sum to `photos.total`.
+   */
+  private async campaignTriggerAndModeStats(campaignId: string): Promise<{
+    byTrigger: CampaignBreakdownCountDao[];
+    byCaptureMode: CampaignBreakdownCountDao[];
+  }> {
+    const rows = await this.dataSource.query<
+      Array<{
+        trigger_source: string | null;
+        capture_mode: string | null;
+        count: number;
+      }>
+    >(
+      `SELECT p.trigger_source, p.capture_mode, COUNT(*)::int AS count
+         FROM photos p
+         JOIN sessions s ON s.id = p.session_id
+        WHERE s.campaign_id = $1
+        GROUP BY p.trigger_source, p.capture_mode`,
+      [campaignId],
+    );
+
+    const triggerCounts = new Map<string | null, number>();
+    const modeCounts = new Map<string | null, number>();
+    for (const row of rows) {
+      triggerCounts.set(
+        row.trigger_source,
+        (triggerCounts.get(row.trigger_source) ?? 0) + Number(row.count),
+      );
+      modeCounts.set(
+        row.capture_mode,
+        (modeCounts.get(row.capture_mode) ?? 0) + Number(row.count),
+      );
+    }
+
+    const toBreakdown = (
+      map: Map<string | null, number>,
+    ): CampaignBreakdownCountDao[] =>
+      [...map.entries()].map(([key, count]) => {
+        const dao = new CampaignBreakdownCountDao();
+        dao.key = key;
+        dao.count = count;
+        return dao;
+      });
+
+    return {
+      byTrigger: toBreakdown(triggerCounts),
+      byCaptureMode: toBreakdown(modeCounts),
+    };
   }
 
   /** Last 30 days, bucketed in the kiosks' own timezone (A.8) — not UTC, so "today" lines up with what an operator in Vietnam actually did today. */

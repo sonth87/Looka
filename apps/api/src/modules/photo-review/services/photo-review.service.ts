@@ -1,6 +1,7 @@
 import { CustomException } from '@app/shared/errors/legacy';
 import { toDao } from '@app/shared/http/to-dao.helper';
 import { FileStorageService } from '@app/modules/file-storage/services/file-storage.service';
+import { ReviewStatsService } from '@app/modules/stats/services/review-stats.service';
 import { Pagination } from '@app/shared/http/pagination';
 import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -40,7 +41,10 @@ import {
   PhotoVariantStatus,
 } from '../photo-review.constants';
 import { PhotoKindService } from './photo-kind.service';
-import { PhotoReviewSidecarService, SidecarError } from './photo-review-sidecar.service';
+import {
+  PhotoReviewSidecarService,
+  SidecarError,
+} from './photo-review-sidecar.service';
 
 /**
  * How long a signed variant `local-content` link stays valid — same value,
@@ -73,7 +77,8 @@ interface SessionContext {
 }
 
 /** A very small (16-byte) 1x1 JPEG-ish sniff is not attempted — MIME + size only, matching `PhotoService.addPhoto`'s own validation depth for this pass. */
-const uploadedFileMimeAllowed = (mimeType: string) => ALLOWED_UPLOAD_MIME_TYPES.includes(mimeType.toLowerCase());
+const uploadedFileMimeAllowed = (mimeType: string) =>
+  ALLOWED_UPLOAD_MIME_TYPES.includes(mimeType.toLowerCase());
 
 /**
  * Extracts a real diagnostic message from anything this module's sidecar
@@ -103,7 +108,8 @@ const uploadedFileMimeAllowed = (mimeType: string) => ALLOWED_UPLOAD_MIME_TYPES.
  */
 function extractSidecarFailureMessage(error: unknown): string {
   if (error instanceof SidecarError) return error.message;
-  if (error instanceof CustomException) return error.payload?.error ?? error.message;
+  if (error instanceof CustomException)
+    return error.payload?.error ?? error.message;
   return (error as Error)?.message ?? String(error);
 }
 
@@ -141,6 +147,7 @@ export class PhotoReviewService {
     private readonly sidecar: PhotoReviewSidecarService,
     private readonly photoKindService: PhotoKindService,
     private readonly configService: ConfigService,
+    private readonly reviewStats: ReviewStatsService,
   ) {}
 
   // ── Locking (plan §4) ──────────────────────────────────────────────────
@@ -165,7 +172,11 @@ export class PhotoReviewService {
   private async findSetEntityOrFail(id: string): Promise<SubjectPhotoSet> {
     const set = await this.setRepository.findOne({ where: { id } });
     if (!set) {
-      throw new CustomException('Photo review set not found', PHOTO_REVIEW_ERROR_CODE.SET_NOT_FOUND, HttpStatus.NOT_FOUND);
+      throw new CustomException(
+        'Photo review set not found',
+        PHOTO_REVIEW_ERROR_CODE.SET_NOT_FOUND,
+        HttpStatus.NOT_FOUND,
+      );
     }
     return set;
   }
@@ -219,12 +230,15 @@ export class PhotoReviewService {
    * `sessions` (cross-module-boundary read, see the class doc comment)
    * rather than importing anything from `capture`.
    */
-  private async resolveSessionContext(sessionId: string): Promise<SessionContext> {
-    const rows: Array<{ at: Date; identity_number: string | null }> = await this.dataSource.query(
-      `SELECT COALESCE(captured_at, created_at) AS at, metadata->>'identityNumber' AS identity_number
+  private async resolveSessionContext(
+    sessionId: string,
+  ): Promise<SessionContext> {
+    const rows: Array<{ at: Date; identity_number: string | null }> =
+      await this.dataSource.query(
+        `SELECT COALESCE(captured_at, created_at) AS at, metadata->>'identityNumber' AS identity_number
          FROM sessions WHERE id = $1`,
-      [sessionId],
-    );
+        [sessionId],
+      );
     const row = rows[0];
     if (!row) {
       throw new CustomException(
@@ -241,7 +255,9 @@ export class PhotoReviewService {
   }
 
   /** Batch version of `resolveSessionContext`, tenant only — see that method's own doc comment for why this is always `undefined` now. Kept (rather than deleted outright) so `listSets`/`getSetDetail` don't need to change shape. */
-  private async batchResolveTenants(sessionIds: string[]): Promise<Map<string, string | undefined>> {
+  private async batchResolveTenants(
+    sessionIds: string[],
+  ): Promise<Map<string, string | undefined>> {
     const map = new Map<string, string | undefined>();
     for (const id of sessionIds) map.set(id, undefined);
     return map;
@@ -254,21 +270,41 @@ export class PhotoReviewService {
    * explicitly tagged FRONT, so this still works for a workflow that only
    * has custom step ids.
    */
-  private async findFrontSourcePhoto(sessionId: string): Promise<FrontSourcePhoto | null> {
-    const rows: Array<{ id: string; fs_file_id: string | null; mime_type: string }> = await this.dataSource.query(
+  private async findFrontSourcePhoto(
+    sessionId: string,
+  ): Promise<FrontSourcePhoto | null> {
+    const rows: Array<{
+      id: string;
+      fs_file_id: string | null;
+      mime_type: string;
+    }> = await this.dataSource.query(
       `SELECT id, fs_file_id, mime_type FROM photos
         WHERE session_id = $1 AND (step_type = 'FRONT' OR step_id ILIKE '%front%')
         ORDER BY attempt DESC LIMIT 1`,
       [sessionId],
     );
     if (rows[0]) {
-      return { id: rows[0].id, fsFileId: rows[0].fs_file_id, mimeType: rows[0].mime_type };
+      return {
+        id: rows[0].id,
+        fsFileId: rows[0].fs_file_id,
+        mimeType: rows[0].mime_type,
+      };
     }
-    const fallback: Array<{ id: string; fs_file_id: string | null; mime_type: string }> = await this.dataSource.query(
+    const fallback: Array<{
+      id: string;
+      fs_file_id: string | null;
+      mime_type: string;
+    }> = await this.dataSource.query(
       `SELECT id, fs_file_id, mime_type FROM photos WHERE session_id = $1 ORDER BY created_at ASC LIMIT 1`,
       [sessionId],
     );
-    return fallback[0] ? { id: fallback[0].id, fsFileId: fallback[0].fs_file_id, mimeType: fallback[0].mime_type } : null;
+    return fallback[0]
+      ? {
+          id: fallback[0].id,
+          fsFileId: fallback[0].fs_file_id,
+          mimeType: fallback[0].mime_type,
+        }
+      : null;
   }
 
   private extForMime(mimeType: string): string {
@@ -321,11 +357,20 @@ export class PhotoReviewService {
   }
 
   /** Bytes for an fs-core file id directly — used once a caller already knows nothing local is available (see `readVariantBytes`/`readSourcePhotoBytes`, which both prefer local bytes first and fall back to this only when the local row has cleared its content or never had one). */
-  private async fetchBytesFromFileStorage(fsFileId: string, tenantName?: string): Promise<Buffer> {
-    const link = await this.fileStorage.issueViewLink(fsFileId, 'photo-review-sidecar', tenantName);
+  private async fetchBytesFromFileStorage(
+    fsFileId: string,
+    tenantName?: string,
+  ): Promise<Buffer> {
+    const link = await this.fileStorage.issueViewLink(
+      fsFileId,
+      'photo-review-sidecar',
+      tenantName,
+    );
     const res = await fetch(link.url);
     if (!res.ok) {
-      throw new SidecarError(`Failed to fetch bytes from the file-service: HTTP ${res.status}`);
+      throw new SidecarError(
+        `Failed to fetch bytes from the file-service: HTTP ${res.status}`,
+      );
     }
     return Buffer.from(await res.arrayBuffer());
   }
@@ -347,7 +392,10 @@ export class PhotoReviewService {
    * the cron queue), instead of wrongly requiring `fsFileId` to be set
    * first.
    */
-  private async readVariantBytes(variant: PhotoVariant, tenantName?: string): Promise<Buffer> {
+  private async readVariantBytes(
+    variant: PhotoVariant,
+    tenantName?: string,
+  ): Promise<Buffer> {
     const rows: Array<{ content: Buffer | null }> = await this.dataSource.query(
       `SELECT content FROM variant_upload_outbox
         WHERE variant_id = $1 AND content IS NOT NULL AND length(content) > 0
@@ -459,11 +507,13 @@ export class PhotoReviewService {
   private async resolveVariantViewSource(
     variant: PhotoVariant,
   ): Promise<
-    | { kind: 'remote'; fsFileId: string }
-    | { kind: 'local' }
-    | { kind: 'none' }
+    { kind: 'remote'; fsFileId: string } | { kind: 'local' } | { kind: 'none' }
   > {
-    if (variant.fsFileId && variant.fsStatus !== 'FAILED' && variant.fsStatus !== 'QUARANTINED') {
+    if (
+      variant.fsFileId &&
+      variant.fsStatus !== 'FAILED' &&
+      variant.fsStatus !== 'QUARANTINED'
+    ) {
       return { kind: 'remote', fsFileId: variant.fsFileId };
     }
     if (await this.hasLocalVariantContent(variant.id)) {
@@ -499,9 +549,16 @@ export class PhotoReviewService {
   }
 
   /** Throws `VARIANT_LOCAL_TOKEN_INVALID` unless `sig`/`exp` are a valid, unexpired pair for `variantId` — see `issueLocalVariantViewLink`. Called by `VariantContentController`. */
-  verifyLocalVariantViewTokenOrFail(variantId: string, expRaw: string, sigRaw: string): void {
+  verifyLocalVariantViewTokenOrFail(
+    variantId: string,
+    expRaw: string,
+    sigRaw: string,
+  ): void {
     const exp = Number(expRaw);
-    const expectedBuf = Buffer.from(this.signLocalVariantViewToken(variantId, exp), 'hex');
+    const expectedBuf = Buffer.from(
+      this.signLocalVariantViewToken(variantId, exp),
+      'hex',
+    );
     const gotBuf = sigRaw ? Buffer.from(sigRaw, 'hex') : Buffer.alloc(0);
     const valid =
       Number.isFinite(exp) &&
@@ -520,17 +577,22 @@ export class PhotoReviewService {
 
   private signLocalVariantViewToken(variantId: string, exp: number): string {
     const secret = this.configService.get<string>('security.apiKey') ?? '';
-    return createHmac('sha256', secret).update(`variant:${variantId}:${exp}`).digest('hex');
+    return createHmac('sha256', secret)
+      .update(`variant:${variantId}:${exp}`)
+      .digest('hex');
   }
 
   /** Streams straight from `variant_upload_outbox.content` — see `resolveVariantViewSource`'s 'local' branch. Called by `VariantContentController`. */
-  async readLocalVariantContent(variantId: string): Promise<{ data: Buffer; mimeType: string }> {
-    const rows: Array<{ content: Buffer | null; mime_type: string }> = await this.dataSource.query(
-      `SELECT content, mime_type FROM variant_upload_outbox
+  async readLocalVariantContent(
+    variantId: string,
+  ): Promise<{ data: Buffer; mimeType: string }> {
+    const rows: Array<{ content: Buffer | null; mime_type: string }> =
+      await this.dataSource.query(
+        `SELECT content, mime_type FROM variant_upload_outbox
         WHERE variant_id = $1 AND content IS NOT NULL AND length(content) > 0
         ORDER BY created_at DESC LIMIT 1`,
-      [variantId],
-    );
+        [variantId],
+      );
     if (!rows[0]?.content) {
       throw new CustomException(
         'No locally stored bytes for this variant',
@@ -584,32 +646,60 @@ export class PhotoReviewService {
         visibility: 'private' as const,
       };
       if (input.tenantName) {
-        await (await this.fileStorage.clientForTenant(input.tenantName)).uploadRaw(uploadInput);
+        await (
+          await this.fileStorage.clientForTenant(input.tenantName)
+        ).uploadRaw(uploadInput);
       } else {
         await this.fileStorage.uploadRaw(uploadInput);
       }
     } catch (error) {
-      this.logger.warn(`best-effort metadata upload failed for ${input.virtualPath}: ${(error as Error).message}`);
+      this.logger.warn(
+        `best-effort metadata upload failed for ${input.virtualPath}: ${(error as Error).message}`,
+      );
     }
   }
 
-  private async lockSet(manager: EntityManager, id: string): Promise<SubjectPhotoSet> {
+  private async lockSet(
+    manager: EntityManager,
+    id: string,
+  ): Promise<SubjectPhotoSet> {
     const set = await manager.getRepository(SubjectPhotoSet).findOne({
       where: { id },
       lock: { mode: 'pessimistic_write' },
     });
     if (!set) {
-      throw new CustomException('Photo review set not found', PHOTO_REVIEW_ERROR_CODE.SET_NOT_FOUND, HttpStatus.NOT_FOUND);
+      throw new CustomException(
+        'Photo review set not found',
+        PHOTO_REVIEW_ERROR_CODE.SET_NOT_FOUND,
+        HttpStatus.NOT_FOUND,
+      );
     }
     return set;
   }
 
-  private async nextVersion(manager: EntityManager, setId: string): Promise<number> {
+  private async nextVersion(
+    manager: EntityManager,
+    setId: string,
+  ): Promise<number> {
     const rows: Array<{ next: number }> = await manager.query(
       `SELECT COALESCE(MAX(version), 0) + 1 AS next FROM photo_variants WHERE set_id = $1`,
       [setId],
     );
     return rows[0]?.next ?? 1;
+  }
+
+  /** D-Q6's "quá hạn" formula — `dueAt` unset (no campaign SLA) or the set already decided means never overdue. */
+  private computeOverdue(
+    dueAt: Date | null | undefined,
+    status: PhotoReviewSetStatus,
+  ): boolean {
+    if (!dueAt) return false;
+    if (
+      status === PhotoReviewSetStatus.APPROVED ||
+      status === PhotoReviewSetStatus.REJECTED
+    )
+      return false;
+    return new Date(dueAt).getTime() < Date.now();
   }
 
   private async writeEvent(
@@ -654,12 +744,18 @@ export class PhotoReviewService {
     const source = await this.resolveVariantViewSource(variant);
     if (source.kind === 'remote') {
       try {
-        const link = await this.fileStorage.issueViewLink(source.fsFileId, 'photo-review', tenantName);
+        const link = await this.fileStorage.issueViewLink(
+          source.fsFileId,
+          'photo-review',
+          tenantName,
+        );
         dao.viewUrl = link.url;
         dao.viewUrlExpiresAt = link.expiresAt;
         return dao;
       } catch (error) {
-        this.logger.warn(`view-link failed for variant ${variant.id}: ${(error as Error).message}`);
+        this.logger.warn(
+          `view-link failed for variant ${variant.id}: ${(error as Error).message}`,
+        );
         // Fall through: fs-core rejected/failed the request (e.g. a stale
         // FS_API_KEY) even though this variant has an fsFileId — try the
         // local fallback below before giving up, same "show SOMETHING"
@@ -714,10 +810,16 @@ export class PhotoReviewService {
     if (!variantId) return {};
     if (fsFileId && fsStatus !== 'FAILED' && fsStatus !== 'QUARANTINED') {
       try {
-        const link = await this.fileStorage.issueViewLink(fsFileId, 'photo-review', tenantName);
+        const link = await this.fileStorage.issueViewLink(
+          fsFileId,
+          'photo-review',
+          tenantName,
+        );
         return { url: link.url, expiresAt: link.expiresAt };
       } catch (error) {
-        this.logger.warn(`current-card view-link failed for variant ${variantId}: ${(error as Error).message}`);
+        this.logger.warn(
+          `current-card view-link failed for variant ${variantId}: ${(error as Error).message}`,
+        );
       }
     }
     if (await this.hasLocalVariantContent(variantId)) {
@@ -729,7 +831,10 @@ export class PhotoReviewService {
 
   // ── GET /v1/review/sets ─────────────────────────────────────────────
 
-  async listSets(query: ListSetsQueryDto, apiBaseUrl: string): Promise<Pagination<ReviewSetListItemDao>> {
+  async listSets(
+    query: ListSetsQueryDto,
+    apiBaseUrl: string,
+  ): Promise<Pagination<ReviewSetListItemDao>> {
     const page = query.page ?? 1;
     const limit = query.limit ?? 20;
     const offset = (page - 1) * limit;
@@ -748,11 +853,31 @@ export class PhotoReviewService {
       params.push(query.status);
       conditions.push(`s.status = $${params.length}`);
     }
-    if (query.missingCard === true) conditions.push('s.current_card_variant_id IS NULL');
-    if (query.missingCard === false) conditions.push('s.current_card_variant_id IS NOT NULL');
+    if (query.missingCard === true)
+      conditions.push('s.current_card_variant_id IS NULL');
+    if (query.missingCard === false)
+      conditions.push('s.current_card_variant_id IS NOT NULL');
+    if (query.className) {
+      params.push(query.className);
+      conditions.push(`s.class_name = $${params.length}`);
+    }
+    if (query.major) {
+      params.push(query.major);
+      conditions.push(`s.major = $${params.length}`);
+    }
+    if (query.citizenId) {
+      params.push(query.citizenId);
+      conditions.push(`s.citizen_id = $${params.length}`);
+    }
+    if (query.subjectCode) {
+      params.push(query.subjectCode);
+      conditions.push(`s.subject_code = $${params.length}`);
+    }
     if (query.q) {
       params.push(`%${query.q}%`);
-      conditions.push(`(s.subject_code ILIKE $${params.length} OR s.subject_name ILIKE $${params.length})`);
+      conditions.push(
+        `(s.subject_code ILIKE $${params.length} OR s.subject_name ILIKE $${params.length})`,
+      );
     }
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
 
@@ -761,13 +886,23 @@ export class PhotoReviewService {
     if (query.hasAi === false) outerConditions.push('has_ai = false');
     if (query.hasUpload === true) outerConditions.push('has_upload = true');
     if (query.hasUpload === false) outerConditions.push('has_upload = false');
-    const outerWhere = outerConditions.length ? `WHERE ${outerConditions.join(' AND ')}` : '';
+    // due_at + overdue — cms-8-screens-api-plan.md §2.4/D-Q6: "quá hạn" only
+    // applies once a due_at is actually set (campaign has an SLA), and never
+    // to an already-decided set.
+    const overdueExpr =
+      "due_at IS NOT NULL AND due_at < now() AND status NOT IN ('APPROVED', 'REJECTED')";
+    if (query.overdue === true) outerConditions.push(overdueExpr);
+    if (query.overdue === false) outerConditions.push(`NOT (${overdueExpr})`);
+    const outerWhere = outerConditions.length
+      ? `WHERE ${outerConditions.join(' AND ')}`
+      : '';
 
     const cte = `
       WITH agg AS (
         SELECT
           s.id, s.campaign_id, s.subject_code, s.subject_name, s.kind_id, k.code AS kind_code,
           s.source_session_id, s.status, s.current_card_variant_id, s.created_at, s.updated_at,
+          s.class_name, s.major, s.faculty, s.citizen_id, s.due_at,
           cv.fs_file_id AS current_fs_file_id,
           cv.fs_status AS current_fs_status,
           EXISTS (SELECT 1 FROM photo_variants v WHERE v.set_id = s.id AND v.kind = 'CARD_AI' AND v.status <> 'DISCARDED') AS has_ai,
@@ -823,6 +958,15 @@ export class PhotoReviewService {
         currentCardViewUrlExpiresAt: links[i]?.expiresAt,
         hasAi: row.has_ai,
         hasUpload: row.has_upload,
+        className: row.class_name ?? undefined,
+        major: row.major ?? undefined,
+        faculty: row.faculty ?? undefined,
+        citizenId: row.citizen_id ?? undefined,
+        dueAt: row.due_at ?? undefined,
+        overdue: this.computeOverdue(
+          row.due_at as Date | null,
+          row.status as PhotoReviewSetStatus,
+        ),
         createdAt: row.created_at,
         updatedAt: row.updated_at,
       })),
@@ -839,10 +983,14 @@ export class PhotoReviewService {
 
   // ── GET /v1/review/sets/:id ──────────────────────────────────────────
 
-  async getSetDetail(id: string, apiBaseUrl: string): Promise<ReviewSetDetailDao> {
+  async getSetDetail(
+    id: string,
+    apiBaseUrl: string,
+  ): Promise<ReviewSetDetailDao> {
     const rows: Array<Record<string, unknown>> = await this.dataSource.query(
       `SELECT s.id, s.campaign_id, s.subject_code, s.subject_name, s.kind_id, k.code AS kind_code,
-              s.source_session_id, s.status, s.current_card_variant_id, s.created_at, s.updated_at
+              s.source_session_id, s.status, s.current_card_variant_id, s.created_at, s.updated_at,
+              s.class_name, s.major, s.faculty, s.citizen_id, s.due_at
          FROM subject_photo_sets s
          LEFT JOIN photo_kinds k ON k.id = s.kind_id
         WHERE s.id = $1`,
@@ -850,7 +998,11 @@ export class PhotoReviewService {
     );
     const row = rows[0];
     if (!row) {
-      throw new CustomException('Photo review set not found', PHOTO_REVIEW_ERROR_CODE.SET_NOT_FOUND, HttpStatus.NOT_FOUND);
+      throw new CustomException(
+        'Photo review set not found',
+        PHOTO_REVIEW_ERROR_CODE.SET_NOT_FOUND,
+        HttpStatus.NOT_FOUND,
+      );
     }
 
     const sessionId = row.source_session_id as string;
@@ -888,8 +1040,14 @@ export class PhotoReviewService {
       ),
     ]);
 
-    const nonDiscardedVariants = variantRows.filter((v) => v.status !== PhotoVariantStatus.DISCARDED);
-    const variants = await Promise.all(nonDiscardedVariants.map((v) => this.toVariantDao(v, apiBaseUrl, tenantName)));
+    const nonDiscardedVariants = variantRows.filter(
+      (v) => v.status !== PhotoVariantStatus.DISCARDED,
+    );
+    const variants = await Promise.all(
+      nonDiscardedVariants.map((v) =>
+        this.toVariantDao(v, apiBaseUrl, tenantName),
+      ),
+    );
 
     const currentVariant = row.current_card_variant_id
       ? nonDiscardedVariants.find((v) => v.id === row.current_card_variant_id)
@@ -916,8 +1074,21 @@ export class PhotoReviewService {
       currentCardVariantId: row.current_card_variant_id ?? undefined,
       currentCardViewUrl,
       currentCardViewUrlExpiresAt,
-      hasAi: nonDiscardedVariants.some((v) => v.kind === PhotoVariantKind.CARD_AI),
-      hasUpload: nonDiscardedVariants.some((v) => v.kind === PhotoVariantKind.CARD_UPLOAD),
+      hasAi: nonDiscardedVariants.some(
+        (v) => v.kind === PhotoVariantKind.CARD_AI,
+      ),
+      hasUpload: nonDiscardedVariants.some(
+        (v) => v.kind === PhotoVariantKind.CARD_UPLOAD,
+      ),
+      className: row.class_name ?? undefined,
+      major: row.major ?? undefined,
+      faculty: row.faculty ?? undefined,
+      citizenId: row.citizen_id ?? undefined,
+      dueAt: row.due_at ?? undefined,
+      overdue: this.computeOverdue(
+        row.due_at as Date | null,
+        row.status as PhotoReviewSetStatus,
+      ),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       originalPhotos: photoRows.map((p) => ({
@@ -966,14 +1137,20 @@ export class PhotoReviewService {
    * hanging request; `PhotoReviewSidecarService` already caps every call at
    * `SIDECAR_TIMEOUT_MS` (30s) via `AbortController`.
    */
-  async reprocess(setId: string, actorUserId: string | null, apiBaseUrl: string): Promise<PhotoVariantDao> {
+  async reprocess(
+    setId: string,
+    actorUserId: string | null,
+    apiBaseUrl: string,
+  ): Promise<PhotoVariantDao> {
     const set = await this.findSetEntityOrFail(setId);
     const kind = await this.photoKindService.findKindEntityOrFail(set.kindId);
-    const sessionContext = await this.resolveSessionContext(set.sourceSessionId);
+    const sessionContext = await this.resolveSessionContext(
+      set.sourceSessionId,
+    );
     const frontPhoto = await this.findFrontSourcePhoto(set.sourceSessionId);
     if (!frontPhoto) {
       throw new CustomException(
-        'No original photo found for this set\'s source session',
+        "No original photo found for this set's source session",
         PHOTO_REVIEW_ERROR_CODE.SOURCE_PHOTO_NOT_FOUND,
         HttpStatus.NOT_FOUND,
       );
@@ -1003,7 +1180,10 @@ export class PhotoReviewService {
     });
 
     try {
-      const sourceBytes = await this.readSourcePhotoBytes(frontPhoto, sessionContext.tenantName);
+      const sourceBytes = await this.readSourcePhotoBytes(
+        frontPhoto,
+        sessionContext.tenantName,
+      );
       const result = await this.sidecar.cardPhoto({
         imageBase64: sourceBytes.toString('base64'),
         cardSpec: kind.cardSpec,
@@ -1021,49 +1201,53 @@ export class PhotoReviewService {
       );
       const data = Buffer.from(result.imageBase64, 'base64');
 
-      const readyVariant = await this.dataSource.transaction(async (manager) => {
-        const lockedSet = await this.lockSet(manager, setId);
-        const stored = await this.storeVariantBytesLocalFirst(manager, {
-          variantId: variant.id,
-          tenantName: sessionContext.tenantName,
-          virtualPath,
-          mimeType: result.mimeType,
-          data,
-          idempotencyKey: `photo-review:${variant.id}:auto`,
-        });
+      const readyVariant = await this.dataSource.transaction(
+        async (manager) => {
+          const lockedSet = await this.lockSet(manager, setId);
+          const stored = await this.storeVariantBytesLocalFirst(manager, {
+            variantId: variant.id,
+            tenantName: sessionContext.tenantName,
+            virtualPath,
+            mimeType: result.mimeType,
+            data,
+            idempotencyKey: `photo-review:${variant.id}:auto`,
+          });
 
-        const repo = manager.getRepository(PhotoVariant);
-        variant.status = PhotoVariantStatus.READY;
-        // fsFileId intentionally left null here — VariantUploadWorkerService's
-        // cron sets it once the push to fs-core actually succeeds (see
-        // storeVariantBytesLocalFirst's own doc comment for why this no
-        // longer uploads to fs-core synchronously).
-        variant.virtualPath = virtualPath;
-        variant.bytes = stored.bytes;
-        variant.sha256 = stored.sha256;
-        variant.width = result.width ?? null;
-        variant.height = result.height ?? null;
-        variant.dpi = result.dpi ?? null;
-        // The sidecar does not version its own pipeline output today (see
-        // SidecarCardPhotoResult's own doc comment) — left null rather than
-        // a made-up constant, matching "never a fabricated value" elsewhere
-        // in this module's own sidecar-result handling.
-        variant.qualityReport = result.warnings.length ? { warnings: result.warnings } : null;
-        variant.algorithmVersion = null;
-        await repo.save(variant);
+          const repo = manager.getRepository(PhotoVariant);
+          variant.status = PhotoVariantStatus.READY;
+          // fsFileId intentionally left null here — VariantUploadWorkerService's
+          // cron sets it once the push to fs-core actually succeeds (see
+          // storeVariantBytesLocalFirst's own doc comment for why this no
+          // longer uploads to fs-core synchronously).
+          variant.virtualPath = virtualPath;
+          variant.bytes = stored.bytes;
+          variant.sha256 = stored.sha256;
+          variant.width = result.width ?? null;
+          variant.height = result.height ?? null;
+          variant.dpi = result.dpi ?? null;
+          // The sidecar does not version its own pipeline output today (see
+          // SidecarCardPhotoResult's own doc comment) — left null rather than
+          // a made-up constant, matching "never a fabricated value" elsewhere
+          // in this module's own sidecar-result handling.
+          variant.qualityReport = result.warnings.length
+            ? { warnings: result.warnings }
+            : null;
+          variant.algorithmVersion = null;
+          await repo.save(variant);
 
-        lockedSet.currentCardVariantId = variant.id;
-        lockedSet.status = PhotoReviewSetStatus.READY;
-        await manager.getRepository(SubjectPhotoSet).save(lockedSet);
+          lockedSet.currentCardVariantId = variant.id;
+          lockedSet.status = PhotoReviewSetStatus.READY;
+          await manager.getRepository(SubjectPhotoSet).save(lockedSet);
 
-        await this.writeEvent(manager, {
-          setId,
-          variantId: variant.id,
-          action: PhotoReviewAction.AUTO_GENERATED,
-          actorUserId: null,
-        });
-        return variant;
-      });
+          await this.writeEvent(manager, {
+            setId,
+            variantId: variant.id,
+            action: PhotoReviewAction.AUTO_GENERATED,
+            actorUserId: null,
+          });
+          return variant;
+        },
+      );
 
       // Best-effort, direct-to-fs-core (see uploadMetadataBestEffort's own
       // doc comment) — a sidecar metadata sidecar file, not the image
@@ -1079,7 +1263,11 @@ export class PhotoReviewService {
         },
       });
 
-      return this.toVariantDao(readyVariant, apiBaseUrl, sessionContext.tenantName);
+      return this.toVariantDao(
+        readyVariant,
+        apiBaseUrl,
+        sessionContext.tenantName,
+      );
     } catch (error) {
       const message = extractSidecarFailureMessage(error);
       this.logger.warn(`reprocess failed for set ${setId}: ${message}`);
@@ -1100,6 +1288,11 @@ export class PhotoReviewService {
           actorUserId: null,
           payload: { error: message },
         });
+        await this.reviewStats.recordAutoFailed(
+          manager,
+          set.campaignId,
+          new Date(),
+        );
       });
     }
 
@@ -1127,7 +1320,9 @@ export class PhotoReviewService {
     this.assertUnlocked(set);
 
     const lowerPrompt = dto.prompt.toLowerCase();
-    const hit = FORBIDDEN_PROMPT_KEYWORDS.find((kw) => lowerPrompt.includes(kw));
+    const hit = FORBIDDEN_PROMPT_KEYWORDS.find((kw) =>
+      lowerPrompt.includes(kw),
+    );
     if (hit) {
       throw new CustomException(
         `Yêu cầu bị từ chối: chứa từ khóa không được phép sửa ("${hit}") — xem plan §6.3 (AI không được đổi biểu cảm, mở mắt, bỏ kính, gầy mặt, trẻ hóa, làm đẹp, đổi mắt/mũi/miệng)`,
@@ -1138,11 +1333,19 @@ export class PhotoReviewService {
 
     const fromVariantId = dto.fromVariantId ?? set.currentCardVariantId;
     if (!fromVariantId) {
-      throw new CustomException('No source variant to edit from', PHOTO_REVIEW_ERROR_CODE.VARIANT_NOT_FOUND, HttpStatus.NOT_FOUND);
+      throw new CustomException(
+        'No source variant to edit from',
+        PHOTO_REVIEW_ERROR_CODE.VARIANT_NOT_FOUND,
+        HttpStatus.NOT_FOUND,
+      );
     }
     const fromVariant = await this.findVariantEntityOrFail(fromVariantId);
     if (fromVariant.setId !== setId) {
-      throw new CustomException('Variant does not belong to this set', PHOTO_REVIEW_ERROR_CODE.VARIANT_NOT_IN_SET, HttpStatus.BAD_REQUEST);
+      throw new CustomException(
+        'Variant does not belong to this set',
+        PHOTO_REVIEW_ERROR_CODE.VARIANT_NOT_IN_SET,
+        HttpStatus.BAD_REQUEST,
+      );
     }
     // "Usable" no longer means "already on fs-core" — a variant that is
     // fully READY with only local bytes (fs-core down, or just not its turn
@@ -1153,7 +1356,8 @@ export class PhotoReviewService {
     // with nothing produced) is rejected here.
     if (
       fromVariant.status === PhotoVariantStatus.DISCARDED ||
-      (!fromVariant.fsFileId && !(await this.hasLocalVariantContent(fromVariant.id)))
+      (!fromVariant.fsFileId &&
+        !(await this.hasLocalVariantContent(fromVariant.id)))
     ) {
       throw new CustomException(
         'Source variant is not usable (discarded or has no image bytes yet)',
@@ -1163,7 +1367,9 @@ export class PhotoReviewService {
     }
 
     const kind = await this.photoKindService.findKindEntityOrFail(set.kindId);
-    const sessionContext = await this.resolveSessionContext(set.sourceSessionId);
+    const sessionContext = await this.resolveSessionContext(
+      set.sourceSessionId,
+    );
 
     const variant = await this.dataSource.transaction(async (manager) => {
       await this.lockSet(manager, setId);
@@ -1186,13 +1392,26 @@ export class PhotoReviewService {
         variantId: created.id,
         action: PhotoReviewAction.AI_REQUESTED,
         actorUserId,
-        payload: { prompt: dto.prompt, region: dto.region, fromVariantId: fromVariant.id },
+        payload: {
+          prompt: dto.prompt,
+          region: dto.region,
+          fromVariantId: fromVariant.id,
+        },
       });
+      await this.reviewStats.recordAiRequested(
+        manager,
+        set.campaignId,
+        actorUserId,
+        new Date(),
+      );
       return created;
     });
 
     try {
-      const sourceBytes = await this.readVariantBytes(fromVariant, sessionContext.tenantName);
+      const sourceBytes = await this.readVariantBytes(
+        fromVariant,
+        sessionContext.tenantName,
+      );
       const result = await this.sidecar.edit({
         imageBase64: sourceBytes.toString('base64'),
         prompt: dto.prompt,
@@ -1275,21 +1494,33 @@ export class PhotoReviewService {
    * real async job queue is a reasonable future improvement, not required
    * now.
    */
-  async getJob(variantId: string, apiBaseUrl: string): Promise<PhotoVariantDao> {
+  async getJob(
+    variantId: string,
+    apiBaseUrl: string,
+  ): Promise<PhotoVariantDao> {
     const variant = await this.findVariantEntityOrFail(variantId);
     const set = await this.findSetEntityOrFail(variant.setId);
-    const sessionContext = await this.resolveSessionContext(set.sourceSessionId);
+    const sessionContext = await this.resolveSessionContext(
+      set.sourceSessionId,
+    );
     return this.toVariantDao(variant, apiBaseUrl, sessionContext.tenantName);
   }
 
   // ── POST /v1/review/variants/:id/accept ─────────────────────────────
 
-  async acceptVariant(variantId: string, actorUserId: string | null, apiBaseUrl: string): Promise<PhotoVariantDao> {
+  async acceptVariant(
+    variantId: string,
+    actorUserId: string | null,
+    apiBaseUrl: string,
+  ): Promise<PhotoVariantDao> {
     const variant = await this.findVariantEntityOrFail(variantId);
     const set = await this.findSetEntityOrFail(variant.setId);
     this.assertUnlocked(set);
 
-    if (variant.kind !== PhotoVariantKind.CARD_AI && variant.kind !== PhotoVariantKind.CARD_UPLOAD) {
+    if (
+      variant.kind !== PhotoVariantKind.CARD_AI &&
+      variant.kind !== PhotoVariantKind.CARD_UPLOAD
+    ) {
       throw new CustomException(
         'Only a CARD_AI or CARD_UPLOAD variant can be accepted',
         PHOTO_REVIEW_ERROR_CODE.VARIANT_NOT_READY,
@@ -1297,9 +1528,16 @@ export class PhotoReviewService {
       );
     }
     if (variant.status !== PhotoVariantStatus.READY) {
-      throw new CustomException('Variant is not READY', PHOTO_REVIEW_ERROR_CODE.VARIANT_NOT_READY, HttpStatus.CONFLICT);
+      throw new CustomException(
+        'Variant is not READY',
+        PHOTO_REVIEW_ERROR_CODE.VARIANT_NOT_READY,
+        HttpStatus.CONFLICT,
+      );
     }
-    if (variant.identitySimilarity != null && variant.identitySimilarity < IDENTITY_SIMILARITY_REJECT_THRESHOLD) {
+    if (
+      variant.identitySimilarity != null &&
+      variant.identitySimilarity < IDENTITY_SIMILARITY_REJECT_THRESHOLD
+    ) {
       throw new CustomException(
         `Identity similarity ${variant.identitySimilarity.toFixed(2)} is below the ${IDENTITY_SIMILARITY_REJECT_THRESHOLD} threshold — cannot accept`,
         PHOTO_REVIEW_ERROR_CODE.IDENTITY_MISMATCH,
@@ -1316,11 +1554,28 @@ export class PhotoReviewService {
       await manager.getRepository(SubjectPhotoSet).save(lockedSet);
 
       const action =
-        variant.kind === PhotoVariantKind.CARD_AI ? PhotoReviewAction.AI_ACCEPTED : PhotoReviewAction.UPLOAD_REPLACED;
-      await this.writeEvent(manager, { setId: set.id, variantId: variant.id, action, actorUserId });
+        variant.kind === PhotoVariantKind.CARD_AI
+          ? PhotoReviewAction.AI_ACCEPTED
+          : PhotoReviewAction.UPLOAD_REPLACED;
+      await this.writeEvent(manager, {
+        setId: set.id,
+        variantId: variant.id,
+        action,
+        actorUserId,
+      });
+      if (action === PhotoReviewAction.AI_ACCEPTED) {
+        await this.reviewStats.recordAiAccepted(
+          manager,
+          set.campaignId,
+          actorUserId,
+          new Date(),
+        );
+      }
     });
 
-    const sessionContext = await this.resolveSessionContext(set.sourceSessionId);
+    const sessionContext = await this.resolveSessionContext(
+      set.sourceSessionId,
+    );
     return this.toVariantDao(variant, apiBaseUrl, sessionContext.tenantName);
   }
 
@@ -1343,7 +1598,11 @@ export class PhotoReviewService {
       );
     }
     if (variant.status === PhotoVariantStatus.DISCARDED) {
-      return this.toVariantDao(variant, apiBaseUrl, (await this.resolveSessionContext(set.sourceSessionId)).tenantName);
+      return this.toVariantDao(
+        variant,
+        apiBaseUrl,
+        (await this.resolveSessionContext(set.sourceSessionId)).tenantName,
+      );
     }
 
     await this.dataSource.transaction(async (manager) => {
@@ -1358,7 +1617,9 @@ export class PhotoReviewService {
       });
     });
 
-    const sessionContext = await this.resolveSessionContext(set.sourceSessionId);
+    const sessionContext = await this.resolveSessionContext(
+      set.sourceSessionId,
+    );
     return this.toVariantDao(variant, apiBaseUrl, sessionContext.tenantName);
   }
 
@@ -1395,7 +1656,9 @@ export class PhotoReviewService {
     }
 
     const kind = await this.photoKindService.findKindEntityOrFail(set.kindId);
-    const sessionContext = await this.resolveSessionContext(set.sourceSessionId);
+    const sessionContext = await this.resolveSessionContext(
+      set.sourceSessionId,
+    );
     const frontPhoto = await this.findFrontSourcePhoto(set.sourceSessionId);
     if (!frontPhoto) {
       throw new CustomException(
@@ -1413,7 +1676,10 @@ export class PhotoReviewService {
       // fs-core) surfaces through the exact same SIDECAR_UNREACHABLE 503
       // this catch block already produces, rather than a second bespoke
       // error path.
-      const referenceBytes = await this.readSourcePhotoBytes(frontPhoto, sessionContext.tenantName);
+      const referenceBytes = await this.readSourcePhotoBytes(
+        frontPhoto,
+        sessionContext.tenantName,
+      );
       const simResult = await this.sidecar.identitySimilarity({
         referenceImageBase64: referenceBytes.toString('base64'),
         candidateImageBase64: file.buffer.toString('base64'),
@@ -1488,7 +1754,9 @@ export class PhotoReviewService {
           height: cardResult.height ?? null,
           dpi: cardResult.dpi ?? null,
           identitySimilarity: similarity,
-          qualityReport: cardResult.warnings.length ? { warnings: cardResult.warnings } : null,
+          qualityReport: cardResult.warnings.length
+            ? { warnings: cardResult.warnings }
+            : null,
           algorithmVersion: null,
           createdByUserId: actorUserId,
         }),
@@ -1529,7 +1797,10 @@ export class PhotoReviewService {
           sessionContext.identityNumber,
         ),
         idempotencyKey: `photo-review:${setId}:upload:v${version}:meta`,
-        metadata: { identitySimilarity: similarity, originalMimeType: file.mimetype },
+        metadata: {
+          identitySimilarity: similarity,
+          originalMimeType: file.mimetype,
+        },
       });
 
       lockedSet.currentCardVariantId = created.id;
@@ -1545,11 +1816,21 @@ export class PhotoReviewService {
         actorUserId,
         payload: { identitySimilarity: similarity },
       });
+      await this.reviewStats.recordUploaded(
+        manager,
+        set.campaignId,
+        actorUserId,
+        new Date(),
+      );
 
       return created;
     });
 
-    const dao = await this.toVariantDao(variant, apiBaseUrl, sessionContext.tenantName);
+    const dao = await this.toVariantDao(
+      variant,
+      apiBaseUrl,
+      sessionContext.tenantName,
+    );
     return toDao(UploadVariantResultDao, {
       variant: dao,
       identitySimilarity: similarity,
@@ -1570,13 +1851,25 @@ export class PhotoReviewService {
 
     const variant = await this.findVariantEntityOrFail(variantId);
     if (variant.setId !== setId) {
-      throw new CustomException('Variant does not belong to this set', PHOTO_REVIEW_ERROR_CODE.VARIANT_NOT_IN_SET, HttpStatus.BAD_REQUEST);
+      throw new CustomException(
+        'Variant does not belong to this set',
+        PHOTO_REVIEW_ERROR_CODE.VARIANT_NOT_IN_SET,
+        HttpStatus.BAD_REQUEST,
+      );
     }
     if (variant.status === PhotoVariantStatus.DISCARDED) {
-      throw new CustomException('Cannot set a discarded variant as current', PHOTO_REVIEW_ERROR_CODE.VARIANT_DISCARDED, HttpStatus.CONFLICT);
+      throw new CustomException(
+        'Cannot set a discarded variant as current',
+        PHOTO_REVIEW_ERROR_CODE.VARIANT_DISCARDED,
+        HttpStatus.CONFLICT,
+      );
     }
     if (variant.status !== PhotoVariantStatus.READY) {
-      throw new CustomException('Only a READY variant can be set as current', PHOTO_REVIEW_ERROR_CODE.VARIANT_NOT_READY, HttpStatus.CONFLICT);
+      throw new CustomException(
+        'Only a READY variant can be set as current',
+        PHOTO_REVIEW_ERROR_CODE.VARIANT_NOT_READY,
+        HttpStatus.CONFLICT,
+      );
     }
 
     await this.dataSource.transaction(async (manager) => {
@@ -1602,7 +1895,14 @@ export class PhotoReviewService {
     actorUserId: string | null,
     apiBaseUrl: string,
   ): Promise<ReviewSetListItemDao> {
-    return this.transitionSetStatus(setId, PhotoReviewSetStatus.APPROVED, PhotoReviewAction.APPROVED, dto, actorUserId, apiBaseUrl);
+    return this.transitionSetStatus(
+      setId,
+      PhotoReviewSetStatus.APPROVED,
+      PhotoReviewAction.APPROVED,
+      dto,
+      actorUserId,
+      apiBaseUrl,
+    );
   }
 
   async reject(
@@ -1611,7 +1911,14 @@ export class PhotoReviewService {
     actorUserId: string | null,
     apiBaseUrl: string,
   ): Promise<ReviewSetListItemDao> {
-    return this.transitionSetStatus(setId, PhotoReviewSetStatus.REJECTED, PhotoReviewAction.REJECTED, dto, actorUserId, apiBaseUrl);
+    return this.transitionSetStatus(
+      setId,
+      PhotoReviewSetStatus.REJECTED,
+      PhotoReviewAction.REJECTED,
+      dto,
+      actorUserId,
+      apiBaseUrl,
+    );
   }
 
   private async transitionSetStatus(
@@ -1635,17 +1942,29 @@ export class PhotoReviewService {
         actorUserId,
         payload: dto.note ? { note: dto.note } : null,
       });
+      await this.reviewStats.recordDecision(
+        manager,
+        set.campaignId,
+        actorUserId,
+        status === PhotoReviewSetStatus.APPROVED ? 'APPROVED' : 'REJECTED',
+        set.createdAt,
+        new Date(),
+      );
     });
 
     return this.toSetListItemDao(setId, apiBaseUrl);
   }
 
   /** Single-row equivalent of one `listSets` result item — used to build the response of every mutating action that returns a set (setCurrent/approve/reject), without a bogus "page 1, limit 1" query that could return the wrong set entirely. */
-  private async toSetListItemDao(setId: string, apiBaseUrl: string): Promise<ReviewSetListItemDao> {
+  private async toSetListItemDao(
+    setId: string,
+    apiBaseUrl: string,
+  ): Promise<ReviewSetListItemDao> {
     const rows: Array<Record<string, unknown>> = await this.dataSource.query(
       `SELECT
           s.id, s.campaign_id, s.subject_code, s.subject_name, s.kind_id, k.code AS kind_code,
           s.source_session_id, s.status, s.current_card_variant_id, s.created_at, s.updated_at,
+          s.class_name, s.major, s.faculty, s.citizen_id, s.due_at,
           cv.fs_file_id AS current_fs_file_id,
           cv.fs_status AS current_fs_status,
           EXISTS (SELECT 1 FROM photo_variants v WHERE v.set_id = s.id AND v.kind = 'CARD_AI' AND v.status <> 'DISCARDED') AS has_ai,
@@ -1658,10 +1977,16 @@ export class PhotoReviewService {
     );
     const row = rows[0];
     if (!row) {
-      throw new CustomException('Photo review set not found', PHOTO_REVIEW_ERROR_CODE.SET_NOT_FOUND, HttpStatus.NOT_FOUND);
+      throw new CustomException(
+        'Photo review set not found',
+        PHOTO_REVIEW_ERROR_CODE.SET_NOT_FOUND,
+        HttpStatus.NOT_FOUND,
+      );
     }
 
-    const tenantMap = await this.batchResolveTenants([row.source_session_id as string]);
+    const tenantMap = await this.batchResolveTenants([
+      row.source_session_id as string,
+    ]);
     const currentCardLink = await this.resolveCurrentCardViewUrl(
       row.current_card_variant_id as string | null,
       row.current_fs_file_id as string | null,
@@ -1686,6 +2011,15 @@ export class PhotoReviewService {
       currentCardViewUrlExpiresAt,
       hasAi: row.has_ai,
       hasUpload: row.has_upload,
+      className: row.class_name ?? undefined,
+      major: row.major ?? undefined,
+      faculty: row.faculty ?? undefined,
+      citizenId: row.citizen_id ?? undefined,
+      dueAt: row.due_at ?? undefined,
+      overdue: this.computeOverdue(
+        row.due_at as Date | null,
+        row.status as PhotoReviewSetStatus,
+      ),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     });
@@ -1693,7 +2027,10 @@ export class PhotoReviewService {
 
   // ── GET /v1/review/sets/:id/events ──────────────────────────────────
 
-  async listEvents(setId: string, query: ListEventsQueryDto): Promise<Pagination<ReviewEventDao>> {
+  async listEvents(
+    setId: string,
+    query: ListEventsQueryDto,
+  ): Promise<Pagination<ReviewEventDao>> {
     await this.findSetEntityOrFail(setId);
     const page = query.page ?? 1;
     const limit = query.limit ?? 20;
@@ -1750,7 +2087,10 @@ export class PhotoReviewService {
    * manifest with an `exported` status, so one bad row never fails the
    * whole export.
    */
-  async exportApproved(campaignId: string, status: PhotoReviewSetStatus): Promise<Buffer> {
+  async exportApproved(
+    campaignId: string,
+    status: PhotoReviewSetStatus,
+  ): Promise<Buffer> {
     const rows: Array<{
       id: string;
       subject_code: string;
@@ -1769,7 +2109,9 @@ export class PhotoReviewService {
       [campaignId, status],
     );
 
-    const tenantMap = await this.batchResolveTenants([...new Set(rows.map((r) => r.source_session_id))]);
+    const tenantMap = await this.batchResolveTenants([
+      ...new Set(rows.map((r) => r.source_session_id)),
+    ]);
 
     const archive = archiver('zip', { zlib: { level: 9 } });
     const output = new PassThrough();
@@ -1781,7 +2123,9 @@ export class PhotoReviewService {
     });
     archive.pipe(output);
 
-    const manifestLines = ['subject_code,subject_name,status,updated_at,exported'];
+    const manifestLines = [
+      'subject_code,subject_name,status,updated_at,exported',
+    ];
     const csvField = (value: string) => `"${value.replace(/"/g, '""')}"`;
 
     for (const row of rows) {
@@ -1797,13 +2141,17 @@ export class PhotoReviewService {
           if (res.ok) {
             const buf = Buffer.from(await res.arrayBuffer());
             const contentType = res.headers.get('content-type') ?? 'image/jpeg';
-            archive.append(buf, { name: `${row.subject_code}.${this.extForMime(contentType)}` });
+            archive.append(buf, {
+              name: `${row.subject_code}.${this.extForMime(contentType)}`,
+            });
             exported = 'OK';
           } else {
             exported = `DOWNLOAD_FAILED_${res.status}`;
           }
         } catch (error) {
-          this.logger.warn(`export download failed for set ${row.id}: ${(error as Error).message}`);
+          this.logger.warn(
+            `export download failed for set ${row.id}: ${(error as Error).message}`,
+          );
           exported = 'ERROR';
         }
       }
@@ -1861,13 +2209,39 @@ export class PhotoReviewService {
   async ensureSetForApprovedSession(
     sessionId: string,
   ): Promise<{ setId: string; pendingAuto: boolean } | null> {
-    const sessionRows: Array<{ subject_code: string | null; subject_name: string | null; campaign_id: string | null }> =
-      await this.dataSource.query(`SELECT subject_code, subject_name, campaign_id FROM sessions WHERE id = $1`, [
-        sessionId,
-      ]);
+    // Denormalization + due_at, cms-8-screens-api-plan.md §2.4/P4: one query
+    // pulling the session's own fields plus a `campaign_subjects` roster
+    // match (device-management, P3 — LEFT JOIN, so a subject with no roster
+    // row just gets null class/major/faculty/citizenId, never a guess) and
+    // the campaign's `processing_sla_hours` (device-management, P3) for
+    // `dueAt`. Cross-module raw SQL, same convention this class's own top
+    // comment already establishes for every other boundary read here.
+    const sessionRows: Array<{
+      subject_code: string | null;
+      subject_name: string | null;
+      campaign_id: string | null;
+      completed_at: Date | null;
+      processing_sla_hours: number | null;
+      class_name: string | null;
+      major: string | null;
+      faculty: string | null;
+      citizen_id: string | null;
+    }> = await this.dataSource.query(
+      `SELECT s.subject_code, s.subject_name, s.campaign_id, s.completed_at,
+              c.processing_sla_hours,
+              cs.class_name, cs.major, cs.faculty, cs.citizen_id
+         FROM sessions s
+         LEFT JOIN campaigns c ON c.id = s.campaign_id
+         LEFT JOIN campaign_subjects cs
+           ON cs.campaign_id = s.campaign_id AND cs.subject_code = s.subject_code AND cs.status = 'VALID'
+        WHERE s.id = $1`,
+      [sessionId],
+    );
     const session = sessionRows[0];
     if (!session?.subject_code || !session.campaign_id) {
-      this.logger.warn(`ensureSetForApprovedSession: session ${sessionId} has no subject_code/campaign_id — skipping`);
+      this.logger.warn(
+        `ensureSetForApprovedSession: session ${sessionId} has no subject_code/campaign_id — skipping`,
+      );
       return null;
     }
     // Captured into locals: used again below, after several `await`s —
@@ -1876,10 +2250,27 @@ export class PhotoReviewService {
     const subjectCode = session.subject_code;
     const campaignId = session.campaign_id;
     const subjectName = session.subject_name;
+    const dueAt =
+      session.completed_at && session.processing_sla_hours
+        ? new Date(
+            session.completed_at.getTime() +
+              session.processing_sla_hours * 3_600_000,
+          )
+        : null;
+    const rosterFields = {
+      className: session.class_name,
+      major: session.major,
+      faculty: session.faculty,
+      citizenId: session.citizen_id,
+    };
 
-    const kind = await this.photoKindRepository.findOne({ where: { code: 'STUDENT_CARD' } });
+    const kind = await this.photoKindRepository.findOne({
+      where: { code: 'STUDENT_CARD' },
+    });
     if (!kind) {
-      this.logger.warn('ensureSetForApprovedSession: STUDENT_CARD photo kind not found — did the seed migration run?');
+      this.logger.warn(
+        'ensureSetForApprovedSession: STUDENT_CARD photo kind not found — did the seed migration run?',
+      );
       return null;
     }
 
@@ -1892,11 +2283,14 @@ export class PhotoReviewService {
         existing.sourceSessionId = sessionId;
         existing.status = PhotoReviewSetStatus.PENDING_AUTO;
         if (subjectName) existing.subjectName = subjectName;
+        Object.assign(existing, rosterFields, { dueAt });
         await this.setRepository.save(existing);
         return { setId: existing.id, pendingAuto: true };
       }
       // Keep the approved variant current; just record that a newer
-      // session exists so a reviewer can decide (R-Q10).
+      // session exists so a reviewer can decide (R-Q10). Roster/due_at left
+      // untouched too — an already-reviewed set's "when was this due"
+      // snapshot should not silently shift under a reviewer's feet.
       existing.sourceSessionId = sessionId;
       await this.setRepository.save(existing);
       return { setId: existing.id, pendingAuto: false };
@@ -1910,8 +2304,23 @@ export class PhotoReviewService {
         kindId: kind.id,
         sourceSessionId: sessionId,
         status: PhotoReviewSetStatus.PENDING_AUTO,
+        ...rosterFields,
+        dueAt,
       }),
     );
+
+    // Best-effort, same non-transactional nature as this whole method (see
+    // its own doc comment) — `dataSource.manager` is a plain EntityManager
+    // not bound to any transaction, so this is a normal, immediately-
+    // committed statement, not a hanging transaction.
+    await this.reviewStats
+      .recordSetCreated(this.dataSource.manager, campaignId, created.createdAt)
+      .catch((err) =>
+        this.logger.warn(
+          `stats recordSetCreated failed: ${(err as Error).message}`,
+        ),
+      );
+
     return { setId: created.id, pendingAuto: true };
   }
 }

@@ -1,5 +1,22 @@
 # Thảo luận thiết kế: Cấu hình campaign, đăng nhập SSO/365, ảnh thẻ 4x6 và AI local
 
+> **Cập nhật 2026-09-11** — `cms-8-screens-api-plan.md` (kế hoạch API cho 8 màn
+> CMS) **đảo ngược hoặc mở rộng** một số quyết định trong tài liệu này; khi hai
+> tài liệu khác nhau, plan mới thắng:
+> - **Q11** (chế độ bấm chụp là cài đặt kiosk) → nay **nghiệp vụ đặt mặc định +
+>   danh sách cho phép**, kiosk chọn trong đó (plan mới D-Q2).
+> - **Roster theo đợt** (`campaign_student_roster` đã xóa, migration 1804) → nay
+>   **tạo lại ở server** (`campaign_subjects`, import Excel), kiosk tra cứu qua
+>   API + cache offline (D-Q3).
+> - **"Không cần phân công cán bộ chụp"** → nay **gán 1 người ↔ 1 kiosk**, gán
+>   đồng thời tự duyệt thành viên (D-Q4).
+> - `capture_angles`/`card_spec` chuyển từ campaign sang thực thể **nghiệp vụ
+>   có version** (`workflows` + `workflow_versions`); campaign chỉ tham chiếu
+>   (D-Q1). Góc chụp vẫn snapshot theo Q22.
+> - Thống kê §3.7 (`byTrigger`) giữ ý nghĩa nhưng đọc từ **bảng thống kê riêng**
+>   (plan mới §2.9), không tính trực tiếp trên `photos`.
+> - §7.3 C (audit log) và các mục I-Q ở plan mới §8 vẫn đang trao đổi.
+
 > **Trạng thái:** BẢN THẢO để trao đổi — chưa phải implementation plan, chưa
 > code. Ngày lập: 2026-09-08. Người đọc: product owner.
 >

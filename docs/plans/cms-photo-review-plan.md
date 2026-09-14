@@ -1,5 +1,22 @@
 # Kế hoạch: Trang CMS duyệt ảnh (Photo Review)
 
+> **Cập nhật 2026-09-11** — `cms-8-screens-api-plan.md` §2.4 và §9 bổ sung
+> cho tài liệu này (luồng review đã build giữ nguyên):
+> - `subject_photo_sets` thêm cột denormalize `class_name`, `major`, `faculty`,
+>   `citizen_id` (ưu tiên từ roster `campaign_subjects`, fallback
+>   `sessions.metadata`) và `due_at` = `sessions.completed_at +
+>   campaigns.processing_sla_hours`; lọc `overdue=true`.
+> - Bộ lọc `GET /v1/review/sets` thêm `className`, `major`, `citizenId`,
+>   `subjectCode`; CCCD chỉ khớp chính xác (I-Q1 mã hóa).
+> - Thống kê duyệt / không duyệt / dùng AI: `GET /v1/review/stats` đọc từ bảng
+>   `stats_daily_review` (plan mới §2.9).
+> - `POST …/ai-edit` thêm `candidates` (1–4 ứng viên để chọn).
+> - R-Q9 "Xuất gói" (`GET /v1/review/export`) sẽ được thay bởi mô-đun in
+>   (`print/batches/:id/package`), giữ deprecated một kỳ.
+> - R-Q2 (một vai trò REVIEWER) **đã chốt** 2026-09-11 (plan mới D-Q14): một
+>   vòng, mở rộng sau bằng permission. `ReviewerRoleGuard` trở thành alias của
+>   permission `review:*`.
+
 > **Trạng thái:** bản thảo để product owner duyệt — chưa code. Ngày lập:
 > 2026-09-08. Là tài liệu thứ ba, đi cùng
 > `campaign-config-sso-card-photo-discussion.md` (mục 3.5 ảnh thẻ, 3.6 AI

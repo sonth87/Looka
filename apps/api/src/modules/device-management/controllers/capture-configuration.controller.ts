@@ -8,6 +8,7 @@ import {
   Controller,
   Delete,
   Get,
+  Header,
   Param,
   Patch,
   Post,
@@ -27,25 +28,39 @@ import { CaptureConfigurationService } from '../services/capture-configuration.s
  * management, same admin gating as `CaptureAnglePresetController`. See
  * `CaptureConfiguration`'s own doc comment for what this resource is (a
  * one-time-copy preset for `CampaignForm.tsx`, never a live link).
+ *
+ * **Deprecated 2026-09-14** (cms-8-screens-api-plan.md §2.2/P2, §9.1 rule
+ * 5): superseded by `modules/workflow` (`/v1/workflows` — immutable
+ * versions, a live campaign reference instead of a one-time copy, plus
+ * identification/eligibility/AI/printing config this table never had).
+ * Every existing `capture_configurations` row was migrated into a
+ * matching `workflows`/`workflow_versions` row by migration
+ * `1814000000000-CampaignWorkflowRef.ts`. Every route here stays fully
+ * functional for one phase (`Deprecation: true` response header, RFC
+ * 8594) — the CMS has not switched to `/v1/workflows` yet — then this
+ * whole controller/table is removed once it has.
  */
 @Controller({ path: 'capture-configurations', version: '1' })
 @ApiTags('device-management')
 @UseGuards(SsoAuthGuard, AdminRoleGuard)
 @ApiBearerAuth('sso')
 export class CaptureConfigurationController {
-  constructor(
-    private readonly configService: CaptureConfigurationService,
-  ) {}
+  constructor(private readonly configService: CaptureConfigurationService) {}
 
   @Get()
-  @ApiOperation({ summary: 'List every capture configuration' })
+  @Header('Deprecation', 'true')
+  @ApiOperation({
+    summary: 'List every capture configuration',
+    deprecated: true,
+  })
   @ApiResponseArrayDecorator(CaptureConfigurationDao)
   listCaptureConfigurations(): Promise<CaptureConfigurationDao[]> {
     return this.configService.listCaptureConfigurations();
   }
 
   @Get(':id')
-  @ApiOperation({ summary: 'Get one capture configuration' })
+  @Header('Deprecation', 'true')
+  @ApiOperation({ summary: 'Get one capture configuration', deprecated: true })
   @ApiResponseDecorator(CaptureConfigurationDao)
   getCaptureConfiguration(
     @Param('id') id: string,
@@ -54,7 +69,8 @@ export class CaptureConfigurationController {
   }
 
   @Post()
-  @ApiOperation({ summary: 'Create a capture configuration' })
+  @Header('Deprecation', 'true')
+  @ApiOperation({ summary: 'Create a capture configuration', deprecated: true })
   @ApiResponseDecorator(CaptureConfigurationDao, { status: 201 })
   createCaptureConfiguration(
     @Body() dto: CreateCaptureConfigurationDto,
@@ -63,7 +79,8 @@ export class CaptureConfigurationController {
   }
 
   @Patch(':id')
-  @ApiOperation({ summary: 'Edit a capture configuration' })
+  @Header('Deprecation', 'true')
+  @ApiOperation({ summary: 'Edit a capture configuration', deprecated: true })
   @ApiResponseDecorator(CaptureConfigurationDao)
   updateCaptureConfiguration(
     @Param('id') id: string,
@@ -78,7 +95,8 @@ export class CaptureConfigurationController {
    * way `DELETE /v1/campaigns/:id` does.
    */
   @Delete(':id')
-  @ApiOperation({ summary: 'Delete a capture configuration' })
+  @Header('Deprecation', 'true')
+  @ApiOperation({ summary: 'Delete a capture configuration', deprecated: true })
   async deleteCaptureConfiguration(
     @Param('id') id: string,
   ): Promise<{ id: string }> {

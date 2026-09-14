@@ -1,5 +1,23 @@
 # Kế hoạch thiết kế lại giao diện — kiosk, web, CMS
 
+> **Cập nhật 2026-09-11** — theo `cms-8-screens-api-plan.md` (§9 tác động),
+> các màn sau đổi so với mô tả bên dưới:
+> - **C2.2 form campaign**: bảng góc chụp (`CaptureAnglesTable`) và card spec
+>   **rời khỏi form đợt**, sang trang mới **C5 Nghiệp vụ** (danh sách / tạo /
+>   sửa nháp / publish / version / lưu trữ). Form đợt còn: thông tin, chọn
+>   nghiệp vụ ACTIVE, thời gian, SLA giờ, địa điểm, import tài khoản, gán kiosk.
+> - **C3 Góc chụp** giữ nguyên; **trang "Mẫu chụp"** (`/capture-configurations`)
+>   bị thay bởi C5.
+> - **S7 Cài đặt thiết bị**: "Kích hoạt chụp" và "Cách chụp" chỉ cho chọn trong
+>   `clickMode.allowed` của nghiệp vụ; giá trị mặc định lấy từ nghiệp vụ.
+> - **S4 Nhập mã SV / quét CCCD**: tra cứu qua API roster của đợt (có cache
+>   offline), không còn `response.json`; ghi phương thức định danh vào phiên.
+> - **C4 / tab Thống kê**: thêm "kiosk được gán" và nguồn auto-approve "Gán
+>   kiosk"; số liệu có nhãn "cập nhật lúc" vì đọc từ bảng thống kê.
+> - **Menu CMS** ẩn/hiện theo permission; thêm Nghiệp vụ, Đợt in, Phôi in, Máy
+>   in, Người dùng.
+> - U-Q8 (consent) không bị ảnh hưởng, vẫn mở.
+
 > **Trạng thái:** bản thảo để product owner duyệt — chưa code. Ngày lập:
 > 2026-09-08. Bám theo toàn bộ quyết định đã chốt trong
 > `campaign-config-sso-card-photo-discussion.md` (Q1–Q22 đã chốt; Q23 —

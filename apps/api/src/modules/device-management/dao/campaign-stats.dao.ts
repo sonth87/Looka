@@ -55,7 +55,10 @@ export class CampaignDeviceStatsDao {
  * capture) under one row rather than dropping those sessions from the count.
  */
 export class CampaignOperatorStatsDao {
-  @ApiPropertyOptional({ description: 'null gộp các phiên không có cán bộ chụp (chưa đăng nhập SSO khi chụp)' })
+  @ApiPropertyOptional({
+    description:
+      'null gộp các phiên không có cán bộ chụp (chưa đăng nhập SSO khi chụp)',
+  })
   operatorUserId: string | null;
 
   @ApiProperty()
@@ -84,6 +87,24 @@ export class CampaignDayStatsDao {
 
   @ApiProperty()
   photos: number;
+}
+
+/**
+ * One row of `CampaignStatsDao.byTrigger`/`byCaptureMode` — cms-8-screens-api-plan.md
+ * §2.3's "thống kê tự động/tay". Grouped from `photos.trigger_source`/
+ * `photos.capture_mode` (the FINAL kept photo's values — see that column's
+ * own doc comment), not `device_events.CAPTURE_TRIGGERED` (which counts
+ * every shutter-fire, including retaken ones) — a stats breakdown of what
+ * actually got kept, not every attempt.
+ */
+export class CampaignBreakdownCountDao {
+  @ApiPropertyOptional({
+    description: 'null gộp ảnh không ghi trường này (kiosk cũ)',
+  })
+  key: string | null;
+
+  @ApiProperty()
+  count: number;
 }
 
 export class CampaignStatsDao {
@@ -129,6 +150,19 @@ export class CampaignStatsDao {
     description: '30 ngày gần nhất, giờ Việt Nam',
   })
   byDay: CampaignDayStatsDao[];
+
+  @ApiProperty({
+    type: [CampaignBreakdownCountDao],
+    description:
+      'Số ảnh theo trigger_source: AUTO | GESTURE | SHUTTER | EXTERNAL',
+  })
+  byTrigger: CampaignBreakdownCountDao[];
+
+  @ApiProperty({
+    type: [CampaignBreakdownCountDao],
+    description: 'Số ảnh theo capture_mode: AUTO | MANUAL | OFF',
+  })
+  byCaptureMode: CampaignBreakdownCountDao[];
 }
 
 /** One campaign's row inside `AllCampaignsStatsDao.campaigns` — same counts as `CampaignStatsDao`, plus the name a table needs to be readable without a second lookup. */

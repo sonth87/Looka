@@ -1,6 +1,6 @@
 import { BaseEntity } from '@app/shared/database/base.entity';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { Column, Entity, OneToMany } from 'typeorm';
+import { Column, Entity, Index, OneToMany } from 'typeorm';
 import { SessionSource, SessionStatus } from '../capture.constants';
 import { Photo } from './photo.entity';
 
@@ -83,6 +83,51 @@ export class Session extends BaseEntity {
     description: 'Id người vận hành đã chụp phiên này, nếu có',
   })
   operatorUserId?: string;
+
+  /**
+   * Encrypted CCCD, added 2026-09-14 (cms-8-screens-api-plan.md §8 I-Q1,
+   * migration `1811000000000-SessionsCitizenIdEncryption.ts`) —
+   * `shared/security/citizen-id.codec.ts` is the only code that should
+   * read/write these three. `metadata.identityNumber` (above) still holds
+   * the plaintext this pass, dual-written by `SessionService.createSession`
+   * — see that migration's own doc comment for why.
+   */
+  @Column('text', { nullable: true, name: 'citizen_id_enc' })
+  citizenIdEnc?: string | null;
+
+  @Column('varchar', { length: 64, nullable: true, name: 'citizen_id_hash' })
+  @Index()
+  citizenIdHash?: string | null;
+
+  @Column('varchar', { length: 4, nullable: true, name: 'citizen_id_last4' })
+  citizenIdLast4?: string | null;
+
+  /**
+   * Added 2026-09-14 (cms-8-screens-api-plan.md §2.1/§2.2, P3) — which
+   * `identification_methods.code` actually identified this subject, and
+   * when identification/hand-off finished, for the kiosk timing stat
+   * (`GET /v1/campaigns/:id/stats/timing`, not built this pass — only the
+   * raw timestamps are captured here). All three are optional in
+   * `SESSION_REPORT` (§9.1 backward-compat rule 2): an older kiosk build
+   * that omits them just leaves these null, counted as "không rõ".
+   */
+  @Column('varchar', {
+    length: 30,
+    nullable: true,
+    name: 'identification_method',
+  })
+  @ApiPropertyOptional({ description: 'Phương thức định danh đã dùng, nếu có' })
+  identificationMethod?: string | null;
+
+  @Column('timestamptz', { nullable: true, name: 'identified_at' })
+  @ApiPropertyOptional({ description: 'Thời điểm định danh xong (quét thẻ)' })
+  identifiedAt?: Date | null;
+
+  @Column('timestamptz', { nullable: true, name: 'finished_at' })
+  @ApiPropertyOptional({
+    description: 'Thời điểm phiên kết thúc (gửi lời chào)',
+  })
+  finishedAt?: Date | null;
 
   @OneToMany(() => Photo, (photo) => photo.session)
   photos?: Photo[];

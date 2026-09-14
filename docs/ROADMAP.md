@@ -1418,6 +1418,40 @@ verified by build and code review only here.
 
 ---
 
+## 3i. CMS 8-screens API plan — discussion only, not implemented (2026-09-11)
+
+`plans/cms-8-screens-api-plan.md` maps eight requested CMS screens (dashboard,
+business-process config, campaigns, AI review, print batches, card
+templates, printers, users/RBAC) against the current 63 routes / 17 tables.
+Nothing from it is implemented yet. It **reverses or extends** decisions
+recorded above, so read it before touching these areas:
+
+- §3.6b / §3.8 capture trigger mode: no longer kiosk-only — the business
+  process sets a default plus an allowed list, the kiosk picks within it.
+- Migration `1804000000000-DropCampaignStudentRoster`: a server-side
+  per-campaign roster (`campaign_subjects`, Excel import) comes back; the
+  desktop `cccdRoster.ts`/`response.json` lookup is replaced by an API
+  lookup with an offline cache.
+- Campaign "Cán bộ chụp" assignment returns as `campaign_kiosk_assignments`
+  (1 person ↔ 1 kiosk), assignment auto-approves membership.
+- `campaigns.capture_angles`/`card_spec` and `capture_configurations` move
+  into versioned `workflows` / `workflow_versions`; campaigns reference a
+  version.
+- §3.4 stats endpoints keep their response shape but will read from
+  dedicated `stats_*` tables filled on action and reconciled by cron.
+- `AdminRoleGuard` / `ReviewerRoleGuard` become aliases of a permission
+  model; campaign create/update/delete gets gated (today only
+  `SsoAuthGuard`).
+- CCCD will be encrypted at rest; the `students/<CCCD>/` file-service path
+  from 2026-09-09 is **replaced by `students/<studentCode>/`** for new
+  sessions (plan D-Q16, decided 2026-09-11); existing files stay where they
+  are.
+- Kiosk roster: downloaded per campaign into local SQLite with delta sync
+  (plan D-Q18); `GET /v1/me/campaigns` gains `assignedDevices[]` so the app
+  can show which kiosk the account is assigned to (plan D-Q17).
+
+Backward-compatibility rules for all of the above are in the plan's §9.1.
+
 ## 4. How this file should be maintained
 
 Re-verify a step's status here by reading the referenced code directly, the

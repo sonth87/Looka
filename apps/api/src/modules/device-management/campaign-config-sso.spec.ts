@@ -99,7 +99,9 @@ describeDb('campaign config / SSO membership / self-enroll', () => {
         // file checks; a resolved-no-op stub satisfies DI.
         {
           provide: PhotoReviewService,
-          useValue: { ensureSetForApprovedSession: jest.fn().mockResolvedValue(null) },
+          useValue: {
+            ensureSetForApprovedSession: jest.fn().mockResolvedValue(null),
+          },
         },
       ],
     }).compile();
@@ -118,7 +120,9 @@ describeDb('campaign config / SSO membership / self-enroll', () => {
   });
 
   /** A throwaway `users` row — campaign_members.user_id is a real FK, so tests need a real row to point at. */
-  async function createTestUser(emailPrefix: string): Promise<{ id: string; email: string; displayName: string | null }> {
+  async function createTestUser(
+    emailPrefix: string,
+  ): Promise<{ id: string; email: string; displayName: string | null }> {
     const id = randomUUID();
     const saved = await userRepo.save({
       ssoUserCode: `${emailPrefix}-${id.slice(0, 8)}`,
@@ -127,7 +131,11 @@ describeDb('campaign config / SSO membership / self-enroll', () => {
       isAdmin: false,
       roles: [],
     });
-    return { id: saved.id, email: saved.email, displayName: saved.displayName ?? null };
+    return {
+      id: saved.id,
+      email: saved.email,
+      displayName: saved.displayName ?? null,
+    };
   }
 
   /** Inserts a minimal COMPLETED session row directly - quotaReached only cares about the count, not a full capture flow (capture module is out of scope for this pass). */

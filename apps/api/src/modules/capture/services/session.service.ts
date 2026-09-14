@@ -2,8 +2,10 @@ import { toDao } from '@app/shared/http/to-dao.helper';
 import { CustomException, ERROR_CODE } from '@app/shared/errors/legacy';
 import { FileStorageService } from '@app/modules/file-storage/services/file-storage.service';
 import { PhotoReviewService } from '@app/modules/photo-review/services/photo-review.service';
+import { CaptureStatsService } from '@app/modules/stats/services/capture-stats.service';
 import { CommonService } from '@app/shared/common/common.service';
 import { Pagination } from '@app/shared/http/pagination';
+import { encryptCitizenId } from '@app/shared/security/citizen-id.codec';
 import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
@@ -23,17 +25,50 @@ export class SessionService extends CommonService<Session> {
     private readonly dataSource: DataSource,
     private readonly fileStorage: FileStorageService,
     private readonly photoReview: PhotoReviewService,
+    private readonly captureStats: CaptureStatsService,
   ) {
     super(repository);
   }
 
   async createSession(dto: CreateSessionDto): Promise<SessionDao> {
+    // Dual-write (cms-8-screens-api-plan.md §8 I-Q1, migration
+    // 1811000000000-SessionsCitizenIdEncryption.ts): `metadata.identityNumber`
+    // stays as the plaintext legacy field this pass (backward-compat rule
+    // §9.1 #1 — student.service.ts's ILIKE search and
+    // photo-review.service.ts's file-path building both still read it
+    // unchanged); the three new columns are the encrypted-at-rest copy for
+    // anything that migrates to them later. A malformed/empty
+    // `identityNumber` (or a missing `CITIZEN_ID_ENCRYPTION_KEY` in an
+    // environment that hasn't set one up) must not block session creation —
+    // logged and skipped, not thrown.
+    const identityNumber = dto.metadata?.identityNumber;
+    let citizenIdEnc: string | undefined;
+    let citizenIdHash: string | undefined;
+    let citizenIdLast4: string | undefined;
+    if (typeof identityNumber === 'string' && identityNumber.trim()) {
+      try {
+        const encrypted = encryptCitizenId(identityNumber);
+        citizenIdEnc = encrypted.enc;
+        citizenIdHash = encrypted.hash;
+        citizenIdLast4 = encrypted.last4;
+      } catch (err) {
+        this.logger.warn(
+          `Could not encrypt citizen id for a new session (continuing without it): ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+
     const session = await this.create({
       subjectCode: dto.subjectCode,
       subjectName: dto.subjectName,
       status: SessionStatus.IN_PROGRESS,
       metadata: dto.metadata ?? {},
       operatorUserId: dto.operatorUserId,
+      citizenIdEnc,
+      citizenIdHash,
+      citizenIdLast4,
     });
 
     return toDao(SessionDao, session);
@@ -126,6 +161,17 @@ export class SessionService extends CommonService<Session> {
         session.status = SessionStatus.COMPLETED;
         session.completedAt = new Date();
         await this.saveWithTransaction(manager, session);
+
+        // Web-path counterpart of DeviceEventService's SESSION_COMPLETED
+        // hook — cms-8-screens-api-plan.md §2.9/P4, same transaction as the
+        // completion itself.
+        await this.captureStats.applySessionCompletedWeb(
+          manager,
+          session.campaignId,
+          session.deviceId,
+          session.operatorUserId,
+          session.completedAt,
+        );
       });
 
       // Best-effort and outside the transaction on purpose: a file-service

@@ -1,4 +1,4 @@
-import type { AuthenticatedUser } from '../guards/sso-auth.guard';
+import type { AuthenticatedUser } from '../auth/sso-auth.guard';
 
 /**
  * Augments Express's `Request` with the `user` field `SsoAuthGuard`

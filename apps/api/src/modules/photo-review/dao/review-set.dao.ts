@@ -116,13 +116,47 @@ export class ReviewSetListItemDao {
   @Expose()
   currentCardViewUrlExpiresAt?: string;
 
-  @ApiProperty({ description: 'Có ít nhất một phiên bản CARD_AI chưa bị hủy hay không' })
+  @ApiProperty({
+    description: 'Có ít nhất một phiên bản CARD_AI chưa bị hủy hay không',
+  })
   @Expose()
   hasAi: boolean;
 
-  @ApiProperty({ description: 'Có ít nhất một phiên bản CARD_UPLOAD chưa bị hủy hay không' })
+  @ApiProperty({
+    description: 'Có ít nhất một phiên bản CARD_UPLOAD chưa bị hủy hay không',
+  })
   @Expose()
   hasUpload: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Lop, lay tu roster (campaign_subjects) neu co',
+  })
+  @Expose()
+  className?: string;
+
+  @ApiPropertyOptional({ description: 'Nganh, lay tu roster neu co' })
+  @Expose()
+  major?: string;
+
+  @ApiPropertyOptional({ description: 'Khoa, lay tu roster neu co' })
+  @Expose()
+  faculty?: string;
+
+  @ApiPropertyOptional({ description: 'So CCCD, lay tu roster neu co' })
+  @Expose()
+  citizenId?: string;
+
+  @ApiPropertyOptional({
+    description: 'Han xu ly - null neu campaign khong dat SLA (P4/D-Q6)',
+  })
+  @Expose()
+  dueAt?: Date;
+
+  @ApiProperty({
+    description: 'true neu da qua dueAt va chua duoc duyet/tu choi',
+  })
+  @Expose()
+  overdue: boolean;
 
   @ApiProperty()
   @Expose()
@@ -145,12 +179,18 @@ export class ReviewSetDetailDao extends ReviewSetListItemDao {
   @Type(() => ReviewOriginalVideoDao)
   videos: ReviewOriginalVideoDao[];
 
-  @ApiProperty({ type: [PhotoVariantDao], description: 'Phiên bản chưa bị hủy, mới nhất trước' })
+  @ApiProperty({
+    type: [PhotoVariantDao],
+    description: 'Phiên bản chưa bị hủy, mới nhất trước',
+  })
   @Expose()
   @Type(() => PhotoVariantDao)
   variants: PhotoVariantDao[];
 
-  @ApiProperty({ type: [ReviewEventDao], description: 'Nhật ký gần đây nhất (xem đầy đủ ở GET .../events)' })
+  @ApiProperty({
+    type: [ReviewEventDao],
+    description: 'Nhật ký gần đây nhất (xem đầy đủ ở GET .../events)',
+  })
   @Expose()
   @Type(() => ReviewEventDao)
   events: ReviewEventDao[];

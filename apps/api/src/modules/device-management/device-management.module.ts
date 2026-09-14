@@ -1,32 +1,48 @@
 import { SsoAuthGuard } from '@app/shared/auth/index';
 import { CaptureModule } from '@app/modules/capture/capture.module';
 import { PhotoReviewModule } from '@app/modules/photo-review/photo-review.module';
+import { IdentityModule } from '@app/modules/identity/identity.module';
+import { WorkflowModule } from '@app/modules/workflow/workflow.module';
+import { FileStorageModule } from '@app/modules/file-storage/file-storage.module';
+import { StatsModule } from '@app/modules/stats/stats.module';
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { CampaignController } from './controllers/campaign.controller';
 import { CampaignConfigController } from './controllers/campaign-config.controller';
+import { CampaignKioskAssignmentController } from './controllers/campaign-kiosk-assignment.controller';
 import { CampaignMemberController } from './controllers/campaign-member.controller';
+import { CampaignSubjectController } from './controllers/campaign-subject.controller';
+import { CampaignSubjectLookupController } from './controllers/campaign-subject-lookup.controller';
 import { CaptureAnglePresetController } from './controllers/capture-angle-preset.controller';
 import { CaptureConfigurationController } from './controllers/capture-configuration.controller';
 import { DeviceController } from './controllers/device.controller';
 import { DeviceSelfController } from './controllers/device-self.controller';
+import { IdentificationMethodController } from './controllers/identification-method.controller';
 import { MeController } from './controllers/me.controller';
 import { Campaign } from './entities/campaign.entity';
+import { CampaignKioskAssignment } from './entities/campaign-kiosk-assignment.entity';
 import { CampaignMember } from './entities/campaign-member.entity';
+import { CampaignSubject } from './entities/campaign-subject.entity';
+import { CampaignSubjectImport } from './entities/campaign-subject-import.entity';
 import { CaptureAnglePreset } from './entities/capture-angle-preset.entity';
 import { CaptureConfiguration } from './entities/capture-configuration.entity';
 import { Device } from './entities/device.entity';
 import { DeviceEvent } from './entities/device-event.entity';
+import { EligibilityCheckLog } from './entities/eligibility-check-log.entity';
+import { IdentificationMethod } from './entities/identification-method.entity';
 import { AdminRoleGuard } from './guards/admin-role.guard';
 import { CampaignMemberGuard } from './guards/campaign-member.guard';
 import { DeviceCredentialsGuard } from './guards/device-credentials.guard';
 import { ActivationPackageService } from './services/activation-package.service';
 import { CampaignService } from './services/campaign.service';
+import { CampaignKioskAssignmentService } from './services/campaign-kiosk-assignment.service';
 import { CampaignMemberService } from './services/campaign-member.service';
+import { CampaignSubjectService } from './services/campaign-subject.service';
 import { CaptureAnglePresetService } from './services/capture-angle-preset.service';
 import { CaptureConfigurationService } from './services/capture-configuration.service';
 import { DeviceService } from './services/device.service';
 import { DeviceEventService } from './services/device-event.service';
+import { IdentificationMethodService } from './services/identification-method.service';
 
 @Module({
   imports: [
@@ -37,7 +53,16 @@ import { DeviceEventService } from './services/device-event.service';
       CaptureAnglePreset,
       CaptureConfiguration,
       CampaignMember,
+      CampaignKioskAssignment,
+      CampaignSubjectImport,
+      CampaignSubject,
+      IdentificationMethod,
+      EligibilityCheckLog,
     ]),
+    // `CampaignSubjectService.importRoster` uploads the parsed error report
+    // (and the original file) via `FileStorageService` — same reasoning
+    // `IdentityModule` imports it for `UserCommandController.uploadAvatar`.
+    FileStorageModule,
     CaptureModule,
     // For DeviceEventService's best-effort
     // PhotoReviewService.ensureSetForApprovedSession() call — the kiosk-path
@@ -46,6 +71,25 @@ import { DeviceEventService } from './services/device-event.service';
     // CaptureModule to re-export it, since CaptureModule's own export list
     // is scoped to its own providers).
     PhotoReviewModule,
+    // For `PermissionsGuard` on campaign.controller.ts's
+    // create/update/delete routes (2026-09-11 security fix,
+    // cms-8-screens-api-plan.md §7 I-Q) — Nest resolves a class passed to
+    // `@UseGuards()` through this module's own DI graph, so the exporting
+    // module must be imported here, not just referenced by path.
+    IdentityModule,
+    // For `CampaignService`'s injected `WorkflowCatalogReadRepository` —
+    // cms-8-screens-api-plan.md §2.2/P2's config merge into `CampaignDao`/
+    // `CampaignConfigDao`. One-directional: `WorkflowModule` never imports
+    // `DeviceManagementModule` back (it uses `capture-angles.validator.ts`
+    // as a plain function import, not a Nest module dependency — see that
+    // validator's own re-export note in `workflow/application/validate-workflow-config.ts`).
+    WorkflowModule,
+    // For `DeviceEventService`'s `CaptureStatsService` hook and
+    // `CampaignSubjectService`'s `CampaignSnapshotService` refresh-after-
+    // import call — cms-8-screens-api-plan.md §2.9/P4. NOT transitively
+    // available through `CaptureModule`/`PhotoReviewModule` above (neither
+    // re-exports `StatsModule`), so imported directly here too.
+    StatsModule,
   ],
   // DeviceSelfController MUST come before DeviceController: Nest/Express
   // matches routes in registration order, and DeviceController's `GET
@@ -72,6 +116,10 @@ import { DeviceEventService } from './services/device-event.service';
     DeviceController,
     CampaignConfigController,
     CampaignMemberController,
+    CampaignKioskAssignmentController,
+    CampaignSubjectController,
+    CampaignSubjectLookupController,
+    IdentificationMethodController,
     CaptureAnglePresetController,
     CaptureConfigurationController,
     MeController,
@@ -81,6 +129,9 @@ import { DeviceEventService } from './services/device-event.service';
     DeviceService,
     DeviceEventService,
     CampaignMemberService,
+    CampaignKioskAssignmentService,
+    CampaignSubjectService,
+    IdentificationMethodService,
     CaptureAnglePresetService,
     CaptureConfigurationService,
     ActivationPackageService,
@@ -96,6 +147,8 @@ import { DeviceEventService } from './services/device-event.service';
     DeviceService,
     DeviceEventService,
     CampaignMemberService,
+    CampaignKioskAssignmentService,
+    CampaignSubjectService,
     CaptureAnglePresetService,
     CaptureConfigurationService,
   ],

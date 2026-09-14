@@ -27,7 +27,8 @@ export class CreateCaptureConfigurationDto {
   description?: string;
 
   @ApiProperty({
-    description: 'Danh sách bước chụp (mẫu) — cùng định dạng CaptureStep[] của campaign',
+    description:
+      'Danh sách bước chụp (mẫu) — cùng định dạng CaptureStep[] của campaign',
     type: [Object],
   })
   @IsArray()
