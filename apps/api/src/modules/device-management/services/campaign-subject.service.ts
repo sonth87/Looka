@@ -204,7 +204,12 @@ export class CampaignSubjectService extends CommonService<CampaignSubject> {
             'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
           data: new Uint8Array(buffer),
           idempotencyKey: randomUUID(),
-          visibility: 'private',
+          // 'public' not 'private': see photo-review.service.ts's
+          // uploadMetadataBestEffort for the full reasoning — owner-based
+          // ACL always denies non-owner reads, and Looka never sends
+          // X-Owner-User-Id, so a private file here is unreadable via
+          // issueViewLink.
+          visibility: 'public',
         });
         errorReportFsFileId = result.fileId;
       } catch (error) {
@@ -224,7 +229,9 @@ export class CampaignSubjectService extends CommonService<CampaignSubject> {
         mimeType: file.mimetype,
         data: new Uint8Array(file.buffer),
         idempotencyKey: randomUUID(),
-        visibility: 'private',
+        // 'public' not 'private' — same reasoning as the error-report
+        // upload just above.
+        visibility: 'public',
       });
       fsFileId = result.fileId;
     } catch (error) {

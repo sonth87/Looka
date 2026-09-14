@@ -224,8 +224,11 @@ export class SessionVideoService extends CommonService<SessionVideo> {
       );
 
       // Recorded evidence, not shareable content — same reasoning as
-      // PhotoService.addDevicePhoto's own identical choice.
-      const visibility: Visibility = 'private';
+      // PhotoService.addDevicePhoto's own identical choice, and same
+      // 'public' not 'private' fix (see that method's comment for why
+      // file-service's owner-based ACL makes 'private' permanently
+      // unreadable here without a stable per-file owner to send).
+      const visibility: Visibility = 'public';
 
       await manager.query(
         `INSERT INTO video_upload_outbox (video_id, idem_key, virtual_path, mime_type, content, visibility, approved_at)

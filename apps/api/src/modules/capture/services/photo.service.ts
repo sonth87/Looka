@@ -136,7 +136,22 @@ export class PhotoService extends CommonService<Photo> {
       // - decided here because this is the one place that actually knows
       // that; the outbox/upload worker downstream just carries the value
       // through as a plain column rather than choosing it themselves.
-      const visibility: Visibility = 'private';
+      //
+      // 'public' not 'private': file-service's owner-based read ACL denies
+      // ANY non-owner read of a private file, and Looka's FsClient never
+      // sends X-Owner-User-Id (pure API-key auth leaves owner_user_id null
+      // server-side) — a private file here was permanently unreadable
+      // through issueViewLink, the only way this photo is ever displayed.
+      // The real access boundary stays Looka's own @RequirePermission
+      // guards, which already gate every call that mints a view link; the
+      // file-service API key + a minted share-token is what actually
+      // protects this URL, not file-service's own visibility flag. See
+      // fs-core's authz.Decide() step 6 and ResolveFileOwnership's doc
+      // comment for why 'private' can never work without also sending
+      // X-Owner-User-Id (which has no stable per-file value to send: every
+      // consumer of this photo — students-gallery, photo-review, card
+      // rendering, print — reads it back under its own distinct viewerId).
+      const visibility: Visibility = 'public';
 
       await manager.query(
         `INSERT INTO upload_outbox (photo_id, idem_key, virtual_path, mime_type, content, visibility)
@@ -258,8 +273,10 @@ export class PhotoService extends CommonService<Photo> {
         ],
       );
 
-      // Same "this is biometric data" reasoning as addPhoto() above.
-      const visibility: Visibility = 'private';
+      // Same "this is biometric data" reasoning as addPhoto() above, and
+      // same 'public' not 'private' fix for the same reason (see addPhoto's
+      // comment for the full explanation).
+      const visibility: Visibility = 'public';
 
       await manager.query(
         `INSERT INTO upload_outbox (photo_id, idem_key, virtual_path, mime_type, content, visibility, approved_at)

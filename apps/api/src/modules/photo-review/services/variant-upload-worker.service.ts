@@ -169,7 +169,13 @@ export class VariantUploadWorkerService implements OnModuleInit {
         mimeType: job.mime_type,
         data: new Uint8Array(job.content),
         idempotencyKey: job.idem_key,
-        visibility: 'private' as const,
+        // 'public' not 'private': see PhotoService.addPhoto's comment for
+        // the full reasoning — file-service's owner-based ACL always denies
+        // non-owner reads, Looka never sends X-Owner-User-Id, and this
+        // variant is read back under several different per-module
+        // viewerIds (card-template, print, photo-review) so no single
+        // owner value could ever satisfy all of them anyway.
+        visibility: 'public' as const,
       };
       const result = job.tenant_name
         ? await (await this.fileStorage.clientForTenant(job.tenant_name)).uploadRaw(uploadInput)

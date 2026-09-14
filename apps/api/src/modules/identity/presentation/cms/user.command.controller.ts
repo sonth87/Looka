@@ -137,7 +137,12 @@ export class UserCommandController {
       mimeType: file.mimetype,
       data: new Uint8Array(file.buffer),
       idempotencyKey: randomUUID(),
-      visibility: 'private',
+      // 'public' not 'private': file-service's owner-based read ACL always
+      // denies a private file here (Looka never sends X-Owner-User-Id —
+      // pure API-key auth leaves owner_user_id null server-side), so a
+      // private avatar would be permanently unreadable via issueViewLink.
+      // Access control stays Looka's own @RequirePermission guards.
+      visibility: 'public',
     });
 
     return this.commandBus.execute(new SetUserAvatarCommand(id, result.fileId));
