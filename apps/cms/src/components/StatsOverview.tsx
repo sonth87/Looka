@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import {
   AllCampaignsStats,
   ApiError,
+  breakdownCount,
   CampaignsTimeseries,
   getAllCampaignsStats,
   getCampaignsTimeseries,
@@ -108,19 +109,25 @@ export function StatsOverview() {
    * `AllCampaignsStats` has no dedicated total field for this (it wasn't
    * part of the original stats/summary shape), so this sums each campaign's
    * own optional `byTrigger` client-side. `null` — not zeros — when not a
-   * single campaign carries `byTrigger` yet, so the tiles below can hide
-   * entirely rather than show a misleading "0" against an unshipped field.
+   * single campaign carries any `byTrigger` rows yet, so the tiles below
+   * can hide entirely rather than show a misleading "0" against an
+   * unshipped field. Note: today's bulk stats endpoint always sends `[]`
+   * here (no bulk per-campaign query exists server-side — see
+   * `allCampaignsStats()`'s own doc comment), so this stays hidden on the
+   * Overview page until that's added; `breakdownCount` still defaults each
+   * individual key to 0 rather than assuming AUTO/GESTURE/SHUTTER/EXTERNAL
+   * are all present on a real (non-empty) row set.
    */
   const triggerTotals = stats?.campaigns.reduce<
     { AUTO: number; GESTURE: number; SHUTTER: number; EXTERNAL: number } | null
   >((acc, c) => {
-    if (!c.byTrigger) return acc;
+    if (!c.byTrigger || c.byTrigger.length === 0) return acc;
     const base = acc ?? { AUTO: 0, GESTURE: 0, SHUTTER: 0, EXTERNAL: 0 };
     return {
-      AUTO: base.AUTO + c.byTrigger.AUTO,
-      GESTURE: base.GESTURE + c.byTrigger.GESTURE,
-      SHUTTER: base.SHUTTER + c.byTrigger.SHUTTER,
-      EXTERNAL: base.EXTERNAL + c.byTrigger.EXTERNAL,
+      AUTO: base.AUTO + breakdownCount(c.byTrigger, 'AUTO'),
+      GESTURE: base.GESTURE + breakdownCount(c.byTrigger, 'GESTURE'),
+      SHUTTER: base.SHUTTER + breakdownCount(c.byTrigger, 'SHUTTER'),
+      EXTERNAL: base.EXTERNAL + breakdownCount(c.byTrigger, 'EXTERNAL'),
     };
   }, null) ?? null;
 

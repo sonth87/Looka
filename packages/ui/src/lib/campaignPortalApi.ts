@@ -174,3 +174,33 @@ export function selfEnrollDevice(
     body: JSON.stringify(input),
   });
 }
+
+export type PhotoReviewSetStatus = 'PENDING_AUTO' | 'READY' | 'IN_REVIEW' | 'APPROVED' | 'REJECTED' | 'AUTO_FAILED';
+
+export interface CampaignSubjectPhotoStatus {
+  exists: boolean;
+  status?: PhotoReviewSetStatus;
+  capturedAt?: string;
+  viewUrl?: string;
+}
+
+/**
+ * `GET /v1/campaigns/:id/subjects/:subjectCode/photo-status` (2026-09-15) —
+ * "does this student already have a photo-review set in this campaign?",
+ * called right after a student-code/CCCD lookup resolves FOUND, before
+ * starting a brand-new session (`FaceCaptureApp.tsx`'s `handleLookupResult`)
+ * — field request: an operator re-scanning an already-photographed student
+ * should be warned and shown the existing photo, not silently recapture
+ * over it. `subjectCode` is URL-encoded — student codes/CCCD numbers are
+ * expected to be plain alphanumeric, but this is cheap insurance regardless.
+ */
+export function fetchCampaignSubjectPhotoStatus(
+  campaignId: string,
+  subjectCode: string,
+  authHeaders: Record<string, string>,
+): Promise<CampaignSubjectPhotoStatus> {
+  return call<CampaignSubjectPhotoStatus>(
+    `/v1/campaigns/${campaignId}/subjects/${encodeURIComponent(subjectCode)}/photo-status`,
+    authHeaders
+  );
+}

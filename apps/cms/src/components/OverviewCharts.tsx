@@ -33,14 +33,14 @@ function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
-/** "YYYY-MM-DD" -> "dd/MM", with no `Date`/timezone parsing involved — the string is already a calendar date, not an instant. */
-function formatDayMonth(isoDate: string): string {
+/** "YYYY-MM-DD" -> "dd/MM", with no `Date`/timezone parsing involved — the string is already a calendar date, not an instant. Exported so `StatsPanel.tsx`'s daily trend chart formats its x-axis identically. */
+export function formatDayMonth(isoDate: string): string {
   const [, m, d] = isoDate.split('-');
   return `${d}/${m}`;
 }
 
-/** A small swatch + label row, shared by every chart's legend below it — a line stroke for line series, a filled square for bar/status series, per the dataviz skill's "line keys for lines, rect keys for bars" rule. */
-function LegendRow({ color, shape, label, value }: { color: string; shape: 'line' | 'rect'; label: string; value?: string }) {
+/** A small swatch + label row, shared by every chart's legend below it — a line stroke for line series, a filled square for bar/status series, per the dataviz skill's "line keys for lines, rect keys for bars" rule. Exported so `StatsPanel.tsx`'s new charts reuse the same legend chrome instead of a second, inconsistent implementation. */
+export function LegendRow({ color, shape, label, value }: { color: string; shape: 'line' | 'rect'; label: string; value?: string }) {
   return (
     <span className="flex items-center gap-1.5">
       {shape === 'rect' ? (
@@ -54,8 +54,8 @@ function LegendRow({ color, shape, label, value }: { color: string; shape: 'line
   );
 }
 
-/** Tooltip shell every chart below reuses — a white card, values Strong/primary and leading, series name secondary and trailing (the legend's hierarchy inverted, since here the reader already has the series and wants the number). */
-function TooltipCard({ title, rows }: { title: string; rows: { color: string; shape: 'line' | 'rect'; label: string; value: string }[] }) {
+/** Tooltip shell every chart below reuses — a white card, values Strong/primary and leading, series name secondary and trailing (the legend's hierarchy inverted, since here the reader already has the series and wants the number). Exported so `StatsPanel.tsx`'s new charts reuse the same tooltip chrome instead of a second, inconsistent implementation. */
+export function TooltipCard({ title, rows }: { title: string; rows: { color: string; shape: 'line' | 'rect'; label: string; value: string }[] }) {
   return (
     <div className="rounded-lg border border-gray-200 bg-white shadow-md px-3 py-2 text-xs min-w-[9rem]">
       <div className="text-gray-500 mb-1.5">{title}</div>

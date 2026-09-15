@@ -21,14 +21,16 @@
  * collision rule.
  */
 
-/** Fixed-order categorical hues (light mode), slots 1/2/3/4/5/7 in use below — see palette.md for the full 8 and why the order is fixed. */
+/** Fixed-order categorical hues (light mode), slots 1/2/3/4/5/6/7/8 in use below — see palette.md for the full 8 and why the order is fixed. */
 export const CATEGORICAL = {
   blue: '#2a78d6', // slot 1 — sessions hoàn tất (primary metric)
   orange: '#eb6834', // slot 2 — thiết bị
   aqua: '#1baf7a', // slot 3 — upload thành công
   yellow: '#eda100', // slot 4 — lần chụp lại
   magenta: '#e87ba4', // slot 5 — CB Help can thiệp
+  green: '#008300', // slot 6 — trigger nguồn chụp: tự động (StatsPanel)
   violet: '#4a3aa7', // slot 7 — phiên chụp (A.8 "sessions")
+  red: '#e34948', // slot 8 — trigger nguồn chụp: thủ công (StatsPanel)
 } as const;
 
 /** Reserved status scale — never reused for a plain "series N", always paired with a label. */
@@ -64,6 +66,12 @@ export const METRIC_COLOR = {
   retakes: CATEGORICAL.yellow,
   cbHelp: CATEGORICAL.magenta,
   sessions: CATEGORICAL.violet,
+  /** AUTO vs GESTURE/SHUTTER("Thủ công") trigger source — `StatsPanel`'s trigger-breakdown chart. Not a good/bad status pair (neither trigger source is "better"), so it takes the next two categorical slots in fixed order rather than borrowing `STATUS`. */
+  triggerAuto: CATEGORICAL.green,
+  triggerManual: CATEGORICAL.red,
+  /** Face-embedding registration outcome (2026-09-15) — genuinely a good/bad pair (unlike triggerAuto/triggerManual above), same reasoning `uploadSuccess`/`uploadFailed` already use `STATUS` rather than a categorical slot. */
+  embeddingEnrolled: STATUS.good,
+  embeddingFailed: STATUS.critical,
 } as const;
 
 /** Compact-but-consistent number formatting — every count in this app already uses `vi-VN` grouping (see StatTile/StatsPanel), kept here rather than switching to K/M compaction so the dashboard doesn't disagree with the table below it. */

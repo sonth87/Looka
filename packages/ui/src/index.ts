@@ -22,6 +22,10 @@ export type { CardProps } from './components/ui/card.js';
 export { Badge } from './components/ui/badge.js';
 export type { BadgeProps, BadgeVariant } from './components/ui/badge.js';
 
+// Kiosk theme (light/dark toggle for the kiosk-* tokens)
+export { applyKioskTheme, getStoredKioskTheme } from './lib/kioskTheme.js';
+export type { KioskTheme } from './lib/kioskTheme.js';
+
 // Kiosk shell (shared header/footer chrome)
 export { KioskShell } from './components/shell/KioskShell.js';
 export type { KioskShellProps } from './components/shell/KioskShell.js';
@@ -37,6 +41,8 @@ export { CameraPermission } from './components/camera/CameraPermission.js';
 export { CameraError } from './components/camera/CameraError.js';
 export { FrameTile } from './components/camera/FrameTile.js';
 export type { FrameTileProps, FrameTileStatus } from './components/camera/FrameTile.js';
+export { CompositionGridOverlay } from './components/camera/CompositionGridOverlay.js';
+export type { CompositionGridOverlayProps } from './components/camera/CompositionGridOverlay.js';
 export { MultiFrameGrid } from './components/camera/MultiFrameGrid.js';
 export type { MultiFrameGridFrame, MultiFrameGridProps } from './components/camera/MultiFrameGrid.js';
 export { FramesBlockedPanel } from './components/camera/FramesBlockedPanel.js';

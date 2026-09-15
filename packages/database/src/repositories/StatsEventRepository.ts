@@ -9,7 +9,27 @@ export type StatsEventType =
   | 'SESSION_REPORT'
   | 'PHOTO_STATUS'
   | 'VIDEO_STATUS'
-  | 'ATTEMPT_SUPERSEDED';
+  | 'ATTEMPT_SUPERSEDED'
+  /**
+   * 2026-09-15 — mirrors `apps/api`'s own `DeviceEventType.EMBEDDING_ENROLLED`
+   * (must stay in sync with that enum; added there in the same change, see
+   * migration 1820000000000-DeviceEventEmbeddingEnrolled). Fired by
+   * `embeddingEnroll.ts` once a capture is successfully registered with the
+   * external face-embedding server, so that record reaches this API's own
+   * Postgres via the same outbox/push pipeline every other stats event
+   * already uses — not just the kiosk's own local `embedding_enrollments`
+   * table.
+   */
+  | 'EMBEDDING_ENROLLED'
+  /**
+   * 2026-09-15 — mirrors `apps/api`'s `DeviceEventType.EMBEDDING_FAILED`
+   * (migration 1821000000000-DeviceEventEmbeddingFailed). Fired only for a
+   * DEFINITIVE enrollment failure (a real server rejection, or a network
+   * failure that finally gave up after every retry) — never for an
+   * ordinary in-progress retry, so a single transient network blip that
+   * resolves on its own never shows up here.
+   */
+  | 'EMBEDDING_FAILED';
 
 export interface StatsEventItem {
   id: string;

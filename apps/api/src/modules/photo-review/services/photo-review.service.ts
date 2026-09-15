@@ -2333,4 +2333,64 @@ export class PhotoReviewService {
 
     return { setId: created.id, pendingAuto: true };
   }
+
+  /**
+   * "Đã có hồ sơ ảnh trong đợt chụp này chưa?" — 2026-09-15, kiosk pre-
+   * capture warning: right after a student-code/CCCD lookup resolves FOUND,
+   * the kiosk calls this (via `CampaignSubjectPhotoStatusController`) before
+   * starting a brand-new session, so the operator can be warned and shown
+   * the existing photo instead of silently recapturing over a set that
+   * already exists. Deliberately lighter than `getSetDetail` (no variants
+   * list, no events, no video rows) — the kiosk only needs enough to render
+   * one warning banner plus one preview image.
+   *
+   * Same `(campaignId, subjectCode, kindId)` uniqueness `ensureSet
+   * ForApprovedSession` relies on, and the SAME "STUDENT_CARD kind" default
+   * — this is intentionally read-only and side-effect-free (unlike that
+   * method), so a kiosk calling this before every single lookup can never
+   * create or mutate a set.
+   */
+  async findExistingSetForSubject(
+    campaignId: string,
+    subjectCode: string,
+    apiBaseUrl: string,
+  ): Promise<{
+    exists: boolean;
+    status?: PhotoReviewSetStatus;
+    capturedAt?: Date;
+    viewUrl?: string;
+  }> {
+    const kind = await this.photoKindRepository.findOne({
+      where: { code: 'STUDENT_CARD' },
+    });
+    if (!kind) return { exists: false };
+
+    const existing = await this.setRepository.findOne({
+      where: { campaignId, subjectCode, kindId: kind.id },
+    });
+    if (!existing) return { exists: false };
+
+    let viewUrl: string | undefined;
+    if (existing.currentCardVariantId) {
+      const variant = await this.variantRepository.findOne({
+        where: { id: existing.currentCardVariantId },
+      });
+      if (variant) {
+        const link = await this.resolveCurrentCardViewUrl(
+          variant.id,
+          variant.fsFileId,
+          variant.fsStatus,
+          apiBaseUrl,
+        );
+        viewUrl = link.url;
+      }
+    }
+
+    return {
+      exists: true,
+      status: existing.status,
+      capturedAt: existing.createdAt,
+      viewUrl,
+    };
+  }
 }

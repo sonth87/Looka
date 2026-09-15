@@ -129,6 +129,14 @@ export class CampaignStatsDao {
   @ApiProperty()
   cbHelpInterventions: number;
 
+  /** Successful `EMBEDDING_ENROLLED` device events (2026-09-15) — a CENTER-step capture the external face-embedding server accepted and registered. */
+  @ApiProperty()
+  embeddingEnrolled: number;
+
+  /** Definitive `EMBEDDING_FAILED` device events (2026-09-15) — a real server rejection (most often "ảnh có N khuôn mặt") or a network failure that gave up after all retries; never counts an in-progress retry. */
+  @ApiProperty()
+  embeddingFailed: number;
+
   /** Completed sessions recorded in `sessions` for this campaign (A.8) — distinct from `sessionsCompleted` above, which counts SESSION_COMPLETED device events instead. */
   @ApiProperty()
   sessions: number;
@@ -252,6 +260,12 @@ export class AllCampaignsStatsDao {
 
   @ApiProperty()
   totalCbHelpInterventions: number;
+
+  @ApiProperty()
+  totalEmbeddingEnrolled: number;
+
+  @ApiProperty()
+  totalEmbeddingFailed: number;
 
   @ApiProperty({
     description: 'Tổng số phiên đã hoàn tất, cộng dồn từ sessions (A.8)',

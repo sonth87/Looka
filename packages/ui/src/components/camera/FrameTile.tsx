@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import { Check } from 'lucide-react';
 import { cn } from '../../lib/utils.js';
+import { CompositionGridOverlay } from './CompositionGridOverlay.js';
 
 /**
  * 'READY': a side frame (non-CENTER) whose camera has actually rendered a
@@ -60,6 +61,8 @@ export interface FrameTileProps {
    * into a tall column is expected and fine.
    */
   size?: 'default' | 'large';
+  /** Draws a rule-of-thirds framing grid over this tile — the caller decides which tile(s) (CENTER only, per product decision 2026-09-15), this component has no opinion on role. Default false. */
+  showCompositionGrid?: boolean;
 }
 
 const STATUS_LABEL_VI: Record<FrameTileStatus, string> = {
@@ -93,6 +96,7 @@ export const FrameTile: React.FC<FrameTileProps> = ({
   mirrored = true,
   size = 'default',
   index,
+  showCompositionGrid = false,
 }) => {
   const isLarge = size === 'large';
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -163,6 +167,8 @@ export const FrameTile: React.FC<FrameTileProps> = ({
         muted
         className={cn('w-full h-full object-cover', mirrored && 'scale-x-[-1]')}
       />
+
+      {showCompositionGrid && <CompositionGridOverlay />}
 
       {/*
         Pose-guide outline for the tile actively being captured — a plain

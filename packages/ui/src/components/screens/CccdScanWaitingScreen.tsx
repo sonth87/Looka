@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
+import { Monitor } from 'lucide-react';
 import type { StudentSubjectInfo } from '../../lib/CaptureSink.js';
 import { cn } from '../../lib/utils.js';
 import { Badge } from '../ui/badge.js';
@@ -58,6 +59,22 @@ export interface CccdScanWaitingScreenProps {
    * locally before forwarding it up (see `handleScanResult` below).
    */
   onManualSubmit?: (code: string) => void;
+  /**
+   * "Màn hình mở rộng" (CB Help) toggle — 2026-09-15 field request: this
+   * button used to live only in `DesktopCaptureView`'s own toolbar
+   * (`FaceCaptureApp.tsx`'s `modeButton`), which does not render at all
+   * while this screen is showing (Bước 2 is a separate, fully-opaque
+   * full-screen step, not an overlay on top of the capture view — see this
+   * file's own top doc comment on that 2026-09-14 redesign), so the button
+   * was simply unreachable during check-in despite an earlier comment
+   * elsewhere insisting it stay "always available". `undefined` skips
+   * rendering it, same convention as `onManualSubmit` — `FaceCaptureApp.tsx`
+   * only passes a real handler on the desktop build where the toggle bridge
+   * (`window.faceAPI.toggleCbHelpWindow`) actually exists.
+   */
+  onToggleCbHelp?: () => void;
+  /** Current open/closed state of the CB Help window, for the button's own label/icon — meaningless (and unused) when `onToggleCbHelp` is undefined. */
+  cbHelpOpen?: boolean;
 }
 
 export function CccdScanWaitingScreen({
@@ -65,6 +82,8 @@ export function CccdScanWaitingScreen({
   error,
   onScanResult,
   onManualSubmit,
+  onToggleCbHelp,
+  cbHelpOpen,
 }: CccdScanWaitingScreenProps) {
   const [foundSubject, setFoundSubject] = useState<StudentSubjectInfo | null>(null);
   const [manualCode, setManualCode] = useState('');
@@ -90,9 +109,17 @@ export function CccdScanWaitingScreen({
 
   return (
     <div className="absolute inset-0 z-[150] flex flex-col overflow-y-auto bg-kiosk-bg text-kiosk-text">
-      <div className="shrink-0 px-8 pt-6 pb-2">
-        <div className="text-xs font-bold uppercase tracking-[0.2em] text-kiosk-accent">Bước 2</div>
-        <h1 className="text-2xl font-bold">Check-in &amp; đối soát hồ sơ</h1>
+      <div className="shrink-0 flex items-start justify-between gap-4 px-8 pt-6 pb-2">
+        <div>
+          <div className="text-xs font-bold uppercase tracking-[0.2em] text-kiosk-accent">Bước 2</div>
+          <h1 className="text-2xl font-bold">Check-in &amp; đối soát hồ sơ</h1>
+        </div>
+        {onToggleCbHelp && (
+          <Button type="button" variant="outline" size="sm" onClick={onToggleCbHelp} className="shrink-0 gap-1.5">
+            <Monitor className="h-3.5 w-3.5" />
+            {cbHelpOpen ? 'Đóng màn hình mở rộng' : 'Mở màn hình mở rộng'}
+          </Button>
+        )}
       </div>
 
       <div className="grid flex-1 grid-cols-1 gap-6 px-8 pb-8 lg:grid-cols-2">
@@ -187,15 +214,12 @@ export function CccdScanWaitingScreen({
   );
 }
 
-/** Max gap, in ms, between two keystrokes still considered part of the same scanner burst — see `ScanMonitorCorner`'s own doc comment for why this is how a scan is told apart from ordinary typing. */
-const SCAN_BURST_GAP_MS = 80;
+/** How long the hidden scanner input can sit with no new character before whatever it's accumulated is treated as one complete scan and auto-submitted — see `handleScannerInput`'s own doc comment for why this scanner needs this at all (it never sends `Enter`). Long enough to never fire mid-scan (Unicode-composition pauses included), short enough that two separate physical scans are never merged into one. */
+const SCAN_DEBOUNCE_MS = 500;
 /** How long a clean scan's parsed number stays visible before the roster lookup fires — an operator glance-check, not a blocking gate. */
 const STABLE_DISPLAY_MS = 400;
 /** How long the found/not-found flash stays up before the corner resumes listening for the next student. */
 const SUCCESS_DISPLAY_MS = 1800;
-
-/** Vietnamese CCCD numbers are exactly 12 digits — the acceptance gate for the scanner's decoded first field, same shape the old OCR path enforced on its own recognized text. */
-const CCCD_NUMBER_PATTERN = /^\d{12}$/;
 
 type ScanPhase = 'idle' | 'stable' | 'checking' | 'check-error' | 'found' | 'not-found';
 
@@ -248,16 +272,84 @@ function cccdRecordToSubject(record: CccdRosterLookupRecord): StudentSubjectInfo
  * Pulls the CCCD number out of a decoded QR payload. A Vietnamese chip-based
  * CCCD's front-side QR code encodes one pipe-delimited string:
  * `<số CCCD>|<số CMND cũ, có thể rỗng>|<họ tên>|<ngày sinh>|<giới tính>|<địa chỉ>|<ngày cấp>`
- * — only the first field is ever used here (matching, not display; the
- * roster lookup already returns the subject's real name/class/major once
- * matched). `null` for anything that doesn't start with a clean 12-digit
- * token — a garbled/partial read (e.g. a keystroke lost to focus moving
- * mid-scan) must never be treated as a match, the same "only a clean read
- * counts" gate the old OCR path enforced via `extractCitizenId`.
+ * — only the first field is ever used to identify the person (matching, not
+ * display; the roster lookup already returns the subject's real name/class/
+ * major once matched).
+ *
+ * Also validates the SECOND field's shape (số CMND cũ: short, digits-only,
+ * or blank), not just the first — 2026-09-15, round 5 field failure: a real
+ * corrupted buffer had a first field that still LOOKED like a clean
+ * 12-digit id (so an earlier version of this check, which only looked at
+ * the first field, accepted it), immediately followed by a field that was
+ * 19 digits long — nowhere close to a real CMND number, and itself strong
+ * evidence that the id/CMND boundary this found was bogus: most likely 1-2
+ * real digits from the true id got pushed past the first "|" by a corrupted
+ * read and landed inside what then looked like an oversized field 2.
+ * Cross-checking field 2's shape catches that whole class of corruption
+ * without needing to special-case any one observed pattern, and rejecting
+ * it here means a bad read fails safely (falls through to "Đọc thẻ không
+ * thành công, vui lòng quét lại") instead of silently recording a wrong id
+ * — the same priority `COMPLETE_CCCD_FIELD_PATTERN` (the instant per-
+ * keystroke check, below) and `recoverCitizenIdFromSettledBuffer` (the
+ * debounce fallback's own recovery search) both apply the identical
+ * two-field validation for the same reason.
  */
 export function extractCitizenIdFromQrPayload(raw: string): string | null {
-  const firstField = raw.split('|')[0]?.trim() ?? '';
-  return CCCD_NUMBER_PATTERN.test(firstField) ? firstField : null;
+  const match = /^(\d{12})\|\d{0,9}\|/.exec(raw);
+  return match ? match[1] : null;
+}
+
+/**
+ * Fallback recovery used only by `processScanBuffer`'s debounce path (buffer
+ * has gone fully quiet), never the instant per-keystroke check. 2026-09-15
+ * round 4 field report, decoded from a `[ScanMonitorCorner] scan parse
+ * failed` diagnostic: the buffer's first field was garbage that was NEITHER
+ * digits nor the true start of the payload (structurally, the tail of an
+ * unrelated later field) — consistent with this corner's hidden input
+ * losing the first several characters of a scan to a focus race right as it
+ * (re)mounts for a new student, before the scanner starts transmitting.
+ * Because this scanner keeps re-transmitting the SAME payload for as long
+ * as the card stays in view (see `COMPLETE_CCCD_FIELD_PATTERN`'s own doc
+ * comment), a complete, uncorrupted repetition typically still follows
+ * later in the same buffer — `extractCitizenIdFromQrPayload` alone can never
+ * find it, since it only ever looks at the first field.
+ *
+ * Searches the WHOLE buffer for every `<12 digits>|<0-9 digits>|` occurrence
+ * — same two-field validation as `extractCitizenIdFromQrPayload`'s own doc
+ * comment explains, required here too: an unvalidated `<12 digits>|` search
+ * on its own re-opens exactly the false-positive risk that check exists to
+ * close (confirmed by a round 5 failure where the buffer had TWO such
+ * matches — the corrupted first field, and a coincidental one hiding
+ * inside a field 2 that was really just a longer run of the same digits) —
+ * and takes the LAST match, on the theory that later occurrences are more
+ * likely to belong to a complete, undamaged repetition than an early one
+ * damaged by this same leading-characters-lost issue. This runs only once
+ * the buffer has been quiet for `SCAN_DEBOUNCE_MS`, so — unlike the instant
+ * per-keystroke check, which is deliberately anchored to buffer position 0
+ * to avoid ever silently accepting a wrong-but-plausible match — it is safe
+ * to search a buffer that has already fully settled.
+ */
+function recoverCitizenIdFromSettledBuffer(raw: string): string | null {
+  const matches = Array.from(raw.matchAll(/(\d{12})\|\d{0,9}\|/g));
+  if (matches.length > 0) return matches[matches.length - 1][1];
+
+  // Fallback of the fallback (2026-09-15, round 6 field report, explicit
+  // product call: "lấy toàn bộ thông tin số đầu tiên khi quét ra là được" —
+  // prefer a successful read over strict field-boundary validation). A real
+  // failure's buffer was 22 characters of PURE digits with no "|" ANYWHERE
+  // — the card was pulled away before the scanner ever reached the first
+  // field separator, so the check above can never match no matter how much
+  // more validation it has. Decoding that buffer showed the true 12-digit
+  // id sitting at the very END (this scanner's continuous retransmission
+  // means a later position is more likely to be a complete, undamaged
+  // copy than an earlier one — same reasoning the match-picking above
+  // already uses), confirmed correct against the operator's own report of
+  // what the card actually says. Only the trailing 12 characters are
+  // tried, and only if they are purely digits — this still refuses a
+  // buffer that never produced a clean 12-digit run anywhere, it just no
+  // longer requires seeing a field separator to trust it.
+  const tail = raw.slice(-12);
+  return /^\d{12}$/.test(tail) ? tail : null;
 }
 
 /**
@@ -267,28 +359,40 @@ export function extractCitizenIdFromQrPayload(raw: string): string | null {
  * alternative). 2026-09-14: un-cornered — was a fixed `absolute bottom-6
  * right-6` floating box over a live camera preview; now sits inline in the
  * left column's scan card instead, since the screen around it is no longer
- * a see-through overlay. Its event-handling/timers below are UNCHANGED by
- * that move — only the returned JSX's layout classes are.
+ * a see-through overlay.
  *
  * Every commercial USB/Bluetooth barcode/QR scanner emulates a keyboard by
  * default ("HID keyboard wedge" mode — no driver or SDK needed): scanning a
  * code "types" its decoded contents into whichever element currently has
- * keyboard focus, then sends Enter. So this listens for keystrokes at the
- * `document` level instead of opening a camera.
+ * keyboard focus, then sends Enter.
  *
- * Telling a genuine scan apart from ordinary typing elsewhere on the page:
- * a scanner delivers every character of one decode within a few ms of the
- * previous one — see `SCAN_BURST_GAP_MS`. Any gap larger than that resets
- * the buffer, so no plausible human typing speed can ever accumulate into a
- * false scan. Belt-and-suspenders: any keystroke while a real
- * `<input>`/`<textarea>`/contenteditable element has focus is ignored
- * outright, so an operator legitimately typing into a real form elsewhere
- * on the page (including this same screen's own manual-entry field) is
- * never mistaken for a scan.
+ * 2026-09-15 rewrite — was a `document`-level `keydown` listener manually
+ * concatenating `e.key` into a buffer, reset whenever two keystrokes were
+ * more than `SCAN_BURST_GAP_MS` (80ms) apart. Field report: scans of a real
+ * Vietnamese CCCD's QR (which contains the holder's name/address with
+ * diacritics — "Trịnh Thái Sơn", not ASCII) kept failing with "Đọc thẻ
+ * không thành công". Root cause: scanners emit a diacritic character via a
+ * multi-key OS-level Unicode compose sequence (e.g. Alt+Numpad), not a
+ * single clean `keydown` — the intermediate keys can legitimately be spaced
+ * more than 80ms apart, which silently wiped `bufferRef` mid-scan, truncating
+ * the payload before the CCCD-number prefix a caller actually needs ever
+ * reached `Enter`. Manually reconstructing text from raw `keydown.key`
+ * values is fundamentally the wrong tool for this: it can never correctly
+ * handle whatever Unicode input method the scanner/OS uses.
+ *
+ * Fix: point the scanner at a real (visually hidden) `<input>` and read its
+ * `.value` on `Enter` — the browser's own native text-input pipeline already
+ * handles ANY composition method correctly (that's what it's for), so no
+ * character-level reconstruction or timing heuristic is needed at all. The
+ * input is kept focused whenever nothing else legitimately has focus (see
+ * the effect below), so a scan lands there wherever the operator's actual
+ * attention is elsewhere on the page — including this same screen's own
+ * manual "nhập mã sinh viên" field, which keeps working normally since focus
+ * is never stolen while it (or the future QR/VNeID buttons) is in use.
  *
  * `paused` (true while the parent's handling of a previous result —
  * greeting, session start — is still in flight, i.e. `submitting`) stops
- * accepting new keystrokes without unmounting anything, matching the old
+ * refocusing the hidden input without unmounting anything, matching the old
  * corner's own pause behaviour so the corner doesn't visibly flicker/reset
  * between one student's scan and the next.
  */
@@ -303,50 +407,262 @@ function ScanMonitorCorner({
   const [statusText, setStatusText] = useState<string | null>(null);
   const [stableCitizenId, setStableCitizenId] = useState<string | null>(null);
 
-  const bufferRef = useRef('');
-  const lastKeyAtRef = useRef(0);
+  const scannerInputRef = useRef<HTMLInputElement>(null);
+  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Cancels any pending debounce on unmount, so a scan mid-flight when the
+  // operator navigates away never fires `processScanBuffer` against an
+  // input that's no longer there.
   useEffect(() => {
+    return () => {
+      if (debounceTimerRef.current !== null) clearTimeout(debounceTimerRef.current);
+    };
+  }, []);
+
+  // Keeps the hidden scanner input focused so a scan's keystrokes land there
+  // no matter where the operator last clicked — but never steals focus away
+  // from a REAL input/textarea/contenteditable the operator is actually
+  // using (this screen's own manual MSSV field included).
+  //
+  // `useLayoutEffect`, not `useEffect` (2026-09-15 round 4): this corner
+  // unmounts/remounts fresh for every new student (gated by the parent's
+  // `awaitingStudent`), and a `[ScanDiag]`-decoded field failure showed the
+  // buffer's first several characters missing — consistent with a scan
+  // starting (card already presented, scanner already firing) before this
+  // effect's very first `refocus()` call had actually run. `useEffect` runs
+  // after the browser paints; `useLayoutEffect` runs synchronously right
+  // after the DOM commits, closing as much of that window as React allows.
+  useLayoutEffect(() => {
     if (paused) return;
+    const input = scannerInputRef.current;
+    if (!input) return;
 
-    function onKeyDown(e: KeyboardEvent) {
-      const target = e.target as HTMLElement | null;
-      const isRealInput =
-        target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable);
-      if (isRealInput) return;
-
-      const now = Date.now();
-      if (now - lastKeyAtRef.current > SCAN_BURST_GAP_MS) {
-        bufferRef.current = '';
-      }
-      lastKeyAtRef.current = now;
-
-      if (e.key === 'Enter') {
-        const raw = bufferRef.current;
-        bufferRef.current = '';
-        if (!raw) return;
-        const citizenId = extractCitizenIdFromQrPayload(raw);
-        if (!citizenId) {
-          setStatusText('Đọc thẻ không thành công, vui lòng quét lại.');
-          return;
-        }
-        setStableCitizenId(citizenId);
-        setPhase('stable');
-        return;
-      }
-
-      // Single printable characters only — ignores modifier/navigation keys
-      // (Shift, Control, ArrowLeft, ...) so they don't contribute to the
-      // buffer, without treating them as a burst-breaking pause either
-      // (`lastKeyAtRef` above is already updated regardless of this check).
-      if (e.key.length === 1) {
-        bufferRef.current += e.key;
-      }
+    function refocus() {
+      const active = document.activeElement as HTMLElement | null;
+      // Already focused — do nothing. 2026-09-15 field report: a scan
+      // sometimes came through with digits scrambled/duplicated in ways a
+      // clean single retransmission could never produce (e.g. the true ID
+      // reappearing with extra leading digits and fragments of later fields
+      // nested back into earlier ones). Root cause: this function used to
+      // call `input.focus()` unconditionally whenever it wasn't some OTHER
+      // real input's turn — including every `click`/`focusin` anywhere on
+      // the page and every 500ms interval tick — even while `input` already
+      // had focus. Calling `.focus()` again on an already-focused element is
+      // a no-op for keeping focus, but can still reset the caret to the
+      // start; the continuous-read scanner's retransmission gaps are well
+      // under that 500ms interval (see `handleScannerInput`'s own doc
+      // comment), so this was firing WHILE a scan's keystrokes were still
+      // arriving, splicing later characters into the front of the buffer
+      // instead of appending them. Returning early here means a scan in
+      // progress is never touched.
+      if (active === input) return;
+      const isOtherRealInput =
+        !!active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable);
+      if (!isOtherRealInput) input?.focus({ preventScroll: true });
     }
 
-    document.addEventListener('keydown', onKeyDown);
-    return () => document.removeEventListener('keydown', onKeyDown);
+    refocus();
+    document.addEventListener('focusin', refocus);
+    document.addEventListener('click', refocus);
+    // A periodic nudge covers focus drifting away with no `focusin`/`click`
+    // in between (e.g. the window itself losing and regaining OS focus).
+    const intervalId = setInterval(refocus, 500);
+    return () => {
+      document.removeEventListener('focusin', refocus);
+      document.removeEventListener('click', refocus);
+      clearInterval(intervalId);
+    };
   }, [paused]);
+
+  /**
+   * Processes whatever the hidden input has accumulated as one complete
+   * scan, then clears it. Shared by both the debounce path (below) and a
+   * literal `Enter` keydown, so a scanner that DOES send a terminator still
+   * submits instantly instead of waiting out the debounce.
+   */
+  function processScanBuffer(input: HTMLInputElement) {
+    const raw = input.value;
+    input.value = '';
+    if (!raw) return;
+
+    const citizenId = extractCitizenIdFromQrPayload(raw) ?? recoverCitizenIdFromSettledBuffer(raw);
+    if (!citizenId) {
+      // TEMP DIAGNOSTIC (2026-09-15) — remove once the scan-failure root
+      // cause is confirmed. Reveals exactly what the hidden input actually
+      // received (length + char codes of the first 20 chars) so a
+      // stray/invisible character or an unexpected split can be told apart
+      // from "the scanner just isn't reaching this input at all". A SINGLE
+      // string argument, not a message + object — Electron's
+      // `console-message` forwarding to the main process only carries a
+      // renderer console call's first string argument (see the identical
+      // note on `openFrameStreams`'s own diagnostic log in
+      // FaceCaptureApp.tsx), so a second object argument here would just
+      // show up as "[object Object]" instead of anything useful.
+      console.warn(
+        `[ScanMonitorCorner] scan parse failed ${JSON.stringify({
+          length: raw.length,
+          first20CharCodes: Array.from(raw.slice(0, 20)).map((c) => c.charCodeAt(0)),
+          firstFieldRaw: raw.split('|')[0] ?? '',
+        })}`
+      );
+      setStatusText('Đọc thẻ không thành công, vui lòng quét lại.');
+      return;
+    }
+    setStableCitizenId(citizenId);
+    setPhase('stable');
+  }
+
+  /**
+   * 2026-09-15 field diagnosis, round 2: the debounce fix below alone was
+   * NOT enough — this specific scanner is a continuous-read model that keeps
+   * re-decoding and re-"typing" the SAME payload over and over while the
+   * card stays in view, with gaps between successive full retransmissions
+   * well under `SCAN_DEBOUNCE_MS`. Confirmed from a second real failure's
+   * captured buffer: a clean seam where one full payload's tail directly
+   * abuts the NEXT retransmission's head — the debounce never once found
+   * 500ms of true silence to fire on, so the buffer just kept growing
+   * across multiple retransmissions instead of one.
+   *
+   * Fix: stop waiting for silence at all. `COMPLETE_CCCD_FIELD_PATTERN`
+   * checks after EVERY character whether a complete first field (12 digits
+   * immediately followed by the next field's `|`) has appeared anywhere in
+   * the buffer — the instant the FIRST full transmission finishes, this
+   * matches and the scan is accepted right then, before a second
+   * retransmission ever has a chance to start concatenating onto it. The
+   * debounce (`handleScannerInput`'s original purpose, still below) is kept
+   * only as a fallback for a garbled/partial read that never forms a clean
+   * match — that case still needs *some* way to eventually give up and show
+   * "Đọc thẻ không thành công" instead of waiting forever.
+   *
+   * Anchored to `^` (2026-09-15, alongside the `refocus()` fix above that
+   * addresses the actual root cause of a corrupted buffer): if the buffer
+   * ever DOES pick up stray leading characters some other way this hasn't
+   * anticipated, an unanchored match could still find a plausible-looking
+   * but WRONG 12-digit run further into the buffer and silently accept it
+   * as if it were a clean read — the worst outcome here, a wrong citizen ID
+   * recorded as a confident match. Anchoring means a corrupted buffer just
+   * fails to match at all and falls through to the debounce fallback's
+   * honest "Đọc thẻ không thành công, vui lòng quét lại", which is always
+   * safer than a silent wrong answer.
+   *
+   * Also requires the SECOND field's shape (round 5, `extractCitizenId
+   * FromQrPayload`'s own doc comment explains why) — a real failure showed
+   * the anchor alone isn't enough on its own: a corrupted first field can
+   * still coincidentally be exactly 12 digits (the length survives even
+   * when the CONTENT is shifted/wrong), which this catches by also
+   * requiring what follows to look like a real, short số-CMND-cũ field.
+   */
+  const COMPLETE_CCCD_FIELD_PATTERN = /^(\d{12})\|\d{0,9}\|/;
+
+  /**
+   * TEMP DIAGNOSTIC (2026-09-15, round 4) — the two previous fixes (skip
+   * redundant `refocus()` calls; anchor the match pattern to `^`) did NOT
+   * resolve the field report: a real scan still comes back with the wrong
+   * citizen id, corrupted in the same shape as before (extra/missing digits
+   * near the start, name/date/address fields interleaved with fragments of
+   * themselves). Guessing a third mechanism blind isn't productive — this
+   * logs the RAW event sequence (keydown/composition/input, each with only
+   * numeric char codes or lengths, never the actual decoded text — see
+   * `processScanBuffer`'s own `first20CharCodes` for the same
+   * privacy-preserving precedent) so the next real failure can be diagnosed
+   * from actual evidence instead of another guess. Remove once resolved.
+   * Single-string-argument `console.warn` throughout — see this file's
+   * existing note on why (Electron's console-forwarding drops a 2nd arg).
+   */
+  function diagLog(event: string, extra: Record<string, unknown> = {}) {
+    console.warn(`[ScanDiag] ${JSON.stringify({ t: Math.round(performance.now()), event, ...extra })}`);
+  }
+
+  /**
+   * Shared by the plain `input` path below and `handleScannerComposition
+   * End` — factored out so a composed (IME) character's final commit gets
+   * exactly the same match-or-arm-debounce treatment as a normal keystroke,
+   * instead of only checking on non-composition `input` events and missing
+   * whatever changed during composition.
+   */
+  function checkForCompleteMatch(input: HTMLInputElement) {
+    const match = COMPLETE_CCCD_FIELD_PATTERN.exec(input.value);
+    if (match) {
+      diagLog('match', { valueLen: input.value.length });
+      if (debounceTimerRef.current !== null) {
+        clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
+      input.value = '';
+      setStableCitizenId(match[1]);
+      setPhase('stable');
+      return true;
+    }
+
+    // Fallback path — see this function's own doc comment above. Once
+    // `SCAN_DEBOUNCE_MS` passes with no further characters AND no clean
+    // field match ever appeared, treat whatever accumulated as a failed
+    // scan (`processScanBuffer` reports it via the usual error message).
+    if (debounceTimerRef.current !== null) clearTimeout(debounceTimerRef.current);
+    debounceTimerRef.current = setTimeout(() => {
+      debounceTimerRef.current = null;
+      processScanBuffer(input);
+    }, SCAN_DEBOUNCE_MS);
+    return false;
+  }
+
+  /**
+   * Tracks whether the hidden input is mid-IME-composition (e.g. a diacritic
+   * assembled over several OS-level key events) — 2026-09-15 round 4
+   * hypothesis: programmatically reading/clearing `.value` while a
+   * composition is still open is a well-known way to desync the browser's
+   * composition state from the actual DOM value, which can itself produce
+   * corrupted/duplicated text once the IME tries to keep composing on top of
+   * a value it no longer recognizes. While this is true, pattern-matching is
+   * skipped entirely (deferred to `onCompositionEnd`) so we never clear
+   * `.value` mid-composition.
+   */
+  const isComposingRef = useRef(false);
+
+  function handleScannerInput(e: React.FormEvent<HTMLInputElement>) {
+    const input = e.currentTarget;
+    const nativeEvent = e.nativeEvent as InputEvent;
+    const composing = nativeEvent.isComposing === true || isComposingRef.current;
+    diagLog('input', {
+      isComposing: composing,
+      valueLen: input.value.length,
+      lastCharCode: input.value.length > 0 ? input.value.charCodeAt(input.value.length - 1) : null,
+      inputType: nativeEvent.inputType ?? null,
+    });
+    if (composing) return; // handled by onCompositionEnd instead
+    checkForCompleteMatch(input);
+  }
+
+  function handleScannerCompositionStart() {
+    isComposingRef.current = true;
+    diagLog('compositionstart');
+  }
+
+  function handleScannerCompositionEnd(e: React.CompositionEvent<HTMLInputElement>) {
+    isComposingRef.current = false;
+    diagLog('compositionend', { dataLen: e.data?.length ?? 0 });
+    checkForCompleteMatch(e.currentTarget);
+  }
+
+  function handleScannerKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    // Diagnostic only: single printable characters are logged as a numeric
+    // char code (never the literal character) so this can be shared safely;
+    // multi-character key names (Enter, Alt, Shift, Unidentified, …) carry
+    // no scan content and are logged as-is.
+    diagLog('keydown', {
+      key: e.key.length === 1 ? e.key.charCodeAt(0) : e.key,
+      altKey: e.altKey,
+      ctrlKey: e.ctrlKey,
+      isComposing: (e.nativeEvent as KeyboardEvent).isComposing,
+    });
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    if (debounceTimerRef.current !== null) {
+      clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+    processScanBuffer(e.currentTarget);
+  }
 
   // Clean read -> brief glance window -> roster lookup. Same "auto-confirm,
   // shown briefly for a glance, not a blocking tap" product decision the
@@ -375,6 +691,18 @@ function ScanMonitorCorner({
             setStableCitizenId(null);
             setStatusText(null);
             setPhase('idle');
+            // 2026-09-15 round 4: this scanner keeps re-transmitting the
+            // same payload for as long as the card sits in view (see
+            // `COMPLETE_CCCD_FIELD_PATTERN`'s own doc comment) — if the
+            // operator pulls the card away mid-retransmission right as this
+            // fires, whatever partial tail the scanner had queued can still
+            // land in the input a moment later. Clearing here means that
+            // tail lands in an EMPTY buffer instead of silently prefixing
+            // the NEXT student's card — a plausible source of "wrong data"
+            // that neither of the previous two fixes addressed, since both
+            // were about a single scan's own internal handling, not
+            // leftovers crossing into the next one.
+            if (scannerInputRef.current) scannerInputRef.current.value = '';
           }, SUCCESS_DISPLAY_MS);
         })
         .catch((err: unknown) => {
@@ -390,10 +718,31 @@ function ScanMonitorCorner({
     setStableCitizenId(null);
     setStatusText(null);
     setPhase('idle');
+    if (scannerInputRef.current) scannerInputRef.current.value = '';
   }
 
   return (
     <div className="flex w-full items-center justify-center gap-2 border-t border-kiosk-border pt-3">
+      {/*
+        Visually hidden but real+focusable, so the OS/browser's own text
+        pipeline composes whatever Unicode input method the scanner emulates
+        — see this component's own doc comment for why a raw `keydown`
+        listener could not. `aria-hidden` + `tabIndex={-1}` keep it out of
+        the accessibility tree and manual Tab order; it is still focused
+        programmatically by the effect above.
+      */}
+      <input
+        ref={scannerInputRef}
+        type="text"
+        aria-hidden="true"
+        tabIndex={-1}
+        autoComplete="off"
+        onInput={handleScannerInput}
+        onKeyDown={handleScannerKeyDown}
+        onCompositionStart={handleScannerCompositionStart}
+        onCompositionEnd={handleScannerCompositionEnd}
+        className="absolute h-0 w-0 overflow-hidden opacity-0"
+      />
       <span className="text-xs text-kiosk-text-muted">Trạng thái đầu đọc:</span>
       {phase === 'idle' && !statusText && <Badge variant="neutral">Sẵn sàng</Badge>}
       {phase === 'stable' && stableCitizenId && <Badge variant="info">{stableCitizenId}</Badge>}

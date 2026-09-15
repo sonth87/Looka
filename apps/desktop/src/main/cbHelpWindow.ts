@@ -106,6 +106,15 @@ export interface CbHelpPublishState {
    * `null`/absent the rest of the time.
    */
   thankYou?: { name: string } | null;
+  /**
+   * Saved role→deviceId mapping plus which of those devices are actually
+   * connected right now — mirrors `packages/ui`'s own copy of this field
+   * (2026-09-15). Published unconditionally (every phase), so
+   * `CbHelpFrames.tsx` can preview a visible non-CENTER camera even with no
+   * capture session running.
+   */
+  cameraRoleMapping?: Record<string, string>;
+  connectedDeviceIds?: string[];
 }
 
 const EMPTY_CBHELP_STATE: CbHelpPublishState = {
@@ -115,6 +124,8 @@ const EMPTY_CBHELP_STATE: CbHelpPublishState = {
   currentStepId: null,
   frames: [],
   greeting: null,
+  cameraRoleMapping: {},
+  connectedDeviceIds: [],
   centerPreviewDataUrl: null,
   errorMessage: null,
   thankYou: null,
@@ -161,6 +172,17 @@ export function sanitizeCbHelpState(raw: unknown): CbHelpPublishState {
       payload?.thankYou && typeof payload.thankYou === 'object' && typeof (payload.thankYou as any).name === 'string'
         ? { name: (payload.thankYou as any).name }
         : null,
+    cameraRoleMapping:
+      payload?.cameraRoleMapping && typeof payload.cameraRoleMapping === 'object'
+        ? Object.fromEntries(
+            Object.entries(payload.cameraRoleMapping).filter(
+              (entry): entry is [string, string] => typeof entry[1] === 'string'
+            )
+          )
+        : {},
+    connectedDeviceIds: Array.isArray(payload?.connectedDeviceIds)
+      ? payload!.connectedDeviceIds.filter((id): id is string => typeof id === 'string')
+      : [],
   };
 }
 
@@ -185,6 +207,22 @@ function sanitizeGreeting(raw: unknown): CbHelpGreeting | null {
 export function publishCbHelpState(next: CbHelpPublishState): void {
   cbHelpState = next;
   cbHelpWindow?.webContents.send('cbhelp:update', cbHelpState);
+}
+
+/**
+ * Sends an arbitrary IPC message to the CB Help window itself, if one is
+ * open — 2026-09-15, for `main/index.ts`'s `camera:setCbHelpVisibility`
+ * handler to notify THIS window too (not just the main kiosk window) when
+ * an operator changes the setting from inside the in-window settings panel
+ * (`CbHelpFrames.tsx`'s own `CbHelpVisibilitySettings`): that change needs
+ * to reach two places — the main window's `cbHelpVisibilityRef` (so the
+ * next `buildCbHelpFrames` call re-filters correctly) AND this window's own
+ * settings-panel state (so its checkboxes reflect the save immediately,
+ * whichever of the two windows the operator actually toggled it from). A
+ * no-op when the CB Help window isn't currently open.
+ */
+export function sendToCbHelpWindow(channel: string, payload: unknown): void {
+  cbHelpWindow?.webContents.send(channel, payload);
 }
 
 /** Hydration for a CB Help window that opens (or reloads) mid-session. */

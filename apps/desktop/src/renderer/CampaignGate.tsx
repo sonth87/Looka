@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AppContentProps } from '@sonth87/device-layout';
 import {
   CAMERA_ROLE_LABELS_VI,
@@ -104,6 +104,21 @@ export function CampaignGate({
    * report: all 3 role chips showed green with only 1 camera attached).
    */
   const [connectedDeviceIds, setConnectedDeviceIds] = useState<Set<string>>(new Set());
+  /**
+   * Live preview streams for `DeviceInitScreen`'s "Thiết bị này" panel, one
+   * per mapped+connected camera role (2026-09-15 — that panel previously
+   * always showed a single-camera placeholder). Keyed by role (CENTER/LEFT/
+   * RIGHT/UP/DOWN) so `DeviceInitScreen` can build a per-campaign
+   * `MultiFrameGrid` showing exactly the roles that campaign needs, live
+   * video for whichever are connected and "chưa kết nối" for the rest.
+   * Only populated while `!started`, so every handle is released before
+   * `FaceCaptureApp`/`DesktopCaptureView` opens its own streams for the same
+   * physical devices — holding both open at once risks the OS/driver
+   * treating a camera as busy.
+   */
+  const [previewStreams, setPreviewStreams] = useState<Record<string, MediaStream>>({});
+  /** `{deviceId: stream}` for whatever's currently open — one entry per PHYSICAL device (not per role, so two roles sharing one camera share one open session too), kept in a ref so the sync effect can diff against "what's actually open" without depending on its own previous state (which would need to be a dependency, causing an infinite loop). `previewStreams` (role-keyed, what `DeviceInitScreen` actually consumes) is derived from this each run. */
+  const openPreviewStreamsRef = useRef<Record<string, MediaStream>>({});
 
   /**
    * Assigned-campaign list + browsing selection for the merged
@@ -231,6 +246,85 @@ export function CampaignGate({
     return () => {
       cancelled = true;
       navigator.mediaDevices.removeEventListener('devicechange', refreshConnectedDevices);
+    };
+  }, []);
+
+  // Opens/closes one preview stream per mapped+connected camera role for
+  // `DeviceInitScreen`'s multi-camera grid — see `previewStreams`'s own doc
+  // comment. Diffs against `openPreviewStreamsRef` so a role whose device
+  // hasn't changed keeps its existing stream instead of restarting it on
+  // every unrelated re-run (e.g. `connectedDeviceIds` updating because a
+  // DIFFERENT role's camera was plugged in).
+  useEffect(() => {
+    let cancelled = false;
+
+    void (async () => {
+      const wanted: Record<string, string> = started
+        ? {}
+        : Object.fromEntries(
+            Object.entries(cameraRoleMapping).filter(([, deviceId]) => deviceId && connectedDeviceIds.has(deviceId))
+          );
+
+      // Keyed by deviceId, not role — 2026-09-15 field report: two roles
+      // (LEFT + RIGHT) mapped to the SAME physical camera (operator only had
+      // one spare, or a Camera Setup mistake) both showed "Thiếu camera" even
+      // though `enumerateDevices()` correctly reported it connected. Opening
+      // one `getUserMedia` session per ROLE meant the second concurrent open
+      // of the identical deviceId hit the same "one exclusive reader" limit
+      // most UVC webcam drivers have (documented in `multiFrame.ts`'s own
+      // `NotReadableError: Device in use` comment) and silently failed.
+      // Opening at most once PER DEVICE and sharing that stream across every
+      // role pointing at it sidesteps the contention entirely — if two roles
+      // really do share one camera, both tiles now show the same live feed
+      // (an honest signal something's misconfigured) instead of one or both
+      // reading as disconnected.
+      const open = openPreviewStreamsRef.current;
+      const uniqueDeviceIds = Array.from(new Set(Object.values(wanted)));
+
+      for (const deviceId of Object.keys(open)) {
+        if (!uniqueDeviceIds.includes(deviceId)) {
+          open[deviceId].getTracks().forEach((t) => t.stop());
+          delete open[deviceId];
+        }
+      }
+
+      for (const deviceId of uniqueDeviceIds) {
+        if (open[deviceId]) continue;
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: deviceId } } });
+          if (cancelled) {
+            stream.getTracks().forEach((t) => t.stop());
+            return;
+          }
+          open[deviceId] = stream;
+        } catch (err) {
+          console.error(`[CampaignGate] getUserMedia (device-init preview, deviceId=${deviceId}) failed:`, err);
+        }
+      }
+
+      if (!cancelled) {
+        setPreviewStreams(
+          Object.fromEntries(
+            Object.entries(wanted)
+              .filter(([, deviceId]) => open[deviceId])
+              .map(([role, deviceId]) => [role, open[deviceId]])
+          )
+        );
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [cameraRoleMapping, connectedDeviceIds, started]);
+
+  // Stops every still-open preview stream on unmount only (the effect above
+  // already handles closing individual ones as roles/devices change or
+  // `started` flips true — this is just the final safety net).
+  useEffect(() => {
+    return () => {
+      Object.values(openPreviewStreamsRef.current).forEach((stream) => stream.getTracks().forEach((t) => t.stop()));
+      openPreviewStreamsRef.current = {};
     };
   }, []);
 
@@ -369,6 +463,8 @@ export function CampaignGate({
         identity={identity}
         authClient={authClient}
         isAdmin={isAdmin}
+        previewStreams={previewStreams}
+        cameraStatuses={cameraFooterStatus}
         campaigns={campaigns}
         campaignsError={campaignsError}
         onReloadCampaigns={() => void loadCampaigns()}

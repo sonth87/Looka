@@ -337,7 +337,32 @@ export class WorkflowEngine implements IWorkflowEngine {
     let qualitySnapshot: { accepted: boolean; reasons: string[] } | null = null;
     if (gateFaceState) {
       const stepResult = this.stepEvaluator.evaluate(gateFaceState, currentStep, this.sensitivity);
-      qualitySnapshot = { accepted: stepResult.passed, reasons: stepResult.reasons };
+      // Product decision 2026-09-15 ("chọn chế độ thủ công thì không cần
+      // tính góc cạnh, hệ thống chỉ đưa gợi ý chứ không cản trở action"): in
+      // EITHER operator-driven manual mode — `MANUAL` (gesture) or `OFF`
+      // (on-screen shutter button; both surface to the operator as "Thủ
+      // công" in the UI, see `CAPTURE_MODE_LABEL` — `OFF` is not "capture
+      // disabled", it just means the auto-fire stability tracker is off) —
+      // the operator/subject decides WHEN to fire for whatever pose they're
+      // currently holding; the step's specific yaw/pitch/roll target
+      // (`stepResult.poseValid`) must not block the save. Originally this
+      // only covered `MANUAL`, leaving `OFF` still gated by the full
+      // `stepResult.passed` (pose included) — a real field report
+      // ("khi chọn thủ công tự chụp thì các góc cam vẫn bị bắt theo các sự
+      // kiện setup góc cho auto") confirmed the on-screen-shutter half of
+      // "Thủ công" was still being blocked exactly like AUTO. This is NOT
+      // "always save no matter what": presence (a real, single face),
+      // quality (brightness/sharpness/eyes/smile — the CENTER-role checks
+      // in `StepEvaluator`), and posture still gate normally, so a blank/
+      // blurry/multi-face frame is still rejected either way. AUTO
+      // (stability-tracked auto-fire) alone keeps the full `stepResult.passed`
+      // gate, pose included, unchanged — that is the one mode whose whole
+      // point IS a matched angle deciding the shot.
+      const accepted =
+        this.captureMode === 'MANUAL' || this.captureMode === 'OFF'
+          ? stepResult.presenceValid && stepResult.qualityValid && stepResult.postureValid
+          : stepResult.passed;
+      qualitySnapshot = { accepted, reasons: stepResult.reasons };
     }
 
     this.isCapturing = true;
