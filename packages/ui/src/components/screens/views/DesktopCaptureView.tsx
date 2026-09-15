@@ -30,6 +30,7 @@ import { SharedCaptureViewProps } from "./types.js";
 import { CameraPreview, CAPTURE_MIRRORED } from "../../camera/CameraPreview.js";
 import { CameraSelector } from "../../camera/CameraSelector.js";
 import { FaceOverlay } from "../../face/FaceOverlay.js";
+import { CompositionGridOverlay } from "../../camera/CompositionGridOverlay.js";
 import { GestureOverlay } from "../../face/GestureOverlay.js";
 import { ShutterButton } from "../../face/ShutterButton.js";
 import { ShutterFlashOverlay } from "../../face/ShutterFlashOverlay.js";
@@ -719,6 +720,9 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                   "rounded-full h-auto w-[min(92%,560px)] max-w-[560px] mx-auto border-2 border-kiosk-accent/60 shadow-[0_0_60px_-12px_rgba(34,211,238,0.5)]",
               )}
             >
+              {/* Rule-of-thirds framing grid — this stage is always the CENTER camera (the CV-analysed feed), on by default per 2026-09-15 product decision. */}
+              {stream && <CompositionGridOverlay />}
+
               {stream && (
                 <FaceOverlay
                   faceState={faceState}

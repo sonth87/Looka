@@ -3,20 +3,6 @@
 @source "../../../../packages/ui/src";
 @source "./";
 
-/* Tailwind v4 utility generation (bg-kiosk-*, text-kiosk-*, border-kiosk-*...) — keep in sync with packages/ui/src/styles/globals.css */
-@theme {
-  --color-kiosk-bg: hsl(222 47% 7%);
-  --color-kiosk-surface: hsl(217 40% 13%);
-  --color-kiosk-surface-2: hsl(217 35% 18%);
-  --color-kiosk-border: hsl(217 35% 24%);
-  --color-kiosk-text: hsl(210 40% 96%);
-  --color-kiosk-text-muted: hsl(215 20% 65%);
-  --color-kiosk-accent: hsl(189 94% 55%);
-  --color-kiosk-accent-2: hsl(158 64% 52%);
-  --color-kiosk-warning: hsl(38 92% 50%);
-  --color-kiosk-danger: hsl(350 89% 60%);
-}
-
 @layer base {
   :root {
     --face-primary: 217 91% 60%;
@@ -26,17 +12,20 @@
     --face-guide: 217 91% 60%;
     --face-overlay: 0 0% 0%;
 
-    /* Kiosk operational UI (navy/cyan) — keep in sync with packages/ui/src/styles/globals.css */
-    --kiosk-bg: 222 47% 7%;
-    --kiosk-surface: 217 40% 13%;
-    --kiosk-surface-2: 217 35% 18%;
-    --kiosk-border: 217 35% 24%;
-    --kiosk-text: 210 40% 96%;
-    --kiosk-text-muted: 215 20% 65%;
-    --kiosk-accent: 189 94% 55%;
-    --kiosk-accent-2: 158 64% 52%;
-    --kiosk-warning: 38 92% 50%;
-    --kiosk-danger: 350 89% 60%;
+    /* Kiosk operational UI — LIGHT (default). Keep in sync with
+       packages/ui/src/styles/globals.css. Toggled to dark via the `.dark`
+       class on `document.documentElement` — see `KioskHeader.tsx` /
+       `lib/kioskTheme.ts`. */
+    --kiosk-bg: 210 30% 97%;
+    --kiosk-surface: 0 0% 100%;
+    --kiosk-surface-2: 210 25% 93%;
+    --kiosk-border: 210 20% 84%;
+    --kiosk-text: 222 47% 11%;
+    --kiosk-text-muted: 215 16% 42%;
+    --kiosk-accent: 192 82% 39%;
+    --kiosk-accent-2: 158 64% 32%;
+    --kiosk-warning: 32 95% 38%;
+    --kiosk-danger: 350 79% 40%;
   }
 
   .dark {
@@ -47,6 +36,7 @@
     --face-guide: 217 91% 60%;
     --face-overlay: 0 0% 0%;
 
+    /* Kiosk operational UI — DARK (navy/cyan, the original design). */
     --kiosk-bg: 222 47% 7%;
     --kiosk-surface: 217 40% 13%;
     --kiosk-surface-2: 217 35% 18%;
@@ -58,4 +48,39 @@
     --kiosk-warning: 38 92% 50%;
     --kiosk-danger: 350 89% 60%;
   }
+
+  /* Explicit `.light` twin of `:root` — see globals.css's own comment on
+     why `KioskShell` needs a real `.light` class to self-apply, not just
+     the absence of `.dark` (DeviceLayout's own wrapper forces a `.dark`
+     class between `<html>` and kiosk content). Keep in sync with
+     packages/ui/src/styles/globals.css. */
+  .light {
+    --kiosk-bg: 210 30% 97%;
+    --kiosk-surface: 0 0% 100%;
+    --kiosk-surface-2: 210 25% 93%;
+    --kiosk-border: 210 20% 84%;
+    --kiosk-text: 222 47% 11%;
+    --kiosk-text-muted: 215 16% 42%;
+    --kiosk-accent: 192 82% 39%;
+    --kiosk-accent-2: 158 64% 32%;
+    --kiosk-warning: 32 95% 38%;
+    --kiosk-danger: 350 79% 40%;
+  }
+}
+
+/* Tailwind v4 utility generation (bg-kiosk-*, text-kiosk-*, border-kiosk-*...)
+   — `inline` so these re-evaluate the `var(--kiosk-*)` chain above at
+   runtime (tracking `.dark` toggling) instead of baking in a single value
+   at build time. Keep in sync with packages/ui/src/styles/globals.css. */
+@theme inline {
+  --color-kiosk-bg: hsl(var(--kiosk-bg));
+  --color-kiosk-surface: hsl(var(--kiosk-surface));
+  --color-kiosk-surface-2: hsl(var(--kiosk-surface-2));
+  --color-kiosk-border: hsl(var(--kiosk-border));
+  --color-kiosk-text: hsl(var(--kiosk-text));
+  --color-kiosk-text-muted: hsl(var(--kiosk-text-muted));
+  --color-kiosk-accent: hsl(var(--kiosk-accent));
+  --color-kiosk-accent-2: hsl(var(--kiosk-accent-2));
+  --color-kiosk-warning: hsl(var(--kiosk-warning));
+  --color-kiosk-danger: hsl(var(--kiosk-danger));
 }

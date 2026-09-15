@@ -171,19 +171,23 @@ export interface CreateDeviceInput {
 }
 
 /**
- * Capture counts by trigger source (`campaign-config-sso-card-photo-discussion.md`
- * §3.7.1) — `GESTURE` (held hand gesture, `MANUAL` capture mode) and
- * `SHUTTER` (on-screen button, any mode) are both shown to the operator
- * under one combined "Thủ công" tile per Q15's decision; `AUTO` is "Tự
- * động"; `EXTERNAL` (a side camera fired alongside CENTER) has no tile of
- * its own today. Optional on every stats shape below — absent entirely on
- * a backend that hasn't shipped §3.7 yet, not just zero-filled.
+ * One row of `byTrigger`/`byCaptureMode` (cms-8-screens-api-plan.md §2.3,
+ * `CampaignBreakdownCountDao` server-side) — grouped counts keyed by
+ * `trigger_source` (`AUTO` | `GESTURE` | `SHUTTER` | `EXTERNAL`) or
+ * `capture_mode`, NOT a fixed `{AUTO, GESTURE, ...}` object: a category
+ * with zero photos simply has no row at all, so callers must look up by
+ * key and default missing ones to 0 (see `breakdownCount` below) rather
+ * than assume every key is present. `key: null` groups photos from a
+ * kiosk build old enough not to report the field.
  */
-export interface CaptureTriggerBreakdown {
-  AUTO: number;
-  GESTURE: number;
-  SHUTTER: number;
-  EXTERNAL: number;
+export interface CampaignBreakdownCount {
+  key: string | null;
+  count: number;
+}
+
+/** Looks up one key's count in a `byTrigger`/`byCaptureMode` array, defaulting a missing (zero-count) key to 0 — see `CampaignBreakdownCount`'s own doc comment for why a key can be absent. */
+export function breakdownCount(rows: CampaignBreakdownCount[] | undefined, key: string): number {
+  return rows?.find((r) => r.key === key)?.count ?? 0;
 }
 
 export interface CampaignStats {
@@ -194,6 +198,10 @@ export interface CampaignStats {
   uploadFailed: number;
   retakes: number;
   cbHelpInterventions: number;
+  /** Successful face-embedding registrations (2026-09-15) — a CENTER-step capture the external embedding server accepted. */
+  embeddingEnrolled: number;
+  /** Definitive embedding-registration failures (2026-09-15) — a real server rejection (e.g. "ảnh có N khuôn mặt") or exhausted retries; never counts an in-progress retry. */
+  embeddingFailed: number;
   /**
    * Completed sessions recorded in `sessions` (Phase 11) — distinct from
    * `sessionsCompleted` above, which counts SESSION_COMPLETED device events
@@ -205,7 +213,7 @@ export interface CampaignStats {
   /** Per-operator ("cán bộ chụp") breakdown — see `CampaignOperatorStats`'s own doc comment. */
   byOperator: CampaignOperatorStats[];
   byDay: CampaignDayStats[];
-  byTrigger?: CaptureTriggerBreakdown;
+  byTrigger?: CampaignBreakdownCount[];
 }
 
 export interface CampaignStatsSummaryItem extends CampaignStats {

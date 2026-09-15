@@ -46,6 +46,27 @@ export enum DeviceEventType {
   // shutter-fire) — distinct from `photos.trigger_source`, which reflects
   // only the final kept photo.
   CAPTURE_TRIGGERED = 'CAPTURE_TRIGGERED',
+  // Fired once a CENTER-step capture is successfully registered with the
+  // external face-embedding server (2026-09-15, face-embedding-server-
+  // integration-plan.md — see `embeddingEnroll.ts` on the kiosk side).
+  // `metadata` carries `{ sessionId, stepId, attempt, userCode, embeddingId,
+  // sourceImagePath }` — the same fields the kiosk's own local SQLite outbox
+  // row gets on success (`embedding_enrollments`, packages/database
+  // migration 011), just also pushed here so it's queryable centrally. No
+  // handler mutates `sessions`/`photos` off this event, same as
+  // `SESSION_STARTED` — `DeviceEventService.recordBatch` just stores it like
+  // any other raw event.
+  EMBEDDING_ENROLLED = 'EMBEDDING_ENROLLED',
+  // Fired for a DEFINITIVE embedding-enrollment failure only — a real
+  // rejection from the server (400/409/413/422 — most often IMAGE_REJECTED,
+  // "ảnh có N khuôn mặt" or too-small a face) or a network failure that
+  // finally gave up after MAX_ATTEMPTS — never for an ordinary in-progress
+  // retry (2026-09-15, field request: this was previously visible only in
+  // the kiosk's own local SQLite, mirrors `UPLOAD_FAILED` already surfacing
+  // a failed photo upload centrally). `metadata` carries `{ sessionId,
+  // stepId, attempt, userCode, failureKind, error, conflictUserCode?,
+  // conflictSimilarity? }` — see `embeddingEnroll.ts`'s `applyFailure()`.
+  EMBEDDING_FAILED = 'EMBEDDING_FAILED',
 }
 
 /**

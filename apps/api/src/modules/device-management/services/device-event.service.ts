@@ -217,6 +217,10 @@ export class DeviceEventService extends CommonService<DeviceEvent> {
     stats.retakes = countByType.get(DeviceEventType.RETAKE) ?? 0;
     stats.cbHelpInterventions =
       countByType.get(DeviceEventType.CB_HELP_INTERVENTION) ?? 0;
+    stats.embeddingEnrolled =
+      countByType.get(DeviceEventType.EMBEDDING_ENROLLED) ?? 0;
+    stats.embeddingFailed =
+      countByType.get(DeviceEventType.EMBEDDING_FAILED) ?? 0;
 
     const [sessionRow] = await this.dataSource.query<Array<{ count: number }>>(
       `SELECT COUNT(*)::int AS count FROM sessions WHERE campaign_id = $1 AND status = 'COMPLETED'`,
@@ -298,6 +302,8 @@ export class DeviceEventService extends CommonService<DeviceEvent> {
     summary.totalUploadFailed = 0;
     summary.totalRetakes = 0;
     summary.totalCbHelpInterventions = 0;
+    summary.totalEmbeddingEnrolled = 0;
+    summary.totalEmbeddingFailed = 0;
     summary.totalSessions = 0;
     summary.totalPhotos = { total: 0, ready: 0, pending: 0, failed: 0 };
 
@@ -316,6 +322,10 @@ export class DeviceEventService extends CommonService<DeviceEvent> {
       item.retakes = countByType.get(DeviceEventType.RETAKE) ?? 0;
       item.cbHelpInterventions =
         countByType.get(DeviceEventType.CB_HELP_INTERVENTION) ?? 0;
+      item.embeddingEnrolled =
+        countByType.get(DeviceEventType.EMBEDDING_ENROLLED) ?? 0;
+      item.embeddingFailed =
+        countByType.get(DeviceEventType.EMBEDDING_FAILED) ?? 0;
       item.sessions = sessionCountByCampaign.get(campaign.id) ?? 0;
       item.photos = photoStatsByCampaign.get(campaign.id) ?? {
         total: 0,
@@ -343,6 +353,8 @@ export class DeviceEventService extends CommonService<DeviceEvent> {
       summary.totalUploadFailed += item.uploadFailed;
       summary.totalRetakes += item.retakes;
       summary.totalCbHelpInterventions += item.cbHelpInterventions;
+      summary.totalEmbeddingEnrolled += item.embeddingEnrolled;
+      summary.totalEmbeddingFailed += item.embeddingFailed;
       summary.totalSessions += item.sessions;
       summary.totalPhotos.total += item.photos.total;
       summary.totalPhotos.ready += item.photos.ready;

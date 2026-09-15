@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { ArrowLeft } from 'lucide-react';
 import { LookaIcon } from '../theme/LookaIcon.js';
+import { ThemeToggle } from '../theme/ThemeToggle.js';
+import type { KioskTheme } from '../../lib/kioskTheme.js';
 import { cn } from '../../lib/utils.js';
 
 export interface KioskHeaderProps {
@@ -15,6 +17,9 @@ export interface KioskHeaderProps {
    * doesn't guess.
    */
   onBack?: () => void;
+  /** Owned by `KioskShell` (not this component) — see its own doc comment on why. */
+  theme: KioskTheme;
+  onToggleTheme: () => void;
   /** Extra controls rendered at the far right, before the clock (e.g. a screen's own mode toggle). */
   right?: React.ReactNode;
   className?: string;
@@ -31,6 +36,8 @@ export function KioskHeader({
   operatorName,
   shiftLabel,
   onBack,
+  theme,
+  onToggleTheme,
   right,
   className,
 }: KioskHeaderProps) {
@@ -69,6 +76,7 @@ export function KioskHeader({
 
       <div className="flex shrink-0 items-center gap-4">
         {right}
+        <ThemeToggle theme={theme} onToggleTheme={onToggleTheme} />
         {operatorName && (
           <div className="flex items-center gap-2.5 rounded-xl border border-kiosk-border bg-kiosk-surface px-3 py-1.5">
             <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-kiosk-accent/20 text-[11px] font-bold text-kiosk-accent">

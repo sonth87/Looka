@@ -92,6 +92,7 @@ import {
   publishCbHelpState,
   getCbHelpState,
   sanitizeCbHelpState,
+  sendToCbHelpWindow,
 } from './cbHelpWindow.js';
 import { initLogger, installCrashHandlers, closeLogger, logFilePath } from './logger.js';
 import { startCccdRosterWatcher, stopCccdRosterWatcher, lookupCccdByIdentityNumber } from './cccdRosterWatcher.js';
@@ -362,13 +363,11 @@ app.whenReady().then(async () => {
     startStatsEventPush();
 
     // Enrollment half of docs/plans/face-embedding-server-integration-plan.md
-    // — see embeddingEnroll.ts's own doc comment. Optional, same shape as
-    // uploads: EMBEDDING_SERVER_BASE_URL unset just means the feature stays
-    // off (no enroll calls, no retry queue), not a startup failure.
-    const embeddingEnrollRunning = startEmbeddingEnroll();
-    if (!embeddingEnrollRunning) {
-      console.warn('[main] EMBEDDING_SERVER_BASE_URL not set; face enrollment is disabled');
-    }
+    // — see embeddingEnroll.ts's own doc comment. `EMBEDDING_SERVER_BASE_URL`
+    // now defaults to the real, live server (2026-09-15), so this is always
+    // on unless that env var is deliberately overridden to something
+    // unreachable.
+    startEmbeddingEnroll();
   }
 
   ipcMain.handle('app:getVersion', () => app.getVersion());
@@ -706,7 +705,20 @@ app.whenReady().then(async () => {
   /** Which camera roles show on CB Help, and in what order — set from Camera Setup (2026-09-10). */
   ipcMain.handle('camera:getCbHelpVisibility', () => getCbHelpVisibility());
   ipcMain.handle('camera:setCbHelpVisibility', (_, map: unknown) => {
-    setCbHelpVisibility(sanitizeCbHelpVisibility(map));
+    const sanitized = sanitizeCbHelpVisibility(map);
+    setCbHelpVisibility(sanitized);
+    // 2026-09-15 — this save can come from EITHER window now: the separate
+    // Camera Setup popup, or the in-window settings panel inside the CB
+    // Help window itself (`CbHelpFrames.tsx`'s `CbHelpVisibilitySettings`).
+    // Both need to hear about a change made from the OTHER one — the main
+    // window's `cbHelpVisibilityRef` (so the next `buildCbHelpFrames` call
+    // re-filters correctly) and the CB Help window's own settings-panel
+    // state (so its checkboxes reflect a save made from Camera Setup
+    // without needing to close/reopen the panel). See preload's
+    // `onCbHelpVisibilityChanged` doc comment. `sendToCbHelpWindow` is a
+    // safe no-op when that window isn't currently open.
+    mainWindow?.webContents.send('camera:cbHelpVisibilityChanged', sanitized);
+    sendToCbHelpWindow('camera:cbHelpVisibilityChanged', sanitized);
     return true;
   });
 

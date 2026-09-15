@@ -374,7 +374,29 @@ export class BrowserCameraService implements CameraService {
     return null;
   }
 
-  public captureBase64Snapshot(): string | null {
+  /**
+   * @param opts Optional downscale/quality override for a caller that does
+   * NOT need the full native resolution — see `FrameInput.nativeWidth`'s own
+   * doc comment (`packages/core/src/interfaces/cv.ts`): "the saved capture
+   * (captureBase64Snapshot()) always uses this [native] resolution" is a
+   * real contract the actual capture path (`FaceCaptureApp.tsx`'s
+   * `setSnapshotProvider`) relies on, so omitting `opts` entirely keeps that
+   * unchanged — full native width/height, quality 0.85, byte-for-byte the
+   * same as before this parameter existed. Added 2026-09-15 for CB Help's
+   * own periodic preview heartbeat (`publishCbHelpState`'s
+   * `centerPreviewDataUrl`), a field report this fixes ("cài đặt hiển thị
+   * cam... rất lag"): that heartbeat used to call this with no args every
+   * 800ms for a kiosk's entire session lifetime (not just while the extended
+   * display window was even open), each call doing a full 1920x1080
+   * synchronous JPEG encode on the render thread and shipping the ~150-300KB
+   * result over IPC to a window that just displays it, scaled down, in a
+   * fraction of that size — real cost for zero visible benefit. `maxWidth`
+   * scales the OUTPUT canvas only (proportionally, never upscaling); the
+   * zoom-crop source rect below is computed in the video's own native
+   * coordinates either way, so digital zoom still behaves identically at
+   * any output size.
+   */
+  public captureBase64Snapshot(opts?: { maxWidth?: number; quality?: number }): string | null {
     let video: HTMLVideoElement | null = this.videoElement;
     if (!video || video.readyState < 2) {
       if (typeof document !== 'undefined') {
@@ -391,10 +413,13 @@ export class BrowserCameraService implements CameraService {
       this.warnSnapshotRejected('zero-size video frame', video);
       return null;
     }
+    const scale = opts?.maxWidth && opts.maxWidth < width ? opts.maxWidth / width : 1;
+    const outWidth = Math.round(width * scale);
+    const outHeight = Math.round(height * scale);
 
     const canvas = document.createElement('canvas');
-    canvas.width = width;
-    canvas.height = height;
+    canvas.width = outWidth;
+    canvas.height = outHeight;
     const ctx = canvas.getContext('2d');
     if (!ctx) {
       this.warnSnapshotRejected('failed to acquire 2d canvas context', video);
@@ -402,7 +427,7 @@ export class BrowserCameraService implements CameraService {
     }
 
     if (this.mirrorStills) {
-      ctx.translate(width, 0);
+      ctx.translate(outWidth, 0);
       ctx.scale(-1, 1);
     }
     const analysisZoom = this.effectiveAnalysisZoom;
@@ -414,11 +439,11 @@ export class BrowserCameraService implements CameraService {
         this.digitalZoomCenterX,
         this.digitalZoomCenterY
       );
-      ctx.drawImage(video, sx, sy, sw, sh, 0, 0, width, height);
+      ctx.drawImage(video, sx, sy, sw, sh, 0, 0, outWidth, outHeight);
     } else {
-      ctx.drawImage(video, 0, 0, width, height);
+      ctx.drawImage(video, 0, 0, width, height, 0, 0, outWidth, outHeight);
     }
-    return canvas.toDataURL('image/jpeg', 0.85);
+    return canvas.toDataURL('image/jpeg', opts?.quality ?? 0.85);
   }
 
   /**

@@ -1,6 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
 import { CAMERA_ROLES, defaultCameraRoleForStepType, type CameraRole, type CaptureStep } from '@face/core';
-import { Badge, Button, Card, DEFAULT_PHYSICAL_ANGLES, type BadgeVariant, type PhysicalCameraAngles } from '@face/ui';
+import {
+  applyKioskTheme,
+  Badge,
+  Button,
+  Card,
+  CAPTURE_MIRRORED,
+  CompositionGridOverlay,
+  DEFAULT_PHYSICAL_ANGLES,
+  getStoredKioskTheme,
+  type BadgeVariant,
+  type PhysicalCameraAngles,
+} from '@face/ui';
 
 type CameraRoleMapping = Partial<Record<CameraRole, string>>;
 /** Every role's *effective* physical mounting angle — always fully populated (defaults filled in), unlike the sparse override map this screen saves/loads. */
@@ -203,6 +214,15 @@ export default function CameraSetupScreen() {
   useEffect(() => {
     audioVolumeRef.current = audioVolume;
   }, [audioVolume]);
+
+  // This screen opens in its own Electron `BrowserWindow` (no shared
+  // `KioskShell`/`KioskHeader`), so it doesn't get the toggle button's
+  // effect automatically — apply whatever theme was last chosen in the main
+  // window (same origin, shared `localStorage`) so the two windows don't
+  // visually diverge.
+  useEffect(() => {
+    applyKioskTheme(getStoredKioskTheme());
+  }, []);
 
   useEffect(() => {
     const faceAPI = (window as any).faceAPI;
@@ -696,8 +716,9 @@ function RoleCard({
           autoPlay
           muted
           playsInline
-          className="w-full h-full object-cover"
+          className={`w-full h-full object-cover${CAPTURE_MIRRORED ? ' scale-x-[-1]' : ''}`}
         />
+        {role === 'CENTER' && <CompositionGridOverlay />}
         <Badge variant={statusVariant} className="absolute top-2 right-2">
           {statusLabel}
         </Badge>
@@ -755,27 +776,39 @@ function RoleCard({
           </label>
         </div>
 
-        <div className="mt-3 flex items-center gap-3 text-xs text-kiosk-text-muted">
-          <label className="flex items-center gap-1.5">
-            <input
-              type="checkbox"
-              checked={cbHelpVisibility.visible}
-              onChange={(e) => onCbHelpVisibilityChange(role, { visible: e.target.checked })}
-            />
-            Hiện trên màn mở rộng
-          </label>
-          {cbHelpVisibility.visible && (
-            <label className="flex items-center gap-1">
-              Thứ tự
+        {/*
+          2026-09-15: made into its own visibly-labeled block (was a single
+          unstyled `text-xs text-kiosk-text-muted` checkbox row easy to miss
+          entirely next to the angle inputs above) — field report "chưa có
+          phần cài đặt màn hình mở rộng" turned out to mean this control
+          existed but wasn't discoverable, not that it was actually missing.
+        */}
+        <div className="mt-3 rounded-lg border border-kiosk-border bg-kiosk-surface-2/40 px-3 py-2.5">
+          <div className="text-xs font-bold uppercase tracking-wide text-kiosk-text-muted">
+            Màn hình mở rộng (CB Help)
+          </div>
+          <div className="mt-2 flex flex-wrap items-center gap-3 text-sm text-kiosk-text">
+            <label className="flex items-center gap-1.5">
               <input
-                type="number"
-                step={1}
-                value={cbHelpVisibility.order}
-                onChange={(e) => onCbHelpVisibilityChange(role, { order: Number(e.target.value) })}
-                className="w-14 bg-kiosk-bg border border-kiosk-border rounded px-2 py-1 text-kiosk-text"
+                type="checkbox"
+                checked={cbHelpVisibility.visible}
+                onChange={(e) => onCbHelpVisibilityChange(role, { visible: e.target.checked })}
               />
+              Hiện camera này
             </label>
-          )}
+            {cbHelpVisibility.visible && (
+              <label className="flex items-center gap-1.5">
+                Thứ tự hiển thị
+                <input
+                  type="number"
+                  step={1}
+                  value={cbHelpVisibility.order}
+                  onChange={(e) => onCbHelpVisibilityChange(role, { order: Number(e.target.value) })}
+                  className="w-14 bg-kiosk-bg border border-kiosk-border rounded px-2 py-1 text-kiosk-text"
+                />
+              </label>
+            )}
+          </div>
         </div>
 
         <div className="mt-4 flex flex-wrap items-center gap-2">

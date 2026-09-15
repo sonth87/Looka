@@ -13,6 +13,7 @@ import { CampaignKioskAssignmentController } from './controllers/campaign-kiosk-
 import { CampaignMemberController } from './controllers/campaign-member.controller';
 import { CampaignSubjectController } from './controllers/campaign-subject.controller';
 import { CampaignSubjectLookupController } from './controllers/campaign-subject-lookup.controller';
+import { CampaignSubjectPhotoStatusController } from './controllers/campaign-subject-photo-status.controller';
 import { CaptureAnglePresetController } from './controllers/capture-angle-preset.controller';
 import { CaptureConfigurationController } from './controllers/capture-configuration.controller';
 import { DeviceController } from './controllers/device.controller';
@@ -119,6 +120,7 @@ import { IdentificationMethodService } from './services/identification-method.se
     CampaignKioskAssignmentController,
     CampaignSubjectController,
     CampaignSubjectLookupController,
+    CampaignSubjectPhotoStatusController,
     IdentificationMethodController,
     CaptureAnglePresetController,
     CaptureConfigurationController,

@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
 import {
   Calendar,
-  Camera,
   CheckCircle2,
   Circle,
   CircleDot,
@@ -21,7 +20,11 @@ import {
 import { Badge, type BadgeVariant } from '../ui/badge.js';
 import { Button } from '../ui/button.js';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card.js';
-import { CameraPreview } from '../camera/CameraPreview.js';
+import { CAPTURE_MIRRORED } from '../camera/CameraPreview.js';
+import { FrameTile, type FrameTileProps } from '../camera/FrameTile.js';
+import { CAMERA_ROLE_LABELS_VI } from '../../lib/multiFrame.js';
+
+const CAMERA_ROLE_ORDER = Object.keys(CAMERA_ROLE_LABELS_VI) as Array<keyof typeof CAMERA_ROLE_LABELS_VI>;
 
 export interface DeviceInitScreenProps {
   identity: AuthenticatedIdentity;
@@ -51,6 +54,10 @@ export interface DeviceInitScreenProps {
    * exist.
    */
   isAdmin?: boolean;
+  /** Live per-role preview streams (CENTER/LEFT/RIGHT/UP/DOWN → stream) for the "Thiết bị này" panel's multi-camera grid — only present for roles that are both mapped and currently connected. Owned/acquired by `CampaignGate` (see its own doc comment), not this screen. */
+  previewStreams?: Record<string, MediaStream>;
+  /** Per-role mapped-camera status (label + live-connected flag) — the exact same list `KioskShell`'s footer already builds from `faceAPI.getCameraRoleMapping()` + live `enumerateDevices()`, reused here so a selected campaign's card can show "cần N camera · đang kết nối M" without a second source of truth. */
+  cameraStatuses?: { id: string; label: string; ready: boolean }[];
   selectedCampaign: CampaignSummary | null;
   onSelectCampaign: (campaign: CampaignSummary | null) => void;
   /** How many physical cameras this kiosk currently has mapped to a role — from Camera Setup / `secrets.dat`. */
@@ -63,6 +70,17 @@ export interface DeviceInitScreenProps {
   starting?: boolean;
   onOpenDeviceSettings: () => void;
   onLogout: () => void;
+  /**
+   * `apps/web` (browser/phone, single camera, no `faceAPI`) — hides the
+   * entire left "Thiết bị này" panel (multi-camera role-mapping grid makes
+   * no sense for one phone camera; `FaceCaptureApp` asks for camera
+   * permission itself once capture starts, no pre-flight device screen
+   * needed) and bypasses `reasonForBlock`'s `mappedCameraCount < 1` gate
+   * (that's a kiosk-camera-mapping concern, not applicable here). Every
+   * other gate (campaign status, membership/admin) stays exactly as-is.
+   * Default `false` — `apps/desktop`'s multi-camera kiosk flow is unaffected.
+   */
+  singleCameraMode?: boolean;
 }
 
 const STATUS_BADGE: Record<CampaignSummary['effectiveStatus'], { label: string; variant: BadgeVariant }> = {
@@ -102,26 +120,43 @@ function campaignCountLabel(c: CampaignSummary): string | null {
  * the `NONE`-membership case, dropped once self-registration was removed:
  * `GET /v1/me/campaigns` now filters a non-admin caller down to campaigns
  * they're already an APPROVED member of, so `NONE` can no longer appear for
- * them, and it never blocked an admin caller in the first place (backend
- * bypasses membership entirely for admins).
+ * them.
+ *
+ * 2026-09-15 fix: admin callers DO still get a real per-user `membership`
+ * value back from the backend (the admin bypass only skips the *filter*,
+ * not the status lookup — see `campaign-member.service.ts`'s
+ * `listCampaignsForUser`), so a stale PENDING/REJECTED/REVOKED row on the
+ * admin's own account was still blocking them here even though
+ * `CampaignMemberGuard` already lets admins through server-side
+ * unconditionally. `isAdmin` now short-circuits past every status/
+ * membership check to match that backend behavior — only the camera-mapped
+ * check still applies to admins, since that's a real local hardware fact,
+ * not a permission gate.
  */
-function reasonForBlock(campaign: CampaignSummary | null, mappedCameraCount: number): string | null {
+function reasonForBlock(
+  campaign: CampaignSummary | null,
+  mappedCameraCount: number,
+  isAdmin: boolean,
+  singleCameraMode: boolean
+): string | null {
   if (!campaign) return 'Chọn một đợt chụp để bắt đầu';
 
-  const campaignOpen = campaign.effectiveStatus === 'OPEN';
-  if (!campaignOpen) {
-    if (campaign.effectiveStatus === 'UPCOMING') {
-      const date = campaign.startsAt ? new Date(campaign.startsAt).toLocaleString('vi-VN') : '';
-      return `Campaign chưa mở${date ? ` — mở ngày ${date}` : ''}`;
+  if (!isAdmin) {
+    const campaignOpen = campaign.effectiveStatus === 'OPEN';
+    if (!campaignOpen) {
+      if (campaign.effectiveStatus === 'UPCOMING') {
+        const date = campaign.startsAt ? new Date(campaign.startsAt).toLocaleString('vi-VN') : '';
+        return `Campaign chưa mở${date ? ` — mở ngày ${date}` : ''}`;
+      }
+      if (campaign.effectiveStatus === 'EXPIRED') return 'Campaign đã hết hạn';
+      if (campaign.effectiveStatus === 'PAUSED') return 'Campaign đang tạm dừng';
+      return 'Campaign đã đóng';
     }
-    if (campaign.effectiveStatus === 'EXPIRED') return 'Campaign đã hết hạn';
-    if (campaign.effectiveStatus === 'PAUSED') return 'Campaign đang tạm dừng';
-    return 'Campaign đã đóng';
+    if (campaign.membership.status === 'PENDING') return 'Tài khoản chưa được phê duyệt — đã gửi yêu cầu';
+    if (campaign.membership.status === 'REJECTED') return 'Yêu cầu tham gia đã bị từ chối';
+    if (campaign.membership.status === 'REVOKED') return 'Quyền tham gia đã bị thu hồi';
   }
-  if (campaign.membership.status === 'PENDING') return 'Tài khoản chưa được phê duyệt — đã gửi yêu cầu';
-  if (campaign.membership.status === 'REJECTED') return 'Yêu cầu tham gia đã bị từ chối';
-  if (campaign.membership.status === 'REVOKED') return 'Quyền tham gia đã bị thu hồi';
-  if (mappedCameraCount < 1) return 'Chưa gán camera cho máy này';
+  if (!singleCameraMode && mappedCameraCount < 1) return 'Chưa gán camera cho máy này';
   return null;
 }
 
@@ -175,6 +210,8 @@ export function DeviceInitScreen({
   campaignsError,
   onReloadCampaigns,
   isAdmin,
+  previewStreams = {},
+  cameraStatuses = [],
   selectedCampaign,
   onSelectCampaign,
   mappedCameraCount,
@@ -184,6 +221,7 @@ export function DeviceInitScreen({
   starting = false,
   onOpenDeviceSettings,
   onLogout,
+  singleCameraMode = false,
 }: DeviceInitScreenProps) {
   const [config, setConfig] = useState<CampaignConfig | null>(null);
   const [configLoading, setConfigLoading] = useState(false);
@@ -221,6 +259,59 @@ export function DeviceInitScreen({
 
   const requiredCameraCount = selectedCampaign?.requiredCameraCount ?? 1;
   const cameraCalibrated = mappedCameraCount >= requiredCameraCount;
+  /** Live-connected count (not just "mapped in Camera Setup at some point") — same distinction `KioskShell`'s footer already draws. Used per-campaign since each campaign can have its own `requiredCameraCount`. */
+  const connectedCameraCount = cameraStatuses.filter((cam) => cam.ready).length;
+
+  /**
+   * Which camera roles to show a tile for, for the currently selected
+   * campaign — at least `requiredCameraCount` slots, but NEVER fewer than
+   * however many distinct roles are actually mapped on this device
+   * (`cameraStatuses`, built from `faceAPI.getCameraRoleMapping()` — same
+   * list the `KioskShell` footer uses): a campaign whose own
+   * `requiredCameraCount` happens to be lower than what this kiosk has
+   * physically configured must still show every configured camera's real
+   * status, or a disconnected LEFT/RIGHT camera the device is depending on
+   * would simply be hidden from this readiness check (2026-09-15 field
+   * report: device had CENTER+LEFT+RIGHT mapped, but a campaign with
+   * `requiredCameraCount: 1` only ever showed the one CENTER tile).
+   * Starts from the campaign's own capture steps' `cameraRole` when known
+   * (real `fetchCampaignConfig` detail, or the list-view summary's
+   * `captureAngles` while that's still loading) merged with every mapped
+   * device role, deduped, then PADDED with the standard CENTER/LEFT/RIGHT/
+   * UP/DOWN order up to that target count.
+   */
+  const neededRoles: string[] = (() => {
+    if (!selectedCampaign) return [];
+    const stepRoles = (config?.captureAngles ?? selectedCampaign.captureAngles ?? [])
+      .map((step) => step.cameraRole)
+      .filter((role): role is string => !!role);
+    const mappedRoles = cameraStatuses.map((cam) => cam.id);
+    // CENTER always gets its own slot, mapped/connected or not — it's the
+    // primary/ICAO-source camera for almost every workflow, so silently
+    // dropping its tile (rather than showing it as "Thiếu camera") would
+    // hide the single most important readiness signal on this screen.
+    const combined = Array.from(new Set(['CENTER', ...stepRoles, ...mappedRoles]));
+    const targetCount = Math.max(requiredCameraCount, combined.length);
+    const deduped = combined.slice(0, targetCount);
+    if (deduped.length >= targetCount) return deduped;
+    const padding = CAMERA_ROLE_ORDER.filter((role) => !deduped.includes(role));
+    return [...deduped, ...padding].slice(0, targetCount);
+  })();
+
+  const cameraFrames: (FrameTileProps & { stepId: string })[] = neededRoles.map((role) => {
+    const connected = cameraStatuses.find((cam) => cam.id === role)?.ready ?? false;
+    const stream = connected ? previewStreams[role] ?? null : null;
+    return {
+      stepId: role,
+      label: role,
+      roleLabel: CAMERA_ROLE_LABELS_VI[role as keyof typeof CAMERA_ROLE_LABELS_VI] ?? role,
+      deviceLabel: null,
+      stream,
+      status: stream ? 'READY' : 'MISSING',
+      mirrored: CAPTURE_MIRRORED,
+      showCompositionGrid: role === 'CENTER',
+    };
+  });
   // No real "connectivity to the central station" check exists yet (no API
   // for it) — always reported ready per the task spec's explicit call for
   // honesty about what's real vs. placeholder. Swap for a real check once
@@ -229,7 +320,7 @@ export function DeviceInitScreen({
   const deviceReady = cameraCalibrated && centralConnectionOk;
   const showPreviewState = !!selectedCampaign && deviceReady;
 
-  const blockReason = reasonForBlock(selectedCampaign, mappedCameraCount);
+  const blockReason = reasonForBlock(selectedCampaign, mappedCameraCount, isAdmin === true, singleCameraMode);
   const canCapture = !!selectedCampaign && blockReason === null;
   /**
    * Label for the "ready to capture" badge below the CTA. A real per-user
@@ -249,8 +340,21 @@ export function DeviceInitScreen({
 
   return (
     <div className="flex h-full w-full flex-col overflow-hidden">
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-hidden p-5 md:grid-cols-[1fr_1.15fr]">
-        {/* Left column — device readiness checklist (state A) or live camera preview (state B) */}
+      <div
+        className={cn(
+          'grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-hidden p-5',
+          !singleCameraMode && 'md:grid-cols-[1fr_1.15fr]'
+        )}
+      >
+        {/*
+          Left column — device readiness checklist (state A) or live camera
+          preview (state B). Hidden entirely in `singleCameraMode`
+          (apps/web): a multi-camera role-mapping grid has nothing to show
+          for one phone camera, and `FaceCaptureApp` asks for camera
+          permission itself once capture starts — no pre-flight device
+          screen needed there.
+        */}
+        {!singleCameraMode && (
         <Card className="flex flex-col overflow-hidden">
           <CardHeader>
             <CardTitle>Thiết bị này</CardTitle>
@@ -258,25 +362,29 @@ export function DeviceInitScreen({
           <CardContent className="flex flex-1 flex-col gap-4 overflow-y-auto">
             {showPreviewState ? (
               <div className="flex flex-1 flex-col gap-3">
-                <CameraPreview stream={null} aspectRatio="4/3" className="flex-1 border border-kiosk-border bg-kiosk-bg">
-                  {/*
-                    This screen has never owned a live getUserMedia stream —
-                    that lives in DesktopCaptureView/FaceCaptureApp, out of
-                    this task's scope. Rather than fake a feed, `stream` stays
-                    null and this overlay says plainly that the real preview
-                    isn't wired up here yet; swap for a real MediaStream once
-                    it is.
-                  */}
-                  <div className="pointer-events-none flex h-full flex-col items-center justify-center gap-2 text-center">
-                    <Camera className="h-10 w-10 text-kiosk-text-muted" />
-                    <div className="text-sm font-medium text-kiosk-text">Xem trước camera</div>
-                    <div className="max-w-[220px] text-xs text-kiosk-text-muted">
-                      Luồng camera thực sẽ hiển thị khi bắt đầu phiên chụp
-                    </div>
-                  </div>
-                </CameraPreview>
+                {/*
+                  One tile per role this campaign needs (`neededRoles`) —
+                  live video (mirrored, matching the real capture screen's
+                  "soi gương" behavior) for whichever are connected right
+                  now, "Thiếu camera" for the rest. Acquired/released by
+                  `CampaignGate` — see `previewStreams`'s own doc comment.
+                  Built directly with `FrameTile` (not `MultiFrameGrid`,
+                  which is tuned for the small fixed-aspect-ratio strip in
+                  `DesktopCaptureView`) — equal-width columns spanning the
+                  full available height, same "size=large" pattern
+                  `CbHelpFrames.tsx` uses, so N tiles never leave a slab of
+                  empty space below a short 16:9 row.
+                */}
+                <div
+                  className="grid flex-1 min-h-0 gap-3 rounded-2xl border border-kiosk-border bg-kiosk-surface/60 p-3"
+                  style={{ gridTemplateColumns: `repeat(${cameraFrames.length}, minmax(0, 1fr))` }}
+                >
+                  {cameraFrames.map((frame) => (
+                    <FrameTile key={frame.stepId} {...frame} size="large" className="h-full w-full" />
+                  ))}
+                </div>
                 <div className="text-xs text-kiosk-text-muted">
-                  {mappedCameraCount}/{requiredCameraCount} camera đã gán ·{' '}
+                  {connectedCameraCount}/{neededRoles.length} camera đang kết nối ·{' '}
                   {sequencing === 'simultaneous' ? 'Đồng thời' : 'Tuần tự'} · {CAPTURE_MODE_LABEL[captureMode]}
                 </div>
               </div>
@@ -300,6 +408,7 @@ export function DeviceInitScreen({
             </Button>
           </CardContent>
         </Card>
+        )}
 
         {/* Right column — assigned campaigns + server-mandated spec for the selected one */}
         <Card className="flex flex-col overflow-hidden">
@@ -369,6 +478,43 @@ export function DeviceInitScreen({
                       </Badge>
                     </div>
                     {count && <div className="mt-2 text-xs text-kiosk-text-muted">{count}</div>}
+
+                    {selected && (
+                      <div className="mt-3 space-y-2 border-t border-kiosk-border/70 pt-3">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="text-kiosk-text-muted">Camera cần cho đợt này</span>
+                          <span
+                            className={cn(
+                              'font-semibold',
+                              connectedCameraCount >= neededRoles.length ? 'text-kiosk-accent-2' : 'text-kiosk-warning'
+                            )}
+                          >
+                            {/* Denominator matches `neededRoles.length` (max of the campaign's own requiredCameraCount and however many roles are actually mapped on this device), not the campaign's raw `requiredCameraCount` alone — otherwise this could read "1/1" while 3 camera chips are shown below it. */}
+                            {connectedCameraCount}/{neededRoles.length} đang kết nối
+                          </span>
+                        </div>
+                        {cameraStatuses.length > 0 ? (
+                          <div className="flex flex-wrap gap-1.5">
+                            {cameraStatuses.map((cam) => (
+                              <span
+                                key={cam.id}
+                                className={cn(
+                                  'flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium',
+                                  cam.ready
+                                    ? 'bg-kiosk-accent-2/10 text-kiosk-accent-2'
+                                    : 'bg-kiosk-text-muted/10 text-kiosk-text-muted'
+                                )}
+                              >
+                                <span className={cn('h-1.5 w-1.5 rounded-full', cam.ready ? 'bg-kiosk-accent-2' : 'bg-kiosk-text-muted')} />
+                                {cam.label}
+                              </span>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="text-[11px] text-kiosk-text-muted">Chưa có camera nào được gán cho máy này.</div>
+                        )}
+                      </div>
+                    )}
                   </button>
                 );
               })}

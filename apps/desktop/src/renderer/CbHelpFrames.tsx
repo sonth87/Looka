@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { CameraRole } from '@face/core';
 import { CAMERA_ROLE_LABELS_VI, CAPTURE_MIRRORED, FrameTile } from '@face/ui';
+import { Settings, X, ChevronUp, ChevronDown } from 'lucide-react';
 
 /**
  * The CB Help extended-display window's capture-frames snapshot — mirrors
@@ -71,6 +72,16 @@ interface CbHelpPublishState {
    * non-null, right after a successful save.
    */
   thankYou?: { name: string } | null;
+  /**
+   * Saved role→deviceId mapping plus which of those devices are actually
+   * connected right now — mirrors `FaceCaptureApp.tsx`'s own copy of this
+   * field (2026-09-15). Published unconditionally (every phase, idle
+   * included), so this window can preview a visible non-CENTER camera the
+   * settings panel marks visible even with no capture session running — see
+   * `idlePreviewRoles` below.
+   */
+  cameraRoleMapping?: Record<string, string>;
+  connectedDeviceIds?: string[];
 }
 
 /** Mirrors `apps/desktop/src/main/cbHelpWindow.ts`'s own copy. */
@@ -92,6 +103,8 @@ const EMPTY_STATE: CbHelpPublishState = {
   centerPreviewDataUrl: null,
   errorMessage: null,
   thankYou: null,
+  cameraRoleMapping: {},
+  connectedDeviceIds: [],
 };
 
 /**
@@ -109,36 +122,34 @@ const EMPTY_STATE: CbHelpPublishState = {
 const GREETING_DURATION_MS = 2000;
 
 /**
- * Whether `frame` should have a live camera stream open in this window right
- * now. Simultaneous mode: every not-yet-COMPLETED frame goes live at once,
- * same as the main kiosk window's own multi-frame grid. Sequential mode:
- * only the CURRENT frame — the others are either not reached yet (PENDING)
- * or already have their captured photo to show (COMPLETED) instead.
+ * Whether `frame` should have its OWN, independently-opened live camera
+ * stream in this window right now. Simultaneous mode: every not-yet-
+ * COMPLETED frame goes live at once, same as the main kiosk window's own
+ * multi-frame grid. Sequential mode: only the CURRENT frame — the others are
+ * either not reached yet (PENDING) or already have their captured photo to
+ * show (COMPLETED) instead.
  *
- * CENTER is excluded unconditionally (item 12b, 2026-09-09) — it used to
- * open its own `getUserMedia` here for the exact same physical device the
- * main kiosk window already has open, which common Windows webcam drivers
- * refuse a second concurrent reader of (2026-09-08 field report: CENTER's
- * tile stays blank even though the main window's CENTER camera is clearly
- * live). CENTER's tile is fed by `centerPreviewDataUrl` instead — see the
- * render below and that field's own doc comment.
+ * CENTER is excluded here unconditionally, but is NOT excluded from having a
+ * live stream overall — its own attempt is handled separately by
+ * `centerLiveDeviceId`/`centerLiveStream` (2026-09-15, "muốn mượt như ở màn
+ * action" field request, reopening item 12b — see that computation's own
+ * doc comment for the full history and the automatic per-device fallback
+ * this now has that the original item-12b removal didn't). This function
+ * only governs the OTHER frames' own `getUserMedia` attempts.
  *
  * `centerDeviceId` (2026-09-09 fix, live-hardware-confirmed: `[cb-help]
  * failed to open camera <id>: NotReadableError`/`[object DOMException]` on a
- * kiosk with exactly one real camera): the CENTER exclusion above only ever
- * checked the frame's *role*, not which physical device it resolves to — but
- * the "1 camera covers multiple roles" fallback (`planCaptureRounds`,
- * lib/multiFrame.ts) can map a non-CENTER role (LEFT/RIGHT/CUSTOM) to the
- * *exact same* device id as CENTER's `currentDeviceId` on a kiosk that does
- * not have a distinct camera for every role. That frame hits the identical
- * "second concurrent reader" conflict item 12b already fixed for the
- * literal CENTER role — just under a different role name — because nothing
- * here was comparing device ids across frames. A frame whose `deviceId`
- * equals `centerDeviceId` is therefore excluded here the same way, with the
- * same fallback: no live stream of its own in this window (there is no
- * snapshot feed for it, unlike CENTER, so its tile simply shows nothing
- * live until it is COMPLETED — same as a frame with no mapped device at
- * all).
+ * kiosk with exactly one real camera): a non-CENTER role (LEFT/RIGHT/CUSTOM)
+ * can resolve to the *exact same* physical device id as CENTER's own
+ * (`planCaptureRounds`'s "1 camera covers multiple roles" fallback,
+ * lib/multiFrame.ts) on a kiosk without a distinct camera per role. Such a
+ * frame must not ALSO try to open its own second, redundant reader of that
+ * device — it is excluded here, but (unlike before `centerLiveDeviceId`
+ * existed) is not left with nothing: `streamsRef` is keyed by device id, so
+ * if CENTER's own attempt for that same id succeeds, this frame's render
+ * (`stream={... streamsRef.current.get(frame.deviceId) ...}`) picks up that
+ * exact same already-open stream for free — no separate open, no separate
+ * fallback needed.
  */
 function isFrameLive(frame: CbHelpFrame, simultaneous: boolean, centerDeviceId: string | null): boolean {
   if (!frame.deviceId || frame.status === 'COMPLETED' || frame.role === 'CENTER') return false;
@@ -158,6 +169,219 @@ function isFrameLive(frame: CbHelpFrame, simultaneous: boolean, centerDeviceId: 
 const TILE_GAP_PX = 10;
 
 /**
+ * Per-column max width, as a percent of the window's own width — 2026-09-15
+ * field request: with the CB Help visibility panel now able to show as few
+ * as 1 tile, an unconstrained `1fr` column would stretch that lone tile
+ * across the whole screen. 32 keeps a 1-3 tile layout close in scale to
+ * what the full 5-tile layout already looks like (5 × ~20vw), rather than
+ * ballooning.
+ *
+ * Applied as a cap on the GRID CONTAINER's total width (`N * MAX_TILE_WIDTH_VW`,
+ * see both grids below), not on each column's own track size — an earlier
+ * version used `minmax(0, min(1fr, ${MAX_TILE_WIDTH_VW}vw))` per column,
+ * which is invalid CSS (a `<flex>` value like `1fr` cannot appear inside
+ * `min()`/`max()`/`clamp()` per the CSS Values spec) and silently made the
+ * ENTIRE `grid-template-columns` declaration invalid — Chromium then fell
+ * back to the property's initial value (`none`), collapsing every column
+ * into one single implicit column with items auto-placed into new rows.
+ * This is the real root cause of the long-standing "hiển thị theo dạng
+ * row" field report: a pure CSS parse failure, invisible to any amount of
+ * JS-side data/diagnostic logging, which is why the frames data itself
+ * kept checking out correct while the rendered layout stayed wrong.
+ * Confirmed via a standalone DOM repro in a live browser tab before this
+ * fix (computed `gridTemplateColumns` was a single `84px` track, not 5).
+ */
+const MAX_TILE_WIDTH_VW = 32;
+
+/**
+ * Which camera roles show on CB Help and in what order — mirrors
+ * `FaceCaptureApp.tsx`'s own `CbHelpVisibilityState`/`DEFAULT_CB_HELP_VISIBILITY`
+ * (duplicated across the IPC boundary, same convention every other type in
+ * this file already follows). Every role, always fully populated (defaults
+ * filled in for whatever the saved map doesn't cover).
+ */
+interface CbHelpCameraVisibility {
+  visible: boolean;
+  order: number;
+}
+type CbHelpVisibilityState = Record<CameraRole, CbHelpCameraVisibility>;
+const CB_HELP_ROLES: CameraRole[] = ['CENTER', 'LEFT', 'RIGHT', 'UP', 'DOWN'];
+const DEFAULT_CB_HELP_VISIBILITY: CbHelpVisibilityState = {
+  CENTER: { visible: true, order: 0 },
+  LEFT: { visible: false, order: 1 },
+  RIGHT: { visible: false, order: 2 },
+  UP: { visible: false, order: 3 },
+  DOWN: { visible: false, order: 4 },
+};
+
+/**
+ * Shared by the settings panel below (its own read/write UI) AND the main
+ * `CbHelpFrames` component (2026-09-15 — needs read-only access to decide
+ * `idlePreviewRoles`, see that computation's own doc comment). Each caller
+ * gets its own independent subscription — `onCbHelpVisibilityChanged` is a
+ * plain `ipcRenderer.on` listener, which supports multiple listeners fine,
+ * so there is no need to lift this into a single shared instance/context
+ * for what is, at most, two consumers in one window.
+ */
+/**
+ * Returns `[visibility, setVisibilityOptimistic]` — the setter is for
+ * `CbHelpVisibilitySettings`'s own use only (see its `persist()`'s doc
+ * comment for why a write needs it); every read-only caller should just
+ * destructure the first element and ignore the second.
+ */
+function useCbHelpVisibility(): [CbHelpVisibilityState, (next: CbHelpVisibilityState) => void] {
+  const [visibility, setVisibility] = useState<CbHelpVisibilityState>({ ...DEFAULT_CB_HELP_VISIBILITY });
+  useEffect(() => {
+    const faceAPI = (window as any).faceAPI;
+    const resolve = (saved: Partial<Record<CameraRole, CbHelpCameraVisibility>> | null | undefined) => {
+      const next = { ...DEFAULT_CB_HELP_VISIBILITY };
+      if (saved) {
+        for (const role of CB_HELP_ROLES) {
+          if (saved[role]) next[role] = saved[role]!;
+        }
+      }
+      setVisibility(next);
+    };
+    // 2026-09-15 field report ("tắt cam trái nhưng button checkbox vẫn hiển
+    // thị") — a stale-overwrite race: `getCbHelpVisibility()` (the one-time
+    // bootstrap fetch, fired on every mount — e.g. opening this settings
+    // panel) and `onCbHelpVisibilityChanged` (the live broadcast, fired on
+    // every toggle) are two independent async channels with no ordering
+    // guarantee between them. If the panel happens to mount around the same
+    // time the operator is toggling checkboxes, the bootstrap fetch's reply
+    // can arrive AFTER a fresher broadcast already applied the real change —
+    // silently overwriting it back to the older snapshot for whichever role
+    // changed in between (every OTHER checkbox stays correct, since only
+    // that one differed from the stale snapshot — exactly the reported
+    // symptom). Once any broadcast has been applied, the bootstrap fetch's
+    // own eventual reply is superseded and must be ignored — the broadcast
+    // channel is the only one that can still be trusted as "latest" after
+    // that point.
+    let supersededByBroadcast = false;
+    faceAPI?.getCbHelpVisibility?.().then((saved: Partial<Record<CameraRole, CbHelpCameraVisibility>> | null | undefined) => {
+      if (!supersededByBroadcast) resolve(saved);
+    });
+    return faceAPI?.onCbHelpVisibilityChanged?.((saved: Partial<Record<CameraRole, CbHelpCameraVisibility>> | null | undefined) => {
+      supersededByBroadcast = true;
+      resolve(saved);
+    });
+  }, []);
+  return [visibility, setVisibility];
+}
+
+/**
+ * In-window "cấu hình hiển thị camera" panel — 2026-09-15 field request:
+ * "muốn hiển thị thêm thì sẽ cài đặt ở trong màn mở rộng đó, có thể thay
+ * đổi được vị trí các cam ở các grid". Previously the only way to change
+ * which cameras show here (and in what order) was the separate Camera Setup
+ * popup window (`Ctrl/Cmd+Shift+K`, opened from the MAIN kiosk window) —
+ * this brings the same `getCbHelpVisibility`/`setCbHelpVisibility` calls
+ * directly into this window instead, since it's naturally the place an
+ * operator is actually looking at while deciding what should show here.
+ *
+ * Reordering is up/down buttons swapping `order` with the adjacent visible
+ * row, not drag-and-drop — same end result ("thay đổi vị trí") without a
+ * DnD library dependency for what is, at most, 5 rows.
+ *
+ * Writes go straight through `setCbHelpVisibility` (persists + broadcasts
+ * to the main kiosk window, see `main/index.ts`'s handler and preload's
+ * `onCbHelpVisibilityChanged` doc comment) — the main window's own
+ * `buildCbHelpFrames` picks up the change and republishes a re-filtered/
+ * sorted `frames` array, which arrives back here via the existing
+ * `onCbHelpUpdate` subscription and simply re-renders the grid below. This
+ * panel never touches `state.frames` itself.
+ */
+function CbHelpVisibilitySettings({ onClose }: { onClose: () => void }) {
+  const [visibility, setVisibility] = useCbHelpVisibility();
+
+  function persist(next: CbHelpVisibilityState) {
+    // 2026-09-15 field report ("chỉ click hiển thị thêm được 1 màn" — every
+    // click seemed to replace the previous selection instead of adding to
+    // it): `toggleVisible`/`move` below both build `next` by spreading the
+    // CURRENT `visibility` from this render's closure. Two clicks fired in
+    // quick succession (well within the round-trip time to main and back)
+    // both close over the SAME pre-either-click `visibility` snapshot, since
+    // React hasn't re-rendered with the first click's result yet — so the
+    // second click's payload effectively re-sends the first role's OLD
+    // value alongside its own change, reverting click 1 the moment click 2's
+    // broadcast reply lands. Setting local state OPTIMISTICALLY, synchron-
+    // ously, right here — instead of only after the round-trip confirms —
+    // means the very next click (even a near-instant one) closes over an
+    // already-updated `visibility`, so consecutive toggles accumulate
+    // correctly instead of stomping each other. The broadcast reply that
+    // follows still reconciles/confirms this normally (and remains the
+    // source of truth for any OTHER window's change, e.g. Camera Setup).
+    setVisibility(next);
+    void (window as any).faceAPI?.setCbHelpVisibility?.(next);
+  }
+
+  function toggleVisible(role: CameraRole) {
+    persist({ ...visibility, [role]: { ...visibility[role], visible: !visibility[role].visible } });
+  }
+
+  // Swaps `order` with the nearest OTHER role in that direction — using the
+  // full role list (not just the visible ones) so a hidden role's order
+  // still moves sensibly if it's later made visible.
+  function move(role: CameraRole, direction: -1 | 1) {
+    const sorted = [...CB_HELP_ROLES].sort((a, b) => visibility[a].order - visibility[b].order);
+    const idx = sorted.indexOf(role);
+    const swapWith = sorted[idx + direction];
+    if (!swapWith) return;
+    persist({
+      ...visibility,
+      [role]: { ...visibility[role], order: visibility[swapWith].order },
+      [swapWith]: { ...visibility[swapWith], order: visibility[role].order },
+    });
+  }
+
+  const orderedRoles = [...CB_HELP_ROLES].sort((a, b) => visibility[a].order - visibility[b].order);
+
+  return (
+    <div className="absolute right-4 top-4 z-20 w-72 rounded-xl border border-slate-700 bg-slate-900/95 p-3 shadow-xl backdrop-blur">
+      <div className="mb-2 flex items-center justify-between">
+        <h2 className="text-sm font-semibold text-slate-100">Cấu hình hiển thị camera</h2>
+        <button onClick={onClose} className="rounded p-1 text-slate-400 hover:bg-slate-800 hover:text-slate-100" aria-label="Đóng">
+          <X className="h-4 w-4" />
+        </button>
+      </div>
+      <ul className="flex flex-col gap-1">
+        {orderedRoles.map((role, idx) => (
+          <li key={role} className="flex items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-slate-800/60">
+            <label className="flex flex-1 items-center gap-2 text-sm text-slate-200">
+              <input
+                type="checkbox"
+                checked={visibility[role].visible}
+                onChange={() => toggleVisible(role)}
+                className="h-4 w-4 accent-blue-600"
+              />
+              {CAMERA_ROLE_LABELS_VI[role] ?? role}
+            </label>
+            <div className="flex shrink-0 gap-0.5">
+              <button
+                onClick={() => move(role, -1)}
+                disabled={idx === 0}
+                className="rounded p-1 text-slate-400 hover:bg-slate-700 hover:text-slate-100 disabled:opacity-30 disabled:hover:bg-transparent"
+                aria-label={`Đưa ${CAMERA_ROLE_LABELS_VI[role] ?? role} lên trước`}
+              >
+                <ChevronUp className="h-3.5 w-3.5" />
+              </button>
+              <button
+                onClick={() => move(role, 1)}
+                disabled={idx === orderedRoles.length - 1}
+                className="rounded p-1 text-slate-400 hover:bg-slate-700 hover:text-slate-100 disabled:opacity-30 disabled:hover:bg-transparent"
+                aria-label={`Đưa ${CAMERA_ROLE_LABELS_VI[role] ?? role} xuống sau`}
+              >
+                <ChevronDown className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/**
  * The CB Help extended-display window — see
  * `apps/desktop/src/main/cbHelpWindow.ts`'s own doc comment for the product
  * decision (2026-09-05, second pass) this implements: the window shows only
@@ -173,33 +397,74 @@ const TILE_GAP_PX = 10;
  * `FaceCaptureApp.tsx`'s `publishCbHelpState` and cbHelpWindow.ts's own doc
  * comment for the full data flow).
  *
- * Live video (non-CENTER frames only — see `isFrameLive`'s own doc comment
- * for why CENTER is excluded): this window opens its own
- * `getUserMedia({ video: { deviceId: { exact } } })` per side-frame device.
- * Streams are keyed by `deviceId` (not by step, in case two frames ever
- * shared one) and reused across pushes — the reconciliation effect below
- * only opens a device it does not already hold a stream for, and only stops
- * one no frame needs live anymore (a step that just got COMPLETED, or a
- * mode/session change).
- *
- * CENTER's own tile (item 12b, 2026-09-09): this used to also open its own
- * `getUserMedia` for CENTER, on the theory that Chromium shares one physical
- * camera across every window of the same session/origin without conflict —
- * true in principle, but not what actually happens on common Windows webcam
- * drivers, which frequently refuse a second concurrent reader of one
- * physical device (2026-09-08 field report: CENTER's tile stayed blank even
- * though the main kiosk window's own CENTER camera was clearly live). Fixed
- * by not opening a second stream at all: CENTER's tile instead renders
- * `state.centerPreviewDataUrl`, a still of the main window's own live CENTER
- * feed that `FaceCaptureApp.tsx`'s `publishCbHelpState` pushes a few times a
- * second (see that field's own doc comment) — plenty for an "extended
- * monitor" without a second live video pipeline over IPC.
+ * Live video: this window opens its own
+ * `getUserMedia({ video: { deviceId: { exact } } })` per frame's device,
+ * CENTER included as of 2026-09-15 (see `centerLiveDeviceId`'s own doc
+ * comment for why CENTER's own attempt is handled separately from
+ * `isFrameLive`, and the automatic per-device fallback to
+ * `centerPreviewDataUrl` if it fails to open — this reopens, but does not
+ * blindly repeat, item 12b/2026-09-09's original "CENTER stayed blank on
+ * common Windows UVC drivers" field bug). Streams are keyed by `deviceId`
+ * (not by step/role, so two frames sharing one physical device reuse a
+ * single open stream instead of each trying their own) and reused across
+ * pushes — the reconciliation effect below only opens a device it does not
+ * already hold a stream for, and only stops one no frame needs live anymore
+ * (a step that just got COMPLETED, a visibility toggle, or a mode/session
+ * change).
  */
 export default function CbHelpFrames() {
   const [state, setState] = useState<CbHelpPublishState>(EMPTY_STATE);
   const streamsRef = useRef<Map<string, MediaStream>>(new Map());
   const deviceLabelsRef = useRef<Map<string, string>>(new Map());
   const [, forceRerender] = useState(0);
+  /** In-window camera-visibility config panel (2026-09-15) — see `CbHelpVisibilitySettings`'s own doc comment. Available in every phase (idle and active grid alike), not just while a session is live. */
+  const [showSettings, setShowSettings] = useState(false);
+  /** Read-only copy for `idlePreviewRoles` below — the settings panel itself (when open) has its own independent copy via the same hook. */
+  const [visibility] = useCbHelpVisibility();
+
+  /**
+   * Which non-CENTER roles should get their own idle-preview stream —
+   * 2026-09-15 field request: the settings panel could already mark a
+   * LEFT/RIGHT/UP/DOWN camera "visible", but nothing showed it until an
+   * actual capture session started (`state.frames` is empty in `idle`
+   * phase — see `CbHelpPublishState.frames`'s own doc comment). A role
+   * qualifies when it's (a) marked visible, (b) not CENTER (which already
+   * has its own always-on `centerPreviewDataUrl` preview, unrelated to this
+   * list), and (c) has a saved role→device mapping that's currently
+   * connected (`state.cameraRoleMapping`/`state.connectedDeviceIds`, 2026-
+   * 09-15 — published unconditionally now, not just during a session) — no
+   * point trying to open a stream for a role with nothing plugged in.
+   */
+  const idlePreviewRoles = (() => {
+    const candidates = CB_HELP_ROLES.filter((role) => {
+      if (role === 'CENTER' || !visibility[role].visible) return false;
+      const deviceId = state.cameraRoleMapping?.[role];
+      return !!deviceId && (state.connectedDeviceIds ?? []).includes(deviceId);
+    }).sort((a, b) => visibility[a].order - visibility[b].order);
+
+    // De-duplicated by physical device (2026-09-15 field report: "rất lag,
+    // ... hiển thị toàn bộ cam" — on a kiosk with fewer physical cameras
+    // than roles, two+ roles can share one deviceId via the same fallback
+    // mapping `resolveStepCamera` already applies elsewhere; without this,
+    // each of those roles opened its OWN `getUserMedia` for the identical
+    // device (redundant negotiation — the lag) and rendered as separate,
+    // visually-identical tiles (reads as "showing every camera" even though
+    // it's really the same one repeated). CENTER's own device (already
+    // covered by `centerPreviewDataUrl`, never opened as a second stream
+    // here) claims its slot first so a role sharing THAT device is skipped
+    // too, same reasoning `isFrameLive`'s own `centerDeviceId` check already
+    // applies during an active session.
+    const claimedDeviceIds = new Set<string>();
+    const centerDeviceId = state.cameraRoleMapping?.CENTER;
+    if (centerDeviceId) claimedDeviceIds.add(centerDeviceId);
+
+    return candidates.filter((role) => {
+      const deviceId = state.cameraRoleMapping![role]!;
+      if (claimedDeviceIds.has(deviceId)) return false;
+      claimedDeviceIds.add(deviceId);
+      return true;
+    });
+  })();
 
   /**
    * The student greeting outlives `state.greeting` itself — that field only
@@ -241,12 +506,37 @@ export default function CbHelpFrames() {
     const faceAPI = (window as any).faceAPI;
     if (!faceAPI?.getCbHelpState) return;
 
+    // TEMP DIAGNOSTIC (2026-09-15, round 3) — "vẫn lag" after reopening
+    // multiple times with no `[CbHelpDiag3]` open-success log AND no
+    // `[cb-help] failed to open camera` error either: the CENTER live-stream
+    // attempt (`centerLiveDeviceId`) is apparently never even reached, which
+    // only happens if `state.cameraRoleMapping.CENTER` or
+    // `state.connectedDeviceIds` is missing/empty at the moment this window
+    // reads state. Logs exactly what actually arrives, once per distinct
+    // value, to settle which one.
+    let lastMappingDiagKey: string | null = null;
+    const diagLogMapping = (s: CbHelpPublishState | null | undefined) => {
+      const key = `${JSON.stringify(s?.cameraRoleMapping ?? null)}|${JSON.stringify(s?.connectedDeviceIds ?? null)}`;
+      if (lastMappingDiagKey === key) return;
+      lastMappingDiagKey = key;
+      console.warn(
+        `[CbHelpDiag3] cameraRoleMapping/connectedDeviceIds ${JSON.stringify({
+          cameraRoleMapping: s?.cameraRoleMapping ?? null,
+          connectedDeviceIds: s?.connectedDeviceIds ?? null,
+        })}`
+      );
+    };
+
     let cancelled = false;
     faceAPI.getCbHelpState().then((s: CbHelpPublishState) => {
+      diagLogMapping(s);
       if (!cancelled) setState(s ?? EMPTY_STATE);
     });
 
-    const unsubscribe = faceAPI.onCbHelpUpdate?.((s: CbHelpPublishState) => setState(s ?? EMPTY_STATE));
+    const unsubscribe = faceAPI.onCbHelpUpdate?.((s: CbHelpPublishState) => {
+      diagLogMapping(s);
+      setState(s ?? EMPTY_STATE);
+    });
     return () => {
       cancelled = true;
       unsubscribe?.();
@@ -270,11 +560,43 @@ export default function CbHelpFrames() {
   // array only actually changes when the SET of needed device ids changes —
   // a real hot-plug/step change — not on every content-identical republish.
   const centerFrameDeviceId = state.frames.find((f) => f.role === 'CENTER')?.deviceId ?? null;
-  const neededDeviceIdsKey = state.frames
-    .filter((f) => isFrameLive(f, state.simultaneous, centerFrameDeviceId))
-    .map((f) => f.deviceId as string)
+  // Idle-preview device ids (2026-09-15) — only relevant in `idle` phase;
+  // once a real session starts, `state.frames` itself covers every visible
+  // non-CENTER role (via `isFrameLive` below) and this list is naturally
+  // empty (`idlePreviewRoles` requires `state.frames`-independent mapping
+  // data, but there's no reason to open a SECOND, redundant stream for a
+  // role `state.frames` is already live-streaming).
+  const idlePreviewDeviceIds =
+    state.phase === 'idle' ? idlePreviewRoles.map((role) => state.cameraRoleMapping?.[role]).filter((id): id is string => !!id) : [];
+  // CENTER's own live stream attempt (2026-09-15, "muốn mượt như ở màn
+  // action" field request) — see `isFrameLive`'s own doc comment for the
+  // full item-12b history this reopens: a live `getUserMedia` for CENTER
+  // was removed because a second concurrent reader of the SAME physical
+  // device commonly fails on Windows UVC webcam drivers, leaving the tile
+  // fully blank with no fallback. This attempts it again, but — unlike the
+  // original item-12b code — with an automatic, per-device fallback: if
+  // `getUserMedia` for this id rejects (logged once by the reconciliation
+  // effect below, same as any other device), it simply never lands in
+  // `streamsRef`, and every CENTER render below already passes BOTH
+  // `stream` and `imagePath` — `FrameTile` itself prefers `stream` when
+  // present and only falls back to `imagePath` when `!stream` (see its own
+  // doc comment on that prop combination), so a failed open here silently
+  // degrades back to the existing `centerPreviewDataUrl` snapshot instead
+  // of a blank tile. Best case (the driver tolerates it): real smooth video,
+  // same as the main window. Worst case: exactly today's snapshot behavior,
+  // never worse.
+  const centerLiveDeviceId = (() => {
+    const id = state.cameraRoleMapping?.CENTER;
+    return id && (state.connectedDeviceIds ?? []).includes(id) ? id : null;
+  })();
+  const neededDeviceIdsKey = [
+    ...state.frames.filter((f) => isFrameLive(f, state.simultaneous, centerFrameDeviceId)).map((f) => f.deviceId as string),
+    ...idlePreviewDeviceIds,
+    ...(centerLiveDeviceId ? [centerLiveDeviceId] : []),
+  ]
     .sort()
     .join(',');
+  const centerLiveStream = centerLiveDeviceId ? streamsRef.current.get(centerLiveDeviceId) ?? null : null;
 
   useEffect(() => {
     let cancelled = false;
@@ -301,6 +623,18 @@ export default function CbHelpFrames() {
           }
           streamsRef.current.set(deviceId, stream);
           openedAny = true;
+          // TEMP DIAGNOSTIC (2026-09-15, round 3) — "muốn mượt như ở màn
+          // action" / "vẫn lag và khá delay" field report: confirms whether
+          // CENTER's own live-stream attempt (`centerLiveDeviceId`) actually
+          // succeeds in THIS window, since success is otherwise silent (only
+          // the catch branch below logs anything) — no news was ambiguous
+          // ("no error" could mean "opened fine" or "never even tried").
+          const track = stream.getVideoTracks()[0];
+          console.warn(
+            `[CbHelpDiag3] opened live stream for ${deviceId}: ${JSON.stringify({
+              settings: track?.getSettings?.() ?? null,
+            })}`
+          );
         } catch (err) {
           // Logged once per actual device-set change now (see this effect's
           // dependency array), not in a sub-second retry storm — a device
@@ -405,21 +739,98 @@ export default function CbHelpFrames() {
     </div>
   );
 
+  // Gear toggle for `CbHelpVisibilitySettings` — same "always available,
+  // every phase" placement as `cornerBadge` above, so an operator can
+  // reconfigure which cameras show without waiting for a session to start.
+  const settingsToggle = (
+    <button
+      onClick={() => setShowSettings((v) => !v)}
+      className="absolute right-4 top-4 z-20 rounded-lg bg-slate-900/90 p-2 text-slate-400 shadow-lg hover:text-slate-100"
+      aria-label="Cấu hình hiển thị camera"
+      title="Cấu hình hiển thị camera"
+    >
+      <Settings className="h-4 w-4" />
+    </button>
+  );
+
   if (state.phase === 'idle' || state.frames.length === 0) {
+    // 2026-09-15 field request: previously this screen only ever showed
+    // CENTER, regardless of the settings panel — `idlePreviewRoles` (see
+    // its own doc comment) is the visible, mapped, connected non-CENTER
+    // cameras, so a grid renders here whenever there's at least one.
+    const showGrid = idlePreviewRoles.length > 0;
     return (
-      <div className="relative w-screen h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center gap-6 overflow-hidden">
+      <div className="relative w-screen h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center gap-6 overflow-hidden p-4">
         {cornerBadge}
-        {/* Live CENTER camera feed (2026-09-10, "camera live vẫn phải hiển
-            thị") — proves the kiosk's cameras are actively working between
-            students instead of leaving this screen fully blank; publisher
-            side already stopped gating this on an active session, see
-            FaceCaptureApp.tsx's own centerPreviewDataUrl doc comment. */}
-        {state.centerPreviewDataUrl && (
-          <img
-            src={state.centerPreviewDataUrl}
-            alt="Camera trực tiếp"
-            className="w-full max-w-3xl aspect-video object-cover rounded-2xl border border-slate-800"
-          />
+        {showSettings ? <CbHelpVisibilitySettings onClose={() => setShowSettings(false)} /> : settingsToggle}
+        {showGrid ? (
+          <div
+            className="flex-1 min-h-0 w-full grid justify-center mx-auto"
+            style={{
+              gridTemplateColumns: `repeat(${1 + idlePreviewRoles.length}, minmax(0, 1fr))`,
+              maxWidth: `${(1 + idlePreviewRoles.length) * MAX_TILE_WIDTH_VW}vw`,
+              gap: TILE_GAP_PX,
+            }}
+          >
+            <FrameTile
+              key="CENTER"
+              size="large"
+              className="w-full h-full"
+              label="FRONT"
+              roleLabel={CAMERA_ROLE_LABELS_VI.CENTER}
+              deviceLabel={centerLiveDeviceId ? deviceLabelsRef.current.get(centerLiveDeviceId) ?? null : null}
+              stream={centerLiveStream}
+              status="READY"
+              imagePath={state.centerPreviewDataUrl}
+              mirrored={CAPTURE_MIRRORED}
+              showCompositionGrid
+            />
+            {idlePreviewRoles.map((role) => {
+              const deviceId = state.cameraRoleMapping?.[role];
+              return (
+                <FrameTile
+                  key={role}
+                  size="large"
+                  className="w-full h-full"
+                  label={role}
+                  roleLabel={CAMERA_ROLE_LABELS_VI[role]}
+                  deviceLabel={deviceId ? deviceLabelsRef.current.get(deviceId) ?? null : null}
+                  stream={deviceId ? streamsRef.current.get(deviceId) ?? null : null}
+                  status="READY"
+                  mirrored={CAPTURE_MIRRORED}
+                />
+              );
+            })}
+          </div>
+        ) : (
+          /* Live CENTER camera feed (2026-09-10, "camera live vẫn phải hiển
+             thị") — proves the kiosk's cameras are actively working between
+             students instead of leaving this screen fully blank; publisher
+             side already stopped gating this on an active session, see
+             FaceCaptureApp.tsx's own centerPreviewDataUrl doc comment.
+             Only used when no OTHER camera is also marked visible — with
+             more than one, the grid above (which already includes CENTER)
+             takes over instead, so CENTER is never shown twice.
+
+             2026-09-15 ("muốn mượt như ở màn action"): now a `FrameTile`
+             instead of a plain `<img>` — same live-stream-with-fallback as
+             every other CENTER render in this file (see
+             `centerLiveDeviceId`'s own doc comment), and it comes with
+             mirroring already built in, closing the exact gap the previous
+             version's own comment here had to patch by hand. */
+          (centerLiveStream || state.centerPreviewDataUrl) && (
+            <FrameTile
+              size="large"
+              className="w-full max-w-3xl aspect-video rounded-2xl"
+              label="FRONT"
+              roleLabel={CAMERA_ROLE_LABELS_VI.CENTER}
+              deviceLabel={centerLiveDeviceId ? deviceLabelsRef.current.get(centerLiveDeviceId) ?? null : null}
+              stream={centerLiveStream}
+              status="READY"
+              imagePath={state.centerPreviewDataUrl}
+              mirrored={CAPTURE_MIRRORED}
+            />
+          )
         )}
         <p className="text-slate-500 text-3xl sm:text-4xl font-semibold text-center px-8">
           Chưa có phiên chụp nào đang diễn ra
@@ -446,6 +857,7 @@ export default function CbHelpFrames() {
   return (
     <div className="relative w-screen h-screen bg-slate-950 text-slate-100 flex flex-col p-4 gap-2 overflow-hidden">
       {cornerBadge}
+      {showSettings ? <CbHelpVisibilitySettings onClose={() => setShowSettings(false)} /> : settingsToggle}
       <header className="text-center shrink-0">
         <h1 className="text-2xl font-bold tracking-wide">{headerTitle}</h1>
         <p className="text-slate-400 mt-0.5">
@@ -460,23 +872,57 @@ export default function CbHelpFrames() {
         Equal-width columns, one per frame, each spanning the full available
         height below the header (product decision 2026-09-05, fourth pass —
         "để thành các thanh dọc, grid chia đều cho các khung"): no more
-        2-over-1/2x2 grouping, just `repeat(N, minmax(0, 1fr))` columns that
-        every frame count from 1 to 5 fits into equally. `FrameTile`'s
-        `size="large"` variant stretches to fill whatever box it is given
-        (see its own doc comment), so each column's video/photo covers it
-        edge-to-edge — cropping a 16:9 feed's sides into the tall column
-        shape is expected and fine.
+        2-over-1/2x2 grouping, just `repeat(N, ...)` columns that every frame
+        count from 1 to 5 fits into equally. `FrameTile`'s `size="large"`
+        variant stretches to fill whatever box it is given (see its own doc
+        comment), so each column's video/photo covers it edge-to-edge —
+        cropping a 16:9 feed's sides into the tall column shape is expected
+        and fine.
+
+        The grid's total width is capped at `frames.length * MAX_TILE_WIDTH_VW`
+        and the row centered (2026-09-15 field request: "nếu hiển thị không
+        hết khung hình thì sẽ gom lại giữa, giới hạn độ rộng của màn hình") —
+        with the CB Help visibility panel able to hide down to just 1-2 tiles
+        now, an unconstrained container would stretch a lone CENTER tile
+        across the ENTIRE screen width, badly distorting its crop. Capping
+        `maxWidth` on the CONTAINER (not each column's own track size —
+        see `MAX_TILE_WIDTH_VW`'s own doc comment for why `minmax(0, min(1fr,
+        ...))` per column is invalid CSS and silently broke this into a
+        single-column row-stack) only ever narrows the grid below its natural
+        full-width share (never widens it — 5 tiles' natural width is already
+        well under the cap, so this changes nothing for the full 5-camera
+        layout). Centering that now-narrower box needs `mx-auto` on the grid
+        element itself (2026-09-15, second pass — "cam chưa đẩy ra giữa" field
+        report): `justify-content: center` alone does NOT do this — it only
+        distributes leftover space AMONG the grid's own tracks, within the
+        grid box's OWN (already `maxWidth`-shrunk) content area, and since
+        the tracks here are `1fr` (always expand to fill 100% of whatever
+        width the box has), there is never any leftover space inside the box
+        for `justify-content` to redistribute. `mx-auto` is what centers the
+        shrunk BOX itself within ITS OWN parent (ordinary block-level
+        auto-margin centering) — `justify-content: center` is kept only for
+        the (currently theoretical) case a future change gives a track less
+        than its `1fr` share.
       */}
       <div
-        className="flex-1 min-h-0 w-full grid"
-        style={{ gridTemplateColumns: `repeat(${state.frames.length}, minmax(0, 1fr))`, gap: TILE_GAP_PX }}
+        className="flex-1 min-h-0 w-full grid justify-center mx-auto"
+        style={{
+          gridTemplateColumns: `repeat(${state.frames.length}, minmax(0, 1fr))`,
+          maxWidth: `${state.frames.length * MAX_TILE_WIDTH_VW}vw`,
+          gap: TILE_GAP_PX,
+        }}
       >
         {state.frames.map((frame) => {
-          // Item 12b: CENTER never gets its own stream in this window
-          // anymore (see `isFrameLive`) — once it is COMPLETED, the real
-          // captured photo takes over exactly like every other frame, but
-          // until then it shows the periodic `centerPreviewDataUrl` push
-          // instead of a blank/dead `<video>` with no stream bound.
+          // CENTER (2026-09-15, "muốn mượt như ở màn action" — see
+          // `centerLiveDeviceId`'s own doc comment for the item-12b history
+          // and the automatic fallback): tries its own live stream first,
+          // same as every other frame, falling back to the periodic
+          // `centerPreviewDataUrl` snapshot only if that stream never opened
+          // — `FrameTile` itself picks between the two (prefers `stream`,
+          // falls back to `imagePath` only when `!stream`), so both are
+          // always passed here unconditionally. Once COMPLETED, the real
+          // captured photo takes over regardless, exactly like every other
+          // frame (same `FrameTile` rule: `status === 'COMPLETED'` wins).
           const isCenter = frame.role === 'CENTER';
           const centerLiveImage = isCenter && frame.status !== 'COMPLETED' ? state.centerPreviewDataUrl : null;
           return (
@@ -487,10 +933,17 @@ export default function CbHelpFrames() {
               label={frame.label}
               roleLabel={CAMERA_ROLE_LABELS_VI[frame.role as CameraRole] ?? frame.role}
               deviceLabel={frame.deviceId ? deviceLabelsRef.current.get(frame.deviceId) ?? null : null}
-              stream={isCenter ? null : frame.deviceId ? streamsRef.current.get(frame.deviceId) ?? null : null}
+              stream={isCenter ? centerLiveStream : frame.deviceId ? streamsRef.current.get(frame.deviceId) ?? null : null}
               status={frame.status}
               imagePath={centerLiveImage ?? frame.capturedDataUrl}
               mirrored={CAPTURE_MIRRORED}
+              // 2026-09-15 field request: the extended display's CENTER tile
+              // (the printed/matched photo — always shown by default, see
+              // `DEFAULT_CB_HELP_VISIBILITY` in FaceCaptureApp.tsx) needs the
+              // same rule-of-thirds composition guide the main kiosk window's
+              // own CENTER stage already has (`DesktopCaptureView.tsx`), so a
+              // CB Help watcher can also judge framing.
+              showCompositionGrid={isCenter}
             />
           );
         })}

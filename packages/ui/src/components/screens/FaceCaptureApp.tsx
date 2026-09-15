@@ -83,6 +83,7 @@ import { CAPTURE_MIRRORED } from '../camera/CameraPreview.js';
 import { StepItem } from '../workflow/StepProgress.js';
 import { TooltipProvider, Tooltip, TooltipTrigger, TooltipContent } from '../ui/tooltip.js';
 import { getSettings, updateSettings } from '../../lib/settingsStore.js';
+import { applyKioskTheme } from '../../lib/kioskTheme.js';
 import { CaptureSink, RunScopedCaptureSession } from '../../lib/CaptureSink.js';
 import type { ApprovalStepInfo, StudentSubjectInfo } from '../../lib/CaptureSink.js';
 import { SQLiteStorageAdapter, SessionRepository } from '@face/database';
@@ -483,6 +484,21 @@ interface CbHelpPublishState {
    * rest of the time.
    */
   thankYou?: { name: string } | null;
+  /**
+   * Saved role→deviceId mapping (Camera Setup) plus which of those devices
+   * are actually connected right now — 2026-09-15 field request: idle
+   * (between-students) preview only ever showed CENTER, with no way to
+   * preview a LEFT/RIGHT/UP/DOWN camera the CB Help visibility panel marks
+   * visible until an actual capture session starts (only then does
+   * `buildCbHelpFrames`'s `frames[].deviceId` carry mapping info at all).
+   * Published unconditionally (every phase, not just `showFrames`), so
+   * `CbHelpFrames.tsx` can open its own idle-preview stream for any VISIBLE
+   * non-CENTER role with a connected mapped camera, the same way it already
+   * opens a live stream per non-CENTER frame during an active session —
+   * this just extends that to "no session running" too.
+   */
+  cameraRoleMapping?: Record<string, string>;
+  connectedDeviceIds?: string[];
 }
 
 /**
@@ -540,7 +556,7 @@ function buildCbHelpFrames(
   // below indexes into THIS original order, so filtering/sorting must happen
   // afterward, on the already-built CbHelpFrame[] (see this function's own
   // return statement), never before the map.
-  return framesForWorkflow(workflow)
+  const mapped = framesForWorkflow(workflow)
     .map((frame, idx) => {
     const sessionStep = session?.steps.find((st) => st.stepId === frame.stepId);
     const isCompleted = sessionStep?.status === 'COMPLETED';
@@ -552,6 +568,37 @@ function buildCbHelpFrames(
       : sessionStep?.status === 'FAILED'
       ? 'FAILED'
       : 'PENDING';
+    // `frame.role` (from `framesForWorkflow`) is NOT a stable display
+    // identity for this window's purposes — 2026-09-15 field bug ("vẫn
+    // hiển thị toàn bộ cam" surviving every visibility setting). For
+    // simultaneous capture, `runSimultaneousCaptureGate`/`buildRoundPlan`
+    // (FaceCaptureApp.tsx) bakes the RESOLVED PHYSICAL camera for this
+    // session's rounds back into each step's own `cameraRole` field before
+    // `setActiveWorkflow` stores it — on a kiosk with only 1 physical
+    // camera, `resolveStepCamera`'s fallback (`@face/core`) resolves EVERY
+    // step to CENTER, so `activeWorkflowRef.current` (what `workflow` here
+    // actually is) legitimately has every step's `cameraRole` set to
+    // 'CENTER' for capture/round-tracking purposes — confirmed live via a
+    // temporary diagnostic (since removed) that caught `mapped`'s own roles
+    // flipping from `["CENTER","LEFT","RIGHT","UP",
+    // "DOWN"]` to `["CENTER","CENTER","CENTER","CENTER","CENTER"]` ~200ms
+    // into session start, exactly when `runSimultaneousCaptureGate` swaps
+    // in the round-adjusted workflow. That is correct for opening the right
+    // physical stream, but wrong for "which of the 5 fixed display slots
+    // (CENTER/LEFT/RIGHT/UP/DOWN) does this step belong to" — the question
+    // `cbHelpVisibility`'s filter/order below, and the operator's saved
+    // `roleMapping`, both actually need answered. `defaultCameraRoleForStepType`
+    // is a pure function of the step's own `type` (FRONT/LEFT/RIGHT/UP/
+    // DOWN), immune to round-planning's fallback substitution, so it is
+    // used here instead as that stable logical identity — deliberately
+    // ignoring a campaign-declared `step.cameraRole` override too, since
+    // there is no way from here to tell that apart from a round-baked one
+    // (both live in the same field); a display-slot mislabel for that rare
+    // case is a acceptable trade for fixing the far more common single/
+    // few-camera-kiosk case. The ACTUAL capture pipeline (`activeWorkflowRef`
+    // itself, `openRoundStreams`, etc.) is untouched by this — only this
+    // function's own `role`/filter/sort logic changes.
+    const logicalRole = defaultCameraRoleForStepType(frame.type);
     // A role-mapped device id is only worth forwarding if it's actually
     // connected right now — same check `isFrameMissingDevice` already does
     // for the main window (see this function's own doc comment, 2026-09-09
@@ -559,11 +606,11 @@ function buildCbHelpFrames(
     // reported as this frame's device — CbHelpFrames.tsx would then keep
     // trying (and failing) to open a stream for it every time this frame
     // becomes live again.
-    const roleMappedDeviceId = roleMapping[frame.role];
+    const roleMappedDeviceId = roleMapping[logicalRole];
     const roleMappedDeviceConnected =
       !!roleMappedDeviceId && connectedDevices.some((d) => d.id === roleMappedDeviceId);
     const mappedDeviceId =
-      frame.role === 'CENTER'
+      logicalRole === 'CENTER'
         ? currentDeviceId || null
         : roleMappedDeviceConnected
         ? roleMappedDeviceId
@@ -572,20 +619,47 @@ function buildCbHelpFrames(
     return {
       stepId: frame.stepId,
       stepType: frame.type,
-      role: frame.role,
+      role: logicalRole,
       label: frame.label,
       deviceId: mappedDeviceId ?? (!simultaneous && isCurrent ? currentDeviceId || null : null),
       status,
       capturedDataUrl: sessionStep?.capturedImagePath,
       attempt: sessionStep?.attempts ?? 0,
     };
-  })
-    .filter((f) => cbHelpVisibility[f.role as CameraRole]?.visible !== false)
-    .sort(
-      (a, b) =>
-        (cbHelpVisibility[a.role as CameraRole]?.order ?? 0) - (cbHelpVisibility[b.role as CameraRole]?.order ?? 0)
+  });
+  const filtered = mapped.filter((f) => cbHelpVisibility[f.role as CameraRole]?.visible !== false);
+  const sorted = filtered.sort(
+    (a, b) =>
+      (cbHelpVisibility[a.role as CameraRole]?.order ?? 0) - (cbHelpVisibility[b.role as CameraRole]?.order ?? 0)
+  );
+  // TEMP DIAGNOSTIC (2026-09-15, round 2) — field report: toggling the CB
+  // Help visibility checkboxes doesn't change what shows. Logs the exact
+  // per-frame role/deviceId/status this function is about to return,
+  // change-only throttled by a module-level key (declared right below, same
+  // pattern the removed round-1 diagnostic used) — checks whether a toggled
+  // role is even reaching a mapped device at all (the operator may simply
+  // never have assigned a physical camera to LEFT/RIGHT/UP/DOWN in Camera
+  // Setup on a kiosk with only 1 camera, in which case a "visible" side tile
+  // has nothing to show and toggling it looks like it does nothing — a real
+  // config gap, not a code bug) versus the visibility map itself not taking
+  // effect (a real code bug).
+  const diag2Key = `${JSON.stringify(cbHelpVisibility)}|${JSON.stringify(roleMapping)}|${sorted
+    .map((f) => `${f.role}:${f.deviceId}:${f.status}`)
+    .join(',')}`;
+  if (lastBuildCbHelpFramesDiag2Key !== diag2Key) {
+    lastBuildCbHelpFramesDiag2Key = diag2Key;
+    console.warn(
+      `[CbHelpDiag2] buildCbHelpFrames ${JSON.stringify({
+        visibility: cbHelpVisibility,
+        roleMapping,
+        result: sorted.map((f) => ({ role: f.role, deviceId: f.deviceId, status: f.status })),
+      })}`
     );
+  }
+  return sorted;
 }
+/** Module-level (not per-render-instance) — see the diagnostic's own comment above for why this exists. */
+let lastBuildCbHelpFramesDiag2Key: string | null = null;
 
 /**
  * Resolves once `video` has genuinely rendered a real frame — not merely
@@ -696,10 +770,27 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
 
   const [theme, setTheme] = useState<'dark' | 'light'>(() => getSettings().theme || 'light');
 
+  // Keeps the `kiosk-*` CSS-variable theme (packages/ui/src/lib/kioskTheme.js
+  // — `.dark`/`.light` class, drives `bg-kiosk-bg`/`text-kiosk-text`/etc.
+  // across GuidedCaptureScreen/DesktopCaptureView/MobileCaptureView and the
+  // check-in screens) in sync with this component's own long-standing
+  // `theme` state/toggle. On `apps/desktop` this is a harmless no-op for
+  // screens already wrapped in `KioskShell` (its own root-level class wins
+  // for anything inside it — see that component's doc comment on why it
+  // self-applies rather than relying on `document.documentElement`), but on
+  // `apps/web` (no `KioskShell` at all) this `document.documentElement`
+  // application is the ONLY thing that ever makes those kiosk-token classes
+  // respond to the toggle button at all — 2026-09-15 fix.
+  useEffect(() => {
+    applyKioskTheme(theme);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const toggleTheme = () => {
     setTheme((prev) => {
       const nextTheme = prev === 'dark' ? 'light' : 'dark';
       updateSettings({ theme: nextTheme });
+      applyKioskTheme(nextTheme);
       return nextTheme;
     });
   };
@@ -934,16 +1025,77 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   }, []);
   /** Which camera roles show on CB Help and in what order (2026-09-10, Camera Setup) — read into `publishCbHelpState`'s own `buildCbHelpFrames` call via a ref (not state) since that function runs from the 800ms heartbeat/event handlers, not React's render path. */
   const cbHelpVisibilityRef = useRef<CbHelpVisibilityState>({ ...DEFAULT_CB_HELP_VISIBILITY });
+  /**
+   * Ref indirection for calling `publishCbHelpState` from THIS effect below
+   * (declared long before `publishCbHelpState` itself) — 2026-09-15, fixing
+   * a real crash the previous version of this fix caused: calling
+   * `publishCbHelpState()` directly from here relied on "the closure isn't
+   * invoked until the whole component function has finished running," which
+   * holds for an ordinary cold mount but NOT reliably across a React Fast
+   * Refresh (Vite HMR) re-invocation — live-hardware-confirmed via
+   * `main.log`: `Uncaught ReferenceError: Cannot access 'publishCbHelpState'
+   * before initialization`, caught by the app's error boundary, which then
+   * rebuilt the whole component tree (resetting `devicesRef`/
+   * `cameraRoleMappingRef` etc. back to their mount defaults until the next
+   * real session start repopulates them — the underlying cause of a run of
+   * "vẫn lag" field reports afterward that were never actually about CB
+   * Help's own performance). A ref populated by an effect declared AFTER
+   * `publishCbHelpState` (see that effect, further down) can never hit this:
+   * `.current` is just a plain mutable slot, no TDZ-risky identifier lookup,
+   * and `?.()` safely no-ops on the off chance it fires before that later
+   * effect's very first run.
+   */
+  const publishCbHelpStateRef = useRef<(() => void) | null>(null);
   useEffect(() => {
     const faceAPI = (window as any).faceAPI;
-    faceAPI?.getCbHelpVisibility?.().then((saved: Partial<Record<CameraRole, CbHelpCameraVisibility>>) => {
+    const resolve = (saved: Partial<Record<CameraRole, CbHelpCameraVisibility>> | null | undefined) => {
       if (!saved) return;
       const next = { ...DEFAULT_CB_HELP_VISIBILITY };
       for (const role of Object.keys(next) as CameraRole[]) {
         if (saved[role]) next[role] = saved[role]!;
       }
       cbHelpVisibilityRef.current = next;
+      // 2026-09-15 field report ("click đóng... vẫn không thay đổi action")
+      // — updating the ref alone does nothing visible on its own:
+      // `buildCbHelpFrames` only ever reads it from INSIDE
+      // `publishCbHelpState`, and nothing here used to trigger that call —
+      // a toggle just sat in the ref until the periodic heartbeat
+      // (`CB_HELP_HEARTBEAT_MS` interval further down)
+      // happened to tick next, a random 0-800ms wait per click that read as
+      // "the button doesn't do anything" (or "still laggy") depending on
+      // how the click happened to land relative to the next tick. Publish
+      // immediately instead, same as every other state-changing event in
+      // this file already does — the heartbeat remains as the fallback for
+      // drift, not the only path. Via the ref, not a direct call — see
+      // `publishCbHelpStateRef`'s own doc comment for why.
+      publishCbHelpStateRef.current?.();
+    };
+    // Stale-overwrite guard — same race `CbHelpFrames.tsx`'s own copy of
+    // this hook has (see its doc comment): the one-time bootstrap fetch
+    // below and the live broadcast subscription are independent async
+    // channels with no ordering guarantee, so a slow bootstrap reply could
+    // in principle land after a real change already broadcast and silently
+    // revert it. Narrower window here (this effect only mounts once per
+    // whole kiosk session, not per settings-panel-open), but the guard is
+    // free and keeps both copies consistent.
+    let supersededByBroadcast = false;
+    faceAPI?.getCbHelpVisibility?.().then((saved: Partial<Record<CameraRole, CbHelpCameraVisibility>> | null | undefined) => {
+      if (!supersededByBroadcast) resolve(saved);
     });
+    // 2026-09-15 field report: Camera Setup is a separate popup window
+    // (`Ctrl/Cmd+Shift+K`) that keeps this window running underneath it —
+    // without this subscription, a visibility/order change saved there
+    // never reached this already-mounted window's own ref, so the extended
+    // display kept showing the old camera set/order until a full app
+    // restart. See preload's `onCbHelpVisibilityChanged` doc comment.
+    return faceAPI?.onCbHelpVisibilityChanged?.((saved: Partial<Record<CameraRole, CbHelpCameraVisibility>> | null | undefined) => {
+      supersededByBroadcast = true;
+      resolve(saved);
+    });
+    // No deps beyond `[]` needed: this effect only ever calls
+    // `publishCbHelpStateRef.current?.()`, a stable ref, never
+    // `publishCbHelpState` itself — see that ref's own doc comment for why
+    // calling the function directly from here is unsafe across Fast Refresh.
   }, []);
 
   /**
@@ -1176,6 +1328,29 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    * hardware) can reject the second independent open with `NotReadableError:
    * Device in use` even from within the same renderer.
    */
+  /**
+   * Finds another frame's already-open, still-live stream reading from the
+   * same physical `deviceId` — 2026-09-15 fix: two DIFFERENT non-CENTER
+   * roles (e.g. LEFT+RIGHT) can resolve to the SAME physical camera (only
+   * one spare camera available, or a Camera Setup mistake), and opening a
+   * second independent `getUserMedia` for a deviceId this function already
+   * has a live stream for hits the identical "device in use" driver
+   * contention the CENTER-sharing case below already guards against — just
+   * between two SIDE frames instead of side+CENTER, which that check alone
+   * doesn't cover. Reads the deviceId off each stream's own live video
+   * track (`getSettings().deviceId`, part of the getUserMedia spec) rather
+   * than a separate side-table, so it needs no change to how
+   * `frameStreamsRef` itself is keyed/stored.
+   */
+  const findExistingStreamForDevice = (deviceId: string, excludeStepId: string): MediaStream | null => {
+    for (const [stepId, s] of Object.entries(frameStreamsRef.current)) {
+      if (stepId === excludeStepId) continue;
+      const track = s.getVideoTracks().find((t) => t.readyState === 'live');
+      if (track?.getSettings().deviceId === deviceId) return s;
+    }
+    return null;
+  };
+
   const openFrameStreams = async (frames: FrameReadiness[]): Promise<boolean> => {
     for (const frame of frames) {
       if (frame.role === 'CENTER' || !frame.deviceId) continue;
@@ -1187,8 +1362,12 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         const cvService = cameraServiceRef.current;
         const reusedCvStream =
           cvService?.getSelectedDevice()?.id === frame.deviceId ? cvService.getActiveStream() : null;
-        const mediaStream = reusedCvStream
-          ? reusedCvStream.clone()
+        const reusedSideStream = reusedCvStream
+          ? null
+          : findExistingStreamForDevice(frame.deviceId, frame.stepId);
+        const sourceStream = reusedCvStream ?? reusedSideStream;
+        const mediaStream = sourceStream
+          ? sourceStream.clone()
           : await navigator.mediaDevices.getUserMedia({
               audio: false,
               // 1280x720, not 1920x1080: these are process-evidence frames, not
@@ -2935,6 +3114,39 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     }
   }, []);
 
+  /**
+   * Ref mirror of "is CB Help actually open right now," polled independently
+   * of `cbHelpOpen` state above — 2026-09-15, closing the last real waste
+   * behind the "hơi lag" field report. `cbHelpOpen` only ever updates from
+   * THIS window's own toggle button, so an operator closing the CB Help
+   * window with its native title-bar X (not the toolbar toggle) leaves
+   * `cbHelpOpen` stuck `true` forever — using it to gate anything would just
+   * trade one silent-waste bug for another. Read from `publishCbHelpState`'s
+   * `centerPreviewDataUrl` computation instead: that heartbeat used to pay
+   * the full downscaled-JPEG-encode cost every 800ms for the kiosk's entire
+   * session lifetime regardless of whether anything was ever open to look at
+   * it — a plain boolean poll every 2s is negligible by comparison, and self
+   * -corrects within 2s of either window state actually changing, from
+   * either window.
+   */
+  const cbHelpWindowOpenRef = useRef(false);
+  useEffect(() => {
+    const faceAPI = (window as any).faceAPI;
+    if (!faceAPI?.isCbHelpWindowOpen) return;
+    let cancelled = false;
+    const poll = () => {
+      faceAPI.isCbHelpWindowOpen().then((open: boolean) => {
+        if (!cancelled) cbHelpWindowOpenRef.current = !!open;
+      });
+    };
+    poll();
+    const id = setInterval(poll, 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
+
   /** Ref mirror of `cameraRoleMapping`, read from `publishCbHelpState` below when it is called from inside the mount-only engine-event handlers (stale-closure concern — same reason `activeWorkflowRef` exists). */
   const cameraRoleMappingRef = useRef<Record<string, string>>({});
   useEffect(() => {
@@ -3008,6 +3220,33 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    * or restarted run must not leave its last frame/photo showing on the
    * extended display.
    */
+  /**
+   * `captureBase64Snapshot()` opts for CB Help's own `centerPreviewDataUrl`
+   * heartbeat below — 2026-09-15 field report ("cài đặt hiển thị cam và
+   * hiển thị cam ở màn mở rộng rất lag"): this heartbeat runs every 800ms
+   * for the kiosk's entire session lifetime (see the `setInterval` further
+   * down), not just while the CB Help window happens to be open, so it must
+   * never do the full-native-resolution encode the real capture path
+   * (`setSnapshotProvider` above) needs — that was a synchronous ~1920x1080
+   * JPEG encode on the render thread plus a ~150-300KB IPC payload, every
+   * 800ms, forever, for a secondary-monitor tile that is never rendered
+   * wider than `MAX_TILE_WIDTH_VW` (32vw, `CbHelpFrames.tsx`) — the exact
+   * cost the operator was feeling as "lag" in both the settings panel and
+   * the live grid in that same window (a heavy decode+repaint competing
+   * with every click/toggle there).
+   *
+   * 2026-09-15, second pass: the first cut (`{maxWidth: 640, quality: 0.6}`)
+   * traded away too much visible sharpness ("cam hiển thị khá mờ so với cam
+   * hiển thị ở màn [chính]" field report) for a cost that pixel count alone
+   * already mostly buys — encode time scales with pixel count far more than
+   * with JPEG quality (quality mainly changes output *size*, not how many
+   * pixels the encoder has to touch), so raising quality back up costs
+   * little extra relative to the ~4x pixel-count cut from 1920x1080 down to
+   * 960x540. 960px still comfortably covers even a 1920px-wide secondary
+   * display's 32vw-capped tile (~614px) with real headroom for a 4K one.
+   */
+  const CB_HELP_PREVIEW_SNAPSHOT_OPTS = { maxWidth: 960, quality: 0.8 };
+
   const publishCbHelpState = useCallback(
     (opts?: {
       phase?: 'idle' | 'review' | 'done';
@@ -3082,33 +3321,69 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         // live preview always shows), so this snapshot is meaningful in
         // every phase, not just 'live'. `captureBase64Snapshot()` already
         // no-ops safely to `null` if the video element isn't ready yet.
-        centerPreviewDataUrl: cameraServiceRef.current?.captureBase64Snapshot() ?? null,
+        // Downscaled (2026-09-15, "cài đặt hiển thị cam... rất lag" field
+        // report) — see `CB_HELP_PREVIEW_SNAPSHOT_OPTS`'s own doc comment for
+        // why this must never call `captureBase64Snapshot()` with no args
+        // the way the real capture path does. Also skipped entirely
+        // (`null`, same as "video not ready") whenever CB Help isn't even
+        // open — see `cbHelpWindowOpenRef`'s own doc comment; there is
+        // nowhere for this snapshot to be seen otherwise, so encoding it is
+        // pure waste.
+        centerPreviewDataUrl: cbHelpWindowOpenRef.current
+          ? cameraServiceRef.current?.captureBase64Snapshot(CB_HELP_PREVIEW_SNAPSHOT_OPTS) ?? null
+          : null,
         errorMessage: cbHelpOverlayRef.current.errorMessage,
         thankYou: cbHelpOverlayRef.current.thankYou,
+        // Unconditional (every phase, idle included) — see this field's own
+        // doc comment on `CbHelpPublishState` for why.
+        cameraRoleMapping: cameraRoleMappingRef.current,
+        connectedDeviceIds: devicesRef.current.map((d) => d.id),
       };
       void faceAPI.publishCbHelpState(state);
     },
     []
   );
+  // Keeps `publishCbHelpStateRef` (declared far above, before this function
+  // exists) pointing at the current `publishCbHelpState` — see that ref's
+  // own doc comment. Safe to list in deps here: this effect is declared
+  // AFTER `publishCbHelpState`, so referencing it in an array literal at
+  // THIS point in the render is ordinary, not a TDZ hazard (`publishCbHelpState`
+  // is `useCallback(..., [])`-stable anyway, so this never re-runs after
+  // the first render in practice).
+  useEffect(() => {
+    publishCbHelpStateRef.current = publishCbHelpState;
+  }, [publishCbHelpState]);
 
   /**
    * Item 12b (2026-09-09): periodically refreshes `centerPreviewDataUrl`
    * (see that field's own doc comment) independent of step/session-change
    * driven publishes — a single step can run for many seconds (posing,
    * holding), during which nothing else would trigger a republish, leaving
-   * CB Help's CENTER tile frozen on a stale still. 800ms is "a few times a
-   * second," plenty for an extended-monitor preview without building a real
-   * second video pipeline over IPC. Reuses the exact same `publishCbHelpState`
-   * every other call site already uses (cheap: one JPEG encode of a frame
-   * already being decoded for the live preview, plus one local IPC send),
-   * rather than a separate, narrower "just the preview" push path. Runs for
-   * the component's whole lifetime now that live is the only mode — no more
+   * CB Help's CENTER tile frozen on a stale still. Reuses the exact same
+   * `publishCbHelpState` every other call site already uses (a JPEG encode
+   * of a frame already being decoded for the live preview, plus one local
+   * IPC send — now gated behind `cbHelpWindowOpenRef`/downscaled, see
+   * `CB_HELP_PREVIEW_SNAPSHOT_OPTS`'s own doc comment), rather than a
+   * separate, narrower "just the preview" push path. Runs for the
+   * component's whole lifetime now that live is the only mode — no more
    * "leaving live mode" case to gate on (cancel/restart already publish
    * `phase: 'idle'` themselves, which zeroes out `frames`/`centerPreviewDataUrl`
    * on the next tick regardless of this timer).
+   *
+   * 1500ms (2026-09-15, second pass — "vẫn hơi lag" field report, user chose
+   * this over keeping 800ms or dropping to 3000ms): was 800ms ("a few times
+   * a second"). Even after downscaling and gating this heartbeat's own
+   * `captureBase64Snapshot()` call, the tick itself still costs a canvas
+   * draw + JPEG encode + IPC send + a forced image decode/repaint in
+   * CbHelpFrames.tsx (a brand-new `data:` URL every tick can never be
+   * browser-cached) whenever the window IS open — the case where the
+   * operator actually feels it. Roughly halving the tick rate roughly
+   * halves that recurring cost; still frequent enough to "prove the camera
+   * is alive" between students, just not sub-second-smooth.
    */
+  const CB_HELP_HEARTBEAT_MS = 1500;
   useEffect(() => {
-    const id = setInterval(() => publishCbHelpState(), 800);
+    const id = setInterval(() => publishCbHelpState(), CB_HELP_HEARTBEAT_MS);
     return () => clearInterval(id);
   }, [publishCbHelpState]);
 
@@ -4000,9 +4275,22 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         the kiosk's campaign+login path (2026-09-09, CCCD-scan feature) shows
         `CccdScanWaitingScreen` — `StudentIdEntryScreen`'s manual "nhập mã
         sinh viên" form is fully replaced there, not shown alongside it, per
-        the product decision. Every other build (apps/web, the legacy
-        per-device-secret desktop path — neither has a CCCD scanner attached)
-        keeps the original manual-entry screen (2026-09-07) unchanged.
+        the product decision. The legacy per-device-secret desktop path (no
+        `campaignId`/`authClient`) keeps the original manual-entry screen
+        (2026-09-07) unchanged.
+
+        2026-09-15: also gated on `window.faceAPI` being present, not just
+        `campaignId && authClient` — `apps/web`'s `WebCampaignGate` passes
+        both of those too (it now shares desktop's real campaign+SSO flow),
+        but `CccdScanWaitingScreen`'s `ScanMonitorCorner` can only ever
+        resolve a scan through the Electron-only `window.faceAPI.
+        lookupCccdByIdentityNumber` bridge — with no such bridge in a plain
+        browser, the card would sit at "Sẵn sàng" forever (silently falling
+        back to `idle` on every scan attempt, see that function's own `if
+        (!lookup)` branch) with no way to actually check a student in. A
+        browser has no guaranteed hardware QR/barcode reader wired up as a
+        keyboard-wedge device the way a kiosk does, so `apps/web` keeps the
+        manual "nhập mã sinh viên" form instead — same as the legacy path.
       */}
       {/*
         Post-save "Cảm ơn" overlay (2026-09-09 product request) — see
@@ -4022,7 +4310,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         </div>
       )}
       {awaitingStudent && !deviceBlockedReason && (
-        props.campaignId && props.authClient ? (
+        props.campaignId && props.authClient && (window as any).faceAPI ? (
           <CccdScanWaitingScreen
             submitting={studentSubmitting}
             error={studentLookupError}
@@ -4034,6 +4322,11 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
             // own doc comment for why this doesn't change anything about
             // `handleStudentSubmit` itself.
             onManualSubmit={(code) => void handleStudentSubmit(code)}
+            // Same desktop-only gating as `modeButton`'s own "Màn hình mở
+            // rộng" button — see `CccdScanWaitingScreenProps.onToggleCbHelp`'s
+            // own doc comment for why this screen needs its own copy of it.
+            onToggleCbHelp={Boolean((window as any).faceAPI?.toggleCbHelpWindow) ? handleToggleCbHelp : undefined}
+            cbHelpOpen={cbHelpOpen}
           />
         ) : (
           <StudentIdEntryScreen

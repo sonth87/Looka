@@ -2,6 +2,7 @@ import { useEffect, Component, ReactNode } from "react";
 import { DeviceLayout, AppConfig } from "@sonth87/device-layout";
 import { FaceCaptureApp, HttpCaptureSink, LookaIcon } from "@face/ui";
 import { StudentsScreen } from "./StudentsScreen";
+import { WebCampaignGate, authClient as webAuthClient } from "./WebCampaignGate";
 
 /**
  * Captures go to our own backend, which holds the file-service key.
@@ -21,7 +22,18 @@ const captureSink = new HttpCaptureSink(
   (window as { LOOKA_API_KEY?: string }).LOOKA_API_KEY
 );
 
-const CaptureScreen = () => <FaceCaptureApp sink={captureSink} />;
+const CaptureScreen = () => (
+  <WebCampaignGate>
+    {(campaignConfig, campaignId) => (
+      <FaceCaptureApp
+        sink={captureSink}
+        campaignConfig={campaignConfig}
+        campaignId={campaignId}
+        authClient={webAuthClient}
+      />
+    )}
+  </WebCampaignGate>
+);
 
 class AppErrorBoundary extends Component<
   { children: ReactNode },

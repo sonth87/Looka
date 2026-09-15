@@ -6,6 +6,7 @@ import type { EnrollFaceError } from '@face/biometric';
 import { EmbeddingEnrollmentRepository, nextRetryDelayMs } from '@face/database';
 import type { EmbeddingEnrollmentItem } from '@face/database';
 import { getDatabase } from './db.js';
+import { recordStatsEvent } from './statsEvents.js';
 
 /**
  * Enrollment side of docs/plans/face-embedding-server-integration-plan.md.
@@ -35,9 +36,23 @@ const BATCH_SIZE = 2;
 /** Matches `UploadWorker`'s own default — roughly a day of retries at capped backoff before giving up and surfacing FAILED/GAVE_UP for an operator to notice. */
 const MAX_ATTEMPTS = 20;
 
-function embeddingServerBaseUrl(): string | null {
-  const v = process.env.EMBEDDING_SERVER_BASE_URL?.trim();
-  return v ? v : null;
+/**
+ * 2026-09-15 — the real, live "Attendance — Face Enrollment API" this
+ * module is a client for (`EmbeddingServerClient`'s own doc comment already
+ * named this exact host as the server its request/response shapes were
+ * verified against, `docs/plans/face-embedding-server-integration-plan.md`
+ * §4). Given as a default rather than left required, same convention
+ * `aiService.ts`'s `DEFAULT_AI_SERVICE_BASE_URL` already uses for the
+ * Python sidecar: this server is reachable network-wide (confirmed live via
+ * `GET /health` → `{"status":"ok","models_loaded":true}`), not a
+ * developer's own localhost, so every kiosk should be able to reach it out
+ * of the box without per-machine configuration — `EMBEDDING_SERVER_BASE_URL`
+ * remains available to override this for a different environment.
+ */
+const DEFAULT_EMBEDDING_SERVER_BASE_URL = 'http://10.20.107.17:8000';
+
+function embeddingServerBaseUrl(): string {
+  return process.env.EMBEDDING_SERVER_BASE_URL?.trim() || DEFAULT_EMBEDDING_SERVER_BASE_URL;
 }
 
 let repo: EmbeddingEnrollmentRepository | null = null;
@@ -52,15 +67,16 @@ function embeddingsDir(): string {
 
 /**
  * Bring up the embedding-enrollment subsystem: recover anything a crash left
- * mid-send, then start the retry worker. Returns false when
- * `EMBEDDING_SERVER_BASE_URL` is unset — per the plan's §7, that is a
- * supported "feature off" state, not an error: the kiosk still captures and
- * queues normally, and nothing calls `enrollFace` at all while this is
- * false (see `FaceCaptureApp.tsx`'s own guard).
+ * mid-send, then start the retry worker. Always returns true now that
+ * `embeddingServerBaseUrl()` has a real default (2026-09-15) — the "feature
+ * off" state the plan's §7 describes is no longer reachable via an unset
+ * env var alone; a caller that genuinely needs to run with the feature off
+ * (e.g. an isolated test environment with no network path to the real
+ * server) sets `EMBEDDING_SERVER_BASE_URL` to something unreachable rather
+ * than leaving it unset.
  */
 export function startEmbeddingEnroll(): boolean {
   const baseUrl = embeddingServerBaseUrl();
-  if (!baseUrl) return false;
 
   repo = new EmbeddingEnrollmentRepository(getDatabase());
   client = new EmbeddingServerClient({ baseUrl, timeoutMs: DEFAULT_TIMEOUT_MS });
@@ -187,6 +203,20 @@ async function sendOne(id: string): Promise<EnrollFaceOutcome> {
 
     const result = await client!.enrollFace(row.userCode, blob, fileName);
     repo!.markDone(id, { embeddingId: result.embeddingId, sourceImagePath: result.sourceImagePath });
+    // 2026-09-15 — pushes this enrollment into apps/api's own Postgres via
+    // the same stats-event outbox every other kiosk metric already uses
+    // (see StatsEventType's own doc comment on EMBEDDING_ENROLLED). The
+    // local `embedding_enrollments` row above is the retry/reference queue;
+    // this is what makes the enrollment queryable centrally, not just on
+    // this one kiosk's own disk.
+    recordStatsEvent('EMBEDDING_ENROLLED', {
+      sessionId: row.sessionId,
+      stepId: row.stepId,
+      attempt: row.attempt,
+      userCode: row.userCode,
+      embeddingId: result.embeddingId,
+      sourceImagePath: result.sourceImagePath,
+    });
     return { ok: true, embeddingId: result.embeddingId, sourceImagePath: result.sourceImagePath };
   } catch (err) {
     return applyFailure(row, err);
@@ -211,6 +241,18 @@ function applyFailure(row: EmbeddingEnrollmentItem, err: unknown): EnrollFaceOut
     // only kind worth a background retry.
     if (row.attempts + 1 >= MAX_ATTEMPTS) {
       repo!.markGaveUp(row.id, err.message);
+      // Definitive — every retry is exhausted, this capture will never be
+      // enrolled without a human redoing it. See EMBEDDING_FAILED's own doc
+      // comment (StatsEventRepository.ts) for why an in-progress retry
+      // (the `markRetry` branch just below) does NOT also report this.
+      recordStatsEvent('EMBEDDING_FAILED', {
+        sessionId: row.sessionId,
+        stepId: row.stepId,
+        attempt: row.attempt,
+        userCode: row.userCode,
+        failureKind: 'NETWORK_ERROR',
+        error: err.message,
+      });
     } else {
       repo!.markRetry(row.id, err.message, nextRetryDelayMs(row.attempts));
     }
@@ -221,6 +263,22 @@ function applyFailure(row: EmbeddingEnrollmentItem, err: unknown): EnrollFaceOut
   // bytes and said no; retrying automatically would only repeat it.
   repo!.markFailed(row.id, {
     kind: detail.kind,
+    error: err.message,
+    conflictUserCode: detail.kind === 'DUPLICATE_IDENTITY' ? detail.conflictUserCode : undefined,
+    conflictSimilarity: detail.kind === 'DUPLICATE_IDENTITY' ? detail.conflictSimilarity : undefined,
+  });
+  // 2026-09-15 — pushes this rejection into apps/api's own Postgres via the
+  // same stats-event outbox EMBEDDING_ENROLLED already uses, so it's
+  // visible centrally (CMS "Thống kê" tab) instead of only in this kiosk's
+  // own local SQLite log — field request, prompted by a real session where
+  // every capture was rejected (too many faces in frame) with nothing
+  // surfacing it beyond this one machine.
+  recordStatsEvent('EMBEDDING_FAILED', {
+    sessionId: row.sessionId,
+    stepId: row.stepId,
+    attempt: row.attempt,
+    userCode: row.userCode,
+    failureKind: detail.kind,
     error: err.message,
     conflictUserCode: detail.kind === 'DUPLICATE_IDENTITY' ? detail.conflictUserCode : undefined,
     conflictSimilarity: detail.kind === 'DUPLICATE_IDENTITY' ? detail.conflictSimilarity : undefined,

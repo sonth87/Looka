@@ -544,6 +544,18 @@ export interface FaceAPIBridge {
   getCbHelpVisibility: () => Promise<CbHelpVisibilityMap>;
   setCbHelpVisibility: (map: CbHelpVisibilityMap) => Promise<boolean>;
 
+  /**
+   * Only meaningful from inside the MAIN kiosk window: fires whenever
+   * `setCbHelpVisibility` is called from anywhere (in practice, the separate
+   * Camera Setup popup window, `Ctrl/Cmd+Shift+K`) — 2026-09-15 field
+   * report: an operator changing "Hiện camera này"/"Thứ tự hiển thị" while
+   * the kiosk's own window was already running had no way to find out, so
+   * `FaceCaptureApp.tsx`'s `cbHelpVisibilityRef` (loaded once, on mount)
+   * kept using the stale value until the whole app was restarted. Returns
+   * an unsubscribe function, same shape as `onCbHelpUpdate`.
+   */
+  onCbHelpVisibilityChanged: (callback: (map: CbHelpVisibilityMap) => void) => () => void;
+
   /** "Lưới 3x3" — always 3 tiles/row in the multi-camera capture grid, a kiosk-local setting (2026-09-10). */
   getGrid3x3Enabled: () => Promise<boolean>;
   setGrid3x3Enabled: (value: boolean) => Promise<boolean>;
@@ -661,6 +673,11 @@ const faceAPI: FaceAPIBridge = {
   setCaptureSequencing: (value) => ipcRenderer.invoke('capture:setSequencing', value),
   getCbHelpVisibility: () => ipcRenderer.invoke('camera:getCbHelpVisibility'),
   setCbHelpVisibility: (map) => ipcRenderer.invoke('camera:setCbHelpVisibility', map),
+  onCbHelpVisibilityChanged: (callback) => {
+    const listener = (_: unknown, map: CbHelpVisibilityMap) => callback(map);
+    ipcRenderer.on('camera:cbHelpVisibilityChanged', listener);
+    return () => ipcRenderer.removeListener('camera:cbHelpVisibilityChanged', listener);
+  },
   getGrid3x3Enabled: () => ipcRenderer.invoke('display:getGrid3x3Enabled'),
   setGrid3x3Enabled: (value) => ipcRenderer.invoke('display:setGrid3x3Enabled', value),
 
