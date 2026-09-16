@@ -66,3 +66,16 @@ export const OUTBOX_MAX_RETRY_DELAY_SECONDS = 300;
  * chances to not recur before giving up.
  */
 export const PURGE_RETRY_MAX_ATTEMPTS = 5;
+
+/**
+ * Max attempts for one `embedding_jobs` row before a still-retryable
+ * (`NETWORK_ERROR`) failure is given up on and marked `FAILED` — mirrors the
+ * old desktop client's own `MAX_ATTEMPTS = 20`
+ * (`apps/desktop/src/main/embeddingEnroll.ts`, now removed) rather than
+ * inventing a new number: this is the same "roughly a day of retries at
+ * capped backoff" budget that path used, just enforced server-side now that
+ * the backend owns embedding. Every other failure kind (400/409/413/422) is
+ * terminal on the first attempt regardless of this cap — see
+ * `EmbeddingServerError.retryable`'s own doc comment in `@face/biometric`.
+ */
+export const EMBEDDING_MAX_ATTEMPTS = 20;

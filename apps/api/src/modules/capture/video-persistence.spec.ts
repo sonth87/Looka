@@ -43,7 +43,11 @@ describeDb('video persistence', () => {
           namingStrategy: new SnakeNamingStrategy(),
           synchronize: false,
         }),
-        TypeOrmModule.forFeature([Session, SessionVideo, VideoUploadOutboxEntry]),
+        TypeOrmModule.forFeature([
+          Session,
+          SessionVideo,
+          VideoUploadOutboxEntry,
+        ]),
       ],
       providers: [SessionService, SessionVideoService],
     }).compile();
@@ -79,13 +83,17 @@ describeDb('video persistence', () => {
     const session = await sessionService.createSession({});
     const videoId = crypto.randomUUID();
 
-    const result = await sessionVideoService.addDeviceVideo(deviceId, campaignId, {
-      videoId,
-      sessionId: session.id,
-      cameraRole: 'CENTER',
-      durationMs: 5000,
-      dataUrl: webmDataUrl(7),
-    });
+    const result = await sessionVideoService.addDeviceVideo(
+      deviceId,
+      campaignId,
+      {
+        videoId,
+        sessionId: session.id,
+        cameraRole: 'CENTER',
+        durationMs: 5000,
+        dataUrl: webmDataUrl(7),
+      },
+    );
     expect(result.videoId).toBe(videoId);
 
     // Not yet on fs-core (no worker has run in this test) — must fall back
@@ -98,7 +106,10 @@ describeDb('video persistence', () => {
     expect(local.mimeType).toBe('video/webm');
     expect(local.data.equals(Buffer.from([7, 7, 7, 7]))).toBe(true);
 
-    const { url: linkUrl } = sessionVideoService.issueLocalViewLink(videoId, 'http://localhost:3100');
+    const { url: linkUrl } = sessionVideoService.issueLocalViewLink(
+      videoId,
+      'http://localhost:3100',
+    );
     const parsed = new URL(linkUrl);
     expect(() =>
       sessionVideoService.verifyLocalViewTokenOrFail(
@@ -108,7 +119,11 @@ describeDb('video persistence', () => {
       ),
     ).not.toThrow();
     expect(() =>
-      sessionVideoService.verifyLocalViewTokenOrFail(videoId, parsed.searchParams.get('exp')!, 'deadbeef'),
+      sessionVideoService.verifyLocalViewTokenOrFail(
+        videoId,
+        parsed.searchParams.get('exp')!,
+        'deadbeef',
+      ),
     ).toThrow();
   });
 
@@ -125,7 +140,10 @@ describeDb('video persistence', () => {
     await sessionVideoService.addDeviceVideo(deviceId, campaignId, dto);
     await sessionVideoService.addDeviceVideo(deviceId, campaignId, dto);
 
-    const rows = await dataSource.query(`SELECT id FROM video_upload_outbox WHERE video_id = $1`, [videoId]);
+    const rows = await dataSource.query(
+      `SELECT id FROM video_upload_outbox WHERE video_id = $1`,
+      [videoId],
+    );
     expect(rows.length).toBe(1);
   });
 
@@ -176,11 +194,15 @@ describeDb('video persistence', () => {
     const videoId = crypto.randomUUID();
     const dataUrl = `data:video/webm;codecs=vp8;base64,${Buffer.from([1, 2, 3]).toString('base64')}`;
 
-    const result = await sessionVideoService.addDeviceVideo(deviceId, campaignId, {
-      videoId,
-      sessionId: session.id,
-      dataUrl,
-    });
+    const result = await sessionVideoService.addDeviceVideo(
+      deviceId,
+      campaignId,
+      {
+        videoId,
+        sessionId: session.id,
+        dataUrl,
+      },
+    );
     expect(result.videoId).toBe(videoId);
 
     const local = await sessionVideoService.readLocalContent(videoId);
@@ -196,11 +218,15 @@ describeDb('video persistence', () => {
         sessionId: session.id,
         dataUrl: 'data:image/jpeg;base64,AAAA',
       }),
-    ).rejects.toMatchObject({ payload: { code: ERROR_CODE.VIDEO_UNSUPPORTED_MIME_TYPE } });
+    ).rejects.toMatchObject({
+      payload: { code: ERROR_CODE.VIDEO_UNSUPPORTED_MIME_TYPE },
+    });
   });
 
   test('readLocalContent throws FILE_STORAGE_NOT_READY for a video with no locally stored bytes', async () => {
-    await expect(sessionVideoService.readLocalContent(crypto.randomUUID())).rejects.toMatchObject({
+    await expect(
+      sessionVideoService.readLocalContent(crypto.randomUUID()),
+    ).rejects.toMatchObject({
       payload: { code: ERROR_CODE.FILE_STORAGE_NOT_READY },
     });
   });

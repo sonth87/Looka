@@ -9,8 +9,17 @@ import { EditCampaignPage } from './components/EditCampaignPage';
 import { AnglePresetsPage } from './components/AnglePresetsPage';
 import { CaptureConfigurationsPage } from './components/CaptureConfigurationsPage';
 import { PhotoKindsPage } from './components/PhotoKindsPage';
+import { PrintersPage } from './components/PrintersPage';
+import { RolesPage } from './components/RolesPage';
 import { ReviewListPage } from './photo-review/ReviewListPage';
 import { ReviewDetailPage } from './photo-review/ReviewDetailPage';
+import { PrintPage } from './print/PrintPage';
+import { PrintBatchDetailPage } from './print/PrintBatchDetailPage';
+import { CardTemplatesPage } from './card-templates/CardTemplatesPage';
+import { CardTemplateDetailPage } from './card-templates/CardTemplateDetailPage';
+import { DashboardPage } from './dashboard/DashboardPage';
+import { WorkflowsPage } from './workflow/WorkflowsPage';
+import { IdentificationMethodsPage } from './workflow/IdentificationMethodsPage';
 import { DesktopCallbackPage } from './components/DesktopCallbackPage';
 
 /**
@@ -47,6 +56,7 @@ export default function App() {
         <Layout>
           <Routes>
             <Route path="/" element={<StatsOverview />} />
+            <Route path="/dashboard" element={<DashboardPage />} />
             <Route path="/campaigns" element={<CampaignList />} />
             <Route path="/campaigns/new" element={<CreateCampaignPage />} />
             <Route path="/campaigns/:id" element={<CampaignDetail />} />
@@ -56,6 +66,14 @@ export default function App() {
             <Route path="/config" element={<PhotoKindsPage />} />
             <Route path="/review" element={<ReviewListPage />} />
             <Route path="/review/:id" element={<ReviewDetailPage />} />
+            <Route path="/print" element={<PrintPage />} />
+            <Route path="/print/batches/:id" element={<PrintBatchDetailPage />} />
+            <Route path="/card-templates" element={<CardTemplatesPage />} />
+            <Route path="/card-templates/:id" element={<CardTemplateDetailPage />} />
+            <Route path="/printers" element={<PrintersPage />} />
+            <Route path="/roles" element={<RolesPage />} />
+            <Route path="/workflows" element={<WorkflowsPage />} />
+            <Route path="/identification-methods" element={<IdentificationMethodsPage />} />
             <Route path="/desktop-callback" element={<DesktopCallbackPage />} />
           </Routes>
         </Layout>

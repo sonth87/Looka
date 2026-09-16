@@ -8,9 +8,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * never a live foreign key a campaign reads from at runtime — no
  * relationship column to any other table exists here on purpose.
  */
-export class CaptureConfigurations1801000000000
-  implements MigrationInterface
-{
+export class CaptureConfigurations1801000000000 implements MigrationInterface {
   name = 'CaptureConfigurations1801000000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

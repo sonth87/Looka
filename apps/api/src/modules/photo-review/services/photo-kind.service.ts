@@ -1,11 +1,16 @@
 import { CustomException } from '@app/shared/errors/legacy';
 import { toDao } from '@app/shared/http/to-dao.helper';
 import { CommonService } from '@app/shared/common/common.service';
+import { Pagination } from '@app/shared/http/pagination';
 import { HttpStatus, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { PhotoKindDao } from '../dao';
-import { CreatePhotoKindDto, UpdatePhotoKindDto } from '../dto';
+import {
+  CreatePhotoKindDto,
+  ListPhotoKindsQueryDto,
+  UpdatePhotoKindDto,
+} from '../dto';
 import { PhotoKind } from '../entities/photo-kind.entity';
 import { PHOTO_REVIEW_ERROR_CODE } from '../photo-review.constants';
 
@@ -25,6 +30,28 @@ export class PhotoKindService extends CommonService<PhotoKind> {
   async listKinds(): Promise<PhotoKindDao[]> {
     const kinds = await this.findAll({ order: { createdAt: 'ASC' } });
     return toDao(PhotoKindDao, kinds);
+  }
+
+  /** Paginated variant, opt-in via `page` — see `ListPhotoKindsQueryDto`'s own doc comment. */
+  async listKindsPaginated(
+    query: ListPhotoKindsQueryDto,
+  ): Promise<Pagination<PhotoKindDao>> {
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 20;
+
+    const qb = this.repository.createQueryBuilder('k');
+    if (query.active !== undefined) {
+      qb.andWhere('k.active = :active', { active: query.active });
+    }
+    if (query.q) {
+      qb.andWhere('(k.label_vi ILIKE :q OR k.code ILIKE :q)', {
+        q: `%${query.q}%`,
+      });
+    }
+    qb.orderBy('k.created_at', 'ASC');
+
+    const result = await this.paginateQueryBuilder(qb, { page, limit });
+    return new Pagination(toDao(PhotoKindDao, result.items), result.meta);
   }
 
   async findKindEntityOrFail(id: string): Promise<PhotoKind> {
@@ -65,7 +92,8 @@ export class PhotoKindService extends CommonService<PhotoKind> {
 
     if (dto.labelVi !== undefined) kind.labelVi = dto.labelVi;
     if (dto.cardSpec !== undefined) kind.cardSpec = dto.cardSpec;
-    if (dto.qualityProfile !== undefined) kind.qualityProfile = dto.qualityProfile;
+    if (dto.qualityProfile !== undefined)
+      kind.qualityProfile = dto.qualityProfile;
     if (dto.promptHints !== undefined) kind.promptHints = dto.promptHints;
     if (dto.active !== undefined) kind.active = dto.active;
 

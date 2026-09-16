@@ -52,6 +52,23 @@ export class AddDevicePhotoDto {
   @IsString()
   identityNumber?: string;
 
+  /**
+   * The subject's `user_code` from the external roster (2026-09-16, backend-
+   * owned embedding) — threaded through end-to-end from
+   * `RunScopedCaptureSession`'s cached `StudentSubjectInfo.userCode` the same
+   * way `identityNumber` above already is, so `PhotoService.addDevicePhoto`
+   * can enqueue an `embedding_jobs` row without depending on this session's
+   * `SESSION_REPORT` metadata having landed first (which may not have
+   * happened yet at this point — see that method's own doc comment).
+   */
+  @ApiPropertyOptional({
+    description:
+      'user_code của sinh viên theo hồ sơ ngoài, nếu có (dùng để đăng ký embedding)',
+  })
+  @IsOptional()
+  @IsString()
+  userCode?: string;
+
   @ApiProperty({ description: 'Bước trong quy trình chụp, ví dụ FRONT/LEFT' })
   @IsString()
   @IsNotEmpty()

@@ -74,20 +74,33 @@ export function WebCampaignGate({
   const [campaignsError, setCampaignsError] = useState<string | null>(null);
   const [selectedCampaign, setSelectedCampaign] = useState<CampaignSummary | null>(null);
 
+  /** Same reset `onLogout` used to do manually — see desktop's `CampaignGate.tsx`'s `forceLogout` for why every 401 handler below needs it too, not just the operator's own logout button. */
+  const forceLogout = useCallback(() => {
+    authClient.logout();
+    setIdentity(null);
+    setCampaigns(null);
+    setCampaignsError(null);
+    setSelectedCampaign(null);
+    setIsAdmin(undefined);
+  }, []);
+
+  /** True for the one `CampaignPortalApiError` case that means "this SSO session is no longer valid" (vs. a network blip or a 5xx). */
+  const isSessionExpired = (err: unknown): boolean => err instanceof CampaignPortalApiError && err.status === 401;
+
   const loadCampaigns = useCallback(async () => {
     setCampaignsError(null);
     try {
       const list = await fetchMyCampaigns(authClient.authHeaders());
       setCampaigns(list);
     } catch (err) {
-      const message =
-        err instanceof CampaignPortalApiError && err.status === 401
-          ? 'Không xác thực được với máy chủ (SSO chưa sẵn sàng hoặc phiên đã hết hạn).'
-          : (err as Error).message;
-      setCampaignsError(message);
+      if (isSessionExpired(err)) {
+        forceLogout();
+        return;
+      }
+      setCampaignsError((err as Error).message);
       setCampaigns((prev) => prev ?? []);
     }
-  }, []);
+  }, [forceLogout]);
 
   useEffect(() => {
     if (!identity) return;
@@ -102,27 +115,37 @@ export function WebCampaignGate({
         const me = await fetchMe(authClient.authHeaders());
         if (!cancelled) setIsAdmin(me.isAdmin);
       } catch (err) {
+        if (!cancelled && isSessionExpired(err)) {
+          forceLogout();
+          return;
+        }
         console.error('[WebCampaignGate] fetchMe failed — isAdmin badge will stay unknown:', err);
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [identity]);
+  }, [identity, forceLogout]);
 
   async function handleStartCapture(selected: CampaignSummary) {
     setCampaign(selected);
     setStarting(true);
     try {
       const config = await fetchCampaignConfig(selected.id, authClient.authHeaders());
-      setCampaignConfig({ captureAngles: config.captureAngles, recordVideo: config.recordVideo === true });
+      setCampaignConfig({
+        captureAngles: config.captureAngles,
+        recordVideo: config.recordVideo === true,
+      });
     } catch (err) {
+      if (isSessionExpired(err)) {
+        forceLogout();
+        return;
+      }
       console.error('[WebCampaignGate] fetchCampaignConfig failed, starting with defaultWorkflow:', err);
       setCampaignConfig({ captureAngles: null, recordVideo: false });
-    } finally {
-      setStarting(false);
-      setStarted(true);
     }
+    setStarting(false);
+    setStarted(true);
   }
 
   // Self-enrollment — same purpose as desktop's own (ties this browser to a
@@ -151,6 +174,10 @@ export function WebCampaignGate({
         // matters; nothing here needs the returned device secret.
         void result;
       } catch (err) {
+        // Deliberately NOT `forceLogout()` here even on a 401 — same
+        // reasoning as desktop's `CampaignGate.tsx`: `started` may already
+        // be `true` by the time this resolves, and actual capture uploads
+        // don't depend on this SSO token at all.
         console.error('[WebCampaignGate] self-enroll failed — SESSION_REPORT stats will keep failing to reach the server:', err);
       }
     })();
@@ -216,14 +243,7 @@ export function WebCampaignGate({
         onStartCapture={(c) => void handleStartCapture(c)}
         starting={starting}
         onOpenDeviceSettings={() => {}}
-        onLogout={() => {
-          authClient.logout();
-          setIdentity(null);
-          setCampaigns(null);
-          setCampaignsError(null);
-          setSelectedCampaign(null);
-          setIsAdmin(undefined);
-        }}
+        onLogout={forceLogout}
       />
     </KioskShell>
   );

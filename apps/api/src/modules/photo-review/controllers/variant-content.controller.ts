@@ -39,8 +39,13 @@ export class VariantContentController {
     @Query('sig') sig: string,
     @Res() res: Response,
   ): Promise<void> {
-    this.photoReviewService.verifyLocalVariantViewTokenOrFail(variantId, exp, sig);
-    const { data, mimeType } = await this.photoReviewService.readLocalVariantContent(variantId);
+    this.photoReviewService.verifyLocalVariantViewTokenOrFail(
+      variantId,
+      exp,
+      sig,
+    );
+    const { data, mimeType } =
+      await this.photoReviewService.readLocalVariantContent(variantId);
     res.setHeader('Content-Type', mimeType);
     res.setHeader('Cache-Control', 'private, max-age=60');
     // `helmet()` (main.ts) sets `Cross-Origin-Resource-Policy: same-origin`

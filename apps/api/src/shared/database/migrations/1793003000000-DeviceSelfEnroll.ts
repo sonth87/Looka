@@ -13,8 +13,12 @@ export class DeviceSelfEnroll1793003000000 implements MigrationInterface {
   name = 'DeviceSelfEnroll1793003000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.query(`ALTER TABLE "devices" DROP CONSTRAINT "FK_devices_campaign"`);
-    await queryRunner.query(`ALTER TABLE "devices" ALTER COLUMN "campaign_id" DROP NOT NULL`);
+    await queryRunner.query(
+      `ALTER TABLE "devices" DROP CONSTRAINT "FK_devices_campaign"`,
+    );
+    await queryRunner.query(
+      `ALTER TABLE "devices" ALTER COLUMN "campaign_id" DROP NOT NULL`,
+    );
     await queryRunner.query(`
       ALTER TABLE "devices"
       ADD CONSTRAINT "FK_devices_campaign" FOREIGN KEY ("campaign_id")
@@ -43,8 +47,12 @@ export class DeviceSelfEnroll1793003000000 implements MigrationInterface {
       DROP COLUMN "hostname"
     `);
 
-    await queryRunner.query(`ALTER TABLE "devices" DROP CONSTRAINT "FK_devices_campaign"`);
-    await queryRunner.query(`ALTER TABLE "devices" ALTER COLUMN "campaign_id" SET NOT NULL`);
+    await queryRunner.query(
+      `ALTER TABLE "devices" DROP CONSTRAINT "FK_devices_campaign"`,
+    );
+    await queryRunner.query(
+      `ALTER TABLE "devices" ALTER COLUMN "campaign_id" SET NOT NULL`,
+    );
     await queryRunner.query(`
       ALTER TABLE "devices"
       ADD CONSTRAINT "FK_devices_campaign" FOREIGN KEY ("campaign_id")

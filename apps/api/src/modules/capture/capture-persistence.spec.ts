@@ -59,7 +59,9 @@ describeDb('capture persistence', () => {
         // irrelevant here, a resolved-no-op stub is enough to satisfy DI.
         {
           provide: PhotoReviewService,
-          useValue: { ensureSetForApprovedSession: jest.fn().mockResolvedValue(null) },
+          useValue: {
+            ensureSetForApprovedSession: jest.fn().mockResolvedValue(null),
+          },
         },
       ],
     }).compile();

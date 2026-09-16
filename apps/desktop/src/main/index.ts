@@ -26,7 +26,6 @@ import {
   startEmbeddingEnroll,
   stopEmbeddingEnroll,
   embeddingHealth,
-  enrollFaceForStep,
   listEnrolledFaces,
   deleteEnrolledFace,
   deleteAllEnrolledFaces,
@@ -534,35 +533,6 @@ app.whenReady().then(async () => {
    * sidecar (plan §6's "models_loaded: false" row).
    */
   ipcMain.handle('embedding:health', () => embeddingHealth());
-
-  /**
-   * Enrolls one capture's image under `userCode`. The renderer only ever
-   * calls this for the CENTER/FRONT step (2026-09-10 product decision — see
-   * FaceCaptureApp.tsx's own call site) and only when a real `userCode` is
-   * known (no CCCD-scan lookup on the manual "nhập mã sinh viên" path skips
-   * this entirely, never falls back to `subjectCode` — see the integration
-   * task's own decision 2). Always resolves, never rejects: every outcome
-   * (success, a real rejection like 409/422, or "queued for background
-   * retry" on a network failure) is reported in the returned `EnrollFaceOutcome`
-   * so the renderer can react without a try/catch.
-   */
-  ipcMain.handle(
-    'embedding:enrollFace',
-    (
-      _,
-      payload: { sessionId?: unknown; stepId?: unknown; attempt?: unknown; userCode?: unknown; dataUrl?: unknown }
-    ) => {
-      const sessionId = String(payload?.sessionId ?? '');
-      const stepId = String(payload?.stepId ?? '');
-      const userCode = String(payload?.userCode ?? '');
-      const attempt = Number(payload?.attempt ?? 1) || 1;
-      const dataUrl = String(payload?.dataUrl ?? '');
-      if (!sessionId || !stepId || !userCode || !dataUrl) {
-        return Promise.resolve({ ok: false, kind: 'EMPTY_OR_UNREADABLE' as const });
-      }
-      return enrollFaceForStep({ sessionId, stepId, attempt, userCode, dataUrl });
-    }
-  );
 
   /** Admin/audit: images the server currently has registered for one userCode (§7 — "màn hình quản trị... CB Help sửa sai"). */
   ipcMain.handle('embedding:listFaces', async (_, userCode: unknown) => {

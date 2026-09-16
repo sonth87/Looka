@@ -9,7 +9,6 @@ import type { AuthenticatedUser } from '../auth/sso-auth.guard';
  * rather than re-declaring the shape.
  */
 declare global {
-  // eslint-disable-next-line @typescript-eslint/no-namespace
   namespace Express {
     interface Request {
       user?: AuthenticatedUser;

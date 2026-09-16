@@ -58,6 +58,15 @@ const EnvSchema = z.object({
 
   PYTHON_AI_BASE_URL: z.string().optional(),
 
+  // Backend-owned face-embedding pipeline (2026-09-16 — `EmbeddingWorkerService`
+  // now calls this external "Attendance — Face Enrollment API" directly,
+  // superseding the old desktop-client path). Optional here, same posture as
+  // PYTHON_AI_BASE_URL above — `EmbeddingWorkerService` falls back to the
+  // same real, network-reachable default the old client used
+  // (`apps/desktop/src/main/embeddingEnroll.ts`'s own
+  // `DEFAULT_EMBEDDING_SERVER_BASE_URL`) rather than requiring this at boot.
+  EMBEDDING_SERVER_BASE_URL: z.string().optional(),
+
   // cms-8-screens-api-plan.md §8 I-Q1 — optional here (not every deployment
   // needs citizen-id encryption on day one, same posture as
   // PYTHON_AI_BASE_URL above); `citizen-id.codec.ts` throws its own clear

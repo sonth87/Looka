@@ -92,7 +92,10 @@ export const IDENTITY_SIMILARITY_WARN_THRESHOLD = 0.85;
 
 /** Upload validation — plan §5.4. */
 export const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
-export const ALLOWED_UPLOAD_MIME_TYPES: readonly string[] = ['image/jpeg', 'image/png'];
+export const ALLOWED_UPLOAD_MIME_TYPES: readonly string[] = [
+  'image/jpeg',
+  'image/png',
+];
 
 /** Sidecar HTTP call timeout (plan §6.4's "chạy nền" budget) — long enough for a real edit, short enough not to hang a request forever when the sidecar is unreachable. */
 export const SIDECAR_TIMEOUT_MS = 30_000;

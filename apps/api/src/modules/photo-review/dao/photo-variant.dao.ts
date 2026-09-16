@@ -1,6 +1,9 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Expose } from 'class-transformer';
-import { PhotoVariantKind, PhotoVariantStatus } from '../photo-review.constants';
+import {
+  PhotoVariantKind,
+  PhotoVariantStatus,
+} from '../photo-review.constants';
 
 /**
  * One version of a card photo, as returned to the CMS. `viewUrl`/
@@ -38,7 +41,10 @@ export class PhotoVariantDao {
   @Expose()
   fsFileId?: string | null;
 
-  @ApiPropertyOptional({ description: 'Trạng thái file trên file-service (SCANNING/READY/FAILED/...) — xem PhotoReviewService.resolveVariantViewSource' })
+  @ApiPropertyOptional({
+    description:
+      'Trạng thái file trên file-service (SCANNING/READY/FAILED/...) — xem PhotoReviewService.resolveVariantViewSource',
+  })
   @Expose()
   fsStatus?: string | null;
 
@@ -86,7 +92,9 @@ export class PhotoVariantDao {
   @Expose()
   seed?: string | null;
 
-  @ApiPropertyOptional({ description: 'Độ giống khuôn mặt so với ảnh gốc (0-1)' })
+  @ApiPropertyOptional({
+    description: 'Độ giống khuôn mặt so với ảnh gốc (0-1)',
+  })
   @Expose()
   identitySimilarity?: number | null;
 
@@ -102,7 +110,9 @@ export class PhotoVariantDao {
   @Expose()
   note?: string | null;
 
-  @ApiPropertyOptional({ description: 'Link xem ảnh, ngắn hạn — vắng mặt nếu chưa sẵn sàng' })
+  @ApiPropertyOptional({
+    description: 'Link xem ảnh, ngắn hạn — vắng mặt nếu chưa sẵn sàng',
+  })
   @Expose()
   viewUrl?: string;
 

@@ -17,6 +17,14 @@ export interface DevicePhotoInput {
   dataUrl: string;
   /** The subject's CCCD number, when known — see `ApiPhotoUploadClient.routeUpload`'s own doc comment for why this rides along the request. */
   identityNumber?: string;
+  /**
+   * The subject's `user_code` from the external roster, when known
+   * (2026-09-16, backend-owned face embedding) — same "rides along the
+   * request, never touches fs-core" treatment as `identityNumber` above.
+   * `PhotoService.addDevicePhoto` uses it to enqueue an `embedding_jobs`
+   * row.
+   */
+  userCode?: string;
 }
 
 /**

@@ -3,6 +3,7 @@ import {
   ApiResponseDecorator,
 } from '@app/shared/http/api-response.decorator';
 import { SsoAuthGuard } from '@app/shared/auth/index';
+import { Pagination } from '@app/shared/http/pagination';
 import { PermissionsGuard } from '@app/modules/identity/presentation/guards/permissions.guard';
 import { RequirePermission } from '@app/modules/identity/presentation/guards/require-permission.decorator';
 import {
@@ -19,6 +20,7 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { IdentificationMethodDao } from '../dao';
 import {
   CreateIdentificationMethodDto,
+  ListIdentificationMethodsQueryDto,
   UpdateIdentificationMethodDto,
 } from '../dto';
 import { IdentificationMethodService } from '../services/identification-method.service';
@@ -41,18 +43,28 @@ import { IdentificationMethodService } from '../services/identification-method.s
 export class IdentificationMethodController {
   constructor(private readonly service: IdentificationMethodService) {}
 
+  /**
+   * Same §9.1 backward-compat rule 6 as `CampaignController.listCampaigns`
+   * — plain array (legacy) when `page` is omitted (a workflow-config form's
+   * picker needs every method at once), paginated+searchable `{items, meta}`
+   * once a caller opts in by passing `page`
+   * (`IdentificationMethodsPage.tsx`'s own management list).
+   */
   @Get()
   @ApiOperation({
     summary:
-      'List identification methods (active only, unless ?includeInactive=true and caller has identification-method:write)',
+      'List identification methods — plain array if `page` is omitted (legacy, active-only unless ?includeInactive=true), paginated+searchable otherwise',
   })
   @ApiResponseArrayDecorator(IdentificationMethodDao)
   list(
-    @Query('includeInactive') includeInactive?: string,
-  ): Promise<IdentificationMethodDao[]> {
-    return includeInactive === 'true'
-      ? this.service.listAll()
-      : this.service.listActive();
+    @Query() query: ListIdentificationMethodsQueryDto,
+  ): Promise<IdentificationMethodDao[] | Pagination<IdentificationMethodDao>> {
+    if (query.page === undefined) {
+      return query.includeInactive
+        ? this.service.listAll()
+        : this.service.listActive();
+    }
+    return this.service.listPaginated(query);
   }
 
   @Post()

@@ -72,6 +72,7 @@ export class CampaignService extends CommonService<Campaign> {
         autoHoldMs: dto.autoHoldMs ?? null,
         simultaneousCapture,
         recordVideo: dto.recordVideo ?? false,
+        requiresEmbedding: dto.requiresEmbedding ?? true,
         workflowId,
         workflowVersionId: dto.workflowVersionId ?? null,
         processingSlaHours: dto.processingSlaHours ?? null,
@@ -279,6 +280,9 @@ export class CampaignService extends CommonService<Campaign> {
     }
     if (dto.recordVideo !== undefined) {
       campaign.recordVideo = dto.recordVideo;
+    }
+    if (dto.requiresEmbedding !== undefined) {
+      campaign.requiresEmbedding = dto.requiresEmbedding;
     }
     if (dto.workflowVersionId !== undefined) {
       if (dto.workflowVersionId === null) {

@@ -37,11 +37,15 @@ export class PhotoReviewEvent extends BaseEntity {
   action: PhotoReviewAction;
 
   @Column('uuid', { name: 'actor_user_id', nullable: true })
-  @ApiPropertyOptional({ description: 'Người thực hiện, null nếu hệ thống tự động' })
+  @ApiPropertyOptional({
+    description: 'Người thực hiện, null nếu hệ thống tự động',
+  })
   actorUserId?: string | null;
 
   @Column('jsonb', { nullable: true })
-  @ApiPropertyOptional({ description: 'Chi tiết bổ sung (vd lỗi, prompt, độ giống)' })
+  @ApiPropertyOptional({
+    description: 'Chi tiết bổ sung (vd lỗi, prompt, độ giống)',
+  })
   payload?: Record<string, unknown> | null;
 
   @Column('timestamptz', { default: () => 'now()' })

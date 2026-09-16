@@ -222,17 +222,23 @@ describeDb(
         metadata: { identityNumber, className: 'CNTT01-META' },
       });
 
-      const byIdentityNumber = await studentService.listStudents({ q: identityNumber });
+      const byIdentityNumber = await studentService.listStudents({
+        q: identityNumber,
+      });
       expect(
         byIdentityNumber.items.some((i) => i.subjectCode === subjectCode),
       ).toBe(true);
 
-      const byClassName = await studentService.listStudents({ q: 'CNTT01-META' });
-      expect(
-        byClassName.items.some((i) => i.subjectCode === subjectCode),
-      ).toBe(true);
+      const byClassName = await studentService.listStudents({
+        q: 'CNTT01-META',
+      });
+      expect(byClassName.items.some((i) => i.subjectCode === subjectCode)).toBe(
+        true,
+      );
 
-      const noMatch = await studentService.listStudents({ q: `no-such-value-${randomUUID()}` });
+      const noMatch = await studentService.listStudents({
+        q: `no-such-value-${randomUUID()}`,
+      });
       expect(noMatch.items.some((i) => i.subjectCode === subjectCode)).toBe(
         false,
       );

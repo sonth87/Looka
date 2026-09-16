@@ -29,6 +29,9 @@ const VARIANT_KIND_LABEL: Record<string, string> = {
   CARD_UPLOAD: 'Upload',
 };
 
+/** Which decision a reviewer is making in `ReviewDecisionModal` — named rather than inlined so both the modal's own prop and `ReviewDetailContent`'s state use the same declared type. */
+type ReviewDecisionMode = 'approve' | 'reject';
+
 /**
  * "Duyệt ảnh" detail body (C5, cms-photo-review-plan.md §5.2) — the actual
  * fetch/actions/JSX, extracted 2026-09-09 so both `ReviewDetailPage` (the
@@ -57,7 +60,12 @@ export function ReviewDetailContent({ id, onClose }: { id: string; onClose?: () 
   const [busy, setBusy] = useState(false);
   const [aiModalOpen, setAiModalOpen] = useState(false);
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
-  const [rejectModalOpen, setRejectModalOpen] = useState(false);
+  // Which decision modal (Duyệt/Từ chối) is open, if any — both actions now
+  // share one modal (`ReviewDecisionModal`) with the same quality checklist,
+  // 2026-09-16 field request. "Duyệt" used to be a single instant click with
+  // no note; it now goes through this modal too so the checklist applies to
+  // both outcomes, not just rejection.
+  const [decisionModal, setDecisionModal] = useState<ReviewDecisionMode | null>(null);
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
   // Original photos carry no `viewUrl` of their own (unlike `PhotoVariant`,
   // which the service layer resolves server-side) - one must be requested
@@ -129,7 +137,7 @@ export function ReviewDetailContent({ id, onClose }: { id: string; onClose?: () 
       .catch((err) => setPhotoLinks((prev) => ({ ...prev, [photoId]: classifyLinkError(err) })));
   }
 
-  const nestedOverlayOpen = aiModalOpen || uploadModalOpen || rejectModalOpen || lightboxUrl != null;
+  const nestedOverlayOpen = aiModalOpen || uploadModalOpen || decisionModal != null || lightboxUrl != null;
 
   useEffect(() => {
     if (!onClose) return;
@@ -322,7 +330,7 @@ export function ReviewDetailContent({ id, onClose }: { id: string; onClose?: () 
             <span className="flex-1" />
             <button
               type="button"
-              onClick={() => setRejectModalOpen(true)}
+              onClick={() => setDecisionModal('reject')}
               disabled={busy}
               className="px-3 py-2 rounded-lg border border-red-300 text-red-700 hover:bg-red-50 text-sm font-semibold disabled:opacity-50"
             >
@@ -330,7 +338,7 @@ export function ReviewDetailContent({ id, onClose }: { id: string; onClose?: () 
             </button>
             <button
               type="button"
-              onClick={() => void withBusy(() => approveReviewSet(id))}
+              onClick={() => setDecisionModal('approve')}
               disabled={busy}
               className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-sm disabled:opacity-50"
             >
@@ -363,12 +371,15 @@ export function ReviewDetailContent({ id, onClose }: { id: string; onClose?: () 
         />
       )}
 
-      {rejectModalOpen && (
-        <RejectNoteModal
-          onClose={() => setRejectModalOpen(false)}
+      {decisionModal && (
+        <ReviewDecisionModal
+          mode={decisionModal}
+          onClose={() => setDecisionModal(null)}
           onConfirm={(note) => {
-            setRejectModalOpen(false);
-            void withBusy(() => rejectReviewSet(id, note || undefined));
+            setDecisionModal(null);
+            void withBusy(() =>
+              decisionModal === 'approve' ? approveReviewSet(id, note || undefined) : rejectReviewSet(id, note || undefined)
+            );
           }}
         />
       )}
@@ -419,13 +430,67 @@ function VariantRow({
   );
 }
 
-function RejectNoteModal({ onClose, onConfirm }: { onClose: () => void; onConfirm: (note: string) => void }) {
+/**
+ * Quality checklist items for the review decision — 2026-09-16 field
+ * request, matching the reference mockup's checkbox-based review popup.
+ * There is no backend field to persist a structured checklist against (the
+ * `approve`/`reject` endpoints only take a free-text `note`, see
+ * `ApproveRejectDto` server-side) — a dedicated checklist table is out of
+ * scope for this change. Instead, checked items are compiled into readable
+ * text and prepended to whatever the reviewer types, so the checklist stays
+ * a fast way to document a decision rather than a separate stored structure.
+ */
+const REVIEW_CHECKLIST_ITEMS = [
+  'Khung hình đúng chuẩn (đúng tỉ lệ, không bị cắt xén)',
+  'Ánh sáng đạt yêu cầu (không quá tối/quá sáng)',
+  'Nền ảnh đúng màu quy định',
+  'Không nhoè, không che khuất khuôn mặt',
+] as const;
+
+function buildDecisionNote(checked: Record<string, boolean>, freeText: string): string {
+  const checklistLine = REVIEW_CHECKLIST_ITEMS.map((item) => `${checked[item] ? '✓' : '✗'} ${item}`).join('; ');
+  const trimmed = freeText.trim();
+  return trimmed ? `${checklistLine}\n${trimmed}` : checklistLine;
+}
+
+/** Shared popup for both "Duyệt" and "Từ chối" — see `REVIEW_CHECKLIST_ITEMS`'s own doc comment for why the checklist is UI-only, compiled into the existing free-text `note` field rather than a new persisted structure. */
+function ReviewDecisionModal({
+  mode,
+  onClose,
+  onConfirm,
+}: {
+  mode: ReviewDecisionMode;
+  onClose: () => void;
+  onConfirm: (note: string) => void;
+}) {
+  const [checked, setChecked] = useState<Record<string, boolean>>({});
   const [note, setNote] = useState('');
+  const isApprove = mode === 'approve';
+
   return (
-    <ModalShell title="Từ chối hồ sơ" onClose={onClose}>
+    <ModalShell title={isApprove ? 'Duyệt hồ sơ' : 'Từ chối hồ sơ'} onClose={onClose}>
       <div className="space-y-3">
         <div>
-          <label className="block text-sm text-gray-500 mb-1">Lý do (không bắt buộc)</label>
+          <label className="block text-sm text-gray-500 mb-1.5">Checklist chất lượng</label>
+          <div className="space-y-1.5">
+            {REVIEW_CHECKLIST_ITEMS.map((item) => (
+              <label key={item} className="flex items-start gap-2 text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={checked[item] ?? false}
+                  onChange={(e) => setChecked((prev) => ({ ...prev, [item]: e.target.checked }))}
+                  className="rounded border-gray-300 mt-0.5"
+                />
+                {item}
+              </label>
+            ))}
+          </div>
+          <p className="text-xs text-gray-400 mt-1">
+            Checklist chỉ để ghi chú nhanh — không lưu thành bảng riêng, được gộp vào ghi chú bên dưới.
+          </p>
+        </div>
+        <div>
+          <label className="block text-sm text-gray-500 mb-1">Ghi chú thêm (không bắt buộc)</label>
           <textarea
             value={note}
             onChange={(e) => setNote(e.target.value)}
@@ -439,10 +504,12 @@ function RejectNoteModal({ onClose, onConfirm }: { onClose: () => void; onConfir
             Huỷ
           </button>
           <button
-            onClick={() => onConfirm(note.trim())}
-            className="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 text-white font-semibold text-sm"
+            onClick={() => onConfirm(buildDecisionNote(checked, note))}
+            className={`px-4 py-2 rounded-lg text-white font-semibold text-sm ${
+              isApprove ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-red-600 hover:bg-red-700'
+            }`}
           >
-            Từ chối
+            {isApprove ? 'Duyệt' : 'Từ chối'}
           </button>
         </div>
       </div>

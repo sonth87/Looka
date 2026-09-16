@@ -1,12 +1,14 @@
 import { toDao } from '@app/shared/http/to-dao.helper';
 import { CustomException, ERROR_CODE } from '@app/shared/errors/legacy';
 import { CommonService } from '@app/shared/common/common.service';
+import { Pagination } from '@app/shared/http/pagination';
 import { BadRequestException, HttpStatus, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { CaptureConfigurationDao } from '../dao';
 import {
   CreateCaptureConfigurationDto,
+  ListCaptureConfigurationsQueryDto,
   UpdateCaptureConfigurationDto,
 } from '../dto';
 import { CaptureConfiguration } from '../entities/capture-configuration.entity';
@@ -48,6 +50,26 @@ export class CaptureConfigurationService extends CommonService<CaptureConfigurat
   async listCaptureConfigurations(): Promise<CaptureConfigurationDao[]> {
     const configs = await this.findAll({ order: { createdAt: 'DESC' } });
     return configs.map((c) => this.toDaoWithRequiredCameraCount(c));
+  }
+
+  /** Paginated variant, opt-in via `page` — see `ListCaptureConfigurationsQueryDto`'s own doc comment. */
+  async listCaptureConfigurationsPaginated(
+    query: ListCaptureConfigurationsQueryDto,
+  ): Promise<Pagination<CaptureConfigurationDao>> {
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 20;
+
+    const qb = this.repository.createQueryBuilder('c');
+    if (query.q) {
+      qb.andWhere('c.name ILIKE :q', { q: `%${query.q}%` });
+    }
+    qb.orderBy('c.created_at', 'DESC');
+
+    const result = await this.paginateQueryBuilder(qb, { page, limit });
+    return new Pagination(
+      result.items.map((c) => this.toDaoWithRequiredCameraCount(c)),
+      result.meta,
+    );
   }
 
   async findCaptureConfigEntityOrFail(

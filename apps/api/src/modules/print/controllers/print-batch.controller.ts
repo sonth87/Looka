@@ -27,6 +27,8 @@ import {
   BatchItemsDto,
   CreatePrintBatchDto,
   ListPrintBatchesQueryDto,
+  PrintPackageQueryDto,
+  SendPrintBatchDto,
   UpdatePrintBatchDto,
 } from '../dto';
 import { PrintBatchService } from '../services/print-batch.service';
@@ -103,6 +105,19 @@ export class PrintBatchController {
     return { removed: true };
   }
 
+  @Post(':id/items/remove')
+  @RequirePermission('print-batch:write', 'Gỡ nhiều item khỏi đợt in')
+  @ApiOperation({
+    summary:
+      'Gỡ hàng loạt item khỏi đợt in (item vẫn tồn tại, chỉ mất batchId)',
+  })
+  removeItems(
+    @Param('id') id: string,
+    @Body() dto: BatchItemsDto,
+  ): Promise<{ removed: number }> {
+    return this.batchService.removeItems(id, dto.itemIds);
+  }
+
   @Post(':id/render')
   @RequirePermission('print-batch:write', 'Render toàn bộ đợt in')
   @ApiOperation({
@@ -121,11 +136,14 @@ export class PrintBatchController {
   @RequirePermission('print-batch:write', 'Gửi in đợt in')
   @ApiOperation({
     summary:
-      'DIRECT: xếp hàng cho print-agent (QUEUED). CENTRALIZED: hoàn tất, sẵn sàng tải gói.',
+      'DIRECT: xếp hàng cho print-agent (QUEUED). CENTRALIZED: hoàn tất, sẵn sàng tải gói. Bỏ trống itemIds = cả đợt.',
   })
   @ApiResponseDecorator(PrintBatchDetailDao)
-  send(@Param('id') id: string): Promise<PrintBatchDetailDao> {
-    return this.batchService.send(id);
+  send(
+    @Param('id') id: string,
+    @Body() dto: SendPrintBatchDto,
+  ): Promise<PrintBatchDetailDao> {
+    return this.batchService.send(id, dto.itemIds);
   }
 
   @Get(':id/package')
@@ -133,10 +151,16 @@ export class PrintBatchController {
   @Header('Content-Type', 'application/zip')
   @ApiOperation({
     summary:
-      'Tải zip (ảnh mặt trước/sau + manifest.csv) — thay dần review/export',
+      'Tải zip (ảnh mặt trước/sau + manifest.csv) — thay dần review/export. Bỏ trống itemIds = cả đợt.',
   })
-  async downloadPackage(@Param('id') id: string): Promise<StreamableFile> {
-    const { zip, filename } = await this.batchService.package(id);
+  async downloadPackage(
+    @Param('id') id: string,
+    @Query() query: PrintPackageQueryDto,
+  ): Promise<StreamableFile> {
+    const { zip, filename } = await this.batchService.package(
+      id,
+      query.itemIds,
+    );
     return new StreamableFile(zip, {
       disposition: `attachment; filename="${filename}"`,
     });

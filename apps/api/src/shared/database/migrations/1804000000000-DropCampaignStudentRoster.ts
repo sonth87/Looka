@@ -18,9 +18,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * below is just defensive belt-and-braces on top of that, not a substitute
  * for having checked.
  */
-export class DropCampaignStudentRoster1804000000000
-  implements MigrationInterface
-{
+export class DropCampaignStudentRoster1804000000000 implements MigrationInterface {
   name = 'DropCampaignStudentRoster1804000000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

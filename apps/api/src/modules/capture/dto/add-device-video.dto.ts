@@ -39,7 +39,8 @@ export class AddDeviceVideoDto {
   identityNumber?: string;
 
   @ApiPropertyOptional({
-    description: 'Camera đã quay video này (vai trò camera, hoặc id thiết bị vật lý nếu không có ánh xạ vai trò)',
+    description:
+      'Camera đã quay video này (vai trò camera, hoặc id thiết bị vật lý nếu không có ánh xạ vai trò)',
   })
   @IsOptional()
   @IsString()
@@ -52,7 +53,8 @@ export class AddDeviceVideoDto {
   durationMs?: number;
 
   @ApiProperty({
-    description: 'Video dạng data URL base64, ví dụ "data:video/webm;base64,..."',
+    description:
+      'Video dạng data URL base64, ví dụ "data:video/webm;base64,..."',
   })
   @IsString()
   dataUrl: string;

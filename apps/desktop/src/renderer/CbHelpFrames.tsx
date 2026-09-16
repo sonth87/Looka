@@ -423,48 +423,85 @@ export default function CbHelpFrames() {
   const [visibility] = useCbHelpVisibility();
 
   /**
-   * Which non-CENTER roles should get their own idle-preview stream —
-   * 2026-09-15 field request: the settings panel could already mark a
-   * LEFT/RIGHT/UP/DOWN camera "visible", but nothing showed it until an
-   * actual capture session started (`state.frames` is empty in `idle`
-   * phase — see `CbHelpPublishState.frames`'s own doc comment). A role
-   * qualifies when it's (a) marked visible, (b) not CENTER (which already
-   * has its own always-on `centerPreviewDataUrl` preview, unrelated to this
-   * list), and (c) has a saved role→device mapping that's currently
-   * connected (`state.cameraRoleMapping`/`state.connectedDeviceIds`, 2026-
-   * 09-15 — published unconditionally now, not just during a session) — no
-   * point trying to open a stream for a role with nothing plugged in.
+   * Whether `role`'s saved mapping (`state.cameraRoleMapping`) currently
+   * resolves to a physically-connected device — i.e. this role could open a
+   * real live stream right now. Used both to decide `idlePreviewRoles`
+   * membership's live-vs-placeholder rendering and to dedup live devices
+   * below.
+   */
+  function isRoleLive(role: CameraRole): boolean {
+    const deviceId = state.cameraRoleMapping?.[role];
+    return !!deviceId && (state.connectedDeviceIds ?? []).includes(deviceId);
+  }
+
+  /**
+   * Which non-CENTER roles get a tile on the idle screen — 2026-09-15 field
+   * request: the settings panel could already mark a LEFT/RIGHT/UP/DOWN
+   * camera "visible", but nothing showed it until an actual capture session
+   * started (`state.frames` is empty in `idle` phase — see
+   * `CbHelpPublishState.frames`'s own doc comment).
+   *
+   * 2026-09-16 field request ("campaign đó có nhiều cam, và cần 3 cam, khi
+   * tôi click chọn thì vẫn phải hiển thị các góc cam dù chưa được kết
+   * nối"): a role now qualifies as soon as it's marked visible — connection
+   * status no longer excludes it from the grid, it only decides what
+   * renders INSIDE that role's tile (`isRoleLive` above: a live stream when
+   * connected, a MISSING/UNASSIGNED placeholder otherwise — see the render
+   * below). This lets an operator preparing a kiosk see every camera angle
+   * the campaign's workflow expects (e.g. "cần 3 cam") and which ones still
+   * need to be plugged in, rather than the tile just silently not existing.
    */
   const idlePreviewRoles = (() => {
-    const candidates = CB_HELP_ROLES.filter((role) => {
-      if (role === 'CENTER' || !visibility[role].visible) return false;
-      const deviceId = state.cameraRoleMapping?.[role];
-      return !!deviceId && (state.connectedDeviceIds ?? []).includes(deviceId);
-    }).sort((a, b) => visibility[a].order - visibility[b].order);
+    const visibleRoles = CB_HELP_ROLES.filter((role) => role !== 'CENTER' && visibility[role].visible).sort(
+      (a, b) => visibility[a].order - visibility[b].order
+    );
 
-    // De-duplicated by physical device (2026-09-15 field report: "rất lag,
-    // ... hiển thị toàn bộ cam" — on a kiosk with fewer physical cameras
-    // than roles, two+ roles can share one deviceId via the same fallback
-    // mapping `resolveStepCamera` already applies elsewhere; without this,
-    // each of those roles opened its OWN `getUserMedia` for the identical
-    // device (redundant negotiation — the lag) and rendered as separate,
-    // visually-identical tiles (reads as "showing every camera" even though
-    // it's really the same one repeated). CENTER's own device (already
-    // covered by `centerPreviewDataUrl`, never opened as a second stream
-    // here) claims its slot first so a role sharing THAT device is skipped
-    // too, same reasoning `isFrameLive`'s own `centerDeviceId` check already
-    // applies during an active session.
+    // De-duplicated by physical device, but ONLY among roles that would
+    // actually open a live stream (2026-09-15 field report: "rất lag, ...
+    // hiển thị toàn bộ cam" — on a kiosk with fewer physical cameras than
+    // roles, two+ roles can share one deviceId via the same fallback mapping
+    // `resolveStepCamera` applies elsewhere; without this, each of those
+    // roles opened its OWN `getUserMedia` for the identical device —
+    // redundant negotiation, the lag — and rendered as separate, visually-
+    // identical tiles). A role with no live feed (not connected, or not
+    // mapped at all) has nothing to duplicate, so it always keeps its own
+    // placeholder tile regardless of this dedup. CENTER's own device
+    // (already covered by `centerPreviewDataUrl`, never opened as a second
+    // stream here) claims its slot first, same as `isFrameLive`'s own
+    // `centerDeviceId` check during an active session.
     const claimedDeviceIds = new Set<string>();
     const centerDeviceId = state.cameraRoleMapping?.CENTER;
     if (centerDeviceId) claimedDeviceIds.add(centerDeviceId);
 
-    return candidates.filter((role) => {
+    return visibleRoles.filter((role) => {
+      if (!isRoleLive(role)) return true;
       const deviceId = state.cameraRoleMapping![role]!;
       if (claimedDeviceIds.has(deviceId)) return false;
       claimedDeviceIds.add(deviceId);
       return true;
     });
   })();
+
+  /**
+   * Full render order for the idle grid, CENTER included — 2026-09-16 fix
+   * ("vị trí các cam khi được đổi thì trên giao diện chưa đổi"): the grid
+   * below used to always render CENTER's tile FIRST, unconditionally, before
+   * mapping `idlePreviewRoles` for the rest — so re-ordering CENTER in the
+   * settings panel (its row has the same up/down controls as every other
+   * role) visibly did nothing, since CENTER's position was never actually
+   * driven by `visibility.CENTER.order` in the first place. This merges
+   * CENTER into the same order-sorted list so its position (and every other
+   * role's, relative to it) genuinely reflects the settings panel.
+   *
+   * Known limitation, not addressed here: if CENTER itself is unchecked
+   * (hidden) while exactly one other role stays visible, this still falls
+   * into the single-tile branch below, which is hardcoded to CENTER's own
+   * live-stream/preview fields — an unlikely combination (CENTER is the
+   * main required shot) not worth the extra branching for right now.
+   */
+  const idleGridRoles: CameraRole[] = (
+    visibility.CENTER.visible ? [...idlePreviewRoles, 'CENTER' as const] : idlePreviewRoles
+  ).sort((a, b) => visibility[a].order - visibility[b].order);
 
   /**
    * The student greeting outlives `state.greeting` itself — that field only
@@ -565,9 +602,15 @@ export default function CbHelpFrames() {
   // non-CENTER role (via `isFrameLive` below) and this list is naturally
   // empty (`idlePreviewRoles` requires `state.frames`-independent mapping
   // data, but there's no reason to open a SECOND, redundant stream for a
-  // role `state.frames` is already live-streaming).
+  // role `state.frames` is already live-streaming). Filtered to `isRoleLive`
+  // (2026-09-16) — `idlePreviewRoles` now also includes roles with no
+  // connected device at all (see its own doc comment), and there is nothing
+  // to open a stream FOR those; they render a MISSING/UNASSIGNED placeholder
+  // below instead.
   const idlePreviewDeviceIds =
-    state.phase === 'idle' ? idlePreviewRoles.map((role) => state.cameraRoleMapping?.[role]).filter((id): id is string => !!id) : [];
+    state.phase === 'idle'
+      ? idlePreviewRoles.filter(isRoleLive).map((role) => state.cameraRoleMapping![role] as string)
+      : [];
   // CENTER's own live stream attempt (2026-09-15, "muốn mượt như ở màn
   // action" field request) — see `isFrameLive`'s own doc comment for the
   // full item-12b history this reopens: a live `getUserMedia` for CENTER
@@ -757,8 +800,9 @@ export default function CbHelpFrames() {
     // 2026-09-15 field request: previously this screen only ever showed
     // CENTER, regardless of the settings panel — `idlePreviewRoles` (see
     // its own doc comment) is the visible, mapped, connected non-CENTER
-    // cameras, so a grid renders here whenever there's at least one.
-    const showGrid = idlePreviewRoles.length > 0;
+    // cameras, so a grid renders here whenever there's more than one tile
+    // total (`idleGridRoles`, CENTER included — see its own doc comment).
+    const showGrid = idleGridRoles.length > 1;
     return (
       <div className="relative w-screen h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center gap-6 overflow-hidden p-4">
         {cornerBadge}
@@ -767,26 +811,36 @@ export default function CbHelpFrames() {
           <div
             className="flex-1 min-h-0 w-full grid justify-center mx-auto"
             style={{
-              gridTemplateColumns: `repeat(${1 + idlePreviewRoles.length}, minmax(0, 1fr))`,
-              maxWidth: `${(1 + idlePreviewRoles.length) * MAX_TILE_WIDTH_VW}vw`,
+              gridTemplateColumns: `repeat(${idleGridRoles.length}, minmax(0, 1fr))`,
+              maxWidth: `${idleGridRoles.length * MAX_TILE_WIDTH_VW}vw`,
               gap: TILE_GAP_PX,
             }}
           >
-            <FrameTile
-              key="CENTER"
-              size="large"
-              className="w-full h-full"
-              label="FRONT"
-              roleLabel={CAMERA_ROLE_LABELS_VI.CENTER}
-              deviceLabel={centerLiveDeviceId ? deviceLabelsRef.current.get(centerLiveDeviceId) ?? null : null}
-              stream={centerLiveStream}
-              status="READY"
-              imagePath={state.centerPreviewDataUrl}
-              mirrored={CAPTURE_MIRRORED}
-              showCompositionGrid
-            />
-            {idlePreviewRoles.map((role) => {
+            {idleGridRoles.map((role) => {
+              if (role === 'CENTER') {
+                return (
+                  <FrameTile
+                    key="CENTER"
+                    size="large"
+                    className="w-full h-full"
+                    label="FRONT"
+                    roleLabel={CAMERA_ROLE_LABELS_VI.CENTER}
+                    deviceLabel={centerLiveDeviceId ? deviceLabelsRef.current.get(centerLiveDeviceId) ?? null : null}
+                    stream={centerLiveStream}
+                    status="READY"
+                    imagePath={state.centerPreviewDataUrl}
+                    mirrored={CAPTURE_MIRRORED}
+                    showCompositionGrid
+                  />
+                );
+              }
               const deviceId = state.cameraRoleMapping?.[role];
+              const live = isRoleLive(role);
+              // MISSING: mapped to a real device, just not plugged in right
+              // now — same status/label ("Thiếu camera") `MultiFrameGrid`
+              // already uses for exactly this during an active session.
+              // UNASSIGNED: this role has no saved device at all yet.
+              const status = live ? 'READY' : deviceId ? 'MISSING' : 'UNASSIGNED';
               return (
                 <FrameTile
                   key={role}
@@ -794,9 +848,9 @@ export default function CbHelpFrames() {
                   className="w-full h-full"
                   label={role}
                   roleLabel={CAMERA_ROLE_LABELS_VI[role]}
-                  deviceLabel={deviceId ? deviceLabelsRef.current.get(deviceId) ?? null : null}
-                  stream={deviceId ? streamsRef.current.get(deviceId) ?? null : null}
-                  status="READY"
+                  deviceLabel={live && deviceId ? deviceLabelsRef.current.get(deviceId) ?? null : null}
+                  stream={live && deviceId ? streamsRef.current.get(deviceId) ?? null : null}
+                  status={status}
                   mirrored={CAPTURE_MIRRORED}
                 />
               );
@@ -821,7 +875,17 @@ export default function CbHelpFrames() {
           (centerLiveStream || state.centerPreviewDataUrl) && (
             <FrameTile
               size="large"
-              className="w-full max-w-3xl aspect-video rounded-2xl"
+              // Height-driven sizing (2026-09-16 field request: "hiển thị lớn
+              // hơn tránh bị nhỏ ở chính giữa") — the previous `max-w-3xl`
+              // capped this at a flat 768px regardless of screen size, which
+              // reads as tiny and lost in the middle of a large external
+              // display. Sizing off viewport HEIGHT instead (with `w-auto` so
+              // `aspect-video` derives the matching width) lets it fill most
+              // of the vertical space this idle screen actually has, since
+              // the container is a `flex-col` column with only the caption
+              // text below competing for room; `max-w-[92vw]` is just a
+              // safety net for an unusually narrow/tall window.
+              className="w-auto h-[70vh] max-w-[92vw] aspect-video rounded-2xl"
               label="FRONT"
               roleLabel={CAMERA_ROLE_LABELS_VI.CENTER}
               deviceLabel={centerLiveDeviceId ? deviceLabelsRef.current.get(centerLiveDeviceId) ?? null : null}
@@ -829,6 +893,7 @@ export default function CbHelpFrames() {
               status="READY"
               imagePath={state.centerPreviewDataUrl}
               mirrored={CAPTURE_MIRRORED}
+              showCompositionGrid
             />
           )
         )}

@@ -51,7 +51,8 @@ export class ApiKeyOrSsoGuard implements CanActivate {
       // identical check: a length/byte-position-timed comparison would let
       // a caller recover the key one correct byte at a time.
       const valid =
-        providedKey.length === this.expectedKey.length && timingSafeEqual(providedKey, this.expectedKey);
+        providedKey.length === this.expectedKey.length &&
+        timingSafeEqual(providedKey, this.expectedKey);
       if (valid) return true;
       // A wrong key falls through to the SSO check rather than rejecting
       // immediately - harmless (the SSO check will reject too, absent a

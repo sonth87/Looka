@@ -34,6 +34,8 @@ export class SeedStudentCardPhotoKind1800001000000 implements MigrationInterface
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.query(`DELETE FROM "photo_kinds" WHERE "code" = 'STUDENT_CARD'`);
+    await queryRunner.query(
+      `DELETE FROM "photo_kinds" WHERE "code" = 'STUDENT_CARD'`,
+    );
   }
 }

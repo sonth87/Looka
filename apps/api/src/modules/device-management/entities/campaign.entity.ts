@@ -216,6 +216,21 @@ export class Campaign extends BaseEntity {
   recordVideo: boolean;
 
   /**
+   * Campaign-level switch for whether captured photos get sent to the
+   * external face-embedding server on CCCD-scan identification. Default
+   * `true` — embedding used to fire unconditionally for every campaign, so
+   * existing rows must keep behaving exactly the same until an admin
+   * explicitly opts a campaign out (unlike `recordVideo`, which defaults to
+   * `false` since it was always opt-in).
+   */
+  @Column('boolean', { default: true, name: 'requires_embedding' })
+  @ApiProperty({
+    description:
+      'Có gửi ảnh chụp lên máy chủ nhận diện khuôn mặt (embedding) hay không',
+  })
+  requiresEmbedding: boolean;
+
+  /**
    * "Nghiệp vụ" the campaign runs — cms-8-screens-api-plan.md §2.2/P2,
    * migration `1814000000000-CampaignWorkflowRef.ts`. Bare uuid, no FK
    * (same cross-module convention `campaign_members.user_id` already

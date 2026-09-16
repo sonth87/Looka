@@ -59,7 +59,11 @@ export class VariantUploadOutboxEntry extends BaseEntity {
   @Column('varchar', { length: 255, nullable: true, name: 'tenant_name' })
   tenantName?: string | null;
 
-  @Column({ type: 'enum', enum: VariantOutboxStatus, default: VariantOutboxStatus.PENDING })
+  @Column({
+    type: 'enum',
+    enum: VariantOutboxStatus,
+    default: VariantOutboxStatus.PENDING,
+  })
   @Index()
   status: VariantOutboxStatus;
 

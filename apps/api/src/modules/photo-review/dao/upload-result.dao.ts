@@ -14,11 +14,16 @@ export class UploadVariantResultDao {
   @Type(() => PhotoVariantDao)
   variant: PhotoVariantDao;
 
-  @ApiPropertyOptional({ description: 'Độ giống khuôn mặt so với ảnh gốc (0-1)' })
+  @ApiPropertyOptional({
+    description: 'Độ giống khuôn mặt so với ảnh gốc (0-1)',
+  })
   @Expose()
   identitySimilarity?: number;
 
-  @ApiProperty({ description: 'true nếu độ giống trong khoảng cảnh báo (0.70-0.85) — vẫn cho phép, chỉ cảnh báo' })
+  @ApiProperty({
+    description:
+      'true nếu độ giống trong khoảng cảnh báo (0.70-0.85) — vẫn cho phép, chỉ cảnh báo',
+  })
   @Expose()
   identityWarning: boolean;
 }

@@ -10,12 +10,14 @@ import { SessionController } from './controllers/session.controller';
 import { StudentController } from './controllers/student.controller';
 import { VideoContentController } from './controllers/video-content.controller';
 import { VideoController } from './controllers/video.controller';
+import { EmbeddingJob } from './entities/embedding-job.entity';
 import { Photo } from './entities/photo.entity';
 import { Session } from './entities/session.entity';
 import { SessionVideo } from './entities/session-video.entity';
 import { UploadOutboxEntry } from './entities/upload-outbox.entity';
 import { VideoUploadOutboxEntry } from './entities/video-upload-outbox.entity';
 import { CaptureReportService } from './services/capture-report.service';
+import { EmbeddingWorkerService } from './services/embedding-worker.service';
 import { PhotoService } from './services/photo.service';
 import { SessionService } from './services/session.service';
 import { SessionVideoService } from './services/session-video.service';
@@ -31,6 +33,7 @@ import { VideoUploadWorkerService } from './services/video-upload-worker.service
       SessionVideo,
       UploadOutboxEntry,
       VideoUploadOutboxEntry,
+      EmbeddingJob,
     ]),
     FileStorageModule,
     // For SessionService.completeSession()'s best-effort
@@ -58,6 +61,7 @@ import { VideoUploadWorkerService } from './services/video-upload-worker.service
     StudentService,
     UploadWorkerService,
     VideoUploadWorkerService,
+    EmbeddingWorkerService,
     CaptureReportService,
     // Guards `@UseGuards()` on SessionController's two CMS-facing GET routes,
     // and PhotoController's/VideoController's view-link routes - see those

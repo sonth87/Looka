@@ -1,5 +1,6 @@
 import { toDao } from '@app/shared/http/to-dao.helper';
 import { CommonService } from '@app/shared/common/common.service';
+import { Pagination } from '@app/shared/http/pagination';
 import {
   ConflictException,
   Injectable,
@@ -9,6 +10,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import {
   CreateIdentificationMethodDto,
+  ListIdentificationMethodsQueryDto,
   UpdateIdentificationMethodDto,
 } from '../dto';
 import { IdentificationMethodDao } from '../dao';
@@ -46,6 +48,31 @@ export class IdentificationMethodService extends CommonService<IdentificationMet
   async listAll(): Promise<IdentificationMethodDao[]> {
     const rows = await this.findAll({ order: { sortOrder: 'ASC' } });
     return toDao(IdentificationMethodDao, rows);
+  }
+
+  /** Paginated variant, opt-in via `page` — see `ListIdentificationMethodsQueryDto`'s own doc comment. */
+  async listPaginated(
+    query: ListIdentificationMethodsQueryDto,
+  ): Promise<Pagination<IdentificationMethodDao>> {
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 20;
+
+    const qb = this.repository.createQueryBuilder('m');
+    if (!query.includeInactive) {
+      qb.andWhere('m.active = true');
+    }
+    if (query.q) {
+      qb.andWhere('(m.name_vi ILIKE :q OR m.code ILIKE :q)', {
+        q: `%${query.q}%`,
+      });
+    }
+    qb.orderBy('m.sort_order', 'ASC');
+
+    const result = await this.paginateQueryBuilder(qb, { page, limit });
+    return new Pagination(
+      toDao(IdentificationMethodDao, result.items),
+      result.meta,
+    );
   }
 
   private async loadOrFail(id: string): Promise<IdentificationMethod> {

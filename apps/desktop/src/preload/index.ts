@@ -204,22 +204,6 @@ export interface CccdRosterRecord {
 /** `cccd:lookupByIdentityNumber`'s result shape — `found: false` is a normal, expected outcome, never an error. */
 export type CccdLookupResult = { found: true; record: CccdRosterRecord } | { found: false };
 
-/**
- * Enrollment side of docs/plans/face-embedding-server-integration-plan.md —
- * mirrors `apps/desktop/src/main/embeddingEnroll.ts`'s own `EnrollFaceOutcome`,
- * duplicated across the IPC boundary the same way every other faceAPI
- * payload/result type in this file already is (see `CbHelpFrame`'s own doc
- * comment for that convention).
- */
-export type EmbeddingEnrollOutcome =
-  | { ok: true; embeddingId: number | null; sourceImagePath: string }
-  | { ok: false; kind: 'NOT_CONFIGURED' }
-  | { ok: false; kind: 'NETWORK_ERROR'; queued: true; cause?: unknown }
-  | { ok: false; kind: 'EMPTY_OR_UNREADABLE' }
-  | { ok: false; kind: 'FILE_TOO_LARGE' }
-  | { ok: false; kind: 'DUPLICATE_IDENTITY'; conflictUserCode: string; conflictSimilarity: number }
-  | { ok: false; kind: 'IMAGE_REJECTED'; detail: string };
-
 export interface EmbeddingHealthResult {
   /** False when EMBEDDING_SERVER_BASE_URL is unset — a supported "feature off" state, not an error. */
   configured: boolean;
@@ -303,25 +287,19 @@ export interface FaceAPIBridge {
   attendanceResetSession: () => Promise<boolean>;
 
   /**
-   * Enrollment side of docs/plans/face-embedding-server-integration-plan.md
-   * — the external "Attendance — Face Enrollment API"
+   * Health/admin side of the external "Attendance — Face Enrollment API"
    * (`EMBEDDING_SERVER_BASE_URL`), unrelated to the `attendance*` MOCK-model
    * methods above. `embeddingHealth` is a preflight (call before starting a
    * capture session, same idea as `getSystemStatus().aiServiceReachable` for
-   * the Python sidecar); `enrollFace` is called once per CENTER-step capture
-   * from `FaceCaptureApp.tsx`, never rejects, and reports every outcome
-   * (success, a real rejection, or "queued for background retry") in the
-   * resolved `EmbeddingEnrollOutcome`. The remaining three are admin/audit
-   * operations against the server's own registered-image list.
+   * the Python sidecar). The remaining three are admin/audit operations
+   * against the server's own registered-image list.
+   *
+   * 2026-09-16 — per-photo enrollment itself (`enrollFace`) moved to the
+   * backend (`apps/api`'s `EmbeddingWorkerService`, enqueued the instant a
+   * photo is saved server-side) and no longer has an IPC entry point here —
+   * see `apps/desktop/src/main/embeddingEnroll.ts`'s own doc comment.
    */
   embeddingHealth: () => Promise<EmbeddingHealthResult>;
-  enrollFace: (payload: {
-    sessionId: string;
-    stepId: string;
-    attempt: number;
-    userCode: string;
-    dataUrl: string;
-  }) => Promise<EmbeddingEnrollOutcome>;
   listEnrolledFaces: (userCode: string) => Promise<EmbeddingListFacesResult>;
   deleteEnrolledFace: (payload: { userCode: string; embeddingId: number }) => Promise<EmbeddingDeleteResult>;
   deleteAllEnrolledFaces: (userCode: string) => Promise<EmbeddingDeleteResult>;
@@ -628,7 +606,6 @@ const faceAPI: FaceAPIBridge = {
   attendanceResetSession: () => ipcRenderer.invoke('attendance:resetSession'),
 
   embeddingHealth: () => ipcRenderer.invoke('embedding:health'),
-  enrollFace: (payload) => ipcRenderer.invoke('embedding:enrollFace', payload),
   listEnrolledFaces: (userCode) => ipcRenderer.invoke('embedding:listFaces', userCode),
   deleteEnrolledFace: (payload) => ipcRenderer.invoke('embedding:deleteFace', payload),
   deleteAllEnrolledFaces: (userCode) => ipcRenderer.invoke('embedding:deleteAllFaces', userCode),

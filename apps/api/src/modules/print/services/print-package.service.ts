@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import archiver from 'archiver';
 import { PassThrough } from 'node:stream';
-import { Repository } from 'typeorm';
+import { FindOptionsWhere, In, Repository } from 'typeorm';
 import { FileStorageService } from '@app/modules/file-storage/services/file-storage.service';
 import { PrintItem } from '../entities/print-item.entity';
 import { PrintBatch } from '../entities/print-batch.entity';
@@ -27,9 +27,11 @@ export class PrintPackageService {
     private readonly fileStorage: FileStorageService,
   ) {}
 
-  async buildPackage(batch: PrintBatch): Promise<Buffer> {
+  async buildPackage(batch: PrintBatch, itemIds?: string[]): Promise<Buffer> {
+    const where: FindOptionsWhere<PrintItem> = { batchId: batch.id };
+    if (itemIds?.length) where.id = In(itemIds);
     const items = await this.items.find({
-      where: { batchId: batch.id },
+      where,
       order: { subjectCode: 'ASC' },
     });
 

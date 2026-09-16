@@ -176,6 +176,15 @@ export class CreateCampaignDto {
   @IsBoolean()
   recordVideo?: boolean;
 
+  @ApiPropertyOptional({
+    description:
+      'Có gửi ảnh chụp lên máy chủ nhận diện khuôn mặt (embedding) hay không',
+    default: true,
+  })
+  @IsOptional()
+  @IsBoolean()
+  requiresEmbedding?: boolean;
+
   /**
    * "Campaign tham chiếu đến version" — cms-8-screens-api-plan.md §2.2/P2.
    * Must be a PUBLISHED version's id (an unpublished draft is not

@@ -8,6 +8,8 @@ export * from './list-print-batches-query.dto';
 export * from './create-print-batch.dto';
 export * from './update-print-batch.dto';
 export * from './batch-items.dto';
+export * from './send-print-batch.dto';
+export * from './print-package-query.dto';
 export * from './list-printers-query.dto';
 export * from './create-printer.dto';
 export * from './update-printer.dto';

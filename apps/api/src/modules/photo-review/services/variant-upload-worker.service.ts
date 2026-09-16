@@ -178,7 +178,9 @@ export class VariantUploadWorkerService implements OnModuleInit {
         visibility: 'public' as const,
       };
       const result = job.tenant_name
-        ? await (await this.fileStorage.clientForTenant(job.tenant_name)).uploadRaw(uploadInput)
+        ? await (
+            await this.fileStorage.clientForTenant(job.tenant_name)
+          ).uploadRaw(uploadInput)
         : await this.fileStorage.uploadRaw(uploadInput);
 
       await this.dataSource.transaction(async (manager) => {
@@ -263,7 +265,10 @@ export class VariantUploadWorkerService implements OnModuleInit {
     }
   }
 
-  private async recordFailure(job: VariantOutboxRow, err: unknown): Promise<void> {
+  private async recordFailure(
+    job: VariantOutboxRow,
+    err: unknown,
+  ): Promise<void> {
     if (!job?.id) {
       this.logger.error('recordFailure called with no job id - skipping');
       return;

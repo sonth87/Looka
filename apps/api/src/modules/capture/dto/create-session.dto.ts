@@ -37,4 +37,21 @@ export class CreateSessionDto {
   @IsOptional()
   @IsUUID()
   operatorUserId?: string;
+
+  /**
+   * The campaign this WEB-path session belongs to, if any (2026-09-16) —
+   * previously only ever populated for KIOSK sessions (see
+   * `session.entity.ts`'s own `campaignId` doc comment), which left the
+   * backend with no way to look up a web session's campaign (and thus its
+   * `requiresEmbedding` setting) until now. `apps/web`'s `WebCampaignGate`/
+   * `HttpCaptureSink.startSession` supply this once a campaign has been
+   * selected; omitted for the legacy no-campaign path, same as
+   * `operatorUserId` above.
+   */
+  @ApiPropertyOptional({
+    description: 'Id campaign chứa phiên này, nếu có (phiên từ web)',
+  })
+  @IsOptional()
+  @IsUUID()
+  campaignId?: string;
 }

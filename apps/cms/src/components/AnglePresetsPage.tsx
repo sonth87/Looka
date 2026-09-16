@@ -5,13 +5,15 @@ import {
   CameraRoleName,
   CaptureAnglePreset,
   CreateAnglePresetInput,
+  Paginated,
   UpdateAnglePresetInput,
   createAnglePreset,
-  listAnglePresets,
+  listAnglePresetsPaginated,
   updateAnglePreset,
 } from '../api';
 import { CAMERA_ROLE_LABELS } from '../captureAngles';
 import { ModalShell } from './CampaignDangerActions';
+import { DEFAULT_PAGE_SIZE, Pager } from './Pager';
 
 const CAMERA_ROLES: CameraRoleName[] = ['CENTER', 'LEFT', 'RIGHT', 'UP', 'DOWN'];
 
@@ -31,21 +33,27 @@ function poseSummary(pose: AnglePoseDefault): string {
  * task spec: `GET/POST/PATCH /v1/capture-angle-presets`.
  */
 export function AnglePresetsPage() {
-  const [presets, setPresets] = useState<CaptureAnglePreset[] | null>(null);
+  const [q, setQ] = useState('');
+  const [includeInactive, setIncludeInactive] = useState(false);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+  const [result, setResult] = useState<Paginated<CaptureAnglePreset> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<CaptureAnglePreset | null>(null);
 
   const reload = () => {
-    listAnglePresets()
-      .then(setPresets)
+    listAnglePresetsPaginated({ page, limit: pageSize, includeInactive, q: q.trim() || undefined })
+      .then(setResult)
       .catch((err) => setError(err instanceof ApiError ? err.message : String(err)));
   };
 
-  useEffect(reload, []);
+  useEffect(reload, [page, pageSize, includeInactive, q]);
+
+  const presets = result?.items ?? null;
 
   const updateRow = (updated: CaptureAnglePreset) => {
-    setPresets((prev) => prev?.map((p) => (p.id === updated.id ? updated : p)) ?? prev);
+    setResult((prev) => (prev ? { ...prev, items: prev.items.map((p) => (p.id === updated.id ? updated : p)) } : prev));
   };
 
   return (
@@ -61,6 +69,30 @@ export function AnglePresetsPage() {
         >
           + Thêm góc
         </button>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-3 mb-4">
+        <input
+          value={q}
+          onChange={(e) => {
+            setQ(e.target.value);
+            setPage(1);
+          }}
+          placeholder="Tìm theo mã hoặc tên..."
+          className="flex-1 min-w-[200px] bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900"
+        />
+        <label className="flex items-center gap-1.5 text-sm text-gray-700 whitespace-nowrap">
+          <input
+            type="checkbox"
+            checked={includeInactive}
+            onChange={(e) => {
+              setIncludeInactive(e.target.checked);
+              setPage(1);
+            }}
+            className="rounded border-gray-300"
+          />
+          Hiện cả đã ẩn
+        </label>
       </div>
 
       {error && <div className="p-4 rounded-xl bg-red-50 border border-red-200 text-red-700 mb-4">{error}</div>}
@@ -136,17 +168,28 @@ export function AnglePresetsPage() {
         </table>
       )}
 
+      <Pager
+        meta={result?.meta}
+        itemLabel="góc chụp"
+        onPageChange={setPage}
+        pageSize={pageSize}
+        onPageSizeChange={(size) => {
+          setPageSize(size);
+          setPage(1);
+        }}
+      />
+
       {formOpen && (
         <AnglePresetFormModal
           preset={editing}
           onClose={() => setFormOpen(false)}
           onSaved={(saved) => {
             setFormOpen(false);
-            setPresets((prev) => {
-              if (!prev) return [saved];
-              const exists = prev.some((p) => p.id === saved.id);
-              return exists ? prev.map((p) => (p.id === saved.id ? saved : p)) : [...prev, saved];
-            });
+            if (editing) {
+              updateRow(saved);
+            } else {
+              reload();
+            }
           }}
         />
       )}

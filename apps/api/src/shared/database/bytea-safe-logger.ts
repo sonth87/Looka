@@ -40,7 +40,9 @@ const MAX_LOGGED_BINARY_PARAM_BYTES = 1024;
  * values) logs exactly as before.
  */
 export class ByteaSafeAdvancedConsoleLogger extends AdvancedConsoleLogger {
-  protected override stringifyParams(parameters: unknown[]): string | unknown[] {
+  protected override stringifyParams(
+    parameters: unknown[],
+  ): string | unknown[] {
     const redacted = parameters.map((param) => {
       if (
         (Buffer.isBuffer(param) || param instanceof Uint8Array) &&
@@ -50,7 +52,7 @@ export class ByteaSafeAdvancedConsoleLogger extends AdvancedConsoleLogger {
       }
       return param;
     });
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-argument -- same
+
     // fallback AbstractLogger.stringifyParams itself uses for circular data.
     return super.stringifyParams(redacted as any[]);
   }

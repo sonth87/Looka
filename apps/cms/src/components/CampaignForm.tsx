@@ -9,8 +9,10 @@ import {
   CardSpec,
   CreateCampaignInput,
   UpdateCampaignInput,
+  WorkflowDetail,
   createCampaign,
   listCaptureConfigurations,
+  listWorkflows,
   updateCampaign,
 } from '../api';
 import { CAMERA_ROLE_LABELS } from '../captureAngles';
@@ -62,6 +64,7 @@ function Section({
 const SECTIONS = [
   { id: 'section-info', label: '1. Thông tin' },
   { id: 'section-capture', label: '2. Cấu hình chụp' },
+  { id: 'section-workflow', label: '3. Workflow' },
 ] as const;
 
 /**
@@ -130,6 +133,7 @@ export function CampaignForm({
   const [recordVideoRoles, setRecordVideoRoles] = useState<Set<CameraRoleName>>(
     () => new Set((campaign?.recordVideoRoles as CameraRoleName[] | undefined) ?? [])
   );
+  const [requiresEmbedding, setRequiresEmbedding] = useState(campaign?.requiresEmbedding ?? true);
 
   const [cardSpec, setCardSpec] = useState<CardSpec>(() => ({ ...DEFAULT_CARD_SPEC, ...(campaign?.cardSpec ?? {}) }));
 
@@ -159,6 +163,29 @@ export function CampaignForm({
   }
 
   const selectedConfig = captureConfigurations?.find((c) => c.id === selectedConfigId) ?? null;
+
+  // "3. Workflow" (Phase 5, cms-8-screens-api-plan.md §2.2/P2) — optional
+  // pin to a PUBLISHED workflow version; picking one just sets
+  // `workflowVersionId`, `workflowId` itself is derived server-side (see
+  // `CreateCampaignDto.workflowVersionId`'s own doc comment) so it's never
+  // sent from here. Only ACTIVE workflows that have actually published at
+  // least once (`currentVersionId != null`) are selectable — a draft-only
+  // workflow has nothing valid to pin to yet.
+  const [workflows, setWorkflows] = useState<WorkflowDetail[] | null>(null);
+  const [workflowVersionId, setWorkflowVersionId] = useState(campaign?.workflow?.versionId ?? '');
+
+  useEffect(() => {
+    listWorkflows({ status: 'ACTIVE' })
+      .then((r) => setWorkflows(r.items))
+      .catch(() => setWorkflows([]));
+  }, []);
+
+  const selectableWorkflows = (workflows ?? []).filter((w) => w.currentVersionId != null);
+  // The campaign's currently-pinned workflow might be ARCHIVED or otherwise
+  // excluded from the ACTIVE-only fetch above — still show it as the
+  // selected option so the picker doesn't silently blank out an existing pin.
+  const pinnedWorkflowMissing =
+    campaign?.workflow != null && !selectableWorkflows.some((w) => w.currentVersionId === campaign.workflow?.versionId);
 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -207,7 +234,9 @@ export function CampaignForm({
           captureAngles,
           recordVideo,
           recordVideoRoles: recordVideoRoles.size > 0 ? Array.from(recordVideoRoles) : null,
+          requiresEmbedding,
           cardSpec,
+          workflowVersionId: workflowVersionId || undefined,
         };
         const created = await createCampaign(input);
         onSaved(created);
@@ -225,7 +254,9 @@ export function CampaignForm({
           captureAngles,
           recordVideo,
           recordVideoRoles: recordVideoRoles.size > 0 ? Array.from(recordVideoRoles) : null,
+          requiresEmbedding,
           cardSpec,
+          workflowVersionId: workflowVersionId || null,
         };
         const updated = await updateCampaign(campaign.id, input);
         onSaved(updated);
@@ -499,6 +530,58 @@ export function CampaignForm({
                 <span className="text-xs text-gray-400 basis-full">Không chọn camera nào = ghi mọi camera.</span>
               </div>
             )}
+          </div>
+
+          <div className="pt-3 border-t border-gray-100">
+            <label className="flex items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={requiresEmbedding}
+                onChange={(e) => setRequiresEmbedding(e.target.checked)}
+                className="rounded border-gray-300 mt-0.5"
+              />
+              <span>
+                <span className="block font-medium text-gray-700">Yêu cầu đăng ký khuôn mặt (embedding)</span>
+                <span className="block text-xs text-gray-500">
+                  Gửi ảnh sinh viên lên máy chủ nhận diện khuôn mặt bên ngoài trong lúc chụp — dùng cho điểm danh/xác
+                  thực sau này. Tắt nếu campaign này không cần.
+                </span>
+              </span>
+            </label>
+          </div>
+        </Section>
+
+        <Section
+          id="section-workflow"
+          title="3. Workflow"
+          subtitle="Điều kiện tiếp nhận và phương thức định danh cho campaign này — tuỳ chọn, quản lý các workflow ở trang riêng"
+        >
+          <div>
+            <label className="block text-sm text-gray-700 font-medium mb-1">Workflow</label>
+            <select
+              value={workflowVersionId}
+              onChange={(e) => setWorkflowVersionId(e.target.value)}
+              className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
+            >
+              <option value="">— Không dùng workflow —</option>
+              {pinnedWorkflowMissing && campaign?.workflow && (
+                <option value={campaign.workflow.versionId}>
+                  {campaign.workflow.code} (v{campaign.workflow.version}) — hiện đang gán, không còn ở trạng thái Đang dùng
+                </option>
+              )}
+              {selectableWorkflows.map((w) => (
+                <option key={w.id} value={w.currentVersionId ?? ''}>
+                  {w.code} — {w.name} (v{w.currentVersion})
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-gray-500 mt-1">
+              Ghim vào version workflow đã publish tại thời điểm chọn — publish version mới sau đó không tự áp dụng lại,
+              cần chọn lại ở đây.{' '}
+              <Link to="/workflows" className="text-blue-600 hover:text-blue-800 underline">
+                Quản lý workflow →
+              </Link>
+            </p>
           </div>
         </Section>
 
