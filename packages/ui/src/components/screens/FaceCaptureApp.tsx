@@ -87,7 +87,6 @@ import { applyKioskTheme } from '../../lib/kioskTheme.js';
 import { CaptureSink, RunScopedCaptureSession } from '../../lib/CaptureSink.js';
 import type { ApprovalStepInfo, StudentSubjectInfo } from '../../lib/CaptureSink.js';
 import { SQLiteStorageAdapter, SessionRepository } from '@face/database';
-import { cn } from '../../lib/utils.js';
 
 const defaultWorkflow: CaptureWorkflow = {
   id: 'workflow_standard_5step',
@@ -336,62 +335,6 @@ function reportStatsEvent(type: StatsEventType, metadata?: Record<string, unknow
     void (window as any).faceAPI?.recordStatsEvent?.({ type, metadata });
   } catch {
     /* no bridge, or not running under the desktop app — fine either way */
-  }
-}
-
-export interface EmbeddingNotice {
-  stepId: string;
-  kind: 'DUPLICATE_IDENTITY' | 'IMAGE_REJECTED' | 'NETWORK_ERROR' | 'REJECTED';
-  message: string;
-}
-
-/**
- * Vietnamese operator copy for one `embedding:enrollFace` outcome — see
- * docs/plans/face-embedding-server-integration-plan.md §6's error table.
- * `outcome` is whatever `window.faceAPI.enrollFace()` resolved with
- * (`EnrollFaceOutcome` in `apps/desktop/src/preload/index.ts`, duplicated
- * across the IPC boundary the same way every other faceAPI payload is —
- * untyped here on purpose since `@face/ui` does not depend on the desktop
- * app's preload types). Returns `null` for anything that needs no banner:
- * success, the feature being off (`NOT_CONFIGURED`), or a rare
- * system-level rejection this plan treats as "should not happen" rather
- * than a distinct operator message (400/413 — see §6's own row for why
- * those are lumped under one generic notice instead of dedicated copy).
- */
-export function embeddingNoticeFromOutcome(stepId: string, outcome: unknown): EmbeddingNotice | null {
-  const o = outcome as { ok?: boolean; kind?: string; conflictUserCode?: string; conflictSimilarity?: number } | null;
-  if (!o || o.ok) return null;
-
-  switch (o.kind) {
-    case 'DUPLICATE_IDENTITY': {
-      const pct = Math.round((o.conflictSimilarity ?? 0) * 100);
-      return {
-        stepId,
-        kind: 'DUPLICATE_IDENTITY',
-        message: `Khuôn mặt này có vẻ đã đăng ký cho mã "${o.conflictUserCode}" (độ giống ${pct}%) — vui lòng báo cán bộ hỗ trợ để kiểm tra, không tự động chặn phiên.`,
-      };
-    }
-    case 'IMAGE_REJECTED':
-      return {
-        stepId,
-        kind: 'IMAGE_REJECTED',
-        message: 'Ảnh góc chính diện chưa đạt yêu cầu nhận diện khuôn mặt — vui lòng chụp lại góc này (đúng 1 khuôn mặt, đủ gần camera).',
-      };
-    case 'NETWORK_ERROR':
-      return {
-        stepId,
-        kind: 'NETWORK_ERROR',
-        message: 'Không kết nối được máy chủ nhận diện khuôn mặt — ảnh vẫn được lưu trên máy, hệ thống sẽ tự động đăng ký lại khi có mạng.',
-      };
-    case 'EMPTY_OR_UNREADABLE':
-    case 'FILE_TOO_LARGE':
-      return {
-        stepId,
-        kind: 'REJECTED',
-        message: 'Không đăng ký được ảnh khuôn mặt cho góc chính diện (lỗi hệ thống) — vui lòng thử chụp lại góc này.',
-      };
-    default:
-      return null;
   }
 }
 
@@ -2081,22 +2024,6 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   /** Set when a capture could not be stored; surfaced, never swallowed. */
   const [storeError, setStoreError] = useState<string | null>(null);
   /**
-   * Enrollment side of docs/plans/face-embedding-server-integration-plan.md
-   * §6's error table — set from `enrollCenterStepIfNeeded`'s outcome,
-   * independent of `storeError` above (which is about the local capture,
-   * never the embedding call — see that plan section's note that the two
-   * are "hai luồng song song, độc lập"). `null` on success, on the feature
-   * being off (`NOT_CONFIGURED`), and on the manual "nhập mã sinh viên" path
-   * with no `userCode` (enrollment is skipped there entirely, not attempted
-   * and failed). Also handed to `SessionReviewModal` so the CENTER step's
-   * tile can carry the same notice into the review screen.
-   */
-  const [embeddingNotice, setEmbeddingNotice] = useState<{
-    stepId: string;
-    kind: 'DUPLICATE_IDENTITY' | 'IMAGE_REJECTED' | 'NETWORK_ERROR' | 'REJECTED';
-    message: string;
-  } | null>(null);
-  /**
    * Fixed at no-zoom/centred now that auto-zoom has been removed (see the
    * removal note further down) — CameraPreview still takes scale/origin
    * props, so these stay as the values that mean "native framing."
@@ -2109,7 +2036,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    * abandoned (cancelled, or "Chụp lại toàn bộ") must call `.reset()` rather
    * than let the next run silently reuse this id.
    */
-  const runSessionRef = useRef<RunScopedCaptureSession>(new RunScopedCaptureSession(sink));
+  const runSessionRef = useRef<RunScopedCaptureSession>(new RunScopedCaptureSession(sink, props.campaignId));
 
   /**
    * The student `setSubject()` was last given — cached here (not just
@@ -2188,53 +2115,6 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   }, [faceState]);
 
   /**
-   * Enrollment call for one capture — docs/plans/face-embedding-server-integration-plan.md
-   * §5.1, narrowed by a 2026-09-10 product decision to the CENTER/FRONT step
-   * only (not every step the plan's own sequence diagram shows — a
-   * deliberately simpler first pass; the local schema this feeds
-   * (`embedding:enrollFace`'s own `stepId`) stays generic per-step so
-   * enrolling more angles later needs no schema change, just another call
-   * site like this one). Independent of `storePhoto`'s own local-disk save —
-   * see that function's own doc comment and the plan's "hai luồng song
-   * song, độc lập" note — so this runs alongside it, not nested inside its
-   * try/catch.
-   */
-  const enrollCenterStepIfNeeded = async (stepId: string, dataUrl: string, attempt: number) => {
-    const faceAPI = (window as any).faceAPI;
-    if (!faceAPI?.enrollFace) return; // web build, or a desktop build with no bridge — feature simply unavailable there
-
-    const frame = framesForWorkflow(activeWorkflowRef.current).find((f) => f.stepId === stepId);
-    if (frame?.role !== 'CENTER') return; // only the CENTER step is sent for enrollment right now — see this function's own doc comment
-
-    const userCode = currentStudentRef.current?.userCode;
-    if (!userCode) {
-      // Manual "nhập mã sinh viên" path (no CCCD scan) has no userCode at
-      // all — skip enrollment entirely rather than falling back to
-      // subjectCode: sending the wrong kind of identifier to an external
-      // biometric-matching API would be a real correctness bug (a student
-      // matched under subjectCode in one place and userCode in another
-      // could silently create duplicate/wrong identities server-side) —
-      // see StudentSubjectInfo.userCode's own doc comment in CaptureSink.ts.
-      return;
-    }
-
-    // Shares RunScopedCaptureSession's own memoized ensure() with
-    // storePhoto()'s savePhoto() call below — safe to call concurrently
-    // (see ensure()'s own doc comment on simultaneous capture already
-    // relying on exactly this), so both converge on the same sessionId
-    // regardless of which of the two fires first.
-    const sessionId = await runSessionRef.current.ensure();
-    if (!sessionId) return;
-
-    try {
-      const outcome = await faceAPI.enrollFace({ sessionId, stepId, attempt, userCode, dataUrl });
-      setEmbeddingNotice(embeddingNoticeFromOutcome(stepId, outcome));
-    } catch (err) {
-      console.error('[FaceCaptureApp] enrollFace IPC call failed:', err);
-    }
-  };
-
-  /**
    * Store one capture as its step completes.
    *
    * A failure is shown rather than logged: the operator is the only one who can
@@ -2243,14 +2123,17 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    * run's photos attach to is opened lazily, on this first call, by
    * RunScopedCaptureSession itself — so idly opening the screen does not leave
    * empty sessions behind.
+   *
+   * Face-embedding registration is no longer triggered from here (2026-09-16
+   * — "tôi muốn phần embedding đó sẽ do backend xử lý, khi nhận ảnh và lưu
+   * sang file server thì chạy bất đồng bộ để embedding"): the backend now
+   * enqueues an embedding job itself, in the same transaction as the photo
+   * save, the instant `CaptureSink.savePhoto()` below reaches it — see
+   * `PhotoService.enqueueEmbeddingJob` (apps/api) and
+   * `CaptureSink.savePhoto`'s own `userCode` doc comment for how the desktop
+   * kiosk carries `userCode` there.
    */
   const storePhoto = async (stepId: string, dataUrl: string, attempt: number) => {
-    // Independent of the local-storage save below — see
-    // enrollCenterStepIfNeeded's own doc comment for why enroll failing (or
-    // the feature simply being off) must never block a photo being kept,
-    // and vice versa.
-    void enrollCenterStepIfNeeded(stepId, dataUrl, attempt);
-
     if (!sink) {
       setStoreError('Chưa cấu hình nơi lưu ảnh — ảnh chụp sẽ không được giữ lại.');
       return;
@@ -4350,32 +4233,6 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           </button>
         </div>
       )}
-      {/*
-        Embedding enrollment notice (docs/plans/face-embedding-server-integration-plan.md
-        §6) — a separate banner from storeError above since the two are
-        independent (see enrollCenterStepIfNeeded's own doc comment): a
-        409/422 here never means the photo itself failed to save. Stacked
-        below storeError (top-9) rather than replacing it, so both can be
-        visible at once in the rare case they fire together.
-      */}
-      {embeddingNotice && (
-        <div
-          className={cn(
-            'absolute top-9 inset-x-0 z-[100] text-xs font-semibold px-4 py-2 flex items-center justify-center gap-2 shadow-lg',
-            embeddingNotice.kind === 'DUPLICATE_IDENTITY'
-              ? 'bg-rose-500 text-white'
-              : embeddingNotice.kind === 'NETWORK_ERROR'
-                ? 'bg-slate-700 text-slate-100'
-                : 'bg-amber-500 text-slate-950'
-          )}
-        >
-          <span>{embeddingNotice.kind === 'DUPLICATE_IDENTITY' ? '⛔' : '⚠️'}</span>
-          <span>{embeddingNotice.message}</span>
-          <button onClick={() => setEmbeddingNotice(null)} className="ml-2 underline cursor-pointer">
-            Ẩn
-          </button>
-        </div>
-      )}
       <GuidedCaptureScreen
         stream={stream}
         zoomScale={digitalZoomScale}
@@ -4450,11 +4307,6 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
 
       {showReviewModal && (
         <SessionReviewModal
-          // Embedding enrollment notice (plan §6) for the step it belongs
-          // to — currently only ever the CENTER step, but keyed by stepId
-          // rather than assumed so the modal needs no change once more
-          // steps enroll. `null`/absent renders nothing extra.
-          embeddingNotice={embeddingNotice}
           // activeSession is the engine's own live session object — it already
           // has whichever steps have been captured so far. `session` (React
           // state) is only ever set by the 'completed' handler below, so

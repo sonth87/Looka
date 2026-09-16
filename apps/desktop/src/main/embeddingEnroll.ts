@@ -1,53 +1,42 @@
-import { app } from 'electron';
-import fs from 'node:fs';
-import path from 'node:path';
-import { EmbeddingServerClient, EmbeddingServerError } from '@face/biometric';
-import type { EnrollFaceError } from '@face/biometric';
-import { EmbeddingEnrollmentRepository, nextRetryDelayMs } from '@face/database';
-import type { EmbeddingEnrollmentItem } from '@face/database';
-import { getDatabase } from './db.js';
-import { recordStatsEvent } from './statsEvents.js';
+import { EmbeddingServerClient } from '@face/biometric';
 
 /**
- * Enrollment side of docs/plans/face-embedding-server-integration-plan.md.
+ * Admin/health surface for the external "Attendance — Face Enrollment API"
+ * (`http://10.20.107.17:8000`).
  *
- * Mirrors `uploads.ts`'s own shape deliberately: a capture is durable the
- * instant it is written to disk and a queue row exists for it (both in one
- * transaction — see `enrollFaceForStep()`), and a background worker retries
- * whatever could not reach the server yet, on its own timer, independent of
- * whether the renderer that triggered it is even still open. That is the
- * same "durable local write first, background worker retries with backoff"
- * pattern `apps/api/src/modules/capture/services/upload-worker.service.ts`
- * already uses server-side, applied here to the desktop main process the
- * same way `uploads.ts`'s own `UploadWorker` already applies it to photo
- * uploads.
+ * 2026-09-16 — this file used to also own the per-photo enrollment call
+ * itself (`enrollFaceForStep`/`sendOne`/`applyFailure`/`tick`, driving a
+ * local SQLite retry queue via `@face/database`'s
+ * `EmbeddingEnrollmentRepository`): the user asked for that to move to the
+ * backend instead ("tôi muốn phần embedding đó sẽ do backend xử lý, khi
+ * nhận ảnh và lưu sang file server thì chạy bất đồng bộ để embedding"), so
+ * it now happens in `apps/api/src/modules/capture/services/embedding-worker.service.ts`,
+ * enqueued the instant a photo is saved server-side
+ * (`PhotoService.addPhoto`/`addDevicePhoto`) rather than pushed from here.
  *
- * What is NOT here: anything from the plan's §5.2 (recognition/attendance
- * `/search` flow) — `attendance.ts` is untouched by this file, and
- * `EmbeddingServerClient.search()` (present on the client for API
- * completeness) is never called from anywhere in this module.
+ * What is left is everything that was never part of that per-photo
+ * pipeline: `embeddingHealth` (a preflight the capture screen still checks
+ * before starting a session) and the admin/audit operations against the
+ * server's own registered-image list (`listEnrolledFaces`/`deleteEnrolledFace`/
+ * `deleteAllEnrolledFaces` — used by a standalone admin/debug surface, not
+ * the per-photo capture flow; no renderer UI currently calls them, but they
+ * are independent of this removal and left untouched). The local SQLite
+ * `embedding_enrollments` table (`@face/database`) is deliberately left in
+ * place but unused, matching this codebase's established
+ * "deprecate, don't drop" convention (e.g. `capture_configurations`) — not
+ * dropped by this change.
  */
 
 const DEFAULT_TIMEOUT_MS = 8_000;
-/** Matches `UploadWorker`'s own default tick — see that class's own doc comment for why a queue an operator is standing in front of needs a tight poll. */
-const TICK_MS = 5_000;
-/** Rows claimed per tick — kept small so a burst of retries cannot starve other main-process work, same reasoning as `UploadWorker`'s own `batchSize`. */
-const BATCH_SIZE = 2;
-/** Matches `UploadWorker`'s own default — roughly a day of retries at capped backoff before giving up and surfacing FAILED/GAVE_UP for an operator to notice. */
-const MAX_ATTEMPTS = 20;
 
 /**
  * 2026-09-15 — the real, live "Attendance — Face Enrollment API" this
  * module is a client for (`EmbeddingServerClient`'s own doc comment already
  * named this exact host as the server its request/response shapes were
- * verified against, `docs/plans/face-embedding-server-integration-plan.md`
- * §4). Given as a default rather than left required, same convention
- * `aiService.ts`'s `DEFAULT_AI_SERVICE_BASE_URL` already uses for the
- * Python sidecar: this server is reachable network-wide (confirmed live via
- * `GET /health` → `{"status":"ok","models_loaded":true}`), not a
- * developer's own localhost, so every kiosk should be able to reach it out
- * of the box without per-machine configuration — `EMBEDDING_SERVER_BASE_URL`
- * remains available to override this for a different environment.
+ * verified against). Given as a default rather than left required, same
+ * convention `aiService.ts`'s `DEFAULT_AI_SERVICE_BASE_URL` already uses for
+ * the Python sidecar — `apps/api`'s own `EmbeddingWorkerService` now uses
+ * this exact same default for the same reason.
  */
 const DEFAULT_EMBEDDING_SERVER_BASE_URL = 'http://10.20.107.17:8000';
 
@@ -55,46 +44,24 @@ function embeddingServerBaseUrl(): string {
   return process.env.EMBEDDING_SERVER_BASE_URL?.trim() || DEFAULT_EMBEDDING_SERVER_BASE_URL;
 }
 
-let repo: EmbeddingEnrollmentRepository | null = null;
 let client: EmbeddingServerClient | null = null;
-let timer: ReturnType<typeof setInterval> | null = null;
-let ticking = false;
-
-/** Where durable local copies of enrolled images live — independent of `uploads.ts`'s own captures dir, see EmbeddingEnrollmentRepository's own doc comment on `localImagePath` for why. */
-function embeddingsDir(): string {
-  return path.join(app.getPath('userData'), 'embeddings');
-}
 
 /**
- * Bring up the embedding-enrollment subsystem: recover anything a crash left
- * mid-send, then start the retry worker. Always returns true now that
- * `embeddingServerBaseUrl()` has a real default (2026-09-15) — the "feature
- * off" state the plan's §7 describes is no longer reachable via an unset
- * env var alone; a caller that genuinely needs to run with the feature off
- * (e.g. an isolated test environment with no network path to the real
- * server) sets `EMBEDDING_SERVER_BASE_URL` to something unreachable rather
- * than leaving it unset.
+ * Bring up the client used by `embeddingHealth`/the admin operations below.
+ * Always returns true now that `embeddingServerBaseUrl()` has a real default
+ * — kept as a function (rather than a module-level constant) so a future
+ * caller that genuinely needs this off (e.g. an isolated test environment)
+ * can still do so by pointing `EMBEDDING_SERVER_BASE_URL` at something
+ * unreachable.
  */
 export function startEmbeddingEnroll(): boolean {
-  const baseUrl = embeddingServerBaseUrl();
-
-  repo = new EmbeddingEnrollmentRepository(getDatabase());
-  client = new EmbeddingServerClient({ baseUrl, timeoutMs: DEFAULT_TIMEOUT_MS });
-
-  const recovered = repo.recoverInterrupted();
-  if (recovered > 0) {
-    console.warn(`[embeddingEnroll] recovered ${recovered} enrollment(s) interrupted by a crash`);
-  }
-
-  if (timer) clearInterval(timer);
-  timer = setInterval(() => void tick(), TICK_MS);
-  void tick();
+  client = new EmbeddingServerClient({ baseUrl: embeddingServerBaseUrl(), timeoutMs: DEFAULT_TIMEOUT_MS });
   return true;
 }
 
+/** No-op now that there is no background retry loop to stop — kept so existing call sites (app quit/window-all-closed handlers in index.ts) need no change. */
 export function stopEmbeddingEnroll(): void {
-  if (timer) clearInterval(timer);
-  timer = null;
+  // Nothing to stop — see this file's own doc comment.
 }
 
 /** Reachability preflight before a capture session — see aiService.ts's `pingAiService` for the same idea applied to the Python sidecar. Never throws. */
@@ -102,219 +69,6 @@ export async function embeddingHealth(): Promise<{ configured: boolean; ok: bool
   if (!client) return { configured: false, ok: false, modelsLoaded: false };
   const result = await client.health();
   return { configured: true, ...result };
-}
-
-export interface EnrollFaceInput {
-  sessionId: string;
-  stepId: string;
-  attempt: number;
-  userCode: string;
-  dataUrl: string;
-}
-
-/**
- * Discriminated the same way the plan's §6 table is: a caller can branch on
- * `kind` to pick the right Vietnamese copy without re-deriving it. `queued:
- * true` on `NETWORK_ERROR` distinguishes "will retry in the background" from
- * every other kind, which never will (see `EmbeddingServerError.retryable`'s
- * own doc comment in `@face/biometric`).
- */
-export type EnrollFaceOutcome =
-  | { ok: true; embeddingId: number | null; sourceImagePath: string }
-  | { ok: false; kind: 'NOT_CONFIGURED' }
-  | { ok: false; kind: 'NETWORK_ERROR'; queued: true; cause: unknown }
-  | { ok: false; kind: 'EMPTY_OR_UNREADABLE' }
-  | { ok: false; kind: 'FILE_TOO_LARGE' }
-  | { ok: false; kind: 'DUPLICATE_IDENTITY'; conflictUserCode: string; conflictSimilarity: number }
-  | { ok: false; kind: 'IMAGE_REJECTED'; detail: string };
-
-function decodeDataUrl(dataUrl: string): Buffer {
-  if (!dataUrl.startsWith('data:image')) {
-    throw new Error('Expected an image data URL');
-  }
-  return Buffer.from(dataUrl.replace(/^data:image\/\w+;base64,/, ''), 'base64');
-}
-
-/**
- * Durably record one capture as needing enrollment, then attempt it
- * immediately. Called from the `embedding:enrollFace` IPC handler once per
- * CENTER-step capture (see the integration task's own scope note on why
- * only CENTER, and `FaceCaptureApp.tsx`'s call site for where that decision
- * lives — the data model itself, `id`/`stepId` here, stays generic).
- *
- * The durable write (image to disk + a PENDING row, both inside one
- * transaction) happens unconditionally before any network call — even a
- * process crash between here and the network response leaves a recoverable
- * PENDING row, never a lost enrollment. This is deliberately synchronous
- * with the caller (unlike `queueCapture`, which never blocks on the
- * network): the plan's §5.1 diagram has the operator see 409/422 immediately
- * so they can react (retake, or flag for CB Help) rather than discovering it
- * only once the background worker gets to it.
- */
-export async function enrollFaceForStep(input: EnrollFaceInput): Promise<EnrollFaceOutcome> {
-  if (!repo || !client) return { ok: false, kind: 'NOT_CONFIGURED' };
-
-  const id = `${input.sessionId}:${input.stepId}:${input.attempt}`;
-  const data = decodeDataUrl(input.dataUrl);
-  const dir = path.join(embeddingsDir(), input.sessionId);
-  fs.mkdirSync(dir, { recursive: true });
-  const localImagePath = path.join(dir, `${input.stepId}-${input.attempt}.jpg`);
-
-  getDatabase().transaction(() => {
-    // Written inside the transaction so a rollback can never leave a file
-    // on disk with no row pointing at it — same reasoning as queueCapture()
-    // in uploads.ts.
-    fs.writeFileSync(localImagePath, data);
-    repo!.enqueue({
-      id,
-      sessionId: input.sessionId,
-      stepId: input.stepId,
-      attempt: input.attempt,
-      userCode: input.userCode,
-      localImagePath,
-    });
-  });
-
-  return sendOne(id);
-}
-
-/**
- * Sends one row to the server and applies the outcome to its DB row.
- *
- * Shared between the immediate call from `enrollFaceForStep()` and the
- * background worker's own retry loop — both need exactly the same
- * success/retry/fail classification, just triggered at different times.
- */
-async function sendOne(id: string): Promise<EnrollFaceOutcome> {
-  const row = repo!.getById(id);
-  if (!row) {
-    // Should be unreachable: `enrollFaceForStep()` always enqueues before
-    // calling this, and rows are never deleted. Guarded rather than
-    // asserted so a future caller mistake fails loudly instead of crashing
-    // the background tick loop.
-    throw new Error(`enrollment row ${id} not found — enqueue() must run before sendOne()`);
-  }
-
-  repo!.markSending(id);
-  try {
-    const data = fs.readFileSync(row.localImagePath);
-    const blob = new Blob([data], { type: 'image/jpeg' });
-    const fileName = `${row.stepId}-${row.attempt}.jpg`;
-
-    const result = await client!.enrollFace(row.userCode, blob, fileName);
-    repo!.markDone(id, { embeddingId: result.embeddingId, sourceImagePath: result.sourceImagePath });
-    // 2026-09-15 — pushes this enrollment into apps/api's own Postgres via
-    // the same stats-event outbox every other kiosk metric already uses
-    // (see StatsEventType's own doc comment on EMBEDDING_ENROLLED). The
-    // local `embedding_enrollments` row above is the retry/reference queue;
-    // this is what makes the enrollment queryable centrally, not just on
-    // this one kiosk's own disk.
-    recordStatsEvent('EMBEDDING_ENROLLED', {
-      sessionId: row.sessionId,
-      stepId: row.stepId,
-      attempt: row.attempt,
-      userCode: row.userCode,
-      embeddingId: result.embeddingId,
-      sourceImagePath: result.sourceImagePath,
-    });
-    return { ok: true, embeddingId: result.embeddingId, sourceImagePath: result.sourceImagePath };
-  } catch (err) {
-    return applyFailure(row, err);
-  }
-}
-
-function applyFailure(row: EmbeddingEnrollmentItem, err: unknown): EnrollFaceOutcome {
-  if (!(err instanceof EmbeddingServerError)) {
-    // Should not happen — every failure path in EmbeddingServerClient wraps
-    // into this type — but a raw throw must still leave the row retryable
-    // rather than stuck SENDING forever.
-    const message = (err as Error)?.message ?? String(err);
-    repo!.markRetry(row.id, message, nextRetryDelayMs(row.attempts));
-    return { ok: false, queued: true, kind: 'NETWORK_ERROR', cause: err };
-  }
-
-  const detail: EnrollFaceError = err.detail as EnrollFaceError;
-
-  if (detail.kind === 'NETWORK_ERROR') {
-    // Transport failure or an unexpected/5xx status — see
-    // EmbeddingServerError.retryable's own doc comment for why this is the
-    // only kind worth a background retry.
-    if (row.attempts + 1 >= MAX_ATTEMPTS) {
-      repo!.markGaveUp(row.id, err.message);
-      // Definitive — every retry is exhausted, this capture will never be
-      // enrolled without a human redoing it. See EMBEDDING_FAILED's own doc
-      // comment (StatsEventRepository.ts) for why an in-progress retry
-      // (the `markRetry` branch just below) does NOT also report this.
-      recordStatsEvent('EMBEDDING_FAILED', {
-        sessionId: row.sessionId,
-        stepId: row.stepId,
-        attempt: row.attempt,
-        userCode: row.userCode,
-        failureKind: 'NETWORK_ERROR',
-        error: err.message,
-      });
-    } else {
-      repo!.markRetry(row.id, err.message, nextRetryDelayMs(row.attempts));
-    }
-    return { ok: false, queued: true, kind: 'NETWORK_ERROR', cause: detail.cause };
-  }
-
-  // A real rejection (400/409/413/422) — the server looked at these exact
-  // bytes and said no; retrying automatically would only repeat it.
-  repo!.markFailed(row.id, {
-    kind: detail.kind,
-    error: err.message,
-    conflictUserCode: detail.kind === 'DUPLICATE_IDENTITY' ? detail.conflictUserCode : undefined,
-    conflictSimilarity: detail.kind === 'DUPLICATE_IDENTITY' ? detail.conflictSimilarity : undefined,
-  });
-  // 2026-09-15 — pushes this rejection into apps/api's own Postgres via the
-  // same stats-event outbox EMBEDDING_ENROLLED already uses, so it's
-  // visible centrally (CMS "Thống kê" tab) instead of only in this kiosk's
-  // own local SQLite log — field request, prompted by a real session where
-  // every capture was rejected (too many faces in frame) with nothing
-  // surfacing it beyond this one machine.
-  recordStatsEvent('EMBEDDING_FAILED', {
-    sessionId: row.sessionId,
-    stepId: row.stepId,
-    attempt: row.attempt,
-    userCode: row.userCode,
-    failureKind: detail.kind,
-    error: err.message,
-    conflictUserCode: detail.kind === 'DUPLICATE_IDENTITY' ? detail.conflictUserCode : undefined,
-    conflictSimilarity: detail.kind === 'DUPLICATE_IDENTITY' ? detail.conflictSimilarity : undefined,
-  });
-
-  if (detail.kind === 'DUPLICATE_IDENTITY') {
-    return {
-      ok: false,
-      kind: 'DUPLICATE_IDENTITY',
-      conflictUserCode: detail.conflictUserCode,
-      conflictSimilarity: detail.conflictSimilarity,
-    };
-  }
-  if (detail.kind === 'IMAGE_REJECTED') {
-    return { ok: false, kind: 'IMAGE_REJECTED', detail: detail.detail };
-  }
-  return { ok: false, kind: detail.kind };
-}
-
-/** One background pass: retry whatever is due. Exposed for tests. */
-export async function tick(): Promise<void> {
-  if (!repo || !client) return;
-  if (ticking) return;
-  ticking = true;
-  try {
-    const due = repo.claimDue(Date.now(), BATCH_SIZE);
-    for (const row of due) {
-      await sendOne(row.id);
-    }
-  } catch (err) {
-    // A background tick must never take the process down — whatever failed
-    // is retried on the next one, same reasoning as UploadWorker.tick().
-    console.error('[embeddingEnroll] tick failed:', (err as Error).message);
-  } finally {
-    ticking = false;
-  }
 }
 
 // ── Admin operations (§7 — listFaces/deleteFace/deleteAllFaces IPC) ────────

@@ -11,6 +11,7 @@ import { registerAs } from '@nestjs/config';
  * startup via `ConfigService`, never echoed back to a client.
  */
 export const dainamStudentInfo = registerAs('dainamStudentInfo', () => ({
-  baseUrl: process.env.DAINAM_STUDENT_INFO_BASE_URL ?? 'https://openapi.dainam.edu.vn',
+  baseUrl:
+    process.env.DAINAM_STUDENT_INFO_BASE_URL ?? 'https://openapi.dainam.edu.vn',
   apiKey: process.env.DAINAM_STUDENT_INFO_API_KEY ?? '',
 }));

@@ -50,7 +50,11 @@ export class VideoUploadOutboxEntry extends BaseEntity {
   @Column('varchar', { length: 10, nullable: true })
   visibility?: Visibility;
 
-  @Column({ type: 'enum', enum: VideoOutboxStatus, default: VideoOutboxStatus.PENDING })
+  @Column({
+    type: 'enum',
+    enum: VideoOutboxStatus,
+    default: VideoOutboxStatus.PENDING,
+  })
   @Index()
   status: VideoOutboxStatus;
 

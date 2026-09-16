@@ -5,7 +5,10 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
-import { OUTBOX_MAX_RETRY_DELAY_SECONDS, PURGE_RETRY_MAX_ATTEMPTS } from '../capture.constants';
+import {
+  OUTBOX_MAX_RETRY_DELAY_SECONDS,
+  PURGE_RETRY_MAX_ATTEMPTS,
+} from '../capture.constants';
 
 interface OutboxRow {
   id: string;
@@ -185,7 +188,9 @@ export class UploadWorkerService implements OnModuleInit {
       [PURGE_RETRY_MAX_ATTEMPTS],
     );
     if (requeued > 0) {
-      this.logger.log(`retryPurgedUploads: re-queued ${requeued} purged photo(s) for re-upload`);
+      this.logger.log(
+        `retryPurgedUploads: re-queued ${requeued} purged photo(s) for re-upload`,
+      );
     }
   }
 
@@ -194,7 +199,9 @@ export class UploadWorkerService implements OnModuleInit {
     try {
       await this.retryPurgedUploads();
     } catch (err) {
-      this.logger.error(`drainPurgeRecovery tick failed: ${(err as Error).message}`);
+      this.logger.error(
+        `drainPurgeRecovery tick failed: ${(err as Error).message}`,
+      );
     }
   }
 
@@ -330,7 +337,10 @@ export class UploadWorkerService implements OnModuleInit {
 
       await this.applyUploadSuccess(job, result);
     } catch (err) {
-      if (err instanceof FsError && err.code === FS_SERVER_CODES.ALREADY_REGISTERED) {
+      if (
+        err instanceof FsError &&
+        err.code === FS_SERVER_CODES.ALREADY_REGISTERED
+      ) {
         // See resolvePathConflict()'s own doc comment for the live-confirmed
         // root cause this handles - a kiosk retake landing on a flat,
         // session-agnostic virtual path an EARLIER session already
@@ -353,7 +363,12 @@ export class UploadWorkerService implements OnModuleInit {
    */
   private async applyUploadSuccess(
     job: OutboxRow,
-    result: { fileId: string; etag: string; status: string; virtualPath: string },
+    result: {
+      fileId: string;
+      etag: string;
+      status: string;
+      virtualPath: string;
+    },
   ): Promise<void> {
     await this.dataSource.transaction(async (manager) => {
       await manager.query(
@@ -475,11 +490,14 @@ export class UploadWorkerService implements OnModuleInit {
     }
 
     try {
-      const updated = await this.fileStorage.updateContent(occupant.fs_file_id, {
-        etag: occupant.fs_etag,
-        data: new Uint8Array(job.content),
-        mimeType: job.mime_type,
-      });
+      const updated = await this.fileStorage.updateContent(
+        occupant.fs_file_id,
+        {
+          etag: occupant.fs_etag,
+          data: new Uint8Array(job.content),
+          mimeType: job.mime_type,
+        },
+      );
       // `updateContent` reports no `status` of its own (unlike a fresh
       // upload's response) — a new version goes through the same
       // virus-scan pipeline a create does, so this is provisional exactly

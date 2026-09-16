@@ -3,13 +3,15 @@ import {
   ApiError,
   CardSpec,
   CreatePhotoKindInput,
+  Paginated,
   PhotoKind,
   UpdatePhotoKindInput,
   createPhotoKind,
-  listPhotoKinds,
+  listPhotoKindsPaginated,
   updatePhotoKind,
 } from '../api';
 import { ModalShell } from './CampaignDangerActions';
+import { DEFAULT_PAGE_SIZE, Pager } from './Pager';
 
 // `CardSpec`'s own fields are all optional (shared with `CampaignForm`'s
 // looser "an older campaign might not have one at all" reading) — the
@@ -45,21 +47,32 @@ function cardSpecSummary(spec: CardSpec): string {
  * it by hand — see that page's own doc comment.
  */
 export function PhotoKindsPage() {
-  const [kinds, setKinds] = useState<PhotoKind[] | null>(null);
+  const [q, setQ] = useState('');
+  const [activeFilter, setActiveFilter] = useState<'' | 'true' | 'false'>('');
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+  const [result, setResult] = useState<Paginated<PhotoKind> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<PhotoKind | null>(null);
 
   const reload = () => {
-    listPhotoKinds()
-      .then(setKinds)
+    listPhotoKindsPaginated({
+      page,
+      limit: pageSize,
+      q: q.trim() || undefined,
+      active: activeFilter === '' ? undefined : activeFilter === 'true',
+    })
+      .then(setResult)
       .catch((err) => setError(err instanceof ApiError ? err.message : String(err)));
   };
 
-  useEffect(reload, []);
+  useEffect(reload, [page, pageSize, q, activeFilter]);
+
+  const kinds = result?.items ?? null;
 
   const updateRow = (updated: PhotoKind) => {
-    setKinds((prev) => prev?.map((k) => (k.id === updated.id ? updated : k)) ?? prev);
+    setResult((prev) => (prev ? { ...prev, items: prev.items.map((k) => (k.id === updated.id ? updated : k)) } : prev));
   };
 
   return (
@@ -82,6 +95,30 @@ export function PhotoKindsPage() {
         >
           + Thêm loại ảnh
         </button>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-3 mb-4">
+        <input
+          value={q}
+          onChange={(e) => {
+            setQ(e.target.value);
+            setPage(1);
+          }}
+          placeholder="Tìm theo mã hoặc tên..."
+          className="flex-1 min-w-[200px] bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900"
+        />
+        <select
+          value={activeFilter}
+          onChange={(e) => {
+            setActiveFilter(e.target.value as '' | 'true' | 'false');
+            setPage(1);
+          }}
+          className="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900"
+        >
+          <option value="">Tất cả</option>
+          <option value="true">Đang dùng</option>
+          <option value="false">Đã ẩn</option>
+        </select>
       </div>
 
       {error && <div className="p-4 rounded-xl bg-red-50 border border-red-200 text-red-700 mb-4">{error}</div>}
@@ -144,17 +181,28 @@ export function PhotoKindsPage() {
         </table>
       )}
 
+      <Pager
+        meta={result?.meta}
+        itemLabel="loại ảnh"
+        onPageChange={setPage}
+        pageSize={pageSize}
+        onPageSizeChange={(size) => {
+          setPageSize(size);
+          setPage(1);
+        }}
+      />
+
       {formOpen && (
         <PhotoKindFormModal
           kind={editing}
           onClose={() => setFormOpen(false)}
           onSaved={(saved) => {
             setFormOpen(false);
-            setKinds((prev) => {
-              if (!prev) return [saved];
-              const exists = prev.some((k) => k.id === saved.id);
-              return exists ? prev.map((k) => (k.id === saved.id ? saved : k)) : [...prev, saved];
-            });
+            if (editing) {
+              updateRow(saved);
+            } else {
+              reload();
+            }
           }}
         />
       )}

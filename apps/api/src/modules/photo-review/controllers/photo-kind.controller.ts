@@ -1,9 +1,25 @@
 import { SsoAuthGuard } from '@app/shared/auth/index';
-import { Body, Controller, ForbiddenException, Get, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
+import { Pagination } from '@app/shared/http/pagination';
+import {
+  Body,
+  Controller,
+  ForbiddenException,
+  Get,
+  Param,
+  Patch,
+  Post,
+  Query,
+  Req,
+  UseGuards,
+} from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Request } from 'express';
 import { PhotoKindDao } from '../dao';
-import { CreatePhotoKindDto, UpdatePhotoKindDto } from '../dto';
+import {
+  CreatePhotoKindDto,
+  ListPhotoKindsQueryDto,
+  UpdatePhotoKindDto,
+} from '../dto';
 import { PhotoKindService } from '../services/photo-kind.service';
 
 /**
@@ -26,16 +42,34 @@ export class PhotoKindController {
     }
   }
 
+  /**
+   * Same §9.1 backward-compat rule 6 as `CampaignController.listCampaigns`
+   * — plain array (legacy) when `page` is omitted (e.g. a picker needing
+   * every kind at once), paginated+searchable `{items, meta}` once a caller
+   * opts in by passing `page` (`PhotoKindsPage.tsx`'s own management list).
+   */
   @Get()
-  @ApiOperation({ summary: 'List photo kinds (config, not a review action) — ADMIN only' })
-  async list(@Req() req: Request): Promise<PhotoKindDao[]> {
+  @ApiOperation({
+    summary:
+      'List photo kinds (config, not a review action) — plain array if `page` is omitted (legacy), paginated+searchable otherwise — ADMIN only',
+  })
+  async list(
+    @Query() query: ListPhotoKindsQueryDto,
+    @Req() req: Request,
+  ): Promise<PhotoKindDao[] | Pagination<PhotoKindDao>> {
     this.assertAdmin(req);
-    return this.photoKindService.listKinds();
+    if (query.page === undefined) {
+      return this.photoKindService.listKinds();
+    }
+    return this.photoKindService.listKindsPaginated(query);
   }
 
   @Post()
   @ApiOperation({ summary: 'Create a photo kind — ADMIN only' })
-  async create(@Body() dto: CreatePhotoKindDto, @Req() req: Request): Promise<PhotoKindDao> {
+  async create(
+    @Body() dto: CreatePhotoKindDto,
+    @Req() req: Request,
+  ): Promise<PhotoKindDao> {
     this.assertAdmin(req);
     return this.photoKindService.createKind(dto);
   }

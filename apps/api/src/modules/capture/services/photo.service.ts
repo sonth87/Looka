@@ -6,8 +6,11 @@ import { HttpStatus, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
-import { DataSource, Repository } from 'typeorm';
-import { ALLOWED_PHOTO_MIME_TYPES, MAX_PHOTO_BYTES } from '../capture.constants';
+import { DataSource, EntityManager, Repository } from 'typeorm';
+import {
+  ALLOWED_PHOTO_MIME_TYPES,
+  MAX_PHOTO_BYTES,
+} from '../capture.constants';
 import { PhotoDao } from '../dao';
 import { AddDevicePhotoDto, AddPhotoDto } from '../dto';
 import { Photo } from '../entities/photo.entity';
@@ -86,7 +89,9 @@ export class PhotoService extends CommonService<Photo> {
     sessionId: string,
     dto: AddPhotoDto,
   ): Promise<{ photoId: string }> {
-    await this.sessionService.findByIdOrFail(sessionId);
+    // Also feeds `enqueueEmbeddingJob` below (`campaignId`/`metadata.userCode`)
+    // — previously this result was discarded, re-fetching nothing from it.
+    const session = await this.sessionService.findByIdOrFail(sessionId);
 
     const { mimeType, data } = this.decodeDataUrl(dto.dataUrl);
     const sha256 = createHash('sha256').update(data).digest('hex');
@@ -160,10 +165,104 @@ export class PhotoService extends CommonService<Photo> {
         [id, idemKey, virtualPath, mimeType, data, visibility],
       );
 
+      // Backend-owned face-embedding registration (2026-09-16) — see
+      // `enqueueEmbeddingJob`'s own doc comment for the full skip/enqueue
+      // rule. `session` was already fetched at the top of this method, so
+      // its `campaignId`/`metadata.userCode` are read straight off it
+      // rather than re-queried.
+      const userCode =
+        typeof session.metadata?.userCode === 'string' &&
+        session.metadata.userCode
+          ? session.metadata.userCode
+          : undefined;
+      await this.enqueueEmbeddingJob(manager, {
+        photoId: id,
+        campaignId: session.campaignId,
+        userCode,
+        mimeType,
+        data,
+      });
+
       return id;
     });
 
     return { photoId };
+  }
+
+  /**
+   * Enqueues one photo for backend-owned face-embedding registration
+   * (2026-09-16, "tôi muốn phần embedding đó sẽ do backend xử lý, khi nhận
+   * ảnh và lưu sang file server thì chạy bất đồng bộ để embedding") —
+   * `EmbeddingWorkerService` drains this queue and is the thing that
+   * actually calls the external server; this only ever writes the row,
+   * inside the same transaction as the photo/`upload_outbox` insert above it
+   * (both `addPhoto` and `addDevicePhoto` call this at the exact same
+   * point), so a photo is never durably saved without also being durably
+   * queued for embedding.
+   *
+   * Silent no-op — matching the old desktop client's own "no userCode, no
+   * enrollment" behaviour — when:
+   *  - `campaignId` is unknown (an older client that never sent one, or a
+   *    non-campaign session): there is nothing to look up
+   *    `requiresEmbedding` against, so this skips entirely rather than
+   *    guessing a default.
+   *  - `userCode` is unavailable: sending the wrong kind of identifier
+   *    (e.g. `subjectCode`) to an external biometric-matching API would be a
+   *    real correctness bug — see `StudentSubjectInfo.userCode`'s own doc
+   *    comment in `packages/ui/src/lib/CaptureSink.ts`.
+   *  - the campaign has `requires_embedding = false`.
+   *
+   * `ON CONFLICT (photo_id) DO NOTHING` makes this idempotent the same way
+   * `upload_outbox`'s own `idem_key` conflict clause is — a resent photo
+   * (the `addPhoto`/`addDevicePhoto` upsert paths both allow this) never
+   * creates a second embedding job for the same photo.
+   */
+  private async enqueueEmbeddingJob(
+    manager: EntityManager,
+    input: {
+      photoId: string;
+      campaignId: string | null | undefined;
+      userCode: string | undefined;
+      mimeType: string;
+      data: Buffer;
+    },
+  ): Promise<void> {
+    if (!input.campaignId || !input.userCode) return;
+
+    const requiresEmbedding = await this.campaignRequiresEmbedding(
+      manager,
+      input.campaignId,
+    );
+    if (!requiresEmbedding) return;
+
+    await manager.query(
+      `INSERT INTO embedding_jobs (photo_id, user_code, mime_type, content)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (photo_id) DO NOTHING`,
+      [input.photoId, input.userCode, input.mimeType, input.data],
+    );
+  }
+
+  /**
+   * Raw SQL cross-module read (`campaigns` lives in `device-management`) —
+   * consistent with this file's own existing raw-SQL style rather than
+   * injecting `CampaignService`/a DAO from another module for one column. A
+   * campaign that genuinely no longer exists (should not happen — a
+   * `campaignId` only ever reaches here from a real session/device call)
+   * defaults to `true`, matching the column's own default and this field's
+   * "always ran before" backward-compat posture (see `Campaign
+   * .requiresEmbedding`'s own doc comment) rather than silently dropping a
+   * job that should have been created.
+   */
+  private async campaignRequiresEmbedding(
+    manager: EntityManager,
+    campaignId: string,
+  ): Promise<boolean> {
+    const rows: Array<{ requires_embedding: boolean }> = await manager.query(
+      `SELECT requires_embedding FROM campaigns WHERE id = $1`,
+      [campaignId],
+    );
+    return rows[0]?.requires_embedding !== false;
   }
 
   /**
@@ -284,6 +383,20 @@ export class PhotoService extends CommonService<Photo> {
          ON CONFLICT (idem_key) DO NOTHING`,
         [dto.photoId, idemKey, virtualPath, mimeType, data, visibility],
       );
+
+      // Backend-owned face-embedding registration (2026-09-16) — see
+      // `enqueueEmbeddingJob`'s own doc comment. `campaignId` is already a
+      // real param here (never null, unlike the web path); `dto.userCode`
+      // is threaded end-to-end from the kiosk the same way
+      // `dto.identityNumber` already is — see that field's own doc comment
+      // in `AddDevicePhotoDto`.
+      await this.enqueueEmbeddingJob(manager, {
+        photoId: dto.photoId,
+        campaignId,
+        userCode: dto.userCode,
+        mimeType,
+        data,
+      });
     });
 
     return { photoId: dto.photoId };
@@ -456,12 +569,20 @@ export class PhotoService extends CommonService<Photo> {
       );
     }
 
-    if (photo.fsFileId && photo.fsStatus !== 'FAILED' && photo.fsStatus !== 'QUARANTINED') {
+    if (
+      photo.fsFileId &&
+      photo.fsStatus !== 'FAILED' &&
+      photo.fsStatus !== 'QUARANTINED'
+    ) {
       // Always the default tenant — see `resolveViewContext`'s doc comment
       // just above for why a KIOSK session's device id must never be used
       // here (the photo was never actually stored under it, and fs-core
       // cannot hand that tenant's key back out a second time regardless).
-      return { kind: 'remote', fsFileId: photo.fsFileId, tenantName: undefined };
+      return {
+        kind: 'remote',
+        fsFileId: photo.fsFileId,
+        tenantName: undefined,
+      };
     }
 
     const rows: Array<{ has_content: boolean }> = await this.dataSource.query(

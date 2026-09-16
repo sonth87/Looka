@@ -38,8 +38,12 @@ export class CreatePhotoReview1800000000000 implements MigrationInterface {
         CONSTRAINT "UQ_photo_kinds_code" UNIQUE ("code")
       )
     `);
-    await queryRunner.query(`CREATE INDEX "IDX_photo_kinds_created_at" ON "photo_kinds" ("created_at")`);
-    await queryRunner.query(`CREATE INDEX "IDX_photo_kinds_code" ON "photo_kinds" ("code")`);
+    await queryRunner.query(
+      `CREATE INDEX "IDX_photo_kinds_created_at" ON "photo_kinds" ("created_at")`,
+    );
+    await queryRunner.query(
+      `CREATE INDEX "IDX_photo_kinds_code" ON "photo_kinds" ("code")`,
+    );
 
     await queryRunner.query(`
       CREATE TABLE "subject_photo_sets" (
@@ -115,8 +119,12 @@ export class CreatePhotoReview1800000000000 implements MigrationInterface {
         CONSTRAINT "CHK_photo_variants_status" CHECK ("status" IN ('PROCESSING', 'READY', 'FAILED', 'DISCARDED'))
       )
     `);
-    await queryRunner.query(`CREATE INDEX "IDX_photo_variants_created_at" ON "photo_variants" ("created_at")`);
-    await queryRunner.query(`CREATE INDEX "IDX_photo_variants_set_id" ON "photo_variants" ("set_id")`);
+    await queryRunner.query(
+      `CREATE INDEX "IDX_photo_variants_created_at" ON "photo_variants" ("created_at")`,
+    );
+    await queryRunner.query(
+      `CREATE INDEX "IDX_photo_variants_set_id" ON "photo_variants" ("set_id")`,
+    );
 
     await queryRunner.query(`
       CREATE TABLE "photo_review_events" (
@@ -142,8 +150,12 @@ export class CreatePhotoReview1800000000000 implements MigrationInterface {
     await queryRunner.query(
       `CREATE INDEX "IDX_photo_review_events_created_at" ON "photo_review_events" ("created_at")`,
     );
-    await queryRunner.query(`CREATE INDEX "IDX_photo_review_events_set_id" ON "photo_review_events" ("set_id")`);
-    await queryRunner.query(`CREATE INDEX "IDX_photo_review_events_at" ON "photo_review_events" ("at")`);
+    await queryRunner.query(
+      `CREATE INDEX "IDX_photo_review_events_set_id" ON "photo_review_events" ("set_id")`,
+    );
+    await queryRunner.query(
+      `CREATE INDEX "IDX_photo_review_events_at" ON "photo_review_events" ("at")`,
+    );
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {

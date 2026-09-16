@@ -3,6 +3,7 @@ import {
   ApiResponseDecorator,
 } from '@app/shared/http/api-response.decorator';
 import { SsoAuthGuard } from '@app/shared/auth/index';
+import { Pagination } from '@app/shared/http/pagination';
 import {
   Body,
   Controller,
@@ -12,12 +13,14 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CaptureConfigurationDao } from '../dao';
 import {
   CreateCaptureConfigurationDto,
+  ListCaptureConfigurationsQueryDto,
   UpdateCaptureConfigurationDto,
 } from '../dto';
 import { AdminRoleGuard } from '../guards/admin-role.guard';
@@ -47,15 +50,27 @@ import { CaptureConfigurationService } from '../services/capture-configuration.s
 export class CaptureConfigurationController {
   constructor(private readonly configService: CaptureConfigurationService) {}
 
+  /**
+   * Same §9.1 backward-compat rule 6 as `CampaignController.listCampaigns`
+   * — plain array (legacy) when `page` is omitted (the `CampaignForm.tsx`
+   * picker), paginated+searchable `{items, meta}` once a caller opts in by
+   * passing `page` (`CaptureConfigurationsPage.tsx`'s own management list).
+   */
   @Get()
   @Header('Deprecation', 'true')
   @ApiOperation({
-    summary: 'List every capture configuration',
+    summary:
+      'List capture configurations — plain array if `page` is omitted (legacy), paginated+searchable otherwise',
     deprecated: true,
   })
   @ApiResponseArrayDecorator(CaptureConfigurationDao)
-  listCaptureConfigurations(): Promise<CaptureConfigurationDao[]> {
-    return this.configService.listCaptureConfigurations();
+  listCaptureConfigurations(
+    @Query() query: ListCaptureConfigurationsQueryDto,
+  ): Promise<CaptureConfigurationDao[] | Pagination<CaptureConfigurationDao>> {
+    if (query.page === undefined) {
+      return this.configService.listCaptureConfigurations();
+    }
+    return this.configService.listCaptureConfigurationsPaginated(query);
   }
 
   @Get(':id')

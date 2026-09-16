@@ -72,6 +72,14 @@ export const METRIC_COLOR = {
   /** Face-embedding registration outcome (2026-09-15) — genuinely a good/bad pair (unlike triggerAuto/triggerManual above), same reasoning `uploadSuccess`/`uploadFailed` already use `STATUS` rather than a categorical slot. */
   embeddingEnrolled: STATUS.good,
   embeddingFailed: STATUS.critical,
+  /** Operations dashboard (2026-09-16) — `DashboardKpisDao`/`DashboardActiveCampaignDao` fields, KPI card accents. `captured`/`printed` are plain volume counts (categorical, neither good nor bad on its own); `pendingReview`/`overdue` are genuinely "needs attention" states (STATUS), same reasoning as `uploadFailed`. */
+  captured: CATEGORICAL.blue,
+  printed: CATEGORICAL.aqua,
+  pendingReview: STATUS.warning,
+  overdue: STATUS.critical,
+  /** "Duyệt ảnh" outcome breakdown (`ReviewStatsDao`) — same good/bad pair reasoning as `embeddingEnrolled`/`embeddingFailed`. */
+  reviewApproved: STATUS.good,
+  reviewRejected: STATUS.critical,
 } as const;
 
 /** Compact-but-consistent number formatting — every count in this app already uses `vi-VN` grouping (see StatTile/StatsPanel), kept here rather than switching to K/M compaction so the dashboard doesn't disagree with the table below it. */

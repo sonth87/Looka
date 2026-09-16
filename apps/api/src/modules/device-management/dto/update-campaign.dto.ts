@@ -145,6 +145,14 @@ export class UpdateCampaignDto {
   @IsBoolean()
   recordVideo?: boolean;
 
+  @ApiPropertyOptional({
+    description:
+      'Có gửi ảnh chụp lên máy chủ nhận diện khuôn mặt (embedding) hay không',
+  })
+  @IsOptional()
+  @IsBoolean()
+  requiresEmbedding?: boolean;
+
   /** See `CreateCampaignDto.workflowVersionId`'s own doc comment. `null` clears the pin. */
   @ApiPropertyOptional({
     description: 'Id version nghiệp vụ đã publish — null để bỏ ghim',

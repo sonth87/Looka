@@ -28,7 +28,8 @@ export class VideoContentController {
     @Res() res: Response,
   ): Promise<void> {
     this.sessionVideoService.verifyLocalViewTokenOrFail(videoId, exp, sig);
-    const { data, mimeType } = await this.sessionVideoService.readLocalContent(videoId);
+    const { data, mimeType } =
+      await this.sessionVideoService.readLocalContent(videoId);
     res.setHeader('Content-Type', mimeType);
     res.setHeader('Cache-Control', 'private, max-age=60');
     res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');

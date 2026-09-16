@@ -1,6 +1,9 @@
 import { FS_SERVER_CODES, FsError } from '@face/fs-client';
 import { OUTBOX_MAX_RETRY_DELAY_SECONDS } from '../capture.constants';
-import { computeNextRetryAt, UploadWorkerService } from './upload-worker.service';
+import {
+  computeNextRetryAt,
+  UploadWorkerService,
+} from './upload-worker.service';
 
 /**
  * Pins the backoff math on its own, without a database - what broke in the
@@ -158,13 +161,14 @@ describe('UploadWorkerService — ALREADY_REGISTERED conflict resolution', () =>
     // actually resolved.
     expect(cancelUpload).not.toHaveBeenCalled();
 
-    const outboxUpdate = dataSource.calls.find((c) =>
-      c.sql.includes('UPDATE upload_outbox') && c.sql.includes("'UPLOADED'"),
+    const outboxUpdate = dataSource.calls.find(
+      (c) =>
+        c.sql.includes('UPDATE upload_outbox') && c.sql.includes("'UPLOADED'"),
     );
     expect(outboxUpdate?.params).toEqual([job.id]);
 
-    const photoUpdate = dataSource.calls.find((c) =>
-      c.sql.includes('UPDATE photos') && c.sql.includes('fs_file_id'),
+    const photoUpdate = dataSource.calls.find(
+      (c) => c.sql.includes('UPDATE photos') && c.sql.includes('fs_file_id'),
     );
     expect(photoUpdate?.params).toEqual([
       job.photo_id,
@@ -204,8 +208,9 @@ describe('UploadWorkerService — ALREADY_REGISTERED conflict resolution', () =>
     expect(updateContent).not.toHaveBeenCalled();
     expect(cancelUpload).toHaveBeenCalledWith(expect.any(String));
 
-    const failedUpdate = dataSource.calls.find((c) =>
-      c.sql.includes('UPDATE upload_outbox') && c.sql.includes("'FAILED'"),
+    const failedUpdate = dataSource.calls.find(
+      (c) =>
+        c.sql.includes('UPDATE upload_outbox') && c.sql.includes("'FAILED'"),
     );
     expect(failedUpdate?.params).toEqual([job.id, err.message.slice(0, 500)]);
   });
@@ -242,8 +247,9 @@ describe('UploadWorkerService — ALREADY_REGISTERED conflict resolution', () =>
       dataSource.calls.some((c) => c.sql.includes('SELECT p.fs_file_id')),
     ).toBe(false);
 
-    const outboxUpdate = dataSource.calls.find((c) =>
-      c.sql.includes('UPDATE upload_outbox') && c.sql.includes("'UPLOADED'"),
+    const outboxUpdate = dataSource.calls.find(
+      (c) =>
+        c.sql.includes('UPDATE upload_outbox') && c.sql.includes("'UPLOADED'"),
     );
     expect(outboxUpdate?.params).toEqual([job.id]);
   });

@@ -10,6 +10,7 @@ import {
 } from '../api';
 import { METRIC_COLOR, NEUTRAL_ACCENT } from '../chartTheme';
 import { KpiCard } from './KpiCard';
+import { DEFAULT_PAGE_SIZE, Pager, paginateClientSide } from './Pager';
 import {
   CampaignComparisonChart,
   CampaignQualityChart,
@@ -88,6 +89,8 @@ export function StatsOverview() {
   const [statsError, setStatsError] = useState<string | null>(null);
   const [timeseries, setTimeseries] = useState<CampaignsTimeseries | null>(null);
   const [timeseriesError, setTimeseriesError] = useState<string | null>(null);
+  const [campaignsPage, setCampaignsPage] = useState(1);
+  const [campaignsPageSize, setCampaignsPageSize] = useState(DEFAULT_PAGE_SIZE);
 
   useEffect(() => {
     getAllCampaignsStats()
@@ -263,42 +266,57 @@ export function StatsOverview() {
             <DashboardPanel title="Danh sách theo từng campaign">
               {stats.campaigns.length === 0 && <p className="text-gray-500 text-sm">Chưa có campaign nào.</p>}
 
-              {stats.campaigns.length > 0 && (
-                <div className="overflow-x-auto -mx-1">
-                  <table className="w-full text-sm border-collapse">
-                    <thead>
-                      <tr className="text-left text-gray-500 border-b border-gray-200">
-                        <th className="py-2.5 px-4">Campaign</th>
-                        <th className="py-2.5 px-4">Thiết bị</th>
-                        <th className="py-2.5 px-4">Session hoàn tất</th>
-                        <th className="py-2.5 px-4">Upload OK</th>
-                        <th className="py-2.5 px-4">Upload lỗi</th>
-                        <th className="py-2.5 px-4">Chụp lại</th>
-                        <th className="py-2.5 px-4">CB Help</th>
-                        <th className="py-2.5 px-4" />
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {stats.campaigns.map((c) => (
-                        <tr key={c.campaignId} className="border-b border-gray-100 last:border-0 hover:bg-gray-50">
-                          <td className="py-2.5 px-4 font-medium text-gray-900">{c.campaignName}</td>
-                          <td className="py-2.5 px-4 text-gray-500 tabular-nums">{c.deviceCount}</td>
-                          <td className="py-2.5 px-4 text-gray-500 tabular-nums">{c.sessionsCompleted}</td>
-                          <td className="py-2.5 px-4 text-gray-500 tabular-nums">{c.uploadSuccess}</td>
-                          <td className="py-2.5 px-4 text-gray-500 tabular-nums">{c.uploadFailed}</td>
-                          <td className="py-2.5 px-4 text-gray-500 tabular-nums">{c.retakes}</td>
-                          <td className="py-2.5 px-4 text-gray-500 tabular-nums">{c.cbHelpInterventions}</td>
-                          <td className="py-2.5 px-4 text-right">
-                            <Link to={`/campaigns/${c.campaignId}`} className="text-blue-600 hover:text-blue-800 font-medium">
-                              Xem →
-                            </Link>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
+              {stats.campaigns.length > 0 && (() => {
+                const { pageItems, meta } = paginateClientSide(stats.campaigns, campaignsPage, campaignsPageSize);
+                return (
+                  <>
+                    <div className="overflow-x-auto -mx-1">
+                      <table className="w-full text-sm border-collapse">
+                        <thead>
+                          <tr className="text-left text-gray-500 border-b border-gray-200">
+                            <th className="py-2.5 px-4">Campaign</th>
+                            <th className="py-2.5 px-4">Thiết bị</th>
+                            <th className="py-2.5 px-4">Session hoàn tất</th>
+                            <th className="py-2.5 px-4">Upload OK</th>
+                            <th className="py-2.5 px-4">Upload lỗi</th>
+                            <th className="py-2.5 px-4">Chụp lại</th>
+                            <th className="py-2.5 px-4">CB Help</th>
+                            <th className="py-2.5 px-4" />
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {pageItems.map((c) => (
+                            <tr key={c.campaignId} className="border-b border-gray-100 last:border-0 hover:bg-gray-50">
+                              <td className="py-2.5 px-4 font-medium text-gray-900">{c.campaignName}</td>
+                              <td className="py-2.5 px-4 text-gray-500 tabular-nums">{c.deviceCount}</td>
+                              <td className="py-2.5 px-4 text-gray-500 tabular-nums">{c.sessionsCompleted}</td>
+                              <td className="py-2.5 px-4 text-gray-500 tabular-nums">{c.uploadSuccess}</td>
+                              <td className="py-2.5 px-4 text-gray-500 tabular-nums">{c.uploadFailed}</td>
+                              <td className="py-2.5 px-4 text-gray-500 tabular-nums">{c.retakes}</td>
+                              <td className="py-2.5 px-4 text-gray-500 tabular-nums">{c.cbHelpInterventions}</td>
+                              <td className="py-2.5 px-4 text-right">
+                                <Link to={`/campaigns/${c.campaignId}`} className="text-blue-600 hover:text-blue-800 font-medium">
+                                  Xem →
+                                </Link>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <Pager
+                      meta={meta}
+                      itemLabel="campaign"
+                      onPageChange={setCampaignsPage}
+                      pageSize={campaignsPageSize}
+                      onPageSizeChange={(size) => {
+                        setCampaignsPageSize(size);
+                        setCampaignsPage(1);
+                      }}
+                    />
+                  </>
+                );
+              })()}
             </DashboardPanel>
           </section>
         </div>

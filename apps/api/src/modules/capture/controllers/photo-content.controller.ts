@@ -37,7 +37,8 @@ export class PhotoContentController {
     @Res() res: Response,
   ): Promise<void> {
     this.photoService.verifyLocalViewTokenOrFail(photoId, exp, sig);
-    const { data, mimeType } = await this.photoService.readLocalContent(photoId);
+    const { data, mimeType } =
+      await this.photoService.readLocalContent(photoId);
     res.setHeader('Content-Type', mimeType);
     res.setHeader('Cache-Control', 'private, max-age=60');
     // `helmet()` (main.ts) sets `Cross-Origin-Resource-Policy: same-origin`

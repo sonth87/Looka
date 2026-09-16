@@ -1,28 +1,60 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { AllCampaignsStats, ApiError, Campaign, getAllCampaignsStats, listCampaigns } from '../api';
+import {
+  AllCampaignsStats,
+  ApiError,
+  Campaign,
+  EffectiveStatus,
+  Paginated,
+  getAllCampaignsStats,
+  listCampaigns,
+  listCampaignsPaginated,
+} from '../api';
 import { StatTile } from './StatsPanel';
 import { CampaignDangerActions } from './CampaignDangerActions';
-import { PURPOSE_LABEL, formatExpiry, isExpired, isExpiringSoon } from '../campaignFormat';
+import { DEFAULT_PAGE_SIZE, Pager } from './Pager';
+import { EFFECTIVE_STATUS_LABEL, PURPOSE_LABEL, formatExpiry, isExpired, isExpiringSoon } from '../campaignFormat';
 
 /**
  * Campaign list (`/campaigns`) — Part 3 of the 2026-09-07 redesign (product
  * request: campaign list + campaign-level stats + create button + per-row
  * view/edit/extend/delete). The inline toggle-shown create form is gone;
  * "+ Tạo campaign" now links to its own page (`/campaigns/new`, Part 4).
+ *
+ * 2026-09-16: the table itself switched to real backend pagination+filters
+ * (`listCampaignsPaginated`, `GET /v1/campaigns?page&limit&status&q`) so a
+ * single fetch never pulls more than `DEFAULT_PAGE_SIZE` rows — the summary
+ * tiles below still read the legacy unfiltered `listCampaigns()` full array
+ * separately, since "Tổng campaign"/"Đã hết hạn"/"Sắp hết hạn" are meant to
+ * stay global counts, unaffected by whatever status/search filter the table
+ * is currently narrowed to.
  */
 export function CampaignList() {
-  const [campaigns, setCampaigns] = useState<Campaign[] | null>(null);
+  const [status, setStatus] = useState<EffectiveStatus | ''>('');
+  const [q, setQ] = useState('');
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+  const [result, setResult] = useState<Paginated<Campaign> | null>(null);
+
+  const [allCampaigns, setAllCampaigns] = useState<Campaign[] | null>(null);
   // Only used for its totalDevices figure in the stats strip below — the
   // rest of AllCampaignsStats (sessions/uploads/etc.) is Overview's job, not
   // this page's; a failure here just means that one tile doesn't render.
   const [allStats, setAllStats] = useState<AllCampaignsStats | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const reload = () => {
-    listCampaigns()
-      .then(setCampaigns)
+  useEffect(() => {
+    listCampaignsPaginated({ page, limit: pageSize, status: status || undefined, q: q.trim() || undefined })
+      .then(setResult)
       .catch((err) => setError(err instanceof ApiError ? err.message : String(err)));
+  }, [page, pageSize, status, q]);
+
+  const reloadSummary = () => {
+    listCampaigns()
+      .then(setAllCampaigns)
+      .catch(() => {
+        /* non-fatal — the summary tiles just won't show */
+      });
     getAllCampaignsStats()
       .then(setAllStats)
       .catch(() => {
@@ -30,23 +62,26 @@ export function CampaignList() {
       });
   };
 
-  useEffect(reload, []);
+  useEffect(reloadSummary, []);
+
+  const campaigns = result?.items ?? null;
 
   const updateRow = (updated: Campaign) => {
-    setCampaigns((prev) => prev?.map((c) => (c.id === updated.id ? updated : c)) ?? prev);
+    setResult((prev) => (prev ? { ...prev, items: prev.items.map((c) => (c.id === updated.id ? updated : c)) } : prev));
   };
   const removeRow = (id: string) => {
-    setCampaigns((prev) => prev?.filter((c) => c.id !== id) ?? prev);
+    setResult((prev) => (prev ? { ...prev, items: prev.items.filter((c) => c.id !== id) } : prev));
+    reloadSummary();
   };
 
-  // Expiry-window counts are computed client-side from the campaigns list
-  // already fetched above (per-campaign `expiresAt`) — no new backend
+  // Expiry-window counts are computed client-side from the FULL (unfiltered)
+  // campaign list fetched above (per-campaign `expiresAt`) — no new backend
   // endpoint needed for this, distinct from Overview's cross-campaign usage
   // stats (sessions/uploads/etc.) which stay on GET /v1/campaigns/stats/summary.
-  const summary = campaigns && {
-    total: campaigns.length,
-    expired: campaigns.filter((c) => isExpired(c)).length,
-    expiringSoon: campaigns.filter((c) => isExpiringSoon(c)).length,
+  const summary = allCampaigns && {
+    total: allCampaigns.length,
+    expired: allCampaigns.filter((c) => isExpired(c)).length,
+    expiringSoon: allCampaigns.filter((c) => isExpiringSoon(c)).length,
   };
 
   return (
@@ -70,6 +105,33 @@ export function CampaignList() {
           {allStats && <StatTile label="Tổng thiết bị" value={allStats.totalDevices} />}
         </div>
       )}
+
+      <div className="flex flex-wrap items-center gap-3 mb-4">
+        <select
+          value={status}
+          onChange={(e) => {
+            setStatus(e.target.value as EffectiveStatus | '');
+            setPage(1);
+          }}
+          className="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900"
+        >
+          <option value="">Tất cả trạng thái</option>
+          {(Object.keys(EFFECTIVE_STATUS_LABEL) as EffectiveStatus[]).map((s) => (
+            <option key={s} value={s}>
+              {EFFECTIVE_STATUS_LABEL[s]}
+            </option>
+          ))}
+        </select>
+        <input
+          value={q}
+          onChange={(e) => {
+            setQ(e.target.value);
+            setPage(1);
+          }}
+          placeholder="Tìm theo tên hoặc mã campaign..."
+          className="flex-1 min-w-[200px] bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900"
+        />
+      </div>
 
       {error && <div className="p-4 rounded-xl bg-red-50 border border-red-200 text-red-700 mb-4">{error}</div>}
 
@@ -138,6 +200,17 @@ export function CampaignList() {
           </tbody>
         </table>
       )}
+
+      <Pager
+        meta={result?.meta}
+        itemLabel="campaign"
+        onPageChange={setPage}
+        pageSize={pageSize}
+        onPageSizeChange={(size) => {
+          setPageSize(size);
+          setPage(1);
+        }}
+      />
     </div>
   );
 }

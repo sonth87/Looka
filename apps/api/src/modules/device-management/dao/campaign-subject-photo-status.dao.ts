@@ -19,12 +19,15 @@ export class CampaignSubjectPhotoStatusDao {
   @Expose()
   status?: PhotoReviewSetStatus;
 
-  @ApiPropertyOptional({ description: 'Thời điểm hồ sơ này được tạo (lần chụp trước)' })
+  @ApiPropertyOptional({
+    description: 'Thời điểm hồ sơ này được tạo (lần chụp trước)',
+  })
   @Expose()
   capturedAt?: Date;
 
   @ApiPropertyOptional({
-    description: 'URL xem trước ảnh thẻ hiện tại — vắng mặt nếu chưa có ảnh nào được xử lý xong',
+    description:
+      'URL xem trước ảnh thẻ hiện tại — vắng mặt nếu chưa có ảnh nào được xử lý xong',
   })
   @Expose()
   viewUrl?: string;

@@ -5,7 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
-import { DataSource, In, Repository } from 'typeorm';
+import { DataSource, FindOptionsWhere, In, Repository } from 'typeorm';
 import { Pagination } from '@app/shared/http/pagination';
 import {
   CreatePrintBatchDto,
@@ -183,6 +183,50 @@ export class PrintBatchService {
     await this.batches.save(batch);
   }
 
+  /** `POST /v1/print/batches/:id/items/remove {itemIds}` — bulk mirror of the single-item `DELETE .../items/:itemId` above; same "item stays, only loses batchId" semantics, just for many at once. */
+  async removeItems(
+    id: string,
+    itemIds: string[],
+  ): Promise<{ removed: number }> {
+    const batch = await this.loadOrFail(id);
+    this.assertEditable(batch);
+    const items = await this.itemService.findByIds(itemIds);
+    const foundIds = new Set(items.map((i) => i.id));
+    const missing = itemIds.filter((i) => !foundIds.has(i));
+    if (missing.length) {
+      throw new NotFoundException(`Không tìm thấy item: ${missing.join(', ')}`);
+    }
+    const foreign = items.find((i) => i.batchId !== id);
+    if (foreign) {
+      throw new NotFoundException(`Item ${foreign.id} không thuộc đợt in này`);
+    }
+    await this.items.update({ id: In(itemIds) }, { batchId: null });
+    batch.itemCount = Math.max(0, batch.itemCount - itemIds.length);
+    await this.batches.save(batch);
+    return { removed: itemIds.length };
+  }
+
+  /** Shared by `send()`/`package()`: when a caller passes an explicit `itemIds` subset, every id must actually be a member of this batch — a foreign or unknown id is a 400, never silently ignored (task brief §Task A point 2). */
+  private async assertItemsBelongToBatch(
+    id: string,
+    itemIds: string[],
+  ): Promise<void> {
+    const items = await this.itemService.findByIds(itemIds);
+    const foundIds = new Set(items.map((i) => i.id));
+    const missing = itemIds.filter((i) => !foundIds.has(i));
+    if (missing.length) {
+      throw new BadRequestException(
+        `Không tìm thấy item: ${missing.join(', ')}`,
+      );
+    }
+    const foreign = items.find((i) => i.batchId !== id);
+    if (foreign) {
+      throw new BadRequestException(
+        `Item ${foreign.id} không thuộc đợt in này`,
+      );
+    }
+  }
+
   /**
    * `POST /v1/print/batches/:id/render` — renders every not-yet-RENDERED
    * item in the batch. Runs SYNCHRONOUSLY within the request (unlike
@@ -234,7 +278,7 @@ export class PrintBatchService {
    * (`GET .../package`, built fresh on demand — see `PrintPackageService`),
    * there is no further state a centralized batch waits through.
    */
-  async send(id: string): Promise<PrintBatchDetailDao> {
+  async send(id: string, itemIds?: string[]): Promise<PrintBatchDetailDao> {
     const batch = await this.loadOrFail(id);
     if (batch.itemCount === 0) {
       throw new BadRequestException('Đợt in chưa có item nào');
@@ -243,6 +287,9 @@ export class PrintBatchService {
       throw new ConflictException(
         `Đợt in đang ở trạng thái ${batch.status}, không thể gửi in`,
       );
+    }
+    if (itemIds?.length) {
+      await this.assertItemsBelongToBatch(id, itemIds);
     }
 
     const now = new Date();
@@ -257,10 +304,15 @@ export class PrintBatchService {
           'Đợt in DIRECT cần gán máy in trước khi gửi',
         );
       }
-      const result = await this.items.update(
-        { batchId: id, status: 'RENDERED' as PrintItem['status'] },
-        { status: 'QUEUED', printerId: batch.printerId },
-      );
+      const where: FindOptionsWhere<PrintItem> = {
+        batchId: id,
+        status: 'RENDERED',
+      };
+      if (itemIds?.length) where.id = In(itemIds);
+      const result = await this.items.update(where, {
+        status: 'QUEUED',
+        printerId: batch.printerId,
+      });
       if (!result.affected) {
         throw new BadRequestException(
           'Chưa có item nào ở trạng thái RENDERED để gửi in',
@@ -269,9 +321,12 @@ export class PrintBatchService {
       batch.status = 'PRINTING';
       batch.sentAt = now;
     } else {
-      const renderedCount = await this.items.count({
-        where: { batchId: id, status: 'RENDERED' },
-      });
+      const countWhere: FindOptionsWhere<PrintItem> = {
+        batchId: id,
+        status: 'RENDERED',
+      };
+      if (itemIds?.length) countWhere.id = In(itemIds);
+      const renderedCount = await this.items.count({ where: countWhere });
       if (renderedCount === 0) {
         throw new BadRequestException(
           'Chưa có item nào được render để xuất gói',
@@ -300,9 +355,15 @@ export class PrintBatchService {
     return PrintBatchDetailDao.fromDetail(saved);
   }
 
-  async package(id: string): Promise<{ zip: Buffer; filename: string }> {
+  async package(
+    id: string,
+    itemIds?: string[],
+  ): Promise<{ zip: Buffer; filename: string }> {
     const batch = await this.loadOrFail(id);
-    const zip = await this.packageService.buildPackage(batch);
+    if (itemIds?.length) {
+      await this.assertItemsBelongToBatch(id, itemIds);
+    }
+    const zip = await this.packageService.buildPackage(batch, itemIds);
     return { zip, filename: `print-batch-${batch.code}.zip` };
   }
 }

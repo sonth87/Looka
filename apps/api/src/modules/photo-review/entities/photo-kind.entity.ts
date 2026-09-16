@@ -22,15 +22,22 @@ export class PhotoKind extends BaseEntity {
 
   /** Default card spec for this kind — size/dpi/background/head-eye ratio. See this module's seed migration for the STUDENT_CARD default. */
   @Column('jsonb', { name: 'card_spec' })
-  @ApiProperty({ description: 'Chuẩn ảnh thẻ mặc định (cỡ, dpi, nền, tỉ lệ đầu/mắt)' })
+  @ApiProperty({
+    description: 'Chuẩn ảnh thẻ mặc định (cỡ, dpi, nền, tỉ lệ đầu/mắt)',
+  })
   cardSpec: Record<string, unknown>;
 
   @Column('jsonb', { name: 'quality_profile', nullable: true })
-  @ApiPropertyOptional({ description: 'Bộ kiểm tra chất lượng riêng cho loại ảnh này' })
+  @ApiPropertyOptional({
+    description: 'Bộ kiểm tra chất lượng riêng cho loại ảnh này',
+  })
   qualityProfile?: Record<string, unknown> | null;
 
   @Column('jsonb', { name: 'prompt_hints', default: () => "'[]'" })
-  @ApiProperty({ description: 'Gợi ý prompt AI cho loại ảnh này', type: [String] })
+  @ApiProperty({
+    description: 'Gợi ý prompt AI cho loại ảnh này',
+    type: [String],
+  })
   promptHints: string[];
 
   @Column('boolean', { default: true })

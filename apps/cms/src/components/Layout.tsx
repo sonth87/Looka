@@ -65,6 +65,9 @@ export function Layout({ children }: { children: ReactNode }) {
           <NavLink to="/" end className={navItemClass}>
             Tổng quan
           </NavLink>
+          <NavLink to="/dashboard" className={navItemClass}>
+            Vận hành
+          </NavLink>
           <NavLink to="/campaigns" className={navItemClass}>
             Campaigns
           </NavLink>
@@ -96,6 +99,19 @@ export function Layout({ children }: { children: ReactNode }) {
             Cấu hình
           </NavLink>
           {/*
+            "Workflow" (Phase 5, cms-8-screens-api-plan.md §2.2/P2) — điều
+            kiện tiếp nhận (eligibility) + phương thức định danh cho một
+            campaign, versioned độc lập với campaign. "Phương thức định danh"
+            là danh mục dùng chung mà workflow tham chiếu tới, nên đặt cạnh
+            nhau cùng nhóm cấu hình ở trên.
+          */}
+          <NavLink to="/workflows" className={navItemClass}>
+            Workflow
+          </NavLink>
+          <NavLink to="/identification-methods" className={navItemClass}>
+            Phương thức định danh
+          </NavLink>
+          {/*
             "Duyệt ảnh" (C5, cms-photo-review-plan.md §0/§R-Q7) — a deliberately
             separate area ("route riêng, menu riêng, vai trò riêng REVIEWER")
             rather than folded into the admin nav group above; visually set
@@ -108,6 +124,41 @@ export function Layout({ children }: { children: ReactNode }) {
           <div className="pt-3 mt-3 border-t border-gray-200">
             <NavLink to="/review" className={navItemClass}>
               Duyệt ảnh
+            </NavLink>
+            <NavLink to="/print" className={navItemClass}>
+              In thẻ
+            </NavLink>
+            {/*
+              "Phôi thẻ" (Task C, 2026-09-16) — card-template CRUD + layout
+              editor (`/card-templates`), placed right after "In thẻ" since a
+              batch's default template and a print item's per-item template
+              both come from this catalog.
+            */}
+            <NavLink to="/card-templates" className={navItemClass}>
+              Phôi thẻ
+            </NavLink>
+            {/*
+              "Máy in" — printer hardware/lifecycle management (status,
+              phôi/stock, agent token), distinct from "In thẻ" above (print
+              BATCHES/ITEMS — the jobs a printer executes). Placed right
+              after it since they're the two halves of the same "in thẻ"
+              concern: job queue vs. the physical hardware running it.
+            */}
+            <NavLink to="/printers" className={navItemClass}>
+              Máy in
+            </NavLink>
+          </div>
+
+          {/*
+            "Phân quyền" — role/permission administration (roles, their
+            permission sets, which users hold them). Kept in its own group,
+            separate from the campaign/photo-operations items above: this is
+            system administration, not a day-to-day capture/review/print
+            task.
+          */}
+          <div className="pt-3 mt-3 border-t border-gray-200">
+            <NavLink to="/roles" className={navItemClass}>
+              Phân quyền
             </NavLink>
           </div>
         </nav>

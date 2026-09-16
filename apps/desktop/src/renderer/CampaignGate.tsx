@@ -136,17 +136,40 @@ export function CampaignGate({
   const [campaignsError, setCampaignsError] = useState<string | null>(null);
   const [selectedCampaign, setSelectedCampaign] = useState<CampaignSummary | null>(null);
 
+  /**
+   * Same reset `onLogout` below already did manually, pulled out so every
+   * 401 handler in this gate can reach it too — previously only the
+   * operator's own "Đăng xuất" button ever cleared `identity`, so an
+   * expired/invalid SSO session (server-side) left the kiosk stuck showing
+   * whatever screen it was already on: `identity` stays non-null (it's just
+   * a locally-cached token blob, never re-validated against the server on
+   * its own), so `LoginScreen`'s early-return never re-triggers, while every
+   * `/v1/*` call keeps 401ing forever. `authClient.logout()` clears the
+   * stale token so a relaunch doesn't resurrect the same stuck state.
+   */
+  const forceLogout = useCallback(() => {
+    authClient.logout();
+    setIdentity(null);
+    setCampaigns(null);
+    setCampaignsError(null);
+    setSelectedCampaign(null);
+    setIsAdmin(undefined);
+  }, []);
+
+  /** True for the one `CampaignPortalApiError` case that means "this SSO session is no longer valid" (vs. a network blip or a 5xx) — see `forceLogout`'s own doc comment. */
+  const isSessionExpired = (err: unknown): boolean => err instanceof CampaignPortalApiError && err.status === 401;
+
   const loadCampaigns = useCallback(async () => {
     setCampaignsError(null);
     try {
       const list = await fetchMyCampaigns(authClient.authHeaders());
       setCampaigns(list);
     } catch (err) {
-      const message =
-        err instanceof CampaignPortalApiError && err.status === 401
-          ? 'Không xác thực được với máy chủ (SSO chưa sẵn sàng hoặc phiên đã hết hạn).'
-          : (err as Error).message;
-      setCampaignsError(message);
+      if (isSessionExpired(err)) {
+        forceLogout();
+        return;
+      }
+      setCampaignsError((err as Error).message);
       // Still flips `campaigns` from `null` to a (empty) array — a failed
       // first fetch is not "still loading", it's a resolved state with an
       // error, and `DeviceInitScreen`'s own retry banner (wired to
@@ -154,7 +177,7 @@ export function CampaignGate({
       // not an indefinite `StandbyScreen`.
       setCampaigns((prev) => prev ?? []);
     }
-  }, []);
+  }, [forceLogout]);
 
   useEffect(() => {
     if (!identity) return;
@@ -173,13 +196,17 @@ export function CampaignGate({
         const me = await fetchMe(authClient.authHeaders());
         if (!cancelled) setIsAdmin(me.isAdmin);
       } catch (err) {
+        if (!cancelled && isSessionExpired(err)) {
+          forceLogout();
+          return;
+        }
         console.error('[CampaignGate] fetchMe failed — isAdmin badge will stay unknown:', err);
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [identity]);
+  }, [identity, forceLogout]);
 
   /**
    * Fetches this campaign's real capture config (steps, "quay video") via
@@ -204,14 +231,23 @@ export function CampaignGate({
     setStarting(true);
     try {
       const config = await fetchCampaignConfig(selected.id, authClient.authHeaders());
-      setCampaignConfig({ captureAngles: config.captureAngles, recordVideo: config.recordVideo === true });
+      setCampaignConfig({
+        captureAngles: config.captureAngles,
+        recordVideo: config.recordVideo === true,
+      });
     } catch (err) {
+      if (isSessionExpired(err)) {
+        // Do NOT fall through to `started: true` below — an expired session
+        // has nothing to capture into, and `forceLogout` is about to render
+        // `LoginScreen` in place of this whole gate anyway.
+        forceLogout();
+        return;
+      }
       console.error('[CampaignGate] fetchCampaignConfig failed, starting with defaultWorkflow:', err);
       setCampaignConfig({ captureAngles: null, recordVideo: false });
-    } finally {
-      setStarting(false);
-      setStarted(true);
     }
+    setStarting(false);
+    setStarted(true);
   }
 
   const refreshDeviceState = useCallback(async () => {
@@ -371,6 +407,15 @@ export function CampaignGate({
         if (cancelled) return;
         await faceAPI?.storeSelfEnrolledDevice?.(result);
       } catch (err) {
+        // Deliberately NOT `forceLogout()` here even on a 401, unlike the
+        // three call sites above — this runs concurrently with (and after)
+        // `handleStartCapture` already flipping `started: true`, so the
+        // operator may already be mid-capture; actual photo/event uploads
+        // authenticate via the device's own x-device-id/x-device-secret
+        // headers, entirely independent of this SSO token, so an expired
+        // session here would only mean this campaign's SESSION_REPORT stats
+        // keep not registering, not that the capture in progress should be
+        // yanked back to a login screen.
         console.error('[CampaignGate] self-enroll failed — SESSION_REPORT stats will keep failing to reach the server:', err);
       }
     })();
@@ -478,23 +523,7 @@ export function CampaignGate({
         onOpenDeviceSettings={() => {
           (window as any).faceAPI?.openCameraSetup?.();
         }}
-        onLogout={() => {
-          authClient.logout();
-          setIdentity(null);
-          // `campaigns`/`selectedCampaign`/etc. live in this persistently-
-          // mounted gate now (lifted here so it can distinguish Standby from
-          // DeviceInitScreen — see `loadCampaigns`'s doc comment), unlike
-          // before when they were local to `CampaignPickerScreen` and simply
-          // vanished on unmount. Without resetting them here, a re-login as
-          // a different operator would briefly render the PREVIOUS user's
-          // campaign list (StandbyScreen would also be skipped, since
-          // `campaigns` wouldn't be `null`) until the identity-keyed refetch
-          // below catches up.
-          setCampaigns(null);
-          setCampaignsError(null);
-          setSelectedCampaign(null);
-          setIsAdmin(undefined);
-        }}
+        onLogout={forceLogout}
       />
     </KioskShell>
   );

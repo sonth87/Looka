@@ -6,7 +6,10 @@ import { ConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { DataSource, Repository } from 'typeorm';
-import { ALLOWED_VIDEO_MIME_TYPES, MAX_VIDEO_BYTES } from '../capture.constants';
+import {
+  ALLOWED_VIDEO_MIME_TYPES,
+  MAX_VIDEO_BYTES,
+} from '../capture.constants';
 import { AddDeviceVideoDto } from '../dto';
 import { SessionVideo } from '../entities/session-video.entity';
 
@@ -102,7 +105,10 @@ export class SessionVideoService extends CommonService<SessionVideo> {
    */
   private decodeDataUrl(dataUrl: string): { mimeType: string; data: Buffer } {
     const markerIndex = dataUrl.indexOf(DATA_URL_MARKER);
-    if (!dataUrl.toLowerCase().startsWith('data:video/') || markerIndex === -1) {
+    if (
+      !dataUrl.toLowerCase().startsWith('data:video/') ||
+      markerIndex === -1
+    ) {
       throw new CustomException(
         'Expected dataUrl to be a base64 video data URL',
         ERROR_CODE.VIDEO_INVALID_DATA_URL,
@@ -120,7 +126,10 @@ export class SessionVideoService extends CommonService<SessionVideo> {
       );
     }
 
-    const data = Buffer.from(dataUrl.slice(markerIndex + DATA_URL_MARKER.length), 'base64');
+    const data = Buffer.from(
+      dataUrl.slice(markerIndex + DATA_URL_MARKER.length),
+      'base64',
+    );
     if (data.byteLength === 0) {
       throw new CustomException(
         'Video payload decoded to zero bytes',
@@ -351,7 +360,11 @@ export class SessionVideoService extends CommonService<SessionVideo> {
     ) {
       // Always the default tenant — see the class doc comment for why a
       // KIOSK session's device id must never be used here.
-      return { kind: 'remote', fsFileId: video.fsFileId, tenantName: undefined };
+      return {
+        kind: 'remote',
+        fsFileId: video.fsFileId,
+        tenantName: undefined,
+      };
     }
 
     const rows: Array<{ has_content: boolean }> = await this.dataSource.query(

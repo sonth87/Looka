@@ -1,7 +1,10 @@
 import { BaseEntity } from '@app/shared/database/base.entity';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Column, Entity, Index, JoinColumn, ManyToOne } from 'typeorm';
-import { PhotoVariantKind, PhotoVariantStatus } from '../photo-review.constants';
+import {
+  PhotoVariantKind,
+  PhotoVariantStatus,
+} from '../photo-review.constants';
 import { SubjectPhotoSet } from './subject-photo-set.entity';
 
 /**
@@ -32,12 +35,15 @@ export class PhotoVariant extends BaseEntity {
   kind: PhotoVariantKind;
 
   @Column('uuid', { name: 'derived_from_variant_id', nullable: true })
-  @ApiPropertyOptional({ description: 'Phiên bản gốc dùng để tạo bản này (sửa AI)' })
+  @ApiPropertyOptional({
+    description: 'Phiên bản gốc dùng để tạo bản này (sửa AI)',
+  })
   derivedFromVariantId?: string | null;
 
   @Column('uuid', { name: 'source_photo_id', nullable: true })
   @ApiPropertyOptional({
-    description: 'Ảnh gốc (bảng photos) dùng làm nguồn — không có FK cứng liên module',
+    description:
+      'Ảnh gốc (bảng photos) dùng làm nguồn — không có FK cứng liên module',
   })
   sourcePhotoId?: string | null;
 
@@ -60,17 +66,22 @@ export class PhotoVariant extends BaseEntity {
    */
   @Column('varchar', { length: 50, name: 'fs_status', nullable: true })
   @ApiPropertyOptional({
-    description: 'Trạng thái file trên file-service (SCANNING/READY/FAILED/...)',
+    description:
+      'Trạng thái file trên file-service (SCANNING/READY/FAILED/...)',
   })
   fsStatus?: string | null;
 
   /** Most recent fs-core-side failure, distinct from `note` (sidecar/pipeline failures) — same separation `photos.uploadError` keeps. */
   @Column('text', { name: 'fs_upload_error', nullable: true })
-  @ApiPropertyOptional({ description: 'Lỗi upload/scan gần nhất trên file-service, nếu có' })
+  @ApiPropertyOptional({
+    description: 'Lỗi upload/scan gần nhất trên file-service, nếu có',
+  })
   fsUploadError?: string | null;
 
   @Column('text', { name: 'virtual_path', nullable: true })
-  @ApiPropertyOptional({ description: 'Đường dẫn ảo trên file-service (card/<năm>/<sessionId>/…)' })
+  @ApiPropertyOptional({
+    description: 'Đường dẫn ảo trên file-service (card/<năm>/<sessionId>/…)',
+  })
   virtualPath?: string | null;
 
   @Column('int', { nullable: true })
@@ -94,7 +105,10 @@ export class PhotoVariant extends BaseEntity {
   dpi?: number | null;
 
   @Column('varchar', { length: 20, default: PhotoVariantStatus.PROCESSING })
-  @ApiProperty({ description: 'Trạng thái phiên bản', enum: PhotoVariantStatus })
+  @ApiProperty({
+    description: 'Trạng thái phiên bản',
+    enum: PhotoVariantStatus,
+  })
   status: PhotoVariantStatus;
 
   @Column('text', { nullable: true })
@@ -102,7 +116,9 @@ export class PhotoVariant extends BaseEntity {
   prompt?: string | null;
 
   @Column('varchar', { length: 30, name: 'region_mode', nullable: true })
-  @ApiPropertyOptional({ description: 'Vùng được sửa (ngoài mặt/kính/tóc/toàn ảnh)' })
+  @ApiPropertyOptional({
+    description: 'Vùng được sửa (ngoài mặt/kính/tóc/toàn ảnh)',
+  })
   regionMode?: string | null;
 
   @Column('varchar', { length: 100, name: 'model_id', nullable: true })
@@ -110,7 +126,9 @@ export class PhotoVariant extends BaseEntity {
   modelId?: string | null;
 
   @Column('varchar', { length: 50, name: 'algorithm_version', nullable: true })
-  @ApiPropertyOptional({ description: 'Phiên bản thuật toán pipeline tự động/sidecar' })
+  @ApiPropertyOptional({
+    description: 'Phiên bản thuật toán pipeline tự động/sidecar',
+  })
   algorithmVersion?: string | null;
 
   @Column('varchar', { length: 50, nullable: true })
@@ -118,7 +136,9 @@ export class PhotoVariant extends BaseEntity {
   seed?: string | null;
 
   @Column('real', { name: 'identity_similarity', nullable: true })
-  @ApiPropertyOptional({ description: 'Độ giống khuôn mặt so với ảnh gốc (0-1)' })
+  @ApiPropertyOptional({
+    description: 'Độ giống khuôn mặt so với ảnh gốc (0-1)',
+  })
   identitySimilarity?: number | null;
 
   @Column('jsonb', { name: 'quality_report', nullable: true })
@@ -126,7 +146,9 @@ export class PhotoVariant extends BaseEntity {
   qualityReport?: Record<string, unknown> | null;
 
   @Column('uuid', { name: 'created_by_user_id', nullable: true })
-  @ApiPropertyOptional({ description: 'Người tạo (upload/chấp nhận AI), null nếu hệ thống tự tạo' })
+  @ApiPropertyOptional({
+    description: 'Người tạo (upload/chấp nhận AI), null nếu hệ thống tự tạo',
+  })
   createdByUserId?: string | null;
 
   @Column('text', { nullable: true })

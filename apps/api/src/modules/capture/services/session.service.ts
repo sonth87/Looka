@@ -66,6 +66,11 @@ export class SessionService extends CommonService<Session> {
       status: SessionStatus.IN_PROGRESS,
       metadata: dto.metadata ?? {},
       operatorUserId: dto.operatorUserId,
+      // 2026-09-16 — the WEB-path counterpart of the campaignId KIOSK
+      // sessions already get from `PhotoService.addDevicePhoto`'s own
+      // `campaignId` param; see `CreateSessionDto.campaignId`'s own doc
+      // comment for why this was missing until now.
+      campaignId: dto.campaignId,
       citizenIdEnc,
       citizenIdHash,
       citizenIdLast4,

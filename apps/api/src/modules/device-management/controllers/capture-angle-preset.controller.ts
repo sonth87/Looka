@@ -3,6 +3,7 @@ import {
   ApiResponseDecorator,
 } from '@app/shared/http/api-response.decorator';
 import { SsoAuthGuard } from '@app/shared/auth/index';
+import { Pagination } from '@app/shared/http/pagination';
 import {
   Body,
   Controller,
@@ -35,16 +36,26 @@ import { CaptureAnglePresetService } from '../services/capture-angle-preset.serv
 export class CaptureAnglePresetController {
   constructor(private readonly presetService: CaptureAnglePresetService) {}
 
+  /**
+   * Same §9.1 backward-compat rule 6 as `CampaignController.listCampaigns`:
+   * plain array (legacy) when `page` is omitted — e.g. `CaptureAnglesTable`'s
+   * picker, which needs every preset in one call — paginated+searchable
+   * `{items, meta}` once a caller opts in by passing `page` (the CMS's own
+   * "Góc chụp" management list).
+   */
   @Get()
   @ApiOperation({
     summary:
-      'List capture angle presets — active only by default, all with ?includeInactive=true',
+      'List capture angle presets — plain array if `page` is omitted (legacy), paginated+searchable otherwise',
   })
   @ApiResponseArrayDecorator(CaptureAnglePresetDao)
   listPresets(
     @Query() query: ListCaptureAnglePresetsQueryDto,
-  ): Promise<CaptureAnglePresetDao[]> {
-    return this.presetService.listPresets(query.includeInactive ?? false);
+  ): Promise<CaptureAnglePresetDao[] | Pagination<CaptureAnglePresetDao>> {
+    if (query.page === undefined) {
+      return this.presetService.listPresets(query.includeInactive ?? false);
+    }
+    return this.presetService.listPresetsPaginated(query);
   }
 
   @Post()

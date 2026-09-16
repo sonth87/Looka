@@ -27,9 +27,15 @@ export class CreateUsers1791000000000 implements MigrationInterface {
         CONSTRAINT "UQ_users_sso_user_code" UNIQUE ("sso_user_code")
       )
     `);
-    await queryRunner.query(`CREATE INDEX "IDX_users_created_at" ON "users" ("created_at")`);
-    await queryRunner.query(`CREATE INDEX "IDX_users_sso_user_code" ON "users" ("sso_user_code")`);
-    await queryRunner.query(`CREATE INDEX "IDX_users_email" ON "users" ("email")`);
+    await queryRunner.query(
+      `CREATE INDEX "IDX_users_created_at" ON "users" ("created_at")`,
+    );
+    await queryRunner.query(
+      `CREATE INDEX "IDX_users_sso_user_code" ON "users" ("sso_user_code")`,
+    );
+    await queryRunner.query(
+      `CREATE INDEX "IDX_users_email" ON "users" ("email")`,
+    );
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {

@@ -37,7 +37,9 @@ export class DeviceSecretRotation1790000000000 implements MigrationInterface {
     // cast automatically across a type swap ("default cannot be cast
     // automatically to type ..."), so the default has to be dropped before
     // the column's type changes and restored after.
-    await queryRunner.query(`ALTER TABLE "devices" ALTER COLUMN "status" DROP DEFAULT`);
+    await queryRunner.query(
+      `ALTER TABLE "devices" ALTER COLUMN "status" DROP DEFAULT`,
+    );
     await queryRunner.query(
       `ALTER TYPE "devices_status_enum" RENAME TO "devices_status_enum_old"`,
     );
@@ -49,7 +51,9 @@ export class DeviceSecretRotation1790000000000 implements MigrationInterface {
         ALTER COLUMN "status" TYPE "devices_status_enum"
         USING "status"::text::"devices_status_enum"
     `);
-    await queryRunner.query(`ALTER TABLE "devices" ALTER COLUMN "status" SET DEFAULT 'REGISTERED'`);
+    await queryRunner.query(
+      `ALTER TABLE "devices" ALTER COLUMN "status" SET DEFAULT 'REGISTERED'`,
+    );
     await queryRunner.query(`DROP TYPE "devices_status_enum_old"`);
 
     await queryRunner.query(`

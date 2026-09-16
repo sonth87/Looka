@@ -64,6 +64,17 @@ export interface CaptureSink {
     subjectCode?: string;
     subjectName?: string;
     metadata?: Record<string, unknown>;
+    /**
+     * The campaign this WEB-path run belongs to, if any (2026-09-16,
+     * backend-owned face embedding) — previously only ever known for a
+     * KIOSK session server-side, which left the backend with no way to look
+     * up a web session's campaign (and thus its `requiresEmbedding` setting)
+     * at all. `RunScopedCaptureSession.ensure()` supplies this from the
+     * value its own constructor was given. `ElectronCaptureSink.startSession()`
+     * ignores it (a pure local no-op — the kiosk reports its campaign a
+     * different way, via `approveSessionUpload`).
+     */
+    campaignId?: string;
   }): Promise<string>;
 
   /**
@@ -89,6 +100,18 @@ export interface CaptureSink {
      * there).
      */
     identityNumber?: string;
+    /**
+     * The subject's `user_code` from the external roster (2026-09-16,
+     * backend-owned face embedding) — same "rides along per-photo, ignored
+     * by a sink with nothing to enrich" treatment as `identityNumber` above.
+     * `ElectronCaptureSink` forwards it into `queueCapture`'s metadata so
+     * `PhotoService.addDevicePhoto` can enqueue an `embedding_jobs` row
+     * without depending on this session's `SESSION_REPORT` having landed
+     * first; `HttpCaptureSink` ignores it (the web path's `userCode` reaches
+     * the backend via the session's own `metadata`, at `startSession` time —
+     * see `RunScopedCaptureSession.ensure()`).
+     */
+    userCode?: string;
   }): Promise<void>;
 
   /** Mark the run finished. */
@@ -195,6 +218,8 @@ export class HttpCaptureSink implements CaptureSink {
     subjectCode?: string;
     subjectName?: string;
     metadata?: Record<string, unknown>;
+    /** Forwarded as-is in the POST body — see `CaptureSink.startSession`'s own doc comment on this field. */
+    campaignId?: string;
   }): Promise<string> {
     const data = await this.post<{ id: string }>('/v1/sessions', input);
     return data.id;
@@ -275,11 +300,22 @@ export class ElectronCaptureSink implements CaptureSink {
     attempt: number;
     dataUrl: string;
     identityNumber?: string;
+    userCode?: string;
   }): Promise<void> {
     const faceAPI = (window as any).faceAPI;
     if (!faceAPI?.queueCapture) {
       throw new Error('faceAPI.queueCapture is not available — not running inside the desktop app');
     }
+    // Carried in `metadata` (2026-09-09 for identityNumber, 2026-09-16 for
+    // userCode) — the main process's own `QueueCaptureInput` has no
+    // dedicated field for either, and `metadata` already rides along the
+    // local outbox row unchanged for exactly this kind of pass-through
+    // value; see `ApiPhotoUploadClient.routeUpload`'s own doc comment for
+    // where both re-emerge.
+    const metadata: Record<string, string> = {};
+    if (input.identityNumber) metadata.identityNumber = input.identityNumber;
+    if (input.userCode) metadata.userCode = input.userCode;
+
     const result = await faceAPI.queueCapture({
       sessionId: input.sessionId,
       // Every capture this screen produces is a face-enrollment photo; see
@@ -288,12 +324,7 @@ export class ElectronCaptureSink implements CaptureSink {
       stepId: input.stepId,
       attempt: input.attempt,
       dataUrl: input.dataUrl,
-      // Carried in `metadata` (2026-09-09) — the main process's own
-      // `QueueCaptureInput` has no dedicated field for this, and `metadata`
-      // already rides along the local outbox row unchanged for exactly
-      // this kind of pass-through value; see `ApiPhotoUploadClient
-      // .routeUpload`'s own doc comment for where it re-emerges.
-      metadata: input.identityNumber ? { identityNumber: input.identityNumber } : undefined,
+      metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
     });
     if (!result?.ok) {
       throw new Error(result?.error ?? 'queueCapture failed');
@@ -459,7 +490,20 @@ export class RunScopedCaptureSession {
    */
   private pendingSubject: StudentSubjectInfo = {};
 
-  constructor(private readonly sink: CaptureSink | null) {}
+  /**
+   * The campaign this run belongs to, if any (2026-09-16, backend-owned face
+   * embedding) — forwarded into `startSession()`'s `campaignId` (see
+   * `CaptureSink.startSession`'s own doc comment). Fixed for the lifetime of
+   * this instance, the same "supplied once by the host app, not re-derived
+   * per run" treatment `sink` itself already gets — a genuinely different
+   * campaign means a new `FaceCaptureApp`/`RunScopedCaptureSession` instance
+   * (e.g. `apps/web`'s `WebCampaignGate` re-mounting the capture screen),
+   * not this same instance switching campaigns mid-life.
+   */
+  constructor(
+    private readonly sink: CaptureSink | null,
+    private readonly campaignId?: string | null,
+  ) {}
 
   /**
    * Caches the student this run belongs to, for `ensure()`/`approve()` to
@@ -489,6 +533,7 @@ export class RunScopedCaptureSession {
             identityNumber: subject.identityNumber,
             userCode: subject.userCode,
           },
+          campaignId: this.campaignId ?? undefined,
         })
         .catch((err) => {
           // A failed startSession must not stay memoised forever — the next
@@ -513,7 +558,12 @@ export class RunScopedCaptureSession {
     // capture of a real (non-manual) run — see `savePhoto`'s own interface
     // doc comment for why this rides along per-photo rather than only at
     // approval time.
-    await this.sink.savePhoto({ sessionId, identityNumber: this.pendingSubject.identityNumber, ...input });
+    await this.sink.savePhoto({
+      sessionId,
+      identityNumber: this.pendingSubject.identityNumber,
+      userCode: this.pendingSubject.userCode,
+      ...input,
+    });
   }
 
   /**

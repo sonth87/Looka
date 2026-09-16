@@ -25,6 +25,7 @@
     "clean": "rimraf dist tsconfig.build.tsbuildinfo"
   },
   "dependencies": {
+    "@face/biometric": "workspace:*",
     "@face/core": "workspace:*",
     "@face/fs-client": "workspace:*",
     "@nestjs/common": "^11.0.1",

@@ -1,12 +1,14 @@
 import { toDao } from '@app/shared/http/to-dao.helper';
 import { CustomException, ERROR_CODE } from '@app/shared/errors/legacy';
 import { CommonService } from '@app/shared/common/common.service';
+import { Pagination } from '@app/shared/http/pagination';
 import { HttpStatus, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { CaptureAnglePresetDao } from '../dao';
 import {
   CreateCaptureAnglePresetDto,
+  ListCaptureAnglePresetsQueryDto,
   UpdateCaptureAnglePresetDto,
 } from '../dto';
 import { CaptureAnglePreset } from '../entities/capture-angle-preset.entity';
@@ -68,6 +70,36 @@ export class CaptureAnglePresetService extends CommonService<CaptureAnglePreset>
       order: { sortOrder: 'ASC', createdAt: 'ASC' },
     });
     return toDao(CaptureAnglePresetDao, presets);
+  }
+
+  /**
+   * Paginated variant of `listPresets` — opt-in via `ListCaptureAnglePresetsQueryDto.page`,
+   * same §9.1 rule-6 pattern as `CampaignService.listCampaignsPaginated`
+   * (the CMS's "Góc chụp" management list; the unpaginated picker keeps
+   * using `listPresets` above).
+   */
+  async listPresetsPaginated(
+    query: ListCaptureAnglePresetsQueryDto,
+  ): Promise<Pagination<CaptureAnglePresetDao>> {
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 20;
+
+    const qb = this.repository.createQueryBuilder('p');
+    if (!query.includeInactive) {
+      qb.andWhere('p.active = true');
+    }
+    if (query.q) {
+      qb.andWhere('(p.label_vi ILIKE :q OR p.code ILIKE :q)', {
+        q: `%${query.q}%`,
+      });
+    }
+    qb.orderBy('p.sort_order', 'ASC').addOrderBy('p.created_at', 'ASC');
+
+    const result = await this.paginateQueryBuilder(qb, { page, limit });
+    return new Pagination(
+      toDao(CaptureAnglePresetDao, result.items),
+      result.meta,
+    );
   }
 
   async findPresetEntityOrFail(id: string): Promise<CaptureAnglePreset> {

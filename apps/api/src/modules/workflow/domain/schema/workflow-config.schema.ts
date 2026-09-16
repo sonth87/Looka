@@ -16,12 +16,17 @@ import { z } from 'zod';
  * not create a circular module reference) and run alongside this schema
  * rather than duplicated inside it.
  *
- * `identification.methods` is validated against the six method codes
- * cms-8-screens-api-plan.md §2.1/§9.2 names (D-Q5) — no live
- * `identification_methods` DB catalog yet (that lookup table is P3 scope,
- * once `sessions.identification_method` actually gets written by a
- * kiosk); a hardcoded literal union is the correct amount of validation
- * for a config field nothing reads yet.
+ * `identification.methods` is validated against a hardcoded literal union
+ * (originally the six method codes cms-8-screens-api-plan.md §2.1/§9.2
+ * named, D-Q5) — the real `identification_methods` DB catalog now exists
+ * (P3, `device-management/entities/identification-method.entity.ts`, CRUD
+ * over `GET/POST/PATCH /v1/identification-methods`) and is seeded with a
+ * 7th code, `OCR_CCCD`, added after this union was first written — kept in
+ * sync by hand below (2026-09-16) rather than switched to a live DB lookup
+ * here, since this schema is a synchronous, dependency-free `zod` object
+ * with no DB access of its own; a caller wanting the literal live catalog
+ * (e.g. the CMS's own workflow-config editor) reads
+ * `GET /v1/identification-methods` directly instead.
  */
 
 const CLICK_MODES = [
@@ -33,6 +38,7 @@ export type WorkflowClickMode = (typeof CLICK_MODES)[number];
 
 const IDENTIFICATION_METHODS = [
   'QR_CCCD',
+  'OCR_CCCD',
   'RFID',
   'NFC',
   'BARCODE',

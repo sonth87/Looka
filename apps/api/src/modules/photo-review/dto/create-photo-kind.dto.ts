@@ -1,5 +1,13 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsArray, IsBoolean, IsNotEmpty, IsObject, IsOptional, IsString, MaxLength } from 'class-validator';
+import {
+  IsArray,
+  IsBoolean,
+  IsNotEmpty,
+  IsObject,
+  IsOptional,
+  IsString,
+  MaxLength,
+} from 'class-validator';
 
 export class CreatePhotoKindDto {
   @ApiProperty({ description: 'Mã loại ảnh, ví dụ STUDENT_CARD' })
@@ -14,11 +22,15 @@ export class CreatePhotoKindDto {
   @MaxLength(255)
   labelVi: string;
 
-  @ApiProperty({ description: 'Chuẩn ảnh thẻ mặc định (cỡ, dpi, nền, tỉ lệ đầu/mắt)' })
+  @ApiProperty({
+    description: 'Chuẩn ảnh thẻ mặc định (cỡ, dpi, nền, tỉ lệ đầu/mắt)',
+  })
   @IsObject()
   cardSpec: Record<string, unknown>;
 
-  @ApiPropertyOptional({ description: 'Bộ kiểm tra chất lượng riêng cho loại ảnh này' })
+  @ApiPropertyOptional({
+    description: 'Bộ kiểm tra chất lượng riêng cho loại ảnh này',
+  })
   @IsOptional()
   @IsObject()
   qualityProfile?: Record<string, unknown>;

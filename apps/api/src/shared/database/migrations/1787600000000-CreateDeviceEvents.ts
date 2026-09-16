@@ -32,9 +32,15 @@ export class CreateDeviceEvents1787600000000 implements MigrationInterface {
         CONSTRAINT "PK_device_events" PRIMARY KEY ("id")
       )
     `);
-    await queryRunner.query(`CREATE INDEX "IDX_device_events_device_id" ON "device_events" ("device_id")`);
-    await queryRunner.query(`CREATE INDEX "IDX_device_events_campaign_id" ON "device_events" ("campaign_id")`);
-    await queryRunner.query(`CREATE INDEX "IDX_device_events_type" ON "device_events" ("campaign_id", "type")`);
+    await queryRunner.query(
+      `CREATE INDEX "IDX_device_events_device_id" ON "device_events" ("device_id")`,
+    );
+    await queryRunner.query(
+      `CREATE INDEX "IDX_device_events_campaign_id" ON "device_events" ("campaign_id")`,
+    );
+    await queryRunner.query(
+      `CREATE INDEX "IDX_device_events_type" ON "device_events" ("campaign_id", "type")`,
+    );
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {

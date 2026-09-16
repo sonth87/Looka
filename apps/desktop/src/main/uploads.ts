@@ -182,6 +182,10 @@ class ApiPhotoUploadClient extends FsClient {
         // doc comment) — safe here specifically because it never reaches
         // that call.
         identityNumber: input.metadata?.identityNumber,
+        // 2026-09-16 (backend-owned face embedding) — same transport-only
+        // treatment as identityNumber just above; PhotoService.addDevicePhoto
+        // uses it to enqueue an embedding_jobs row.
+        userCode: input.metadata?.userCode,
       });
     }
 

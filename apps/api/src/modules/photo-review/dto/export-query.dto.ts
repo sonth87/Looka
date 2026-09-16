@@ -10,7 +10,8 @@ export class ExportQueryDto {
   @ApiPropertyOptional({
     enum: PhotoReviewSetStatus,
     default: PhotoReviewSetStatus.APPROVED,
-    description: 'Chỉ xuất hồ sơ ở trạng thái này (mặc định APPROVED, đúng mục đích in thẻ)',
+    description:
+      'Chỉ xuất hồ sơ ở trạng thái này (mặc định APPROVED, đúng mục đích in thẻ)',
   })
   @IsOptional()
   @IsEnum(PhotoReviewSetStatus)

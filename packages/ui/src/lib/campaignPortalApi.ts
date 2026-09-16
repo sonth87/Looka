@@ -75,6 +75,15 @@ export interface CampaignConfig {
   recordVideoRoles?: string[] | null;
   cardSpec?: Record<string, unknown> | null;
   requiredCameraCount: number;
+  /**
+   * "Có gửi ảnh chụp lên máy chủ nhận diện khuôn mặt (embedding) hay không"
+   * — present on the real `CampaignConfigDao` response, same
+   * present-but-possibly-missing-on-an-older-backend treatment as
+   * `recordVideo` above. Kept optional here for the same reason; call sites
+   * default a missing value to `true` (embedding used to always run), not
+   * `false` — the opposite default from `recordVideo`.
+   */
+  requiresEmbedding?: boolean;
 }
 
 function apiBaseUrl(): string {

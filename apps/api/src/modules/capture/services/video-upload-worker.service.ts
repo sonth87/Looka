@@ -200,7 +200,10 @@ export class VideoUploadWorkerService implements OnModuleInit {
     }
   }
 
-  private async recordFailure(job: VideoOutboxRow, err: unknown): Promise<void> {
+  private async recordFailure(
+    job: VideoOutboxRow,
+    err: unknown,
+  ): Promise<void> {
     if (!job?.id) {
       this.logger.error('recordFailure called with no job id - skipping');
       return;

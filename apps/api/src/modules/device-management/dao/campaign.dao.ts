@@ -174,6 +174,13 @@ export class CampaignDao {
   @Expose()
   recordVideo: boolean;
 
+  @ApiProperty({
+    description:
+      'Có gửi ảnh chụp lên máy chủ nhận diện khuôn mặt (embedding) hay không',
+  })
+  @Expose()
+  requiresEmbedding: boolean;
+
   @ApiProperty()
   @Expose()
   createdAt: Date;

@@ -5,17 +5,19 @@ import {
   CardSpec,
   CaptureConfiguration,
   CreateCaptureConfigurationInput,
+  Paginated,
   PhotoKind,
   UpdateCaptureConfigurationInput,
   createCaptureConfiguration,
   deleteCaptureConfiguration,
-  listCaptureConfigurations,
+  listCaptureConfigurationsPaginated,
   listPhotoKinds,
   updateCaptureConfiguration,
 } from '../api';
 import { CaptureAngleRow, captureStepToRow, fallbackRowsFromStepDefs, rowToCaptureStep } from '../captureAngleSteps';
 import { CaptureAnglesTable, MIN_ROWS } from './CaptureAnglesTable';
 import { CardSpecFields, DEFAULT_CARD_SPEC } from './CardSpecFields';
+import { DEFAULT_PAGE_SIZE, Pager } from './Pager';
 
 /**
  * "Mẫu chụp" (nav label) / "Mẫu cấu hình chụp" (page title) — item 10 of the
@@ -40,24 +42,29 @@ import { CardSpecFields, DEFAULT_CARD_SPEC } from './CardSpecFields';
  * link to `photo_kinds`; there's no `photoKindId` column, by design.
  */
 export function CaptureConfigurationsPage() {
-  const [configs, setConfigs] = useState<CaptureConfiguration[] | null>(null);
+  const [q, setQ] = useState('');
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+  const [result, setResult] = useState<Paginated<CaptureConfiguration> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<CaptureConfiguration | null>(null);
 
   const reload = () => {
-    listCaptureConfigurations()
-      .then(setConfigs)
+    listCaptureConfigurationsPaginated({ page, limit: pageSize, q: q.trim() || undefined })
+      .then(setResult)
       .catch((err) => setError(err instanceof ApiError ? err.message : String(err)));
   };
 
-  useEffect(reload, []);
+  useEffect(reload, [page, pageSize, q]);
+
+  const configs = result?.items ?? null;
 
   async function handleDelete(config: CaptureConfiguration) {
     if (!window.confirm(`Xoá mẫu "${config.name}"? Campaign đã dùng mẫu này trước đây không bị ảnh hưởng.`)) return;
     try {
       await deleteCaptureConfiguration(config.id);
-      setConfigs((prev) => prev?.filter((c) => c.id !== config.id) ?? prev);
+      setResult((prev) => (prev ? { ...prev, items: prev.items.filter((c) => c.id !== config.id) } : prev));
     } catch (err) {
       setError(err instanceof ApiError ? err.message : String(err));
     }
@@ -70,11 +77,11 @@ export function CaptureConfigurationsPage() {
         onClose={() => setFormOpen(false)}
         onSaved={(saved) => {
           setFormOpen(false);
-          setConfigs((prev) => {
-            if (!prev) return [saved];
-            const exists = prev.some((c) => c.id === saved.id);
-            return exists ? prev.map((c) => (c.id === saved.id ? saved : c)) : [saved, ...prev];
-          });
+          if (editing) {
+            setResult((prev) => (prev ? { ...prev, items: prev.items.map((c) => (c.id === saved.id ? saved : c)) } : prev));
+          } else {
+            reload();
+          }
         }}
       />
     );
@@ -100,6 +107,18 @@ export function CaptureConfigurationsPage() {
         >
           + Thêm mẫu
         </button>
+      </div>
+
+      <div className="mb-4">
+        <input
+          value={q}
+          onChange={(e) => {
+            setQ(e.target.value);
+            setPage(1);
+          }}
+          placeholder="Tìm theo tên mẫu..."
+          className="w-full max-w-sm bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900"
+        />
       </div>
 
       {error && <div className="p-4 rounded-xl bg-red-50 border border-red-200 text-red-700 mb-4">{error}</div>}
@@ -156,6 +175,17 @@ export function CaptureConfigurationsPage() {
           </tbody>
         </table>
       )}
+
+      <Pager
+        meta={result?.meta}
+        itemLabel="mẫu"
+        onPageChange={setPage}
+        pageSize={pageSize}
+        onPageSizeChange={(size) => {
+          setPageSize(size);
+          setPage(1);
+        }}
+      />
     </div>
   );
 }
