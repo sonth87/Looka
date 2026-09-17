@@ -2,6 +2,19 @@ import { contextBridge, ipcRenderer } from 'electron';
 import type { AttendanceResult, Person } from '@face/core';
 import type { CapturedStudentItem } from '@face/database';
 
+/** `listCampaignRecentCaptures`'s row shape — mirrors `RecentCaptureEntry` in `apps/desktop/src/main/deviceApi.ts` (duplicated rather than imported, same convention every other `faceAPI` payload type here follows). */
+export interface CampaignRecentCaptureItem {
+  id: string;
+  deviceId?: string;
+  deviceName?: string;
+  subjectCode?: string;
+  subjectName?: string;
+  capturedAt?: string;
+  completedAt?: string;
+  photoCount: number;
+  isThisDevice: boolean;
+}
+
 export interface ExportResult {
   success: boolean;
   exportPath?: string;
@@ -560,6 +573,14 @@ export interface FaceAPIBridge {
   listRecentStudents: (limit?: number) => Promise<CapturedStudentItem[]>;
   listStudentSessions: (subjectCode: string) => Promise<CapturedStudentItem[]>;
   searchStudents: (query: string) => Promise<CapturedStudentItem[]>;
+  /**
+   * "Cả campaign khi online" (plan item 13, 2026-09-17) — recent completed
+   * sessions across every kiosk in this device's campaign, from the server
+   * (`GET /v1/devices/recent-captures`). Resolves `null` on any failure (no
+   * device identity, offline, rejected) so the caller can fall back to
+   * `listRecentStudents` above (this device's own local SQLite index).
+   */
+  listCampaignRecentCaptures: (limit?: number) => Promise<CampaignRecentCaptureItem[] | null>;
 
   /**
    * Reports a stats-worthy moment (§3.4) — queued locally and pushed to the
@@ -664,6 +685,7 @@ const faceAPI: FaceAPIBridge = {
   ssoLogin: () => ipcRenderer.invoke('auth:ssoLogin'),
 
   listRecentStudents: (limit) => ipcRenderer.invoke('students:listRecent', limit),
+  listCampaignRecentCaptures: (limit) => ipcRenderer.invoke('students:listCampaignRecent', limit),
   listStudentSessions: (subjectCode) => ipcRenderer.invoke('students:listSessions', subjectCode),
   searchStudents: (query) => ipcRenderer.invoke('students:search', query),
 

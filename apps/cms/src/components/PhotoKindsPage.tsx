@@ -37,14 +37,14 @@ function cardSpecSummary(spec: CardSpec): string {
  * throughout this API) — "Ẩn" (hide) is a PATCH `active: false`, and a
  * hidden kind can always be brought back with "Hiện".
  *
- * 2026-09-09 (product feedback, item 1/2): distinct from "Mẫu chụp"
- * (`/capture-configurations`, `CaptureConfigurationsPage.tsx`) — a "Cấu
- * hình" row here is just a reusable *chuẩn ảnh thẻ* (photo standard) shared
- * across campaigns, with no angle table of its own. "Mẫu chụp" is a step
- * up: a full capture template (angle table + optional card spec) a
- * campaign selects. A "Mẫu chụp" can now pull its own card spec from one of
- * these rows via a picker in its form (`applyPhotoKind`) instead of typing
- * it by hand — see that page's own doc comment.
+ * 2026-09-09 (product feedback, item 1/2): a "Cấu hình" row here is just a
+ * reusable *chuẩn ảnh thẻ* (photo standard) shared across campaigns, with
+ * no angle table of its own — distinct from a Workflow's own
+ * `output.cardSpec` (`WorkflowConfigEditor.tsx`), which is typed directly
+ * per-workflow rather than picked from this catalog. "Mẫu chụp"
+ * (`CaptureConfiguration`), the intermediate concept this comment used to
+ * describe, was retired 2026-09-17 — see `CampaignForm.tsx`'s own doc
+ * comment.
  */
 export function PhotoKindsPage() {
   const [q, setQ] = useState('');

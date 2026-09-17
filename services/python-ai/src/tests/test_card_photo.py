@@ -17,9 +17,9 @@ class TestPixelTable(unittest.TestCase):
     table, implemented exactly."""
 
     def test_pixel_table_exact_values(self):
-        self.assertEqual(get_target_pixels("3x4", 300), (354, 472))
+        self.assertEqual(get_target_pixels("3x4", 300), (600, 800))
         self.assertEqual(get_target_pixels("3x4", 600), (709, 945))
-        self.assertEqual(get_target_pixels("4x6", 300), (472, 709))
+        self.assertEqual(get_target_pixels("4x6", 300), (600, 900))
         self.assertEqual(get_target_pixels("4x6", 600), (945, 1417))
 
     def test_pixel_table_has_exactly_four_entries(self):
@@ -41,7 +41,7 @@ class TestCardPhotoEndpoint(unittest.TestCase):
         with open(FIXTURE_PATH, "rb") as f:
             self.image_b64 = base64.b64encode(f.read()).decode("ascii")
 
-    def _post(self, size, dpi, background="#FFFFFF"):
+    def _post(self, size, dpi, background="#F67220"):
         return self.client.post(
             "/api/v1/card-photo",
             json={
@@ -58,15 +58,15 @@ class TestCardPhotoEndpoint(unittest.TestCase):
         response = self._post("4x6", 300)
         self.assertEqual(response.status_code, 200)
         data = response.json()
-        self.assertEqual(data["width"], 472)
-        self.assertEqual(data["height"], 709)
+        self.assertEqual(data["width"], 600)
+        self.assertEqual(data["height"], 900)
         self.assertEqual(data["dpi"], 300)
         self.assertIsInstance(data["warnings"], list)
 
         decoded = cv2.imdecode(np.frombuffer(base64.b64decode(data["image_data"]), np.uint8), cv2.IMREAD_COLOR)
         self.assertIsNotNone(decoded)
         h, w = decoded.shape[:2]
-        self.assertEqual((w, h), (472, 709))
+        self.assertEqual((w, h), (600, 900))
 
     def test_3x4_600dpi_output_dimensions(self):
         response = self._post("3x4", 600)

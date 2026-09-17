@@ -298,11 +298,16 @@ export class PhotoService extends CommonService<Photo> {
    *     path's `PhotoService.addPhoto` → `SessionService.completeSession`
    *     two-step has.
    *
-   * A minimal `sessions` row is upserted first (IN_PROGRESS, `ON CONFLICT
-   * DO NOTHING`) so `photos.session_id`'s FK is satisfied even if this call
-   * lands before (or interleaved with) that session's own SESSION_REPORT —
-   * identical reasoning to `CaptureReportService.applyPhotoStatus`'s own
-   * create-if-missing-session step.
+   * A minimal `sessions` row is upserted first (IN_PROGRESS) so
+   * `photos.session_id`'s FK is satisfied even if this call lands before (or
+   * interleaved with) that session's own SESSION_REPORT — identical
+   * reasoning to `CaptureReportService.applyPhotoStatus`'s own
+   * create-if-missing-session step. Every column but `operator_user_id`
+   * behaves as `DO NOTHING` on a conflict, same as before; `operator_user_id`
+   * alone gets a COALESCE-guarded `DO UPDATE` so it can be set the first time
+   * ANY photo of this session reaches this method, rather than waiting for
+   * SESSION_REPORT (2026-09-17, "theo dõi ai chụp/ai upload" — see the query
+   * below).
    */
   async addDevicePhoto(
     deviceId: string,
@@ -337,11 +342,26 @@ export class PhotoService extends CommonService<Photo> {
       : `sessions/${dto.sessionId}/${dto.stepId}-${dto.attempt}.${ext}`;
 
     await this.dataSource.transaction(async (manager) => {
+      // 2026-09-17 ("theo dõi ai chụp/ai upload"): a photo already reaches
+      // this method — and thus Postgres — well before this session's own
+      // SESSION_REPORT device-event (sent only after the operator approves
+      // the whole session) ever arrives, so operator_user_id used to stay
+      // NULL for that entire window, permanently if the report was ever
+      // lost. `dto.operatorUserId` is threaded through end-to-end from the
+      // kiosk's logged-in operator (see `AddDevicePhotoDto.operatorUserId`'s
+      // own doc comment) so it can be set right here, at the earliest
+      // possible moment — `ON CONFLICT ... DO UPDATE` only ever touches
+      // `operator_user_id`, and only fills it in when it is not already set
+      // (COALESCE, same non-regression contract
+      // `CaptureReportService.applySessionReport` already uses for this
+      // same column), so every other column keeps its previous
+      // `DO NOTHING` behaviour unchanged.
       await manager.query(
-        `INSERT INTO sessions (id, source, device_id, campaign_id, status)
-         VALUES ($1, 'KIOSK', $2, $3, 'IN_PROGRESS')
-         ON CONFLICT (id) DO NOTHING`,
-        [dto.sessionId, deviceId, campaignId],
+        `INSERT INTO sessions (id, source, device_id, campaign_id, status, operator_user_id)
+         VALUES ($1, 'KIOSK', $2, $3, 'IN_PROGRESS', $4)
+         ON CONFLICT (id) DO UPDATE
+           SET operator_user_id = COALESCE(sessions.operator_user_id, EXCLUDED.operator_user_id)`,
+        [dto.sessionId, deviceId, campaignId, dto.operatorUserId ?? null],
       );
 
       await manager.query(

@@ -69,6 +69,21 @@ export class AddDevicePhotoDto {
   @IsString()
   userCode?: string;
 
+  /**
+   * Người vận hành (SSO) đang chụp phiên này, nếu có (2026-09-17, "theo dõi
+   * ai chụp/ai upload") — threaded end-to-end from the kiosk's logged-in
+   * operator the same way `identityNumber`/`userCode` above already are, so
+   * `PhotoService.addDevicePhoto` can set `sessions.operator_user_id` at
+   * capture time instead of only once a later SESSION_REPORT device-event
+   * lands (see that method's own doc comment).
+   */
+  @ApiPropertyOptional({
+    description: 'Người vận hành (SSO) đang chụp phiên này, nếu có',
+  })
+  @IsOptional()
+  @IsUUID()
+  operatorUserId?: string;
+
   @ApiProperty({ description: 'Bước trong quy trình chụp, ví dụ FRONT/LEFT' })
   @IsString()
   @IsNotEmpty()

@@ -3,10 +3,9 @@ import {
   ApiError,
   CampaignKioskSummary,
   DeviceStatus,
-  UserListItem,
   assignCampaignKiosk,
+  findOrCreateUserByEmail,
   listCampaignKiosks,
-  listUsers,
   unassignCampaignKiosk,
 } from '../api';
 import { ModalShell } from './CampaignDangerActions';
@@ -136,9 +135,13 @@ export function CampaignAssignmentsPanel({ campaignId }: { campaignId: string })
 }
 
 /**
- * Search-as-you-type user picker (debounced 300ms against `GET /v1/users`).
- * A search error (e.g. 403 if the signed-in admin somehow lacks `user:read`)
- * surfaces inline rather than crashing the modal.
+ * Gán theo EMAIL (plan item 14, 2026-09-17) — không còn tìm-và-chọn trong
+ * danh sách user đã có sẵn. Người được gán không cần tồn tại trước:
+ * `findOrCreateUserByEmail` tạo một placeholder MANUAL nếu chưa có tài
+ * khoản nào dùng email đó, và `SsoAuthGuard.upsertUser()` (phía server, đã
+ * có sẵn) sẽ tự gộp placeholder này vào tài khoản thật ngay khi người đó
+ * đăng nhập SSO lần đầu bằng đúng email — vai trò/quyền/gán kiosk đã có giữ
+ * nguyên, không cần bước nào thêm ở đây.
  */
 function AssignUserModal({
   campaignId,
@@ -151,30 +154,27 @@ function AssignUserModal({
   onClose: () => void;
   onAssigned: () => void;
 }) {
-  const [q, setQ] = useState('');
-  const [results, setResults] = useState<UserListItem[] | null>(null);
-  const [searchError, setSearchError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<UserListItem | null>(null);
+  const [email, setEmail] = useState('');
   const [note, setNote] = useState('');
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [resolvedMessage, setResolvedMessage] = useState<string | null>(null);
 
-  useEffect(() => {
-    const handle = setTimeout(() => {
-      setSearchError(null);
-      listUsers({ q: q.trim() || undefined, limit: 20 })
-        .then((res) => setResults(res.items))
-        .catch((err) => setSearchError(err instanceof ApiError ? err.message : String(err)));
-    }, 300);
-    return () => clearTimeout(handle);
-  }, [q]);
+  const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
 
   const submit = async () => {
-    if (!selected) return;
+    if (!emailValid) return;
     setSaving(true);
     setSaveError(null);
+    setResolvedMessage(null);
     try {
-      await assignCampaignKiosk(campaignId, kiosk.deviceId, selected.id, note.trim() || undefined);
+      const resolved = await findOrCreateUserByEmail(email.trim());
+      setResolvedMessage(
+        resolved.created
+          ? `Đã tạo tài khoản mới cho ${email.trim()} — người này sẽ thấy được gán ngay khi đăng nhập SSO lần đầu.`
+          : `Đã tìm thấy tài khoản có sẵn: ${resolved.displayName ?? resolved.email}.`,
+      );
+      await assignCampaignKiosk(campaignId, kiosk.deviceId, resolved.id, note.trim() || undefined);
       onAssigned();
     } catch (err) {
       setSaveError(err instanceof ApiError ? err.message : String(err));
@@ -187,49 +187,19 @@ function AssignUserModal({
     <ModalShell title={`Gán người vào "${kiosk.deviceName}"`} onClose={onClose}>
       <div className="space-y-3">
         <div>
-          <label className="block text-sm text-gray-500 mb-1">Tìm người dùng (email, tên, mã, hoặc SĐT)</label>
+          <label className="block text-sm text-gray-500 mb-1">Email người được gán</label>
           <input
-            type="text"
-            value={q}
-            onChange={(e) => {
-              setQ(e.target.value);
-              setSelected(null);
-            }}
-            placeholder="Nhập để tìm..."
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="ten.nguoidung@dainam.edu.vn"
             className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
             autoFocus
           />
+          <p className="text-xs text-gray-400 mt-1">
+            Không cần người này đã có tài khoản trong hệ thống — chỉ cần đúng email họ dùng để đăng nhập SSO sau này.
+          </p>
         </div>
-
-        {searchError && (
-          <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">{searchError}</div>
-        )}
-
-        {!searchError && (
-          <div className="max-h-56 overflow-y-auto border border-gray-200 rounded-lg divide-y divide-gray-100">
-            {results === null && <p className="p-3 text-sm text-gray-500">Đang tải...</p>}
-            {results !== null && results.length === 0 && (
-              <p className="p-3 text-sm text-gray-500">Không tìm thấy người dùng nào.</p>
-            )}
-            {results?.map((u) => (
-              <button
-                key={u.id}
-                type="button"
-                onClick={() => setSelected(u)}
-                className={`w-full text-left px-3 py-2 text-sm hover:bg-gray-50 ${
-                  selected?.id === u.id ? 'bg-blue-50' : ''
-                }`}
-              >
-                <div className="text-gray-900 font-medium">{u.displayName ?? u.email}</div>
-                <div className="text-xs text-gray-500">
-                  {u.email}
-                  {u.code ? ` · ${u.code}` : ''}
-                  {u.isAdmin ? ' · Admin' : ''}
-                </div>
-              </button>
-            ))}
-          </div>
-        )}
 
         <div>
           <label className="block text-sm text-gray-500 mb-1">Ghi chú (tuỳ chọn)</label>
@@ -241,6 +211,9 @@ function AssignUserModal({
           />
         </div>
 
+        {resolvedMessage && (
+          <div className="p-3 rounded-lg bg-blue-50 border border-blue-200 text-blue-700 text-sm">{resolvedMessage}</div>
+        )}
         {saveError && <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">{saveError}</div>}
 
         <div className="flex justify-end gap-2 pt-1">
@@ -250,7 +223,7 @@ function AssignUserModal({
           <button
             type="button"
             onClick={submit}
-            disabled={!selected || saving}
+            disabled={!emailValid || saving}
             className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold text-sm disabled:opacity-50"
           >
             {saving ? 'Đang gán...' : 'Gán'}

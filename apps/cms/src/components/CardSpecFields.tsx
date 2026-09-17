@@ -12,7 +12,7 @@ export const DEFAULT_CARD_SPEC: Required<
 } = {
   size: '4x6',
   dpi: 300,
-  backgroundColor: '#FFFFFF',
+  backgroundColor: '#F67220',
   headHeightRatio: [0.7, 0.8],
   eyeLineRatio: [0.4, 0.45],
   retouch: { enabled: true, strength: 'LIGHT' },
@@ -21,11 +21,12 @@ export const DEFAULT_CARD_SPEC: Required<
 /**
  * "Chuẩn ảnh thẻ" (card-photo spec) field group — cỡ/dpi/nền/làm mịn/tỉ lệ
  * crop + a small live preview swatch. Extracted from `CampaignForm.tsx`'s
- * "3. Ảnh thẻ" section (2026-09-09, item 10) so `CaptureConfigurationsPage`
- * can reuse the exact same fields for a capture configuration's own
- * (optional) card spec, without duplicating ~150 lines of near-identical
- * form markup. Pure controlled-component — the caller owns `cardSpec` state
- * and persistence; this only renders inputs and calls `onChange`.
+ * original "3. Ảnh thẻ" section (2026-09-09, item 10) and now reused by
+ * `WorkflowConfigEditor.tsx`'s `output.cardSpec` group (plan item 6,
+ * 2026-09-17) — the single place a card spec gets authored since "Mẫu
+ * chụp" was retired the same day. Pure controlled-component — the caller
+ * owns `cardSpec` state and persistence; this only renders inputs and
+ * calls `onChange`.
  */
 export function CardSpecFields({
   cardSpec,

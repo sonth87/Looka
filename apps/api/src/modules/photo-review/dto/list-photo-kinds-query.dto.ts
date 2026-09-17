@@ -13,10 +13,9 @@ import {
  * Same §9.1 backward-compat rule 6 pattern used across the other admin
  * catalogs (`ListCampaignsQueryDto`, `ListCaptureAnglePresetsQueryDto`) —
  * `page` has no default so its absence stays observable: callers that just
- * need every kind in one shot (e.g. `CaptureConfigurationsPage.tsx`'s card-
- * spec picker) keep getting the legacy plain array, while
- * `PhotoKindsPage.tsx`'s own management list opts into `{items, meta}` by
- * passing `page`.
+ * need every kind in one shot (e.g. a card-spec picker) keep getting the
+ * legacy plain array, while `PhotoKindsPage.tsx`'s own management list
+ * opts into `{items, meta}` by passing `page`.
  */
 export class ListPhotoKindsQueryDto {
   @ApiPropertyOptional({

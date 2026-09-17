@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { ILike } from 'typeorm';
 import { User } from '@app/modules/shared/entities/user.entity';
 import { TransactionContext } from '@app/shared/database/transaction-context';
 import { IUserProfileRepository } from './user-profile.repository.interface';
@@ -13,6 +14,10 @@ export class UserProfileRepository implements IUserProfileRepository {
 
   findByCode(code: string): Promise<User | null> {
     return this.context.manager().findOneBy(User, { code });
+  }
+
+  findByEmail(email: string): Promise<User | null> {
+    return this.context.manager().findOneBy(User, { email: ILike(email) });
   }
 
   save(user: User): Promise<User> {

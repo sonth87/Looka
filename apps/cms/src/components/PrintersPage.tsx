@@ -66,9 +66,8 @@ const STOCK_REASON_LABEL: Record<string, string> = {
  *
  * List + detail-page pattern (not a modal for edit) since a printer's
  * detail view needs room for stock history + token issuance + enable/
- * disable + test-print, matching `CaptureConfigurationsPage.tsx`'s own
- * "form takes over the page" convention rather than cramming all of that
- * into `ModalShell`'s `max-w-md`.
+ * disable + test-print — "form takes over the page" rather than cramming
+ * all of that into `ModalShell`'s `max-w-md`.
  */
 export function PrintersPage() {
   const [statusFilter, setStatusFilter] = useState<PrinterStatus | ''>('');

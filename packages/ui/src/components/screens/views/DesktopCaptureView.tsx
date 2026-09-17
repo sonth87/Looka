@@ -140,12 +140,26 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
     multiFrame,
     subjectInfo,
     capturedList,
+    recordingFailed,
   } = props;
+
+  // Plan item 2, 2026-09-17: surfaces a camera whose video-recording channel
+  // never started/died mid-session (see FaceCaptureApp.tsx's two recording
+  // effects) — this used to reach only the console. No per-device role
+  // mapping is threaded into this view (see this file's other comment on
+  // `recordingFailed`), so this reports a count, not which physical camera —
+  // still real, operator-visible signal instead of none at all.
+  const failedRecordingCount = recordingFailed ? Object.values(recordingFailed).filter(Boolean).length : 0;
 
   const [showTelemetryDrawer, setShowTelemetryDrawer] = useState(false);
   const [activeSidebarTab, setActiveSidebarTab] = useState<
-    "debug" | "overlay" | "captured"
+    "debug" | "overlay"
   >("debug");
+  // Plan item 13, 2026-09-17 — collapses the new always-visible left-corner
+  // "Đã chụp" panel below without removing it from the DOM; starts expanded
+  // since the whole point of this fix is that it's visible by default now
+  // (see this file's other comment on why the old placement never was).
+  const [capturedPanelCollapsed, setCapturedPanelCollapsed] = useState(false);
 
   // Multi-frame simultaneous capture (§ desktop kiosk multi-camera capture) —
   // `multiFrame` is only ever passed while the campaign's `simultaneousCapture`
@@ -1119,13 +1133,15 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
               `orientation="vertical"`).
             - Bước 6 (gương soi/mirror, single-frame): the new
               PhotoQualityChecklist + the big shutter CTA.
-            The old "ĐÃ CHỤP · ĐANG CHỤP" `CapturedListPanel` that used to
-            live in this column moved into the telemetry drawer's new
-            "Đã chụp" tab below (`activeSidebarTab === "captured"`) — this
-            column no longer has room for it alongside the new mockup content,
-            but the feature/data-wiring itself (`capturedList` prop) is
-            unchanged, just relocated behind the same drawer toggle the
-            debug/overlay panels already use.
+            The "ĐÃ CHỤP · ĐANG CHỤP" `CapturedListPanel` briefly lived in
+            this column, then moved into the telemetry drawer's "Đã chụp"
+            tab (hidden behind `showTelemetryDrawer`, and unconditionally
+            hidden in fullscreen — i.e. effectively never visible on a real
+            kiosk). Plan item 13 (2026-09-17) moves it again, this time to
+            an always-visible bottom-left panel (see the `capturedPanelCollapsed`
+            block below `<MultiFrameGrid>`/mirror preview) that renders
+            regardless of `isFullscreen` or the drawer — same `capturedList`
+            prop/data throughout, just a third placement.
           */}
           {!isFullscreen && (
             <div className="hidden lg:flex flex-col w-[300px] shrink-0 h-full max-h-[82vh] gap-3 p-1 overflow-y-auto">
@@ -1163,6 +1179,12 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                       </span>
                     )}
                   </div>
+
+                  {isWorkflowStarted && failedRecordingCount > 0 && (
+                    <div className="px-1 text-[11px] font-semibold text-kiosk-danger">
+                      ⚠ {failedRecordingCount} camera không quay được video (ảnh chụp không bị ảnh hưởng)
+                    </div>
+                  )}
 
                   {/* Vertical checklist — same steps/currentStepIndex data as the header's horizontal pill, just restyled for the sidebar. */}
                   <Card variant="panel" className="p-3 flex-1 min-h-0 overflow-y-auto">
@@ -1251,28 +1273,6 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                     <span>Overlay</span>
                   </button>
 
-                  {/*
-                    "Đã chụp" tab — the "ĐÃ CHỤP · ĐANG CHỤP" CapturedListPanel
-                    that used to sit in its own persistent right column moved
-                    here once that column became the bước-5/bước-6
-                    mockup-specific sidebar above; still the same
-                    `capturedList` prop/data, just reached through this
-                    existing drawer toggle instead of always being visible.
-                  */}
-                  <button
-                    onClick={() => setActiveSidebarTab("captured")}
-                    className={cn(
-                      "flex-1 py-1.5 rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5 font-bold text-xs",
-                      activeSidebarTab === "captured"
-                        ? "bg-blue-600 text-white shadow-md shadow-blue-500/25"
-                        : theme === "dark"
-                          ? "text-slate-400 hover:text-slate-200"
-                          : "text-slate-600 hover:text-slate-900",
-                    )}
-                  >
-                    <Images className="w-3.5 h-3.5" />
-                    <span>Đã chụp</span>
-                  </button>
                 </div>
 
                 <button
@@ -1286,16 +1286,7 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
 
               {/* Sidebar Scrollable Body */}
               <div className="flex-1 overflow-y-auto space-y-3.5 pr-1 text-xs no-scrollbar">
-                {activeSidebarTab === "captured" ? (
-                  /* ═══════════ TAB 3: ĐÃ CHỤP · ĐANG CHỤP ═══════════ */
-                  <CapturedListPanel
-                    current={capturedList?.current ?? null}
-                    recent={capturedList?.recent ?? []}
-                    onOpenSession={capturedList?.onOpenSession ?? (() => {})}
-                    theme={theme}
-                    className="h-full"
-                  />
-                ) : activeSidebarTab === "debug" ? (
+                {activeSidebarTab === "debug" ? (
                   /* ═══════════ TAB 1: DEBUG TELEMETRY ═══════════ */
                   <div className="space-y-3.5 font-mono">
                     {/* Card 1: Performance Meters (Camera & CV Engine FPS) */}
@@ -1967,6 +1958,60 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
               </div>
             </aside>
           )}
+
+          {/*
+            Bottom-left "ĐÃ CHỤP · ĐANG CHỤP" panel — plan item 13,
+            2026-09-17. Always rendered (no `isFullscreen`/
+            `showTelemetryDrawer` gate, unlike every earlier placement of
+            this same `CapturedListPanel` — see this file's other doc
+            comments on why those were effectively invisible on a real
+            kiosk), collapsible to a small pill via `capturedPanelCollapsed`
+            so it doesn't have to permanently sit over the live preview.
+          */}
+          <div
+            className={cn(
+              "absolute left-2 sm:left-4 bottom-2 z-40 flex flex-col select-none",
+              capturedPanelCollapsed ? "w-auto" : "w-72 max-w-[calc(100vw-2rem)] max-h-[50vh]",
+            )}
+          >
+            {capturedPanelCollapsed ? (
+              <button
+                onClick={() => setCapturedPanelCollapsed(false)}
+                className={cn(
+                  "flex items-center gap-1.5 px-3 py-2 rounded-full border shadow-xl backdrop-blur-3xl text-xs font-bold cursor-pointer transition-colors",
+                  theme === "dark"
+                    ? "bg-slate-900/95 border-slate-800 text-slate-100"
+                    : "bg-white/95 border-slate-200 text-slate-900",
+                )}
+              >
+                <Images className="w-3.5 h-3.5" />
+                Đã chụp{capturedList?.recent?.length ? ` (${capturedList.recent.length})` : ""}
+              </button>
+            ) : (
+              <div className="relative flex flex-col min-h-0">
+                <button
+                  onClick={() => setCapturedPanelCollapsed(true)}
+                  aria-label="Thu gọn danh sách đã chụp"
+                  title="Thu gọn"
+                  className={cn(
+                    "absolute -top-2 -right-2 z-10 w-6 h-6 rounded-full border flex items-center justify-center text-xs font-bold cursor-pointer shadow-lg transition-colors",
+                    theme === "dark"
+                      ? "bg-slate-800 border-slate-700 text-slate-300 hover:text-white"
+                      : "bg-white border-slate-200 text-slate-500 hover:text-slate-900",
+                  )}
+                >
+                  ✕
+                </button>
+                <CapturedListPanel
+                  current={capturedList?.current ?? null}
+                  recent={capturedList?.recent ?? []}
+                  onOpenSession={capturedList?.onOpenSession ?? (() => {})}
+                  theme={theme}
+                  className="max-h-[50vh]"
+                />
+              </div>
+            )}
+          </div>
         </div>
       </main>
 

@@ -22,9 +22,9 @@ from src.models.face_landmarks import FaceDetectionResult, FaceLandmarkDetector
 
 # --- Pixel table (campaign-config-sso-card-photo-discussion.md §3.5) ---
 CARD_PHOTO_PIXEL_TABLE: dict[Tuple[str, int], Tuple[int, int]] = {
-    ("3x4", 300): (354, 472),
+    ("3x4", 300): (600, 800),
     ("3x4", 600): (709, 945),
-    ("4x6", 300): (472, 709),
+    ("4x6", 300): (600, 900),
     ("4x6", 600): (945, 1417),
 }
 

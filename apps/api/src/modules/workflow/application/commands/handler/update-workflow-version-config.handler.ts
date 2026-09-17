@@ -12,6 +12,7 @@ import type { IWorkflowRepository } from '../../../infrastructure/repositories/w
 import { WORKFLOW_VERSION_REPOSITORY } from '../../../infrastructure/repositories/workflow-version.repository.interface';
 import type { IWorkflowVersionRepository } from '../../../infrastructure/repositories/workflow-version.repository.interface';
 import { checkWorkflowConfig } from '../../validate-workflow-config';
+import { reconcileEligibilityCredential } from '../../eligibility-credential.util';
 import { WORKFLOW_ERROR_CODES } from '../../../workflow.error-codes';
 import { UpdateWorkflowVersionConfigCommand } from '../command/update-workflow-version-config.command';
 import { WorkflowVersionResult } from '../result/workflow.result';
@@ -62,7 +63,11 @@ export class UpdateWorkflowVersionConfigHandler
       );
     }
 
-    const result = draft.updateConfig(command.config, command.note);
+    // Preserves the draft's already-stored credential when this save
+    // doesn't touch it — see `reconcileEligibilityCredential`'s own doc
+    // comment for why that's needed (GET never echoes the ciphertext back).
+    const config = reconcileEligibilityCredential(command.config, draft.config);
+    const result = draft.updateConfig(config, command.note);
     if (result.isFailure) {
       throw new BusinessRuleException(
         WORKFLOW_ERROR_CODES.VERSION_ALREADY_PUBLISHED,

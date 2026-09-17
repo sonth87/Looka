@@ -22,9 +22,10 @@ import { EmbeddingServerClient } from '@face/biometric';
  * the per-photo capture flow; no renderer UI currently calls them, but they
  * are independent of this removal and left untouched). The local SQLite
  * `embedding_enrollments` table (`@face/database`) is deliberately left in
- * place but unused, matching this codebase's established
- * "deprecate, don't drop" convention (e.g. `capture_configurations`) — not
- * dropped by this change.
+ * place but unused, matching this codebase's established "deprecate first,
+ * drop later once superseded data is confirmed migrated" convention (e.g.
+ * `capture_configurations`, dropped 2026-09-17 once its rows were confirmed
+ * copied into `workflows`) — not dropped by this change.
  */
 
 const DEFAULT_TIMEOUT_MS = 8_000;

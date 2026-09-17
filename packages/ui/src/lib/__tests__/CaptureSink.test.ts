@@ -44,7 +44,22 @@ function fakeSink(
   const approveUploadSteps: Array<ApprovalStepInfo[] | undefined> = [];
   const approveUploadVideoSessionIds: Array<string | undefined> = [];
   const approveUploadSubjects: Array<StudentSubjectInfo | undefined> = [];
-  const startSessionInputs: Array<{ subjectCode?: string; subjectName?: string; metadata?: Record<string, unknown>; campaignId?: string }> = [];
+  const startSessionInputs: Array<{
+    subjectCode?: string;
+    subjectName?: string;
+    metadata?: Record<string, unknown>;
+    campaignId?: string;
+    operatorUserId?: string | null;
+  }> = [];
+  const savePhotoInputs: Array<{
+    sessionId: string;
+    stepId: string;
+    attempt: number;
+    dataUrl: string;
+    identityNumber?: string;
+    userCode?: string;
+    operatorUserId?: string | null;
+  }> = [];
 
   const sink: CaptureSink = {
     async startSession(input) {
@@ -58,6 +73,7 @@ function fakeSink(
       return `session_${nextId}`;
     },
     async savePhoto(input) {
+      savePhotoInputs.push(input);
       calls.push(`savePhoto:${input.sessionId}:${input.stepId}:${input.attempt}`);
     },
     async completeSession(sessionId) {
@@ -79,6 +95,7 @@ function fakeSink(
     approveUploadVideoSessionIds,
     approveUploadSubjects,
     startSessionInputs,
+    savePhotoInputs,
     get startSessionCalls() {
       return startSessionCalls;
     },
@@ -273,6 +290,7 @@ test('setSubject() before the first capture makes ensure() send it to startSessi
         userCode: undefined,
       },
       campaignId: undefined,
+      operatorUserId: undefined,
     },
   ]);
 });
@@ -309,8 +327,99 @@ test('with no setSubject() call, ensure() sends startSession an all-undefined su
         userCode: undefined,
       },
       campaignId: undefined,
+      operatorUserId: undefined,
     },
   ]);
+});
+
+// ── operatorUserId (2026-09-17, "theo dõi ai chụp/ai upload") ──────────────
+//
+// operatorUserId now rides along from the moment RunScopedCaptureSession is
+// constructed — set as early as possible (startSession/savePhoto), not only
+// at approve() time as before this change (approve()'s own operatorUserId
+// param, tested separately above/below, is unaffected).
+
+test('a constructor-supplied operatorUserId flows into both startSession and savePhoto', async () => {
+  const { sink, startSessionInputs, savePhotoInputs } = fakeSink();
+  const run = new RunScopedCaptureSession(sink, undefined, 'OPERATOR-1');
+
+  await run.savePhoto({ stepId: 'step-front', attempt: 1, dataUrl: 'data:image/jpeg;base64,aaaa' });
+
+  assert.equal(startSessionInputs[0]?.operatorUserId, 'OPERATOR-1');
+  assert.equal(savePhotoInputs[0]?.operatorUserId, 'OPERATOR-1');
+});
+
+test('every savePhoto within one run carries the same operatorUserId, not only the first', async () => {
+  const { sink, savePhotoInputs } = fakeSink();
+  const run = new RunScopedCaptureSession(sink, undefined, 'OPERATOR-1');
+
+  await run.savePhoto({ stepId: 'step-front', attempt: 1, dataUrl: 'data:image/jpeg;base64,aaaa' });
+  await run.savePhoto({ stepId: 'step-left', attempt: 1, dataUrl: 'data:image/jpeg;base64,bbbb' });
+
+  assert.deepEqual(savePhotoInputs.map((i) => i.operatorUserId), ['OPERATOR-1', 'OPERATOR-1']);
+});
+
+test('with no operatorUserId supplied, startSession and savePhoto both receive undefined, not a missing/omitted value crashing anything', async () => {
+  const { sink, startSessionInputs, savePhotoInputs } = fakeSink();
+  const run = new RunScopedCaptureSession(sink);
+
+  await run.savePhoto({ stepId: 'step-front', attempt: 1, dataUrl: 'data:image/jpeg;base64,aaaa' });
+
+  assert.equal(startSessionInputs[0]?.operatorUserId, undefined);
+  assert.equal(savePhotoInputs[0]?.operatorUserId, undefined);
+});
+
+test('ElectronCaptureSink.savePhoto carries operatorUserId into queueCapture metadata, alongside identityNumber/userCode', async () => {
+  const calls: unknown[] = [];
+  await withFakeWindow(
+    {
+      queueCapture: async (payload: unknown) => {
+        calls.push(payload);
+        return { ok: true };
+      },
+    },
+    async () => {
+      const sink = new ElectronCaptureSink();
+      await sink.savePhoto({
+        sessionId: 'session_ok',
+        stepId: 'step-front',
+        attempt: 1,
+        dataUrl: 'data:image/jpeg;base64,aaaa',
+        identityNumber: '014203003990',
+        userCode: 'SV001',
+        operatorUserId: 'OPERATOR-1',
+      });
+    }
+  );
+  const payload = calls[0] as { metadata?: Record<string, unknown> };
+  assert.deepEqual(payload.metadata, {
+    identityNumber: '014203003990',
+    userCode: 'SV001',
+    operatorUserId: 'OPERATOR-1',
+  });
+});
+
+test('ElectronCaptureSink.savePhoto omits operatorUserId from metadata when not supplied', async () => {
+  const calls: unknown[] = [];
+  await withFakeWindow(
+    {
+      queueCapture: async (payload: unknown) => {
+        calls.push(payload);
+        return { ok: true };
+      },
+    },
+    async () => {
+      const sink = new ElectronCaptureSink();
+      await sink.savePhoto({
+        sessionId: 'session_ok',
+        stepId: 'step-front',
+        attempt: 1,
+        dataUrl: 'data:image/jpeg;base64,aaaa',
+      });
+    }
+  );
+  const payload = calls[0] as { metadata?: Record<string, unknown> };
+  assert.equal(payload.metadata, undefined);
 });
 
 test('setSubject() before approve() forwards the cached student to the kiosk approve path', async () => {

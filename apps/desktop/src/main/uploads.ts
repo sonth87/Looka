@@ -185,6 +185,11 @@ class ApiPhotoUploadClient extends FsClient {
         // treatment as identityNumber just above; PhotoService.addDevicePhoto
         // uses it to enqueue an embedding_jobs row.
         userCode: input.metadata?.userCode,
+        // 2026-09-17 ("theo dõi ai chụp/ai upload") — same transport-only
+        // treatment as identityNumber/userCode above; PhotoService
+        // .addDevicePhoto uses it to set sessions.operator_user_id as early
+        // as possible, instead of only once a later SESSION_REPORT lands.
+        operatorUserId: input.metadata?.operatorUserId,
       });
     }
 

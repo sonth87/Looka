@@ -9,6 +9,7 @@ import {
   ReviewSetListItem,
   ReviewSetStatus,
   listCampaigns,
+  listCampaignSubjectDistinctValues,
   listPhotoKinds,
   listReviewSets,
 } from '../api';
@@ -36,7 +37,19 @@ export function ReviewListPage() {
   const [hasAi, setHasAi] = useState(false);
   const [hasUpload, setHasUpload] = useState(false);
   const [missingCard, setMissingCard] = useState(false);
+  const [overdue, setOverdue] = useState(false);
   const [q, setQ] = useState('');
+  // Lớp/chuyên ngành/khoa filters (plan §G.2.c, 2026-09-17) — options come
+  // from the campaign's real roster (`GET /v1/campaigns/:id/subjects/distinct-values`),
+  // never hardcoded, and only make sense once a campaign is selected (same
+  // rule `CampaignPrintStatusPage` already applies for its own className/
+  // facultyFilter dropdowns).
+  const [className, setClassName] = useState('');
+  const [major, setMajor] = useState('');
+  const [faculty, setFaculty] = useState('');
+  const [classNameOptions, setClassNameOptions] = useState<string[]>([]);
+  const [majorOptions, setMajorOptions] = useState<string[]>([]);
+  const [facultyOptions, setFacultyOptions] = useState<string[]>([]);
   const [page, setPage] = useState(1);
 
   const [result, setResult] = useState<Paginated<ReviewSetListItem> | null>(null);
@@ -60,6 +73,28 @@ export function ReviewListPage() {
       });
   }, []);
 
+  // Lớp/chuyên ngành/khoa dropdowns are scoped to one campaign — reset both
+  // the selected value and the option list whenever no campaign is chosen,
+  // and repopulate from the real roster otherwise (same pattern as
+  // `CampaignPrintStatusPage`'s classNameOptions/facultyOptions effect).
+  useEffect(() => {
+    if (!campaignId) {
+      setClassNameOptions([]);
+      setMajorOptions([]);
+      setFacultyOptions([]);
+      return;
+    }
+    listCampaignSubjectDistinctValues(campaignId, 'className')
+      .then((r) => setClassNameOptions(r.items))
+      .catch(() => setClassNameOptions([]));
+    listCampaignSubjectDistinctValues(campaignId, 'major')
+      .then((r) => setMajorOptions(r.items))
+      .catch(() => setMajorOptions([]));
+    listCampaignSubjectDistinctValues(campaignId, 'faculty')
+      .then((r) => setFacultyOptions(r.items))
+      .catch(() => setFacultyOptions([]));
+  }, [campaignId]);
+
   useEffect(() => {
     const params: ListReviewSetsParams = { page, limit: PAGE_SIZE };
     if (campaignId) params.campaignId = campaignId;
@@ -68,13 +103,17 @@ export function ReviewListPage() {
     if (hasAi) params.hasAi = true;
     if (hasUpload) params.hasUpload = true;
     if (missingCard) params.missingCard = true;
+    if (overdue) params.overdue = true;
     if (q.trim()) params.q = q.trim();
+    if (className) params.className = className;
+    if (major) params.major = major;
+    if (faculty) params.faculty = faculty;
 
     setError(null);
     listReviewSets(params)
       .then(setResult)
       .catch((err) => setError(err instanceof ApiError ? err.message : String(err)));
-  }, [campaignId, kindId, status, hasAi, hasUpload, missingCard, q, page]);
+  }, [campaignId, kindId, status, hasAi, hasUpload, missingCard, overdue, q, className, major, faculty, page]);
 
   const sets = result?.items ?? [];
   const meta = result?.meta;
@@ -90,6 +129,12 @@ export function ReviewListPage() {
             value={campaignId}
             onChange={(e) => {
               setCampaignId(e.target.value);
+              // Lớp/ngành/khoa chỉ có ý nghĩa trong phạm vi 1 campaign — đổi
+              // campaign thì reset cả 3 lựa chọn cũ (options tự nạp lại ở
+              // effect riêng).
+              setClassName('');
+              setMajor('');
+              setFaculty('');
               setPage(1);
             }}
             className="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900"
@@ -98,6 +143,57 @@ export function ReviewListPage() {
             {campaigns.map((c) => (
               <option key={c.id} value={c.id}>
                 {c.name}
+              </option>
+            ))}
+          </select>
+
+          <select
+            value={className}
+            onChange={(e) => {
+              setClassName(e.target.value);
+              setPage(1);
+            }}
+            disabled={!campaignId || classNameOptions.length === 0}
+            className="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <option value="">Tất cả lớp</option>
+            {classNameOptions.map((v) => (
+              <option key={v} value={v}>
+                {v}
+              </option>
+            ))}
+          </select>
+
+          <select
+            value={major}
+            onChange={(e) => {
+              setMajor(e.target.value);
+              setPage(1);
+            }}
+            disabled={!campaignId || majorOptions.length === 0}
+            className="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <option value="">Tất cả chuyên ngành</option>
+            {majorOptions.map((v) => (
+              <option key={v} value={v}>
+                {v}
+              </option>
+            ))}
+          </select>
+
+          <select
+            value={faculty}
+            onChange={(e) => {
+              setFaculty(e.target.value);
+              setPage(1);
+            }}
+            disabled={!campaignId || facultyOptions.length === 0}
+            className="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <option value="">Tất cả khoa</option>
+            {facultyOptions.map((v) => (
+              <option key={v} value={v}>
+                {v}
               </option>
             ))}
           </select>
@@ -184,6 +280,18 @@ export function ReviewListPage() {
               className="rounded border-gray-300"
             />
             Thiếu ảnh 4x6
+          </label>
+          <label className="flex items-center gap-1.5">
+            <input
+              type="checkbox"
+              checked={overdue}
+              onChange={(e) => {
+                setOverdue(e.target.checked);
+                setPage(1);
+              }}
+              className="rounded border-gray-300"
+            />
+            Chỉ quá hạn xử lý
           </label>
         </div>
       </div>

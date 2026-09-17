@@ -875,6 +875,10 @@ export class PhotoReviewService {
       params.push(query.major);
       conditions.push(`s.major = $${params.length}`);
     }
+    if (query.faculty) {
+      params.push(query.faculty);
+      conditions.push(`s.faculty = $${params.length}`);
+    }
     if (query.citizenId) {
       params.push(query.citizenId);
       conditions.push(`s.citizen_id = $${params.length}`);
@@ -915,11 +919,14 @@ export class PhotoReviewService {
           s.class_name, s.major, s.faculty, s.citizen_id, s.due_at,
           cv.fs_file_id AS current_fs_file_id,
           cv.fs_status AS current_fs_status,
+          COALESCE(u.display_name, u.email) AS operator_name,
           EXISTS (SELECT 1 FROM photo_variants v WHERE v.set_id = s.id AND v.kind = 'CARD_AI' AND v.status <> 'DISCARDED') AS has_ai,
           EXISTS (SELECT 1 FROM photo_variants v WHERE v.set_id = s.id AND v.kind = 'CARD_UPLOAD' AND v.status <> 'DISCARDED') AS has_upload
         FROM subject_photo_sets s
         LEFT JOIN photo_kinds k ON k.id = s.kind_id
         LEFT JOIN photo_variants cv ON cv.id = s.current_card_variant_id
+        LEFT JOIN sessions se ON se.id = s.source_session_id
+        LEFT JOIN users u ON u.id = se.operator_user_id
         ${where}
       )
       SELECT * FROM agg ${outerWhere}
@@ -972,6 +979,7 @@ export class PhotoReviewService {
         major: row.major ?? undefined,
         faculty: row.faculty ?? undefined,
         citizenId: row.citizen_id ?? undefined,
+        operatorName: row.operator_name ?? undefined,
         dueAt: row.due_at ?? undefined,
         overdue: this.computeOverdue(
           row.due_at as Date | null,
@@ -1000,9 +1008,12 @@ export class PhotoReviewService {
     const rows: Array<Record<string, unknown>> = await this.dataSource.query(
       `SELECT s.id, s.campaign_id, s.subject_code, s.subject_name, s.kind_id, k.code AS kind_code,
               s.source_session_id, s.status, s.current_card_variant_id, s.created_at, s.updated_at,
-              s.class_name, s.major, s.faculty, s.citizen_id, s.due_at
+              s.class_name, s.major, s.faculty, s.citizen_id, s.due_at,
+              COALESCE(u.display_name, u.email) AS operator_name
          FROM subject_photo_sets s
          LEFT JOIN photo_kinds k ON k.id = s.kind_id
+         LEFT JOIN sessions se ON se.id = s.source_session_id
+         LEFT JOIN users u ON u.id = se.operator_user_id
         WHERE s.id = $1`,
       [id],
     );
@@ -1094,6 +1105,7 @@ export class PhotoReviewService {
       major: row.major ?? undefined,
       faculty: row.faculty ?? undefined,
       citizenId: row.citizen_id ?? undefined,
+      operatorName: row.operator_name ?? undefined,
       dueAt: row.due_at ?? undefined,
       overdue: this.computeOverdue(
         row.due_at as Date | null,
@@ -1977,11 +1989,14 @@ export class PhotoReviewService {
           s.class_name, s.major, s.faculty, s.citizen_id, s.due_at,
           cv.fs_file_id AS current_fs_file_id,
           cv.fs_status AS current_fs_status,
+          COALESCE(u.display_name, u.email) AS operator_name,
           EXISTS (SELECT 1 FROM photo_variants v WHERE v.set_id = s.id AND v.kind = 'CARD_AI' AND v.status <> 'DISCARDED') AS has_ai,
           EXISTS (SELECT 1 FROM photo_variants v WHERE v.set_id = s.id AND v.kind = 'CARD_UPLOAD' AND v.status <> 'DISCARDED') AS has_upload
         FROM subject_photo_sets s
         LEFT JOIN photo_kinds k ON k.id = s.kind_id
         LEFT JOIN photo_variants cv ON cv.id = s.current_card_variant_id
+        LEFT JOIN sessions se ON se.id = s.source_session_id
+        LEFT JOIN users u ON u.id = se.operator_user_id
        WHERE s.id = $1`,
       [setId],
     );
@@ -2025,6 +2040,7 @@ export class PhotoReviewService {
       major: row.major ?? undefined,
       faculty: row.faculty ?? undefined,
       citizenId: row.citizen_id ?? undefined,
+      operatorName: row.operator_name ?? undefined,
       dueAt: row.due_at ?? undefined,
       overdue: this.computeOverdue(
         row.due_at as Date | null,

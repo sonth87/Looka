@@ -16,8 +16,7 @@ import { AI_PIPELINE_STEP_REPOSITORY } from './infrastructure/repositories/ai-pi
 import { AiPipelineStepRepository } from './infrastructure/repositories/ai-pipeline-step.repository';
 import { WorkflowCatalogReadRepository } from './infrastructure/read/workflow-catalog.read-repository';
 import { AiPipelineStepReadRepository } from './infrastructure/read/ai-pipeline-step.read-repository';
-import { DainamStudentInfoClient } from '@app/shared/integrations/dainam-student/student-directory.adapter';
-import { EligibilityCatalogService } from './application/eligibility-catalog.service';
+import { EligibilityHttpClient } from './infrastructure/integrations/eligibility-http.client';
 import { CreateWorkflowHandler } from './application/commands/handler/create-workflow.handler';
 import { RenameWorkflowHandler } from './application/commands/handler/rename-workflow.handler';
 import { UpdateWorkflowVersionConfigHandler } from './application/commands/handler/update-workflow-version-config.handler';
@@ -34,12 +33,10 @@ import { ListWorkflowVersionsHandler } from './application/queries/handler/list-
 import { GetWorkflowUsageHandler } from './application/queries/handler/get-workflow-usage.handler';
 import { ValidateWorkflowConfigHandler } from './application/queries/handler/validate-workflow-config.handler';
 import { ListAiPipelineStepsHandler } from './application/queries/handler/list-ai-pipeline-steps.handler';
-import { ListEligibilityApiClientsHandler } from './application/queries/handler/list-eligibility-api-clients.handler';
 import { WorkflowCommandController } from './presentation/cms/workflow.command.controller';
 import { WorkflowQueryController } from './presentation/cms/workflow.query.controller';
 import { AiPipelineStepCommandController } from './presentation/cms/ai-pipeline-step.command.controller';
 import { AiPipelineStepQueryController } from './presentation/cms/ai-pipeline-step.query.controller';
-import { EligibilityQueryController } from './presentation/cms/eligibility.query.controller';
 import { EligibilityCommandController } from './presentation/cms/eligibility.command.controller';
 import {
   WORKFLOW_CONSTRAINTS,
@@ -66,7 +63,6 @@ const QUERY_HANDLERS = [
   GetWorkflowUsageHandler,
   ValidateWorkflowConfigHandler,
   ListAiPipelineStepsHandler,
-  ListEligibilityApiClientsHandler,
 ];
 
 /**
@@ -78,6 +74,12 @@ const QUERY_HANDLERS = [
  * imports THIS module in turn (P2's "gộp config cho devices/config và
  * campaigns/:id/config"), so the dependency chain is
  * `device-management → workflow → identity`, never circular.
+ *
+ * No more `eligibility_api_clients` catalog/repository here (2026-09-17
+ * redo of plan item 7) — `EligibilityHttpClient` is still exported for
+ * `device-management`'s `CampaignSubjectService` to execute a workflow's
+ * OWN inline `config.eligibility.api`, but there is no longer a shared
+ * catalog table for it to read from; see that class' own doc comment.
  */
 @Module({
   imports: [
@@ -94,7 +96,6 @@ const QUERY_HANDLERS = [
     WorkflowQueryController,
     AiPipelineStepCommandController,
     AiPipelineStepQueryController,
-    EligibilityQueryController,
     EligibilityCommandController,
   ],
   providers: [
@@ -109,8 +110,7 @@ const QUERY_HANDLERS = [
     },
     WorkflowCatalogReadRepository,
     AiPipelineStepReadRepository,
-    DainamStudentInfoClient,
-    EligibilityCatalogService,
+    EligibilityHttpClient,
     ...COMMAND_HANDLERS,
     ...QUERY_HANDLERS,
   ],
@@ -122,7 +122,13 @@ const QUERY_HANDLERS = [
   // exported too, but `device-management` injects it as a normal
   // constructor dependency (through `WorkflowModule` import), which only
   // needs the export, not anything extra.
-  exports: [WorkflowCatalogReadRepository],
+  //
+  // `EligibilityHttpClient` exported for the same reason (plan item 7,
+  // 2026-09-17): `CampaignSubjectService.lookupSubject` (device-management)
+  // reads a workflow's pinned version's own `eligibility.api` config
+  // (already has it via `WorkflowCatalogReadRepository`) and executes the
+  // lookup directly — no separate catalog lookup needed anymore.
+  exports: [WorkflowCatalogReadRepository, EligibilityHttpClient],
 })
 export class WorkflowModule implements OnModuleInit {
   constructor(

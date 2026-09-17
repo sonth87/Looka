@@ -438,4 +438,70 @@ describeDb('photo-review persistence', () => {
       ).toBe(true);
     });
   });
+
+  describe('listSets faculty filter (plan §G.2.b, 2026-09-17)', () => {
+    /** Mirrors `seedSet` above but sets `faculty` directly rather than going through the service — `className`/`major` already work this same "denormalized column, exact match" way, `faculty` was just missing from the DTO before this change. */
+    async function seedSetWithFaculty(
+      faculty: string | null,
+    ): Promise<{ setId: string; campaignId: string; subjectCode: string }> {
+      const setId = randomUUID();
+      const campaignId = randomUUID();
+      const sourceSessionId = randomUUID();
+      const subjectCode = `SV${Math.random().toString(36).slice(2, 8)}`;
+
+      await dataSource.query(`INSERT INTO sessions (id) VALUES ($1)`, [
+        sourceSessionId,
+      ]);
+      await dataSource.query(
+        `INSERT INTO subject_photo_sets
+           (id, campaign_id, subject_code, kind_id, source_session_id, status, faculty, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, now(), now())`,
+        [
+          setId,
+          campaignId,
+          subjectCode,
+          kindId,
+          sourceSessionId,
+          PhotoReviewSetStatus.PENDING_AUTO,
+          faculty,
+        ],
+      );
+      return { setId, campaignId, subjectCode };
+    }
+
+    it('returns only sets whose faculty matches exactly', async () => {
+      const match = await seedSetWithFaculty('CNTT');
+      await seedSetWithFaculty('Khoa khac');
+      await seedSetWithFaculty(null);
+
+      const result = await service.listSets(
+        { campaignId: match.campaignId, faculty: 'CNTT' },
+        apiBaseUrl,
+      );
+
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0].id).toBe(match.setId);
+      expect(result.items[0].faculty).toBe('CNTT');
+    });
+
+    it('is not applied when omitted — behaves like today for existing callers', async () => {
+      const a = await seedSetWithFaculty('CNTT');
+      const sameCampaignFaculty = await seedSetWithFaculty('Khoa khac');
+      // Force both rows into the same campaign so the "no faculty filter"
+      // assertion actually exercises more than one row.
+      await dataSource.query(
+        `UPDATE subject_photo_sets SET campaign_id = $1 WHERE id = $2`,
+        [a.campaignId, sameCampaignFaculty.setId],
+      );
+
+      const result = await service.listSets(
+        { campaignId: a.campaignId },
+        apiBaseUrl,
+      );
+
+      expect(result.items.map((i) => i.id).sort()).toEqual(
+        [a.setId, sameCampaignFaculty.setId].sort(),
+      );
+    });
+  });
 });

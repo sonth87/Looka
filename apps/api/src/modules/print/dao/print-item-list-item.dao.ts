@@ -38,10 +38,18 @@ export class PrintItemListItemDao {
     description: 'Trường còn thiếu — CMS cần sửa tay',
   })
   missingFields: string[];
+  @ApiPropertyOptional({
+    description:
+      'Người chụp (operator SSO) — resolved qua setId → subject_photo_sets.source_session_id → sessions.operator_user_id → users, null nếu chưa có',
+  })
+  operatorName?: string | null;
   @ApiProperty() createdAt: Date;
   @ApiProperty() updatedAt: Date;
 
-  static from(item: PrintItem): PrintItemListItemDao {
+  static from(
+    item: PrintItem,
+    operatorName?: string | null,
+  ): PrintItemListItemDao {
     const dao = new PrintItemListItemDao();
     dao.id = item.id;
     dao.batchId = item.batchId ?? null;
@@ -60,6 +68,7 @@ export class PrintItemListItemDao {
     dao.errorMessage = item.errorMessage ?? null;
     dao.reprintOfItemId = item.reprintOfItemId ?? null;
     dao.missingFields = computeMissingFields(item);
+    dao.operatorName = operatorName ?? null;
     dao.createdAt = item.createdAt;
     dao.updatedAt = item.updatedAt;
     return dao;

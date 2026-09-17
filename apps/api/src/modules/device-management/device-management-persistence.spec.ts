@@ -1819,6 +1819,93 @@ describeDb('device management persistence', () => {
       }
     });
 
+    test('getStudentDetail resolves operatorName from sessions.operator_user_id, falling back to email, and undefined when there is no operator or no matching user', async () => {
+      // 2026-09-17 ("theo dõi ai chụp/ai upload") — CampaignStudentsPanel's
+      // "Sinh viên" tab drawer shows this per session (see
+      // StudentService.getStudentDetail's own LEFT JOIN users). No FK from
+      // sessions.operator_user_id to users (see that column's own migration
+      // doc comment), so a real `users` row is seeded here with plain SQL
+      // rather than through IdentityModule's own services, same "stay
+      // inside this module's own persistence" reasoning the rest of this
+      // file already follows for campaigns/devices.
+      const campaign = await campaignService.createCampaign({
+        name: 'Student Detail Operator',
+      });
+      const { device } = await deviceService.registerDevice(campaign.id, {
+        name: 'Kiosk SDO',
+      });
+
+      const [userWithDisplayName] = await dataSource.query(
+        `INSERT INTO users (sso_user_code, email, display_name) VALUES ($1, $2, $3) RETURNING id`,
+        [
+          `sdo-1-${randomUUID()}`,
+          `sdo-1-${randomUUID()}@example.com`,
+          'Nguyễn Vận Hành',
+        ],
+      );
+      const userWithoutDisplayNameEmail = `sdo-2-${randomUUID()}@example.com`;
+      const [userWithoutDisplayName] = await dataSource.query(
+        `INSERT INTO users (sso_user_code, email) VALUES ($1, $2) RETURNING id`,
+        [`sdo-2-${randomUUID()}`, userWithoutDisplayNameEmail],
+      );
+
+      const subjectCode = `SV_DETAIL_OP_${randomUUID().slice(0, 8)}`;
+      const reportSession = async (operatorUserId: string | null) => {
+        const sessionId = randomUUID();
+        const at = new Date().toISOString();
+        await deviceEventService.recordBatch(device.id, campaign.id, [
+          {
+            type: DeviceEventType.SESSION_REPORT,
+            occurredAt: at,
+            metadata: {
+              sessionId,
+              approvedAt: at,
+              subjectCode,
+              operatorUserId,
+              photos: [
+                {
+                  photoId: randomUUID(),
+                  stepId: 'FRONT',
+                  attempt: 1,
+                  mimeType: 'image/jpeg',
+                  sizeBytes: 500,
+                  sha256: randomUUID().replace(/-/g, '').padEnd(64, '0'),
+                  virtualPath: `face/2026/${sessionId}/FRONT-1.jpg`,
+                },
+              ],
+            },
+          },
+        ]);
+        return sessionId;
+      };
+
+      // A random, unassigned uuid — no user was ever deleted, this session
+      // simply never resolved to a real users row (e.g. a stale/rotated id).
+      const orphanOperatorUserId = randomUUID();
+
+      const sessionWithDisplayName = await reportSession(
+        userWithDisplayName.id,
+      );
+      const sessionWithEmailOnly = await reportSession(
+        userWithoutDisplayName.id,
+      );
+      const sessionWithNoOperator = await reportSession(null);
+      const sessionWithOrphanOperator =
+        await reportSession(orphanOperatorUserId);
+
+      const detail = await studentService.getStudentDetail(subjectCode);
+      const byId = new Map(detail.sessions.map((s) => [s.id, s]));
+
+      expect(byId.get(sessionWithDisplayName)?.operatorName).toBe(
+        'Nguyễn Vận Hành',
+      );
+      expect(byId.get(sessionWithEmailOnly)?.operatorName).toBe(
+        userWithoutDisplayNameEmail,
+      );
+      expect(byId.get(sessionWithNoOperator)?.operatorName).toBeUndefined();
+      expect(byId.get(sessionWithOrphanOperator)?.operatorName).toBeUndefined();
+    });
+
     test('getStudentDetail throws STUDENT_NOT_FOUND for a code with no sessions', async () => {
       await expect(
         studentService.getStudentDetail('SV_DOES_NOT_EXIST'),

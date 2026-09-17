@@ -31,6 +31,7 @@ import { SetRolePermissionsHandler } from './application/commands/handler/set-ro
 import { DeleteRoleHandler } from './application/commands/handler/delete-role.handler';
 import { SetUserRolesHandler } from './application/commands/handler/set-user-roles.handler';
 import { CreateUserHandler } from './application/commands/handler/create-user.handler';
+import { FindOrCreateUserByEmailHandler } from './application/commands/handler/find-or-create-user-by-email.handler';
 import { UpdateUserProfileHandler } from './application/commands/handler/update-user-profile.handler';
 import { SetUserStatusHandler } from './application/commands/handler/set-user-status.handler';
 import { SetUserAvatarHandler } from './application/commands/handler/set-user-avatar.handler';
@@ -63,6 +64,7 @@ const COMMAND_HANDLERS = [
   DeleteRoleHandler,
   SetUserRolesHandler,
   CreateUserHandler,
+  FindOrCreateUserByEmailHandler,
   UpdateUserProfileHandler,
   SetUserStatusHandler,
   SetUserAvatarHandler,

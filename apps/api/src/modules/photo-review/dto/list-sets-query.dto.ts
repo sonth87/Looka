@@ -95,6 +95,11 @@ export class ListSetsQueryDto extends QueryPaginateDto {
   @IsString()
   major?: string;
 
+  @ApiPropertyOptional({ description: 'Lọc theo khoa (khớp đúng)' })
+  @IsOptional()
+  @IsString()
+  faculty?: string;
+
   @ApiPropertyOptional({ description: 'Lọc theo số CCCD (khớp đúng)' })
   @IsOptional()
   @IsString()

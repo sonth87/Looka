@@ -862,34 +862,85 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    * just finished shows up promptly instead of waiting for the next reload.
    */
   const [recentStudents, setRecentStudents] = useState<CapturedListRecentEntry[]>([]);
+  /**
+   * Plan item 13, 2026-09-17 — "Q19: cả campaign khi online, chỉ máy này khi
+   * offline" (this component's own comment above), finally implemented:
+   * tries the server-backed campaign-wide list first
+   * (`faceAPI.listCampaignRecentCaptures`, `GET /v1/devices/recent-captures`)
+   * and only falls back to the local-only `listRecentStudents` read below
+   * when that resolves `null` (offline, no device identity, or rejected) —
+   * same offline-first contract every other device-API call in this app
+   * follows.
+   */
   const refreshRecentStudents = useCallback(() => {
     const faceAPI = (window as any).faceAPI;
-    faceAPI?.listRecentStudents
-      ?.(20)
-      .then((rows: Array<{ subjectCode: string; subjectName: string | null; photoCount: number; approvedAt: number }>) => {
-        setRecentStudents(
-          rows.map((r) => ({
-            subjectCode: r.subjectCode,
-            subjectName: r.subjectName ?? undefined,
-            // No separate "target photo count" in this local index — every
-            // row here is by definition an already-approved session, so
-            // showing photoCount/photoCount ("N/N ảnh") is accurate, not a
-            // guess.
-            photoCount: r.photoCount,
-            photoTotal: r.photoCount,
-            capturedAt: r.approvedAt,
-            // This local index is kiosk-local only (no device field in it
-            // at all — see CapturedStudentRepository's own doc comment), so
-            // every row is, by construction, from this device.
-            isThisDevice: true,
-          }))
-        );
-      })
-      .catch(() => {
-        // Best-effort UI polish, not core capture functionality — a failed
-        // refresh just leaves the panel showing its last-known (or empty)
-        // list rather than surfacing an error anywhere.
-      });
+
+    const fromLocal = () =>
+      faceAPI?.listRecentStudents
+        ?.(20)
+        .then((rows: Array<{ subjectCode: string; subjectName: string | null; photoCount: number; approvedAt: number }>) => {
+          setRecentStudents(
+            rows.map((r) => ({
+              subjectCode: r.subjectCode,
+              subjectName: r.subjectName ?? undefined,
+              // No separate "target photo count" in this local index — every
+              // row here is by definition an already-approved session, so
+              // showing photoCount/photoCount ("N/N ảnh") is accurate, not a
+              // guess.
+              photoCount: r.photoCount,
+              photoTotal: r.photoCount,
+              capturedAt: r.approvedAt,
+              // This local index is kiosk-local only (no device field in it
+              // at all — see CapturedStudentRepository's own doc comment), so
+              // every row is, by construction, from this device.
+              isThisDevice: true,
+            }))
+          );
+        })
+        .catch(() => {
+          // Best-effort UI polish, not core capture functionality — a failed
+          // refresh just leaves the panel showing its last-known (or empty)
+          // list rather than surfacing an error anywhere.
+        });
+
+    if (!faceAPI?.listCampaignRecentCaptures) {
+      void fromLocal();
+      return;
+    }
+    faceAPI
+      .listCampaignRecentCaptures(20)
+      .then(
+        (
+          rows: Array<{
+            subjectCode?: string;
+            subjectName?: string;
+            photoCount: number;
+            capturedAt?: string;
+            completedAt?: string;
+            deviceName?: string;
+            isThisDevice: boolean;
+          }> | null
+        ) => {
+          if (!rows) {
+            void fromLocal();
+            return;
+          }
+          setRecentStudents(
+            rows
+              .filter((r): r is typeof r & { subjectCode: string } => !!r.subjectCode)
+              .map((r) => ({
+                subjectCode: r.subjectCode,
+                subjectName: r.subjectName,
+                photoCount: r.photoCount,
+                photoTotal: r.photoCount,
+                capturedAt: r.completedAt ?? r.capturedAt ?? Date.now(),
+                deviceName: r.deviceName,
+                isThisDevice: r.isThisDevice,
+              }))
+          );
+        }
+      )
+      .catch(() => void fromLocal());
   }, []);
   useEffect(() => {
     refreshRecentStudents();
@@ -2036,7 +2087,9 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    * abandoned (cancelled, or "Chụp lại toàn bộ") must call `.reset()` rather
    * than let the next run silently reuse this id.
    */
-  const runSessionRef = useRef<RunScopedCaptureSession>(new RunScopedCaptureSession(sink, props.campaignId));
+  const runSessionRef = useRef<RunScopedCaptureSession>(
+    new RunScopedCaptureSession(sink, props.campaignId, props.operatorUserId)
+  );
 
   /**
    * The student `setSubject()` was last given — cached here (not just
@@ -2605,6 +2658,11 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
       const isNewCameraService = !cameraServiceRef.current;
       const camera = cameraServiceRef.current || new BrowserCameraService();
       cameraServiceRef.current = camera;
+      // Product decision 2026-09-17 (plan item 1): saved stills must match the
+      // mirrored preview the operator sees, not the raw sensor orientation.
+      // See BrowserCameraService's own docstring on `mirrorStills` for the
+      // accuracy trade-off this reverses (text/hair-part/embedding mirroring).
+      camera.setMirrorStills(true);
 
       if (isNewCameraService) {
         // Hot-plug detection (item 12a, 2026-09-09): `BrowserCameraService`'s
@@ -3742,6 +3800,15 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           // Same DOMException-stringification fix as the single-stream
           // recorder above — see the comment there.
           console.error(`[FaceCaptureApp] multi-channel recording failed to start for ${deviceId}: ${err?.name}: ${err?.message}`);
+          // Plan item 2, 2026-09-17: this used to be console-only — a camera
+          // whose second `getUserMedia` the OS/driver refuses (see this
+          // effect's own "double-open" comment above) silently ended up with
+          // NO recording channel at all, and nothing ever told the operator.
+          // `recordingFailed` already existed for the liveness monitor below
+          // to report a channel that died mid-recording; a channel that never
+          // even started is the same "this camera isn't recording" fact from
+          // an earlier point in its lifecycle, so it's reported the same way.
+          setRecordingFailed((prev) => ({ ...prev, [deviceId]: true }));
         }
       }
 

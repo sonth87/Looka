@@ -10,6 +10,7 @@ import type { IWorkflowRepository } from '../../../infrastructure/repositories/w
 import { WORKFLOW_VERSION_REPOSITORY } from '../../../infrastructure/repositories/workflow-version.repository.interface';
 import type { IWorkflowVersionRepository } from '../../../infrastructure/repositories/workflow-version.repository.interface';
 import { checkWorkflowConfig } from '../../validate-workflow-config';
+import { reconcileEligibilityCredential } from '../../eligibility-credential.util';
 import { WORKFLOW_ERROR_CODES } from '../../../workflow.error-codes';
 import { CreateWorkflowCommand } from '../command/create-workflow.command';
 import { WorkflowResult } from '../result/workflow.result';
@@ -40,6 +41,8 @@ export class CreateWorkflowHandler
         configCheck.errors.join('; '),
       );
     }
+    // No previous config to preserve a credential from — brand new workflow.
+    const config = reconcileEligibilityCredential(command.config, null);
 
     const result = Workflow.create({
       code: command.code,
@@ -59,7 +62,7 @@ export class CreateWorkflowHandler
     const draft = WorkflowVersion.createDraft({
       workflowId: workflow.id,
       version: 1,
-      config: command.config,
+      config,
     });
     await this.versions.save(draft);
 

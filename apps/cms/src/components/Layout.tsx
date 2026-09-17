@@ -62,29 +62,15 @@ export function Layout({ children }: { children: ReactNode }) {
         </div>
 
         <nav className="flex-1 px-3 py-4 space-y-1">
+          {/* "Tổng quan" (plan item 11, 2026-09-17) — merged with the old separate "Vận hành" nav entry; that content is now a tab on this same page (`OverviewPage.tsx`). */}
           <NavLink to="/" end className={navItemClass}>
             Tổng quan
-          </NavLink>
-          <NavLink to="/dashboard" className={navItemClass}>
-            Vận hành
           </NavLink>
           <NavLink to="/campaigns" className={navItemClass}>
             Campaigns
           </NavLink>
           <NavLink to="/angle-presets" className={navItemClass}>
             Góc chụp
-          </NavLink>
-          {/*
-            "Mẫu chụp" (item 10, 2026-09-09) — reusable capture-configuration
-            templates (angle table + optional card spec) a campaign can pick
-            from instead of building its own from scratch. Deliberately
-            named differently from "Cấu hình" below (`photo_kinds` —
-            standards per photo TYPE, a different concept) and placed right
-            after "Góc chụp" since a configuration's rows are built from that
-            catalog, one level up.
-          */}
-          <NavLink to="/capture-configurations" className={navItemClass}>
-            Mẫu chụp
           </NavLink>
           {/*
             "Cấu hình" (2026-09-08, product feedback) — standalone page for
@@ -157,6 +143,10 @@ export function Layout({ children }: { children: ReactNode }) {
             task.
           */}
           <div className="pt-3 mt-3 border-t border-gray-200">
+            {/* "Người dùng" (plan item 12, 2026-09-17) — browsable/filterable list, placed right before "Phân quyền" since gán vai trò is the very next thing an admin does after finding someone here. */}
+            <NavLink to="/users" className={navItemClass}>
+              Người dùng
+            </NavLink>
             <NavLink to="/roles" className={navItemClass}>
               Phân quyền
             </NavLink>

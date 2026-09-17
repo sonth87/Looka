@@ -209,9 +209,11 @@ export class StudentService {
         `SELECT
           s.id, s.source, s.device_id, d.name AS device_name, s.campaign_id,
           s.subject_code, s.subject_name, s.status,
-          s.captured_at, s.completed_at, s.approved_at
+          s.captured_at, s.completed_at, s.approved_at,
+          COALESCE(u.display_name, u.email) AS operator_name
          FROM sessions s
          LEFT JOIN devices d ON d.id = s.device_id
+         LEFT JOIN users u ON u.id = s.operator_user_id
         WHERE s.subject_code = $1
         ORDER BY COALESCE(s.captured_at, s.created_at) DESC`,
         [subjectCode],
@@ -333,6 +335,11 @@ export class StudentService {
         capturedAt: row.captured_at ?? undefined,
         completedAt: row.completed_at ?? undefined,
         approvedAt: row.approved_at ?? undefined,
+        // 2026-09-17 ("theo dõi ai chụp/ai upload") — resolved here, at read
+        // time, the same "raw SQL LEFT JOIN users, COALESCE(display_name,
+        // email)" pattern `DeviceEventService.campaignOperatorStats()`
+        // already uses for the same column.
+        operatorName: row.operator_name ?? undefined,
         photos: photosBySession.get(row.id as string) ?? [],
         videos: videosBySession.get(row.id as string) ?? [],
       }),

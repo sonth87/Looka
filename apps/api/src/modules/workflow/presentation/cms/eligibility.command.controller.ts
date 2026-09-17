@@ -7,8 +7,17 @@ import { PermissionsGuard } from '@app/modules/identity/presentation/guards/perm
 import { RequirePermission } from '@app/modules/identity/presentation/guards/require-permission.decorator';
 import { TestEligibilityLookupCommand } from '../../application/commands/command/test-eligibility-lookup.command';
 import { TestEligibilityLookupDto } from '../../application/commands/transfer-model/test-eligibility-lookup.dto';
-import { TestLookupResult } from '../../application/eligibility-catalog.service';
+import { TestLookupResult } from '../../application/commands/handler/test-eligibility-lookup.handler';
 
+/**
+ * `POST /v1/eligibility/test-lookup` only (2026-09-17 redo of plan item 7)
+ * — the `api-clients` CRUD routes this controller briefly had are gone:
+ * there is no more shared catalog to manage (see this module's own
+ * `eligibility-http.client.ts` doc comment). A workflow's own eligibility
+ * API config lives inline in `config.eligibility.api`, edited/saved through
+ * the normal `PUT /v1/workflows/:id/config` path — this route only ever
+ * TRIES an ad-hoc config, it never persists one.
+ */
 @Controller({ path: 'eligibility', version: '1' })
 @ApiTags('workflow')
 @UseGuards(SsoAuthGuard, PermissionsGuard)
@@ -20,12 +29,10 @@ export class EligibilityCommandController {
   @Post('test-lookup')
   @ApiOperation({
     summary:
-      'Thử tra cứu một mã qua API ngoài — để tác giả nghiệp vụ xem field thật trước khi cấu hình rule',
+      'Thử tra cứu một mã qua API ngoài (config gửi trực tiếp, không qua catalog) — để tác giả nghiệp vụ xem field thật trước khi lưu workflow',
   })
   @ApiResponseDecorator(Object)
   testLookup(@Body() dto: TestEligibilityLookupDto): Promise<TestLookupResult> {
-    return this.commandBus.execute(
-      new TestEligibilityLookupCommand(dto.clientCode, dto.key),
-    );
+    return this.commandBus.execute(new TestEligibilityLookupCommand(dto));
   }
 }
