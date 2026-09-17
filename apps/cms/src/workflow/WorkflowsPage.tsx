@@ -2,7 +2,6 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
 import {
   ApiError,
-  EligibilityApiClient,
   IdentificationMethod,
   Paginated,
   WorkflowConfig,
@@ -12,7 +11,6 @@ import {
   archiveWorkflow,
   createWorkflow,
   createWorkflowDraftVersion,
-  listEligibilityApiClients,
   listIdentificationMethods,
   listWorkflowVersions,
   listWorkflows,
@@ -30,7 +28,7 @@ const WORKFLOW_STATUS_LABEL: Record<WorkflowStatus, string> = {
   ARCHIVED: 'Lưu trữ',
 };
 
-/** A minimal-but-schema-valid starting config for a brand new workflow — every group needs at least this much to pass `POST /v1/workflows`' server-side zod validation (see workflow-config.schema.ts); an admin fills in the real angles/card-spec/etc. afterward via the raw-JSON groups or (for capture/output) the separate `CaptureConfiguration` system. */
+/** A minimal-but-schema-valid starting config for a brand new workflow — every group needs at least this much to pass `POST /v1/workflows`' server-side zod validation (see workflow-config.schema.ts); an admin fills in the real angles/card-spec/etc. afterward via `WorkflowConfigEditor.tsx`'s `CaptureAnglesTable`/`CardSpecFields`. */
 const DEFAULT_NEW_WORKFLOW_CONFIG: WorkflowConfig = {
   capture: { angles: [], clickMode: { default: 'MANUAL_SEQUENTIAL', allowed: ['MANUAL_SEQUENTIAL'] } },
   identification: { methods: ['MANUAL_LOOKUP'], lookupKeyField: 'studentCode' },
@@ -68,11 +66,9 @@ export function WorkflowsPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [identificationMethods, setIdentificationMethods] = useState<IdentificationMethod[]>([]);
-  const [eligibilityApiClients, setEligibilityApiClients] = useState<EligibilityApiClient[]>([]);
 
   useEffect(() => {
     listIdentificationMethods().then(setIdentificationMethods).catch(() => {});
-    listEligibilityApiClients().then(setEligibilityApiClients).catch(() => {});
   }, []);
 
   function reload() {
@@ -189,6 +185,7 @@ export function WorkflowsPage() {
 
       {createOpen && (
         <CreateWorkflowModal
+          identificationMethods={identificationMethods}
           onClose={() => setCreateOpen(false)}
           onCreated={() => {
             setCreateOpen(false);
@@ -201,7 +198,6 @@ export function WorkflowsPage() {
         <WorkflowDetailModal
           workflow={selected}
           identificationMethods={identificationMethods}
-          eligibilityApiClients={eligibilityApiClients}
           onClose={() => setSelectedId(null)}
           onChanged={reload}
         />
@@ -210,10 +206,29 @@ export function WorkflowsPage() {
   );
 }
 
-function CreateWorkflowModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
+/**
+ * Create modal now embeds the full `WorkflowConfigEditor` (plan item 5,
+ * 2026-09-17) — `POST /v1/workflows` always required a full `config` body
+ * (see `CreateWorkflowDto.config`'s own `@IsObject()`, no `@IsOptional()`),
+ * this modal was just never offering it: it silently submitted the hardcoded
+ * `DEFAULT_NEW_WORKFLOW_CONFIG` and left every real setting for a second,
+ * separate "open the workflow again to configure it" step. `config` now
+ * starts from that same default (still schema-valid on its own) but is a
+ * normal editable field like the others, not a fixed constant.
+ */
+function CreateWorkflowModal({
+  identificationMethods,
+  onClose,
+  onCreated,
+}: {
+  identificationMethods: IdentificationMethod[];
+  onClose: () => void;
+  onCreated: () => void;
+}) {
   const [code, setCode] = useState('');
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
+  const [config, setConfig] = useState<WorkflowConfig>(DEFAULT_NEW_WORKFLOW_CONFIG);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -222,7 +237,7 @@ function CreateWorkflowModal({ onClose, onCreated }: { onClose: () => void; onCr
     setSaving(true);
     setError(null);
     try {
-      await createWorkflow({ code: code.trim(), name: name.trim(), description: description.trim() || undefined, config: DEFAULT_NEW_WORKFLOW_CONFIG });
+      await createWorkflow({ code: code.trim(), name: name.trim(), description: description.trim() || undefined, config });
       onCreated();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : String(err));
@@ -234,28 +249,31 @@ function CreateWorkflowModal({ onClose, onCreated }: { onClose: () => void; onCr
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/30" onClick={onClose} />
-      <form onSubmit={submit} className="relative w-full max-w-md bg-white rounded-2xl shadow-xl p-6 space-y-4">
+      <form onSubmit={submit} className="relative w-full max-w-3xl max-h-[90vh] overflow-y-auto bg-white rounded-2xl shadow-xl p-6 space-y-4">
         <h2 className="text-lg font-semibold text-gray-900">Tạo workflow mới</h2>
         <p className="text-xs text-gray-500">
-          Tạo với cấu hình tối thiểu hợp lệ — sửa chi tiết (điều kiện, phương thức định danh, góc chụp...) sau khi tạo.
+          Cấu hình chi tiết ngay dưới đây, hoặc để mặc định và sửa lại sau — cả hai cách đều tạo ra 1 version nháp có
+          thể sửa tiếp trước khi publish.
         </p>
-        <div>
-          <label className="block text-sm text-gray-500 mb-1">Mã (không đổi được sau khi tạo)</label>
-          <input
-            value={code}
-            onChange={(e) => setCode(e.target.value.toUpperCase())}
-            required
-            className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
-          />
-        </div>
-        <div>
-          <label className="block text-sm text-gray-500 mb-1">Tên</label>
-          <input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            required
-            className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
-          />
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-sm text-gray-500 mb-1">Mã (không đổi được sau khi tạo)</label>
+            <input
+              value={code}
+              onChange={(e) => setCode(e.target.value.toUpperCase())}
+              required
+              className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
+            />
+          </div>
+          <div>
+            <label className="block text-sm text-gray-500 mb-1">Tên</label>
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              required
+              className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
+            />
+          </div>
         </div>
         <div>
           <label className="block text-sm text-gray-500 mb-1">Mô tả</label>
@@ -266,6 +284,9 @@ function CreateWorkflowModal({ onClose, onCreated }: { onClose: () => void; onCr
             className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
           />
         </div>
+
+        <WorkflowConfigEditor config={config} onChange={setConfig} identificationMethods={identificationMethods} />
+
         {error && <div className="p-2.5 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">{error}</div>}
         <div className="flex justify-end gap-2 pt-1">
           <button type="button" onClick={onClose} className="px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-100">
@@ -284,16 +305,51 @@ function CreateWorkflowModal({ onClose, onCreated }: { onClose: () => void; onCr
   );
 }
 
+/**
+ * Plain-language step breadcrumb for the create→configure→publish→re-draft
+ * flow (plan item 4, 2026-09-17) — this is the exact sequence
+ * `WorkflowDetailModal` already enforces via `draftVersion`/`publishedBefore`
+ * (see its own comments), just made visible instead of only inferable from
+ * which buttons happen to be enabled.
+ */
+function WorkflowStepIndicator({ hasDraft, publishedBefore }: { hasDraft: boolean; publishedBefore: boolean }) {
+  const steps = [
+    { key: 'draft', label: 'Nháp' },
+    { key: 'configure', label: 'Cấu hình' },
+    { key: 'publish', label: 'Publish' },
+  ] as const;
+  const currentKey: (typeof steps)[number]['key'] = !publishedBefore ? 'draft' : hasDraft ? 'configure' : 'publish';
+
+  return (
+    <div className="flex items-center gap-1.5 mb-4 text-xs">
+      {steps.map((step, i) => (
+        <div key={step.key} className="flex items-center gap-1.5">
+          {i > 0 && <span className="text-gray-300">→</span>}
+          <span
+            className={`px-2 py-1 rounded-full font-medium ${
+              step.key === currentKey ? 'bg-blue-100 text-blue-700' : 'text-gray-400'
+            }`}
+          >
+            {step.label}
+          </span>
+        </div>
+      ))}
+      <span className="text-gray-300">→</span>
+      <span className="text-gray-400" title="Sau khi publish, sửa tiếp cần tạo 1 version nháp mới (không sửa lại version đã publish).">
+        Sửa tiếp = version nháp mới
+      </span>
+    </div>
+  );
+}
+
 function WorkflowDetailModal({
   workflow,
   identificationMethods,
-  eligibilityApiClients,
   onClose,
   onChanged,
 }: {
   workflow: WorkflowDetail;
   identificationMethods: IdentificationMethod[];
-  eligibilityApiClients: EligibilityApiClient[];
   onClose: () => void;
   onChanged: () => void;
 }) {
@@ -386,6 +442,8 @@ function WorkflowDetailModal({
         <p className="text-sm text-gray-500 mb-4">
           {workflow.code} · Version hiện tại: {workflow.currentVersion ?? '— (chưa publish)'} · Dùng bởi {workflow.campaignCount} campaign
         </p>
+
+        <WorkflowStepIndicator hasDraft={!!draftVersion} publishedBefore={publishedBefore} />
 
         {error && <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm mb-3">{error}</div>}
         {message && <div className="p-3 rounded-lg bg-blue-50 border border-blue-200 text-blue-700 text-sm mb-3">{message}</div>}
@@ -486,12 +544,7 @@ function WorkflowDetailModal({
 
         {draftVersion && config ? (
           <>
-            <WorkflowConfigEditor
-              config={config}
-              onChange={setConfig}
-              identificationMethods={identificationMethods}
-              eligibilityApiClients={eligibilityApiClients}
-            />
+            <WorkflowConfigEditor config={config} onChange={setConfig} identificationMethods={identificationMethods} />
             <div className="mt-3">
               <label className="block text-sm text-gray-500 mb-1">Ghi chú cho lần lưu này (tuỳ chọn)</label>
               <input value={note} onChange={(e) => setNote(e.target.value)} className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900 text-sm" />

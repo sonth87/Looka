@@ -38,6 +38,31 @@ export const PRINT_ITEM_STATUS_BADGE_CLASS: Record<PrintItemStatus, string> = {
   CANCELLED: 'bg-red-50 border-red-200 text-red-700',
 };
 
+/**
+ * 3-nhóm rút gọn cho màn "In thẻ theo campaign" (plan item 8, §5 Q2, chốt
+ * 2026-09-17: giữ đúng 3 nhóm, không tách riêng "Lỗi") — UI-only, không đổi
+ * `PrintItemStatus` 8 giá trị ở DB/API.
+ */
+export type PrintItemStatusBucket = 'PRINTED' | 'PRINTING' | 'NOT_PRINTED';
+
+export const PRINT_ITEM_BUCKET_LABEL: Record<PrintItemStatusBucket, string> = {
+  PRINTED: 'Đã in',
+  PRINTING: 'Đang in',
+  NOT_PRINTED: 'Chưa in',
+};
+
+export const PRINT_ITEM_BUCKET_BADGE_CLASS: Record<PrintItemStatusBucket, string> = {
+  PRINTED: 'bg-emerald-50 border-emerald-200 text-emerald-700',
+  PRINTING: 'bg-amber-50 border-amber-200 text-amber-700',
+  NOT_PRINTED: 'bg-gray-50 border-gray-200 text-gray-600',
+};
+
+export function printItemStatusBucket(status: PrintItemStatus): PrintItemStatusBucket {
+  if (status === 'PRINTED') return 'PRINTED';
+  if (status === 'QUEUED' || status === 'PRINTING') return 'PRINTING';
+  return 'NOT_PRINTED';
+}
+
 export function formatDateTime(iso?: string | null): string {
   if (!iso) return '—';
   const d = new Date(iso);

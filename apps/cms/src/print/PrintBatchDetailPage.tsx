@@ -8,6 +8,8 @@ import {
   PrintBatch,
   PrintItem,
   PrintItemGroup,
+  PrintItemStatus,
+  Printer,
   addItemsToPrintBatch,
   bulkApplyPrintTemplate,
   bulkCreatePrintItems,
@@ -15,9 +17,11 @@ import {
   downloadPrintBatchPackage,
   getPrintBatch,
   listCampaigns,
+  listCampaignSubjectDistinctValues,
   listCardTemplates,
   listPrintItemGroups,
   listPrintItems,
+  listPrinters,
   previewCardTemplateUrl,
   previewPrintItemUrl,
   removeItemFromPrintBatch,
@@ -64,15 +68,23 @@ export function PrintBatchDetailPage() {
 
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [templates, setTemplates] = useState<CardTemplate[]>([]);
+  const [printers, setPrinters] = useState<Printer[]>([]);
   const [batch, setBatch] = useState<PrintBatch | null>(null);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+  const [statusFilter, setStatusFilter] = useState<PrintItemStatus | ''>('');
+  const [classNameFilter, setClassNameFilter] = useState('');
+  const [facultyFilter, setFacultyFilter] = useState('');
+  const [classNameOptions, setClassNameOptions] = useState<string[]>([]);
+  const [facultyOptions, setFacultyOptions] = useState<string[]>([]);
+  const [q, setQ] = useState('');
   const [itemsResult, setItemsResult] = useState<Paginated<PrintItem> | null>(null);
   const [groups, setGroups] = useState<PrintItemGroup[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [editTemplateOpen, setEditTemplateOpen] = useState(false);
+  const [editPrinterOpen, setEditPrinterOpen] = useState(false);
   const [applyTemplateTargets, setApplyTemplateTargets] = useState<string[] | null>(null);
   const [previewItem, setPreviewItem] = useState<PrintItem | null>(null);
   const [previewingDefaultTemplate, setPreviewingDefaultTemplate] = useState(false);
@@ -81,7 +93,13 @@ export function PrintBatchDetailPage() {
 
   useEffect(() => {
     listCampaigns().then(setCampaigns).catch(() => {});
-    listCardTemplates().then((r) => setTemplates(r.items)).catch(() => {});
+    // Plan item 9: only ACTIVE templates are offered when picking a batch's
+    // default template or applying a template to items.
+    listCardTemplates({ status: 'ACTIVE' }).then((r) => setTemplates(r.items)).catch(() => {});
+    // Unfiltered — needed to display the batch's CURRENT printer even if it
+    // has since gone DISABLED/ERROR; `EditBatchPrinterModal` filters to
+    // ONLINE/OFFLINE itself for the picker (plan item 9, §5 Q3).
+    listPrinters().then((r) => setPrinters(r.items)).catch(() => {});
   }, []);
 
   function reload() {
@@ -90,12 +108,20 @@ export function PrintBatchDetailPage() {
     getPrintBatch(id)
       .then(setBatch)
       .catch((err) => setError(err instanceof ApiError ? err.message : String(err)));
-    listPrintItems({ batchId: id, page, limit: pageSize })
+    listPrintItems({
+      batchId: id,
+      status: statusFilter || undefined,
+      className: classNameFilter.trim() || undefined,
+      faculty: facultyFilter.trim() || undefined,
+      q: q.trim() || undefined,
+      page,
+      limit: pageSize,
+    })
       .then(setItemsResult)
       .catch((err) => setError(err instanceof ApiError ? err.message : String(err)));
   }
 
-  useEffect(reload, [id, page, pageSize]);
+  useEffect(reload, [id, page, pageSize, statusFilter, classNameFilter, facultyFilter, q]);
 
   useEffect(() => {
     if (batch?.campaignId) {
@@ -103,10 +129,28 @@ export function PrintBatchDetailPage() {
     }
   }, [batch?.campaignId, batch?.itemCount]);
 
+  // Plan §G.2.e, 2026-09-17: lớp/khoa filters become dropdowns populated from
+  // this batch's campaign roster (`GET /v1/campaigns/:id/subjects/distinct-values`)
+  // instead of free text, same endpoint `CampaignPrintStatusPage` uses.
+  useEffect(() => {
+    if (!batch?.campaignId) {
+      setClassNameOptions([]);
+      setFacultyOptions([]);
+      return;
+    }
+    listCampaignSubjectDistinctValues(batch.campaignId, 'className')
+      .then((r) => setClassNameOptions(r.items))
+      .catch(() => setClassNameOptions([]));
+    listCampaignSubjectDistinctValues(batch.campaignId, 'faculty')
+      .then((r) => setFacultyOptions(r.items))
+      .catch(() => setFacultyOptions([]));
+  }, [batch?.campaignId]);
+
   const items = itemsResult?.items ?? [];
   const totalItemCount = itemsResult?.meta.totalItems ?? 0;
   const campaignName = (cid?: string | null) => campaigns.find((c) => c.id === cid)?.name ?? cid ?? '—';
   const defaultTemplate = templates.find((t) => t.id === batch?.defaultTemplateId) ?? null;
+  const currentPrinter = printers.find((p) => p.id === batch?.printerId) ?? null;
   const selectedIds = Array.from(selected);
 
   async function withBusy(action: () => Promise<void>) {
@@ -183,6 +227,13 @@ export function PrintBatchDetailPage() {
         {canEdit && (
           <button type="button" onClick={() => setEditTemplateOpen(true)} className="ml-2 text-blue-600 hover:text-blue-800 underline">
             Đổi phôi mặc định
+          </button>
+        )}
+        {' · Máy in: '}
+        {currentPrinter ? currentPrinter.name : '— chưa chọn —'}
+        {canEdit && (
+          <button type="button" onClick={() => setEditPrinterOpen(true)} className="ml-2 text-blue-600 hover:text-blue-800 underline">
+            Đổi máy in
           </button>
         )}
       </p>
@@ -300,6 +351,63 @@ export function PrintBatchDetailPage() {
             Hủy đợt
           </button>
         )}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 mb-3">
+        <input
+          value={q}
+          onChange={(e) => {
+            setQ(e.target.value);
+            setPage(1);
+          }}
+          placeholder="Tìm theo mã SV hoặc tên..."
+          className="flex-1 min-w-[180px] bg-white border border-gray-300 rounded-lg px-3 py-1.5 text-sm text-gray-900"
+        />
+        <select
+          value={classNameFilter}
+          onChange={(e) => {
+            setClassNameFilter(e.target.value);
+            setPage(1);
+          }}
+          className="w-32 bg-white border border-gray-300 rounded-lg px-3 py-1.5 text-sm text-gray-900"
+        >
+          <option value="">Tất cả lớp</option>
+          {classNameOptions.map((c) => (
+            <option key={c} value={c}>
+              {c}
+            </option>
+          ))}
+        </select>
+        <select
+          value={facultyFilter}
+          onChange={(e) => {
+            setFacultyFilter(e.target.value);
+            setPage(1);
+          }}
+          className="w-32 bg-white border border-gray-300 rounded-lg px-3 py-1.5 text-sm text-gray-900"
+        >
+          <option value="">Tất cả khoa</option>
+          {facultyOptions.map((f) => (
+            <option key={f} value={f}>
+              {f}
+            </option>
+          ))}
+        </select>
+        <select
+          value={statusFilter}
+          onChange={(e) => {
+            setStatusFilter(e.target.value as PrintItemStatus | '');
+            setPage(1);
+          }}
+          className="bg-white border border-gray-300 rounded-lg px-3 py-1.5 text-sm text-gray-900"
+        >
+          <option value="">Tất cả trạng thái</option>
+          {(Object.keys(PRINT_ITEM_STATUS_LABEL) as PrintItemStatus[]).map((s) => (
+            <option key={s} value={s}>
+              {PRINT_ITEM_STATUS_LABEL[s]}
+            </option>
+          ))}
+        </select>
       </div>
 
       <div className="rounded-xl border border-gray-200 overflow-hidden">
@@ -435,6 +543,18 @@ export function PrintBatchDetailPage() {
         />
       )}
 
+      {editPrinterOpen && (
+        <EditBatchPrinterModal
+          batch={batch}
+          printers={printers}
+          onClose={() => setEditPrinterOpen(false)}
+          onSaved={(updated) => {
+            setEditPrinterOpen(false);
+            setBatch(updated);
+          }}
+        />
+      )}
+
       {applyTemplateTargets && (
         <ApplyTemplateModal
           templates={templates}
@@ -527,6 +647,77 @@ function EditBatchTemplateModal({
           <button
             onClick={() => void submit()}
             disabled={busy || !defaultTemplateId}
+            className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold text-sm disabled:opacity-50"
+          >
+            {busy ? 'Đang lưu...' : 'Lưu'}
+          </button>
+        </div>
+      </div>
+    </ModalShell>
+  );
+}
+
+/**
+ * "Đổi máy in" — plan item 9: `PATCH /v1/print/batches/:id {printerId}`
+ * already accepted this field (`UpdatePrintBatchInput.printerId`), there was
+ * just no UI for it at all, same gap `EditBatchTemplateModal` above used to
+ * have for the template field. Only ONLINE/OFFLINE printers are offered
+ * (§5 Q3, chốt 2026-09-17) — ERROR/DISABLED excluded even if that happens to
+ * be the batch's current printer (it still shows in the header text via
+ * `currentPrinter`, just not selectable again here).
+ */
+function EditBatchPrinterModal({
+  batch,
+  printers,
+  onClose,
+  onSaved,
+}: {
+  batch: PrintBatch;
+  printers: Printer[];
+  onClose: () => void;
+  onSaved: (batch: PrintBatch) => void;
+}) {
+  const [printerId, setPrinterId] = useState(batch.printerId ?? '');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const selectable = printers.filter((p) => p.status === 'ONLINE' || p.status === 'OFFLINE');
+
+  async function submit() {
+    if (!printerId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      onSaved(await updatePrintBatch(batch.id, { printerId }));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <ModalShell title="Đổi máy in của đợt in" onClose={onClose}>
+      <div className="space-y-3">
+        <select
+          value={printerId}
+          onChange={(e) => setPrinterId(e.target.value)}
+          className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
+        >
+          <option value="">— Chọn máy in —</option>
+          {selectable.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name} ({p.status === 'ONLINE' ? 'Trực tuyến' : 'Ngoại tuyến'})
+            </option>
+          ))}
+        </select>
+        {error && <div className="p-2.5 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">{error}</div>}
+        <div className="flex justify-end gap-2 pt-1">
+          <button onClick={onClose} className="px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-100">
+            Đóng
+          </button>
+          <button
+            onClick={() => void submit()}
+            disabled={busy || !printerId}
             className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold text-sm disabled:opacity-50"
           >
             {busy ? 'Đang lưu...' : 'Lưu'}

@@ -178,7 +178,10 @@ export function ReviewDetailContent({ id, onClose }: { id: string; onClose?: () 
           {REVIEW_STATUS_LABEL[set.status]}
         </span>
       </div>
-      <p className="text-sm text-gray-500 mb-6">{set.campaignName ?? set.campaignId}</p>
+      <p className="text-sm text-gray-500 mb-6">
+        {set.campaignName ?? set.campaignId}
+        {set.operatorName ? ` · Người chụp: ${set.operatorName}` : ''}
+      </p>
 
       {locked && (
         <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-sm mb-4 flex items-center gap-2">

@@ -181,6 +181,13 @@ export class StudentSessionSummaryDao {
   @Expose()
   approvedAt?: Date;
 
+  @ApiPropertyOptional({
+    description:
+      'Tên người vận hành (SSO) đã chụp phiên này, nếu có (2026-09-17)',
+  })
+  @Expose()
+  operatorName?: string;
+
   @ApiProperty({ type: [StudentSessionPhotoDao] })
   @Expose()
   @Type(() => StudentSessionPhotoDao)

@@ -87,15 +87,59 @@ const eligibilityRuleSchema = z.object({
   message: z.string().min(1),
 });
 
+const ELIGIBILITY_AUTH_TYPES = [
+  'NONE',
+  'API_KEY_HEADER',
+  'BEARER_TOKEN',
+  'QUERY_PARAM',
+] as const;
+const ELIGIBILITY_REQUEST_METHODS = ['GET', 'POST'] as const;
+
+/**
+ * Inline, per-workflow API config (2026-09-17 redo of plan item 7) — the
+ * user explicitly rejected the first design (a DB-wide `eligibility_api_clients`
+ * catalog shared across every workflow, one class-per-integration before
+ * that): "API điều kiện tiếp nhận là config trong workflow luôn chứ không
+ * dùng chung như hiện tại". Every field a workflow's own API call needs
+ * lives directly in ITS OWN `config.eligibility.api`, versioned/immutable
+ * with the rest of `workflow_versions.config` — no separate table, no
+ * cross-workflow reuse.
+ *
+ * `credential`/`credentialCiphertext` are BOTH declared here on purpose:
+ * `credential` is the transient plaintext a command handler receives from
+ * the CMS and immediately re-encrypts into `credentialCiphertext` before
+ * persisting (see `create-workflow.handler.ts`/
+ * `update-workflow-version-config.handler.ts`'s own doc comment) —
+ * `credentialCiphertext` is the only one that should ever actually reach
+ * the database. Both stay optional here so this same schema validates a
+ * dry-run (`POST /v1/workflows/validate`, plaintext still present) and an
+ * already-persisted version (only ciphertext present) without needing two
+ * schemas.
+ *
+ * `hasCredential` is a THIRD, read-only annotation — `workflow-catalog.read-repository.ts`'s
+ * `sanitizeEligibilityCredential` strips `credentialCiphertext` out of
+ * whatever config it hands to the CMS and sets this instead, so the CMS
+ * can show "đã có credential" without ever seeing the encrypted value.
+ * Never read by anything that writes config back (the credential-reconcile
+ * step only ever looks at `credential`/`credentialCiphertext`).
+ */
+const eligibilityApiSchema = z.object({
+  baseUrl: z.string().min(1),
+  requestMethod: z.enum(ELIGIBILITY_REQUEST_METHODS).default('POST'),
+  requestPath: z.string().min(1),
+  requestBodyTemplate: z.record(z.string(), z.unknown()).optional(),
+  authType: z.enum(ELIGIBILITY_AUTH_TYPES).default('API_KEY_HEADER'),
+  authParamName: z.string().optional(),
+  credential: z.string().optional(),
+  credentialCiphertext: z.string().optional(),
+  hasCredential: z.boolean().optional(),
+  keyResponsePath: z.string().optional(),
+  requiredFields: z.array(z.string()).optional(),
+});
+
 const eligibilitySchema = z.object({
   mode: z.enum(ELIGIBILITY_MODES),
-  api: z
-    .object({
-      clientCode: z.string().min(1),
-      keyField: z.string().min(1),
-      requiredFields: z.array(z.string()).optional(),
-    })
-    .optional(),
+  api: eligibilityApiSchema.optional(),
   rules: z.array(eligibilityRuleSchema).optional(),
   rosterTemplate: z.string().optional(),
 });

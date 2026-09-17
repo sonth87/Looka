@@ -16,5 +16,7 @@ export const USER_PROFILE_REPOSITORY = Symbol('USER_PROFILE_REPOSITORY');
 export interface IUserProfileRepository {
   findById(id: string): Promise<User | null>;
   findByCode(code: string): Promise<User | null>;
+  /** Case-insensitive, any `source` — same matching rule `SsoAuthGuard.upsertUser()` already uses for its own MANUAL-row merge (plan item 14, 2026-09-17). */
+  findByEmail(email: string): Promise<User | null>;
   save(user: User): Promise<User>;
 }

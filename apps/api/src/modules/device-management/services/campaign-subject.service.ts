@@ -3,9 +3,14 @@ import { CustomException, ERROR_CODE } from '@app/shared/errors/legacy';
 import { CommonService } from '@app/shared/common/common.service';
 import { Pagination } from '@app/shared/http/pagination';
 import { FileStorageService } from '@app/modules/file-storage/services/file-storage.service';
-import { DainamStudentInfoClient } from '@app/shared/integrations/dainam-student/student-directory.adapter';
 import { WorkflowCatalogReadRepository } from '@app/modules/workflow/infrastructure/read/workflow-catalog.read-repository';
-import { HttpStatus, Injectable, Logger } from '@nestjs/common';
+import { EligibilityHttpClient } from '@app/modules/workflow/infrastructure/integrations/eligibility-http.client';
+import {
+  BadRequestException,
+  HttpStatus,
+  Injectable,
+  Logger,
+} from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
 import ExcelJS from 'exceljs';
@@ -13,6 +18,7 @@ import { DataSource, Repository } from 'typeorm';
 import type { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 import {
   CampaignSubjectDao,
+  CampaignSubjectDistinctValuesDao,
   CampaignSubjectImportDao,
   CampaignSubjectLookupDao,
 } from '../dao';
@@ -27,7 +33,11 @@ import {
   EligibilityMode,
   EligibilitySource,
 } from '../entities/eligibility-check-log.entity';
-import { evaluateEligibilityRules } from '../util/eligibility-rule.evaluator';
+import {
+  EligibilityRule,
+  evaluateEligibilityRules,
+} from '../util/eligibility-rule.evaluator';
+import { TestRosterLookupResultDao } from '../dao/test-roster-lookup-result.dao';
 import { CampaignService } from './campaign.service';
 import { CampaignSnapshotService } from '@app/modules/stats/services/campaign-snapshot.service';
 
@@ -77,6 +87,24 @@ interface ParsedRow {
 export class CampaignSubjectService extends CommonService<CampaignSubject> {
   private readonly logger = new Logger(CampaignSubjectService.name);
 
+  /**
+   * `distinctValues()`'s allowlist — the ONLY thing standing between the
+   * `field` query param and a raw-SQL column name. `field` is caller input
+   * (validated by `DistinctSubjectValuesQueryDto`'s `@IsIn` at the HTTP
+   * layer already, but this map is the real, defense-in-depth guard: it is
+   * checked again here so the SQL below only ever interpolates one of
+   * these 3 hardcoded, known-safe column names — never the raw string the
+   * caller sent).
+   */
+  private static readonly DISTINCT_VALUE_COLUMNS: Record<
+    'className' | 'faculty' | 'major',
+    string
+  > = {
+    className: 'class_name',
+    faculty: 'faculty',
+    major: 'major',
+  };
+
   constructor(
     @InjectRepository(CampaignSubject)
     repository: Repository<CampaignSubject>,
@@ -90,7 +118,7 @@ export class CampaignSubjectService extends CommonService<CampaignSubject> {
     private readonly fileStorage: FileStorageService,
     private readonly snapshotService: CampaignSnapshotService,
     private readonly workflowCatalog: WorkflowCatalogReadRepository,
-    private readonly dainamClient: DainamStudentInfoClient,
+    private readonly eligibilityHttpClient: EligibilityHttpClient,
   ) {
     super(repository);
   }
@@ -367,6 +395,49 @@ export class CampaignSubjectService extends CommonService<CampaignSubject> {
   }
 
   /**
+   * `GET /v1/campaigns/:id/subjects/distinct-values?field=className|faculty|major`
+   * — card-photo-export-and-filters-plan-2026-09-17.md §G.2.a. Populates the
+   * Photo Review/Print CMS class/faculty/major filter dropdowns from the
+   * real roster: `className`/`faculty`/`major` are free-text columns copied
+   * from an Excel import, not a catalog/enum, so no hardcoded list exists
+   * anywhere for them. Reads `campaign_subjects` (the roster itself, every
+   * row regardless of whether it has a photo set/print item yet) rather
+   * than `subject_photo_sets`/`print_items` — those two only cover subjects
+   * that already progressed further, a narrower list than the full roster.
+   *
+   * `field` never gets interpolated into SQL directly — it is looked up in
+   * `DISTINCT_VALUE_COLUMNS` first (throws `BadRequestException` on a miss),
+   * and only the resulting hardcoded column name from that map is
+   * interpolated. This is a second guard behind
+   * `DistinctSubjectValuesQueryDto`'s own `@IsIn`, not a replacement for it.
+   */
+  async distinctValues(
+    campaignId: string,
+    field: 'className' | 'faculty' | 'major',
+  ): Promise<CampaignSubjectDistinctValuesDao> {
+    await this.campaignService.findCampaignEntityOrFail(campaignId);
+
+    const column = CampaignSubjectService.DISTINCT_VALUE_COLUMNS[field];
+    if (!column) {
+      throw new BadRequestException(
+        `field không hợp lệ — chỉ nhận: ${Object.keys(CampaignSubjectService.DISTINCT_VALUE_COLUMNS).join(', ')}`,
+      );
+    }
+
+    const rows: Array<{ value: string }> = await this.dataSource.query(
+      `SELECT DISTINCT ${column} AS value
+         FROM campaign_subjects
+        WHERE campaign_id = $1 AND ${column} IS NOT NULL AND ${column} <> ''
+        ORDER BY ${column}`,
+      [campaignId],
+    );
+
+    const dao = new CampaignSubjectDistinctValuesDao();
+    dao.items = rows.map((r) => r.value);
+    return dao;
+  }
+
+  /**
    * `GET /v1/campaigns/:id/subjects/lookup?key=` (§2.3's kiosk note) — `key`
    * matches `subjectCode` OR `citizenId` exactly against `VALID` roster
    * rows, for `ROSTER`/`ROSTER_AND_API` modes. Follows the campaign's
@@ -420,15 +491,43 @@ export class CampaignSubjectService extends CommonService<CampaignSubject> {
     });
 
     if (mode === 'ROSTER') {
-      return rosterSubject
-        ? this.recordLookup(campaignId, key, mode, 'ROSTER', {
-            eligible: true,
-            subject: rosterSubject,
-          })
-        : this.recordLookup(campaignId, key, mode, 'ROSTER', {
-            eligible: false,
-            reason: 'Không tìm thấy trong danh sách đợt này',
-          });
+      if (!rosterSubject) {
+        return this.recordLookup(campaignId, key, mode, 'ROSTER', {
+          eligible: false,
+          reason: 'Không tìm thấy trong danh sách đợt này',
+        });
+      }
+      // Plan §E.2, 2026-09-17: `eligibility.rules[]` used to have ZERO
+      // effect in plain ROSTER mode — found-in-roster-with-VALID-status
+      // was always eligible, no matter what rules a workflow's CMS editor
+      // configured (rules only ever ran for EXTERNAL_API/ROSTER_AND_API,
+      // below). Now evaluates them here too, using the SAME context shape
+      // the EXTERNAL_API branch builds — but ONLY when the workflow
+      // actually configured at least one rule, so a workflow with
+      // `rules: []`/undefined keeps today's exact behavior (regression
+      // safety: found-in-roster is eligible, full stop).
+      const rules = eligibility?.rules ?? [];
+      if (rules.length === 0) {
+        return this.recordLookup(campaignId, key, mode, 'ROSTER', {
+          eligible: true,
+          subject: rosterSubject,
+        });
+      }
+      const rosterContext: Record<string, unknown> = {
+        subjectCode: rosterSubject.subjectCode,
+        fullName: rosterSubject.fullName,
+        citizenId: rosterSubject.citizenId,
+        className: rosterSubject.className,
+        faculty: rosterSubject.faculty,
+        major: rosterSubject.major,
+      };
+      const rosterEvaluation = evaluateEligibilityRules(rules, rosterContext);
+      return this.recordLookup(campaignId, key, mode, 'ROSTER', {
+        eligible: rosterEvaluation.eligible,
+        reason: rosterEvaluation.reason,
+        subject: rosterSubject,
+        context: rosterContext,
+      });
     }
 
     // EXTERNAL_API or ROSTER_AND_API from here.
@@ -439,9 +538,36 @@ export class CampaignSubjectService extends CommonService<CampaignSubject> {
       });
     }
 
-    const outcome = await this.dainamClient.getListStudentInfo({
-      studentCode: key,
-    });
+    // Plan item 7, 2026-09-17 (redone same day): `eligibility.api` used to
+    // be stored but never actually read here — every EXTERNAL_API/
+    // ROSTER_AND_API workflow silently called the one hardcoded
+    // `DainamStudentInfoClient` regardless of what its config said. Now
+    // executes whatever API this workflow's OWN config describes — inline,
+    // no shared catalog (the first redo of this fix used a DB-wide
+    // `eligibility_api_clients` catalog; the user rejected that in favor of
+    // each workflow owning its own config, versioned with the rest of it).
+    const api = eligibility?.api;
+    if (!api) {
+      return this.recordLookup(campaignId, key, mode, 'EXTERNAL_API', {
+        eligible: false,
+        reason: 'Nghiệp vụ chưa cấu hình API ngoài cho điều kiện tiếp nhận',
+        subject: rosterSubject,
+      });
+    }
+
+    const outcome = await this.eligibilityHttpClient.lookup(
+      {
+        baseUrl: api.baseUrl,
+        requestMethod: api.requestMethod,
+        requestPath: api.requestPath,
+        requestBodyTemplate: api.requestBodyTemplate,
+        authType: api.authType,
+        authParamName: api.authParamName,
+        credentialCiphertext: api.credentialCiphertext,
+        keyResponsePath: api.keyResponsePath,
+      },
+      key,
+    );
     if (outcome.kind !== 'Success') {
       return this.recordLookup(campaignId, key, mode, 'EXTERNAL_API', {
         eligible: false,
@@ -449,7 +575,7 @@ export class CampaignSubjectService extends CommonService<CampaignSubject> {
         subject: rosterSubject,
       });
     }
-    const apiRecord = outcome.value.data[0];
+    const apiRecord = outcome.value.record;
     if (!apiRecord) {
       return this.recordLookup(campaignId, key, mode, 'EXTERNAL_API', {
         eligible: false,
@@ -521,6 +647,64 @@ export class CampaignSubjectService extends CommonService<CampaignSubject> {
       ? toDao(CampaignSubjectDao, result.subject)
       : null;
     dao.externalRecord = result.externalRecord ?? null;
+    return dao;
+  }
+
+  /**
+   * `POST /v1/campaigns/:id/subjects/test-roster-lookup` (plan §E.3) — a
+   * dry-run for the workflow-editing screen: checks `key` against this
+   * campaign's already-imported roster (same match as `lookupSubject`'s
+   * ROSTER branch — `subjectCode` OR `citizenId`, `status = 'VALID'`) and,
+   * if `rules` is non-empty, evaluates them against the SAME context shape
+   * that branch builds. `rules` comes straight from the workflow-editor
+   * form, which may not be saved yet — this never reads a saved workflow's
+   * own config. Deliberately does NOT call `recordLookup` / write
+   * `eligibility_check_logs` — this is not a real kiosk lookup, so it must
+   * not pollute that audit trail.
+   */
+  async testRosterLookup(
+    campaignId: string,
+    key: string,
+    rules: EligibilityRule[],
+  ): Promise<TestRosterLookupResultDao> {
+    await this.campaignService.findCampaignEntityOrFail(campaignId);
+
+    const rosterSubject = await this.repository.findOne({
+      where: [
+        { campaignId, subjectCode: key, status: 'VALID' },
+        { campaignId, citizenId: key, status: 'VALID' },
+      ],
+    });
+
+    const dao = new TestRosterLookupResultDao();
+    if (!rosterSubject) {
+      dao.found = false;
+      dao.subject = null;
+      dao.eligible = false;
+      dao.reason = 'Không tìm thấy trong danh sách đợt này';
+      return dao;
+    }
+
+    dao.found = true;
+    dao.subject = toDao(CampaignSubjectDao, rosterSubject);
+
+    if (!rules || rules.length === 0) {
+      dao.eligible = true;
+      return dao;
+    }
+
+    const context: Record<string, unknown> = {
+      subjectCode: rosterSubject.subjectCode,
+      fullName: rosterSubject.fullName,
+      citizenId: rosterSubject.citizenId,
+      className: rosterSubject.className,
+      faculty: rosterSubject.faculty,
+      major: rosterSubject.major,
+    };
+    const evaluation = evaluateEligibilityRules(rules, context);
+    dao.eligible = evaluation.eligible;
+    if (evaluation.reason) dao.reason = evaluation.reason;
+    dao.context = context;
     return dao;
   }
 

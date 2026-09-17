@@ -6,9 +6,11 @@ import {
   Campaign,
   EffectiveStatus,
   Paginated,
+  WorkflowDetail,
   getAllCampaignsStats,
   listCampaigns,
   listCampaignsPaginated,
+  listWorkflows,
 } from '../api';
 import { StatTile } from './StatsPanel';
 import { CampaignDangerActions } from './CampaignDangerActions';
@@ -32,9 +34,13 @@ import { EFFECTIVE_STATUS_LABEL, PURPOSE_LABEL, formatExpiry, isExpired, isExpir
 export function CampaignList() {
   const [status, setStatus] = useState<EffectiveStatus | ''>('');
   const [q, setQ] = useState('');
+  const [workflowId, setWorkflowId] = useState('');
+  const [from, setFrom] = useState('');
+  const [to, setTo] = useState('');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [result, setResult] = useState<Paginated<Campaign> | null>(null);
+  const [workflows, setWorkflows] = useState<WorkflowDetail[]>([]);
 
   const [allCampaigns, setAllCampaigns] = useState<Campaign[] | null>(null);
   // Only used for its totalDevices figure in the stats strip below — the
@@ -44,10 +50,27 @@ export function CampaignList() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    listCampaignsPaginated({ page, limit: pageSize, status: status || undefined, q: q.trim() || undefined })
+    listCampaignsPaginated({
+      page,
+      limit: pageSize,
+      status: status || undefined,
+      q: q.trim() || undefined,
+      workflowId: workflowId || undefined,
+      from: from || undefined,
+      to: to || undefined,
+    })
       .then(setResult)
       .catch((err) => setError(err instanceof ApiError ? err.message : String(err)));
-  }, [page, pageSize, status, q]);
+  }, [page, pageSize, status, q, workflowId, from, to]);
+
+  // Plan item 12: workflow filter dropdown — only ACTIVE workflows can be
+  // pinned to a campaign in the first place (`CampaignForm.tsx`'s own
+  // `selectableWorkflows`), so filtering by anything else would never match.
+  useEffect(() => {
+    listWorkflows({ status: 'ACTIVE', limit: 100 })
+      .then((r) => setWorkflows(r.items))
+      .catch(() => {});
+  }, []);
 
   const reloadSummary = () => {
     listCampaigns()
@@ -131,6 +154,45 @@ export function CampaignList() {
           placeholder="Tìm theo tên hoặc mã campaign..."
           className="flex-1 min-w-[200px] bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900"
         />
+        <select
+          value={workflowId}
+          onChange={(e) => {
+            setWorkflowId(e.target.value);
+            setPage(1);
+          }}
+          className="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900"
+        >
+          <option value="">Tất cả workflow</option>
+          {workflows.map((w) => (
+            <option key={w.id} value={w.id}>
+              {w.name}
+            </option>
+          ))}
+        </select>
+        <label className="flex items-center gap-1.5 text-sm text-gray-500">
+          Từ
+          <input
+            type="date"
+            value={from}
+            onChange={(e) => {
+              setFrom(e.target.value);
+              setPage(1);
+            }}
+            className="bg-white border border-gray-300 rounded-lg px-2 py-1.5 text-sm text-gray-900"
+          />
+        </label>
+        <label className="flex items-center gap-1.5 text-sm text-gray-500">
+          Đến
+          <input
+            type="date"
+            value={to}
+            onChange={(e) => {
+              setTo(e.target.value);
+              setPage(1);
+            }}
+            className="bg-white border border-gray-300 rounded-lg px-2 py-1.5 text-sm text-gray-900"
+          />
+        </label>
       </div>
 
       {error && <div className="p-4 rounded-xl bg-red-50 border border-red-200 text-red-700 mb-4">{error}</div>}

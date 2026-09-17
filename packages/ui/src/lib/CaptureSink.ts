@@ -75,6 +75,16 @@ export interface CaptureSink {
      * different way, via `approveSessionUpload`).
      */
     campaignId?: string;
+    /**
+     * The logged-in operator's server-side `users.id` (2026-09-17, "theo dõi
+     * ai chụp/ai upload" — set at capture time instead of only at approval
+     * time, so the earliest photo already carries it). Forwarded as-is in
+     * the POST body by `HttpCaptureSink.startSession()`; `ElectronCaptureSink`
+     * ignores it (its own `startSession()` is a pure local no-op — the kiosk
+     * still reports the operator the pre-existing way, via `approveUpload`'s
+     * own `operatorUserId` param).
+     */
+    operatorUserId?: string | null;
   }): Promise<string>;
 
   /**
@@ -112,6 +122,20 @@ export interface CaptureSink {
      * see `RunScopedCaptureSession.ensure()`).
      */
     userCode?: string;
+    /**
+     * The logged-in operator's server-side `users.id`, when known
+     * (2026-09-17, "theo dõi ai chụp/ai upload" — see `startSession`'s own
+     * doc comment on this same field for why capture time, not only approval
+     * time). `ElectronCaptureSink` rides it along in `queueCapture`'s
+     * metadata, the same "not a dedicated column, carried as free-form
+     * metadata" treatment `identityNumber`/`userCode` already get, so
+     * `PhotoService.addDevicePhoto`'s session upsert can set
+     * `operator_user_id` without depending on this session's
+     * `SESSION_REPORT` having landed first. `HttpCaptureSink` ignores it —
+     * the web path's session already carries it from `startSession()`
+     * instead (see `RunScopedCaptureSession.ensure()`).
+     */
+    operatorUserId?: string | null;
   }): Promise<void>;
 
   /** Mark the run finished. */
@@ -220,11 +244,21 @@ export class HttpCaptureSink implements CaptureSink {
     metadata?: Record<string, unknown>;
     /** Forwarded as-is in the POST body — see `CaptureSink.startSession`'s own doc comment on this field. */
     campaignId?: string;
+    /** Forwarded as-is in the POST body — see `CaptureSink.startSession`'s own doc comment on this field. */
+    operatorUserId?: string | null;
   }): Promise<string> {
     const data = await this.post<{ id: string }>('/v1/sessions', input);
     return data.id;
   }
 
+  /**
+   * `operatorUserId` is deliberately not in this method's own parameter type
+   * (unlike `startSession` above) — a no-op here, same treatment as
+   * `identityNumber`/`userCode`: the web session already carries the
+   * operator from `startSession()` time (see `CaptureSink.savePhoto`'s own
+   * doc comment on this field), so there is nothing further for a per-photo
+   * call to send.
+   */
   public async savePhoto(input: {
     sessionId: string;
     stepId: string;
@@ -301,20 +335,24 @@ export class ElectronCaptureSink implements CaptureSink {
     dataUrl: string;
     identityNumber?: string;
     userCode?: string;
+    /** See `CaptureSink.savePhoto`'s own doc comment on this field. */
+    operatorUserId?: string | null;
   }): Promise<void> {
     const faceAPI = (window as any).faceAPI;
     if (!faceAPI?.queueCapture) {
       throw new Error('faceAPI.queueCapture is not available — not running inside the desktop app');
     }
     // Carried in `metadata` (2026-09-09 for identityNumber, 2026-09-16 for
-    // userCode) — the main process's own `QueueCaptureInput` has no
-    // dedicated field for either, and `metadata` already rides along the
-    // local outbox row unchanged for exactly this kind of pass-through
-    // value; see `ApiPhotoUploadClient.routeUpload`'s own doc comment for
-    // where both re-emerge.
+    // userCode, 2026-09-17 for operatorUserId) — the main process's own
+    // `QueueCaptureInput` has no dedicated field for any of these, and
+    // `metadata` already rides along the local outbox row unchanged for
+    // exactly this kind of pass-through value; see
+    // `ApiPhotoUploadClient.routeUpload`'s own doc comment for where they
+    // re-emerge.
     const metadata: Record<string, string> = {};
     if (input.identityNumber) metadata.identityNumber = input.identityNumber;
     if (input.userCode) metadata.userCode = input.userCode;
+    if (input.operatorUserId) metadata.operatorUserId = input.operatorUserId;
 
     const result = await faceAPI.queueCapture({
       sessionId: input.sessionId,
@@ -500,9 +538,17 @@ export class RunScopedCaptureSession {
    * (e.g. `apps/web`'s `WebCampaignGate` re-mounting the capture screen),
    * not this same instance switching campaigns mid-life.
    */
+  /**
+   * The logged-in operator for this run, if any (2026-09-17, "theo dõi ai
+   * chụp/ai upload" — see `CaptureSink.savePhoto`'s own doc comment on this
+   * field for why it now rides along per-photo/at `startSession` time,
+   * rather than only at `approve()` time as before). Same "fixed for the
+   * lifetime of this instance" treatment as `campaignId` just above.
+   */
   constructor(
     private readonly sink: CaptureSink | null,
     private readonly campaignId?: string | null,
+    private readonly operatorUserId?: string | null,
   ) {}
 
   /**
@@ -534,6 +580,7 @@ export class RunScopedCaptureSession {
             userCode: subject.userCode,
           },
           campaignId: this.campaignId ?? undefined,
+          operatorUserId: this.operatorUserId ?? undefined,
         })
         .catch((err) => {
           // A failed startSession must not stay memoised forever — the next
@@ -562,6 +609,7 @@ export class RunScopedCaptureSession {
       sessionId,
       identityNumber: this.pendingSubject.identityNumber,
       userCode: this.pendingSubject.userCode,
+      operatorUserId: this.operatorUserId,
       ...input,
     });
   }

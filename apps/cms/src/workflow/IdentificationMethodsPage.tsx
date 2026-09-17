@@ -8,14 +8,15 @@ import {
   updateIdentificationMethod,
 } from '../api';
 import { DEFAULT_PAGE_SIZE, Pager } from '../components/Pager';
+import { ModalShell } from '../components/CampaignDangerActions';
 
 /**
- * "Phương thức định danh" catalog management — mirrors
- * `CaptureConfigurationsPage.tsx`'s list+inline-form-toggle pattern exactly
- * (same reasoning: one route, no separate /new or /:id/edit paths). Backs
- * `WorkflowConfigEditor.tsx`'s identification-methods multi-select — a
- * workflow only ever REFERENCES a method by its `code`, never edits one
- * inline, so this catalog needs its own screen.
+ * "Phương thức định danh" catalog management. Create/edit opens as a
+ * `ModalShell` overlay (same pattern `CardTemplatesPage.tsx`/`WorkflowsPage.tsx`
+ * use) rather than swapping the whole page out for the form — plan item 3,
+ * 2026-09-17. Backs `WorkflowConfigEditor.tsx`'s identification-methods
+ * multi-select — a workflow only ever REFERENCES a method by its `code`,
+ * never edits one inline, so this catalog needs its own screen.
  *
  * No hard delete exists server-side (`IdentificationMethodController` has
  * no `DELETE`) — retiring a method is `active: false` via the same form,
@@ -44,23 +45,6 @@ export function IdentificationMethodsPage() {
   const updateRow = (updated: IdentificationMethod) => {
     setResult((prev) => (prev ? { ...prev, items: prev.items.map((m) => (m.id === updated.id ? updated : m)) } : prev));
   };
-
-  if (formOpen) {
-    return (
-      <IdentificationMethodForm
-        method={editing}
-        onClose={() => setFormOpen(false)}
-        onSaved={(saved) => {
-          setFormOpen(false);
-          if (editing) {
-            updateRow(saved);
-          } else {
-            reload();
-          }
-        }}
-      />
-    );
-  }
 
   return (
     <div>
@@ -174,6 +158,21 @@ export function IdentificationMethodsPage() {
           setPage(1);
         }}
       />
+
+      {formOpen && (
+        <IdentificationMethodForm
+          method={editing}
+          onClose={() => setFormOpen(false)}
+          onSaved={(saved) => {
+            setFormOpen(false);
+            if (editing) {
+              updateRow(saved);
+            } else {
+              reload();
+            }
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -226,10 +225,8 @@ function IdentificationMethodForm({
   }
 
   return (
-    <form onSubmit={submit} className="max-w-lg space-y-4">
-      <h1 className="text-2xl font-bold text-gray-900">{method ? 'Sửa phương thức định danh' : 'Thêm phương thức định danh'}</h1>
-
-      <div className="p-5 rounded-2xl border border-gray-200 bg-white shadow-sm space-y-3">
+    <ModalShell title={method ? 'Sửa phương thức định danh' : 'Thêm phương thức định danh'} onClose={onClose}>
+      <form onSubmit={submit} className="space-y-4">
         <div>
           <label className="block text-sm text-gray-500 mb-1">Mã{method ? ' (không đổi được)' : ''}</label>
           <input
@@ -278,22 +275,22 @@ function IdentificationMethodForm({
             className="w-32 bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
           />
         </div>
-      </div>
 
-      {error && <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">{error}</div>}
+        {error && <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">{error}</div>}
 
-      <div className="flex items-center gap-3">
-        <button
-          type="submit"
-          disabled={saving || !nameVi.trim() || !code.trim()}
-          className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold text-sm disabled:opacity-50"
-        >
-          {saving ? 'Đang lưu...' : 'Lưu'}
-        </button>
-        <button type="button" onClick={onClose} className="text-sm text-gray-500 hover:text-gray-700">
-          Huỷ
-        </button>
-      </div>
-    </form>
+        <div className="flex items-center gap-3">
+          <button
+            type="submit"
+            disabled={saving || !nameVi.trim() || !code.trim()}
+            className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold text-sm disabled:opacity-50"
+          >
+            {saving ? 'Đang lưu...' : 'Lưu'}
+          </button>
+          <button type="button" onClick={onClose} className="text-sm text-gray-500 hover:text-gray-700">
+            Huỷ
+          </button>
+        </div>
+      </form>
+    </ModalShell>
   );
 }

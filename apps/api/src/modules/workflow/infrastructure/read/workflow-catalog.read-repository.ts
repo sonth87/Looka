@@ -192,10 +192,35 @@ export class WorkflowCatalogReadRepository {
       status: row.status,
       currentVersionId: row.currentVersionId,
       currentVersion: row.currentVersion,
-      currentConfig: row.currentConfig,
+      currentConfig: sanitizeEligibilityCredential(row.currentConfig),
       campaignCount: Number(row.campaignCount),
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
     };
   }
+}
+
+/**
+ * Strips `eligibility.api.credentialCiphertext` out of whatever config
+ * `list()`/`getById()` return to the CMS (2026-09-17 redo of plan item 7)
+ * — never echo an encrypted secret back to a browser even encrypted,
+ * same "write-only from the CMS's perspective" posture the abandoned
+ * `eligibility_api_clients.hasCredential` design already had. `getVersionRef`
+ * (execution path, `device-management`) reads the real, un-sanitized config
+ * straight from the DB instead — this function is only ever applied on the
+ * CMS-facing read path.
+ */
+function sanitizeEligibilityCredential(
+  config: WorkflowConfig | null,
+): WorkflowConfig | null {
+  if (!config?.eligibility?.api) return config;
+  const { credential, credentialCiphertext, ...restApi } =
+    config.eligibility.api;
+  return {
+    ...config,
+    eligibility: {
+      ...config.eligibility,
+      api: { ...restApi, hasCredential: !!credentialCiphertext },
+    },
+  };
 }

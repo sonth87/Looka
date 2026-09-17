@@ -52,9 +52,9 @@ function pageNumbers(current: number, total: number): (number | 'ellipsis')[] {
  * the earlier Trước/Sau-only version per product feedback, then gained the
  * selector per a follow-up request to let the admin choose 10/20/50/99 rows
  * per page) used across every list page this pass added pagination to
- * (`CampaignList`, `AnglePresetsPage`, `CaptureConfigurationsPage`,
- * `PhotoKindsPage`, `IdentificationMethodsPage`, `WorkflowsPage`,
- * `StatsOverview`, `DashboardPage`, `PrintPage`).
+ * (`CampaignList`, `AnglePresetsPage`, `PhotoKindsPage`,
+ * `IdentificationMethodsPage`, `WorkflowsPage`, `StatsOverview`,
+ * `DashboardPage`, `PrintPage`).
  *
  * The page-size selector (and item count) render whenever `meta` exists;
  * the Trước/1/2/…/Sau page-number row only renders once there's more than

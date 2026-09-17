@@ -26,9 +26,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `recordDeviceEvent`'s join simply returns no row, which it already treats
  * as "log and skip" rather than throwing.
  */
-export class DropEmbeddingJobsPhotoCascade1824000000000
-  implements MigrationInterface
-{
+export class DropEmbeddingJobsPhotoCascade1824000000000 implements MigrationInterface {
   name = 'DropEmbeddingJobsPhotoCascade1824000000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

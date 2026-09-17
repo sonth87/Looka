@@ -1,16 +1,20 @@
 ﻿import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import {
   ApiError,
   Campaign,
   CardTemplate,
+  Paginated,
   PrintBatch,
   PrintBatchStatus,
+  Printer,
   createPrintBatch,
   listCampaigns,
   listCardTemplates,
   listPrintBatches,
+  listPrinters,
 } from '../api';
+import { DEFAULT_PAGE_SIZE, Pager } from '../components/Pager';
 import {
   PRINT_BATCH_STATUS_BADGE_CLASS,
   PRINT_BATCH_STATUS_LABEL,
@@ -33,25 +37,39 @@ export function PrintPage() {
   const navigate = useNavigate();
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [templates, setTemplates] = useState<CardTemplate[]>([]);
+  const [printers, setPrinters] = useState<Printer[]>([]);
   const [statusFilter, setStatusFilter] = useState<PrintBatchStatus | ''>('');
   const [campaignFilter, setCampaignFilter] = useState('');
-  const [batches, setBatches] = useState<PrintBatch[]>([]);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+  const [result, setResult] = useState<Paginated<PrintBatch> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
 
   useEffect(() => {
     listCampaigns().then(setCampaigns).catch(() => {});
-    listCardTemplates().then((r) => setTemplates(r.items)).catch(() => {});
+    // Plan item 9: only ACTIVE templates are offered when configuring a
+    // print batch's default template — DRAFT/ARCHIVED ones used to show up
+    // here too.
+    listCardTemplates({ status: 'ACTIVE' }).then((r) => setTemplates(r.items)).catch(() => {});
+    // Plan item 9 (§5 Q3 chốt): máy in chọn được cho đợt in = ONLINE hoặc
+    // OFFLINE, loại ERROR/DISABLED — `listPrinters` chỉ nhận 1 giá trị
+    // `status`, nên lọc 2 giá trị này ở client thay vì gọi 2 lần.
+    listPrinters()
+      .then((r) => setPrinters(r.items.filter((p) => p.status === 'ONLINE' || p.status === 'OFFLINE')))
+      .catch(() => {});
   }, []);
 
   function reloadBatches() {
     setError(null);
-    listPrintBatches({ status: statusFilter || undefined, campaignId: campaignFilter || undefined, limit: 50 })
-      .then((r) => setBatches(r.items))
+    listPrintBatches({ status: statusFilter || undefined, campaignId: campaignFilter || undefined, page, limit: pageSize })
+      .then(setResult)
       .catch((err) => setError(err instanceof ApiError ? err.message : String(err)));
   }
 
-  useEffect(reloadBatches, [statusFilter, campaignFilter]);
+  useEffect(reloadBatches, [statusFilter, campaignFilter, page, pageSize]);
+
+  const batches = result?.items ?? [];
 
   const campaignName = (id?: string | null) => campaigns.find((c) => c.id === id)?.name ?? id ?? '—';
 
@@ -59,19 +77,30 @@ export function PrintPage() {
     <div>
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold text-gray-900">Quản lý in thẻ</h1>
-        <button
-          type="button"
-          onClick={() => setCreateOpen(true)}
-          className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold text-sm"
-        >
-          + Tạo đợt in
-        </button>
+        <div className="flex items-center gap-2">
+          <Link
+            to="/print/by-campaign"
+            className="px-4 py-2 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 text-sm font-medium"
+          >
+            Xem theo campaign
+          </Link>
+          <button
+            type="button"
+            onClick={() => setCreateOpen(true)}
+            className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold text-sm"
+          >
+            + Tạo đợt in
+          </button>
+        </div>
       </div>
 
       <div className="p-4 rounded-2xl border border-gray-200 bg-white shadow-sm mb-4 flex flex-wrap gap-3">
         <select
           value={campaignFilter}
-          onChange={(e) => setCampaignFilter(e.target.value)}
+          onChange={(e) => {
+            setCampaignFilter(e.target.value);
+            setPage(1);
+          }}
           className="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900"
         >
           <option value="">Tất cả campaign</option>
@@ -83,7 +112,10 @@ export function PrintPage() {
         </select>
         <select
           value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value as PrintBatchStatus | '')}
+          onChange={(e) => {
+            setStatusFilter(e.target.value as PrintBatchStatus | '');
+            setPage(1);
+          }}
           className="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900"
         >
           <option value="">Tất cả trạng thái</option>
@@ -140,14 +172,25 @@ export function PrintPage() {
         </table>
       </div>
 
+      <Pager
+        meta={result?.meta}
+        itemLabel="đợt in"
+        onPageChange={setPage}
+        pageSize={pageSize}
+        onPageSizeChange={(size) => {
+          setPageSize(size);
+          setPage(1);
+        }}
+      />
+
       {createOpen && (
         <CreateBatchModal
           campaigns={campaigns}
           templates={templates}
+          printers={printers}
           onClose={() => setCreateOpen(false)}
           onCreated={(batch) => {
             setCreateOpen(false);
-            setBatches((prev) => [batch, ...prev]);
             navigate(`/print/batches/${batch.id}`);
           }}
         />
@@ -159,17 +202,20 @@ export function PrintPage() {
 function CreateBatchModal({
   campaigns,
   templates,
+  printers,
   onClose,
   onCreated,
 }: {
   campaigns: Campaign[];
   templates: CardTemplate[];
+  printers: Printer[];
   onClose: () => void;
   onCreated: (batch: PrintBatch) => void;
 }) {
   const [name, setName] = useState('');
   const [campaignId, setCampaignId] = useState('');
   const [defaultTemplateId, setDefaultTemplateId] = useState('');
+  const [printerId, setPrinterId] = useState('');
   const [mode, setMode] = useState<'DIRECT' | 'CENTRALIZED'>('CENTRALIZED');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -183,6 +229,7 @@ function CreateBatchModal({
         name: name.trim(),
         campaignId: campaignId || undefined,
         defaultTemplateId: defaultTemplateId || undefined,
+        printerId: printerId || undefined,
         mode,
       });
       onCreated(batch);
@@ -233,6 +280,21 @@ function CreateBatchModal({
             {templates.map((t) => (
               <option key={t.id} value={t.id}>
                 {t.name} (v{t.version})
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className="block text-sm text-gray-500 mb-1">Máy in (không bắt buộc)</label>
+          <select
+            value={printerId}
+            onChange={(e) => setPrinterId(e.target.value)}
+            className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
+          >
+            <option value="">— Không chọn —</option>
+            {printers.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name} ({p.status === 'ONLINE' ? 'Trực tuyến' : 'Ngoại tuyến'})
               </option>
             ))}
           </select>

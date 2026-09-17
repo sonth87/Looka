@@ -597,13 +597,24 @@ function RoleDetailPage({
 }
 
 /**
- * Search-as-you-type user picker — same pattern as
- * `CampaignAssignmentsPanel.tsx`'s `AssignUserModal` (debounced 300ms
- * against `GET /v1/users`), plus an extra check the kiosk-assignment picker
- * doesn't need: fetching the selected user's current roles up front so the
- * "already has this role" case can be caught and blocked before submit,
- * rather than silently no-op'ing (`applyRoleToUser`'s `Set` would just
- * re-add an id already present).
+ * Search-as-you-type MULTI-select user picker — same debounced (300ms)
+ * `GET /v1/users` search `CampaignAssignmentsPanel.tsx`'s `AssignUserModal`
+ * uses, but tracks a `Map` of selected users (plan item 10, 2026-09-17)
+ * instead of a single `UserListItem | null` — the old single-select had no
+ * persistent selected-state once a search result scrolled out of the
+ * current query's results, and no way to review who was picked before
+ * submitting. Checked state now lives in `selected` itself (a real
+ * checkbox per row), and a "Đã chọn (N)" chip tray below the search box
+ * shows/lets you remove anyone picked so far, independent of what the
+ * current search query happens to return.
+ *
+ * `PUT /v1/users/:id/roles` (via `applyRoleToUser`) is inherently per-user
+ * (replaces one user's whole role set), so a multi-select submit is a
+ * client-side loop — same idempotent call as before, just once per selected
+ * user instead of once. A user who already has the role is skipped (not an
+ * error) when submitting the batch, same "no silent re-add" caution the
+ * single-select version had, just per-person now instead of blocking the
+ * whole modal.
  */
 function AddUserToRoleModal({
   role,
@@ -619,9 +630,9 @@ function AddUserToRoleModal({
   const [q, setQ] = useState('');
   const [results, setResults] = useState<UserListItem[] | null>(null);
   const [searchError, setSearchError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<UserListItem | null>(null);
-  const [alreadyHasRole, setAlreadyHasRole] = useState(false);
-  const [checking, setChecking] = useState(false);
+  const [selected, setSelected] = useState<Map<string, UserListItem>>(new Map());
+  const [alreadyHasRole, setAlreadyHasRole] = useState<Set<string>>(new Set());
+  const [checkingIds, setCheckingIds] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
@@ -635,33 +646,70 @@ function AddUserToRoleModal({
     return () => clearTimeout(handle);
   }, [q]);
 
-  async function selectUser(u: UserListItem) {
-    setSelected(u);
+  function removeSelected(userId: string) {
+    setSelected((prev) => {
+      const next = new Map(prev);
+      next.delete(userId);
+      return next;
+    });
+  }
+
+  async function toggleUser(u: UserListItem) {
+    if (selected.has(u.id)) {
+      removeSelected(u.id);
+      return;
+    }
+    setSelected((prev) => new Map(prev).set(u.id, u));
     setSaveError(null);
-    setChecking(true);
+    setCheckingIds((prev) => new Set(prev).add(u.id));
     try {
       const detail = await getUser(u.id);
-      setAlreadyHasRole(detail.roleCodes.includes(role.code));
+      if (detail.roleCodes.includes(role.code)) {
+        setAlreadyHasRole((prev) => new Set(prev).add(u.id));
+      }
     } catch (err) {
       setSaveError(err instanceof ApiError ? err.message : String(err));
     } finally {
-      setChecking(false);
+      setCheckingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(u.id);
+        return next;
+      });
     }
   }
 
   const submit = async () => {
-    if (!selected || alreadyHasRole) return;
+    const toAdd = Array.from(selected.values()).filter((u) => !alreadyHasRole.has(u.id));
+    if (toAdd.length === 0) return;
     setSaving(true);
     setSaveError(null);
-    try {
-      await applyRoleToUser(selected.id, role.id, true, allRoles);
-      onAdded();
-    } catch (err) {
-      setSaveError(err instanceof ApiError ? err.message : String(err));
-    } finally {
-      setSaving(false);
+    const failedIds = new Set<string>();
+    const failureMessages: string[] = [];
+    for (const u of toAdd) {
+      try {
+        await applyRoleToUser(u.id, role.id, true, allRoles);
+      } catch (err) {
+        failedIds.add(u.id);
+        failureMessages.push(`${u.displayName ?? u.email}: ${err instanceof ApiError ? err.message : String(err)}`);
+      }
     }
+    setSaving(false);
+    if (failedIds.size === 0) {
+      onAdded();
+      return;
+    }
+    // Keep only the failed ones selected so retrying doesn't re-submit the
+    // people who already succeeded.
+    setSelected((prev) => {
+      const next = new Map<string, UserListItem>();
+      for (const [id, u] of prev) if (failedIds.has(id)) next.set(id, u);
+      return next;
+    });
+    setSaveError(`Không thêm được cho ${failedIds.size} người: ${failureMessages.join('; ')}`);
+    if (failedIds.size < toAdd.length) onAdded(); // some succeeded — reload the parent list too
   };
+
+  const pendingCount = Array.from(selected.keys()).filter((id) => !alreadyHasRole.has(id)).length;
 
   return (
     <ModalShell title={`Thêm người vào vai trò "${role.name}"`} onClose={onClose}>
@@ -670,11 +718,7 @@ function AddUserToRoleModal({
           <label className="block text-sm text-gray-500 mb-1">Tìm người dùng (email, tên, mã, hoặc SĐT)</label>
           <input
             value={q}
-            onChange={(e) => {
-              setQ(e.target.value);
-              setSelected(null);
-              setAlreadyHasRole(false);
-            }}
+            onChange={(e) => setQ(e.target.value)}
             placeholder="Nhập để tìm..."
             className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
             autoFocus
@@ -690,25 +734,59 @@ function AddUserToRoleModal({
               <p className="p-3 text-sm text-gray-500">Không tìm thấy người dùng nào.</p>
             )}
             {results?.map((u) => (
-              <button
+              <label
                 key={u.id}
-                type="button"
-                onClick={() => void selectUser(u)}
-                className={`w-full text-left px-3 py-2 text-sm hover:bg-gray-50 ${selected?.id === u.id ? 'bg-blue-50' : ''}`}
+                className={`flex items-center gap-2.5 px-3 py-2 text-sm hover:bg-gray-50 cursor-pointer ${selected.has(u.id) ? 'bg-blue-50' : ''}`}
               >
-                <div className="text-gray-900 font-medium">{u.displayName ?? u.email}</div>
-                <div className="text-xs text-gray-500">
-                  {u.email}
-                  {u.code ? ` · ${u.code}` : ''}
+                <input
+                  type="checkbox"
+                  checked={selected.has(u.id)}
+                  onChange={() => void toggleUser(u)}
+                  className="rounded border-gray-300"
+                />
+                <div className="min-w-0">
+                  <div className="text-gray-900 font-medium">{u.displayName ?? u.email}</div>
+                  <div className="text-xs text-gray-500">
+                    {u.email}
+                    {u.code ? ` · ${u.code}` : ''}
+                  </div>
                 </div>
-              </button>
+              </label>
             ))}
           </div>
         )}
 
-        {selected && checking && <p className="text-xs text-gray-500">Đang kiểm tra vai trò hiện có...</p>}
-        {selected && !checking && alreadyHasRole && (
-          <p className="text-xs text-amber-700">{selected.displayName ?? selected.email} đã có vai trò này rồi.</p>
+        {selected.size > 0 && (
+          <div>
+            <label className="block text-sm text-gray-500 mb-1.5">Đã chọn ({selected.size})</label>
+            <div className="flex flex-wrap gap-1.5">
+              {Array.from(selected.values()).map((u) => {
+                const checking = checkingIds.has(u.id);
+                const hasRole = alreadyHasRole.has(u.id);
+                return (
+                  <span
+                    key={u.id}
+                    className={`inline-flex items-center gap-1.5 pl-2.5 pr-1.5 py-1 rounded-full border text-xs font-medium ${
+                      hasRole ? 'bg-amber-50 border-amber-200 text-amber-700' : 'bg-gray-50 border-gray-200 text-gray-700'
+                    }`}
+                    title={hasRole ? 'Đã có vai trò này — sẽ bỏ qua khi thêm' : checking ? 'Đang kiểm tra...' : undefined}
+                  >
+                    {u.displayName ?? u.email}
+                    {checking && '…'}
+                    {hasRole && ' (đã có)'}
+                    <button
+                      type="button"
+                      onClick={() => removeSelected(u.id)}
+                      aria-label={`Bỏ chọn ${u.displayName ?? u.email}`}
+                      className="hover:text-red-600"
+                    >
+                      ×
+                    </button>
+                  </span>
+                );
+              })}
+            </div>
+          </div>
         )}
 
         {saveError && <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">{saveError}</div>}
@@ -720,10 +798,10 @@ function AddUserToRoleModal({
           <button
             type="button"
             onClick={() => void submit()}
-            disabled={!selected || alreadyHasRole || checking || saving}
+            disabled={pendingCount === 0 || checkingIds.size > 0 || saving}
             className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold text-sm disabled:opacity-50"
           >
-            {saving ? 'Đang thêm...' : 'Thêm vào vai trò'}
+            {saving ? 'Đang thêm...' : `Thêm vào vai trò${pendingCount > 0 ? ` (${pendingCount})` : ''}`}
           </button>
         </div>
       </div>

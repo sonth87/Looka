@@ -437,6 +437,8 @@ export interface StudentSessionSummary {
   capturedAt?: string;
   completedAt?: string;
   approvedAt?: string;
+  /** Tên người vận hành (SSO) đã chụp phiên này, nếu có (2026-09-17). */
+  operatorName?: string;
   photos: StudentSessionPhoto[];
   videos: StudentSessionVideo[];
 }
@@ -557,62 +559,6 @@ export const updateAnglePreset = (id: string, input: UpdateAnglePresetInput) =>
   request<CaptureAnglePreset>(`${CAPTURE_ANGLE_PRESETS_PATH}/${id}`, { method: 'PATCH', body: JSON.stringify(input) });
 
 // --- Capture Configurations ("Cấu hình chụp" — reusable template) ----------
-// Item 10 of the 2026-09-09 task brief: a reusable capture template an admin
-// manages independently of any one campaign — "Configuration 1: 3 camera,
-// gán trái/phải/chính giữa, chụp tỉ lệ 4x6, cộng các tham số khác". Deliberately
-// a preset, not a live link: `CampaignForm.tsx`'s "Chọn từ cấu hình có sẵn"
-// copies one of these onto the campaign's own `captureAngles`/`cardSpec`
-// fields ONCE, at creation/edit time — editing this configuration later, or
-// deleting it, never touches any campaign that already copied its values in.
-// Endpoints: `GET/POST/PATCH/DELETE /v1/capture-configurations` (device-management
-// module, apps/api).
-
-export interface CaptureConfiguration {
-  id: string;
-  name: string;
-  description?: string | null;
-  captureAngles: Record<string, unknown>[];
-  cardSpec?: CardSpec | null;
-  /** Read-only "cần tối đa K camera" hint — same derivation as `Campaign.requiredCameraCount`. */
-  requiredCameraCount: number;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface CreateCaptureConfigurationInput {
-  name: string;
-  description?: string;
-  captureAngles: Record<string, unknown>[];
-  cardSpec?: CardSpec | null;
-}
-
-export interface UpdateCaptureConfigurationInput {
-  name?: string;
-  description?: string;
-  captureAngles?: Record<string, unknown>[];
-  cardSpec?: CardSpec | null;
-}
-
-const CAPTURE_CONFIGURATIONS_PATH = '/v1/capture-configurations';
-
-/** Every configuration in one call — for `CampaignForm.tsx`'s picker. Use `listCaptureConfigurationsPaginated` for a management list instead. */
-export const listCaptureConfigurations = () => request<CaptureConfiguration[]>(CAPTURE_CONFIGURATIONS_PATH);
-export const listCaptureConfigurationsPaginated = (params: { page: number; limit?: number; q?: string }) => {
-  const search = new URLSearchParams();
-  search.set('page', String(params.page));
-  search.set('limit', String(params.limit ?? 20));
-  if (params.q) search.set('q', params.q);
-  return request<Paginated<CaptureConfiguration>>(`${CAPTURE_CONFIGURATIONS_PATH}?${search.toString()}`);
-};
-export const getCaptureConfiguration = (id: string) =>
-  request<CaptureConfiguration>(`${CAPTURE_CONFIGURATIONS_PATH}/${id}`);
-export const createCaptureConfiguration = (input: CreateCaptureConfigurationInput) =>
-  request<CaptureConfiguration>(CAPTURE_CONFIGURATIONS_PATH, { method: 'POST', body: JSON.stringify(input) });
-export const updateCaptureConfiguration = (id: string, input: UpdateCaptureConfigurationInput) =>
-  request<CaptureConfiguration>(`${CAPTURE_CONFIGURATIONS_PATH}/${id}`, { method: 'PATCH', body: JSON.stringify(input) });
-export const deleteCaptureConfiguration = (id: string) =>
-  request<{ id: string }>(`${CAPTURE_CONFIGURATIONS_PATH}/${id}`, { method: 'DELETE' });
-
 // --- Campaign members ("Cán bộ chụp") ----------------------------------------
 // See docs/plans/campaign-config-sso-card-photo-discussion.md §2.3/§3.2.2 for
 // the `campaign_members`/`users` schema this mirrors, and this app's task
@@ -738,6 +684,148 @@ export const unassignCampaignKiosk = (campaignId: string, deviceId: string) =>
     method: 'DELETE',
   });
 
+// --- Campaign roster import (Excel) — plan item 15, 2026-09-17 -------------
+// Backend (`CampaignSubjectController`) has been complete since P3
+// (2026-09-14) — `POST/GET .../subjects/imports`, `GET .../subjects`,
+// `GET .../subjects/import-template` — but no CMS screen ever called any of
+// these routes before this. Used for `eligibility.mode = ROSTER`/
+// `ROSTER_AND_API` (the "import Excel" half of workflow item 7/15 — the
+// other half, "call API", is the inline `eligibility.api` fields in
+// `WorkflowConfigEditor.tsx`, not a separate catalog screen).
+
+export type CampaignSubjectStatus = 'VALID' | 'ERROR' | 'DUPLICATE';
+
+/** `GET /v1/campaigns/:id/subjects` row (mirrors `CampaignSubjectDao`). */
+export interface CampaignSubject {
+  id: string;
+  campaignId: string;
+  importId: string;
+  rowNo: number;
+  subjectCode: string;
+  fullName: string;
+  citizenId?: string | null;
+  className?: string | null;
+  faculty?: string | null;
+  major?: string | null;
+  dateOfBirth?: string | null;
+  cardValidUntil?: string | null;
+  status: CampaignSubjectStatus;
+  errorMessage?: string | null;
+  createdAt: string;
+}
+
+export type CampaignSubjectImportStatus = 'PROCESSING' | 'DONE' | 'FAILED';
+
+/** `POST/GET /v1/campaigns/:id/subjects/imports` row (mirrors `CampaignSubjectImportDao`). */
+export interface CampaignSubjectImport {
+  id: string;
+  campaignId: string;
+  fileName: string;
+  uploadedByUserId?: string | null;
+  status: CampaignSubjectImportStatus;
+  totalRows: number;
+  validRows: number;
+  errorRows: number;
+  errorReportUrl?: string | null;
+  failureReason?: string | null;
+  createdAt: string;
+}
+
+function campaignsPath(campaignId: string): string {
+  return `${CAMPAIGNS_PATH}/${campaignId}`;
+}
+
+/** `GET /v1/campaigns/subjects/import-template` — an .xlsx StreamableFile, same "blob + filename off Content-Disposition" pattern `downloadPrintBatchPackage` already uses. */
+export async function downloadRosterImportTemplate(): Promise<{ blob: Blob; filename: string }> {
+  const res = await fetch(`${baseUrl()}${CAMPAIGNS_PATH}/subjects/import-template`, {
+    headers: { ...authHeaders() },
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(text.slice(0, 300) || res.statusText, res.status);
+  }
+  const disposition = res.headers.get('Content-Disposition') ?? '';
+  const match = /filename="([^"]+)"/.exec(disposition);
+  return { blob: await res.blob(), filename: match?.[1] ?? 'roster-template.xlsx' };
+}
+
+/**
+ * `GET /v1/campaigns/:id/export-approved-photos` — Phase F.4
+ * (docs/plans/card-photo-export-and-filters-plan-2026-09-17.md). A zip:
+ * full roster CSV + approved-photos CSV + one `{subjectCode}.jpg` per
+ * approved set. Same "blob + filename off Content-Disposition" pattern
+ * `downloadRosterImportTemplate`/`downloadPrintBatchPackage` already use.
+ */
+export async function downloadCampaignApprovedPhotos(campaignId: string): Promise<{ blob: Blob; filename: string }> {
+  const res = await fetch(`${baseUrl()}${campaignsPath(campaignId)}/export-approved-photos`, {
+    headers: { ...authHeaders() },
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(text.slice(0, 300) || res.statusText, res.status);
+  }
+  const disposition = res.headers.get('Content-Disposition') ?? '';
+  const match = /filename="([^"]+)"/.exec(disposition);
+  return { blob: await res.blob(), filename: match?.[1] ?? `campaign-${campaignId}-approved-photos.zip` };
+}
+
+/** `POST /v1/campaigns/:id/subjects/imports` (multipart) — same `FormData`, no-manual-Content-Type pattern `uploadReplacePhoto` already uses. */
+export async function importCampaignRoster(campaignId: string, file: File): Promise<CampaignSubjectImport> {
+  const form = new FormData();
+  form.append('file', file);
+  const res = await fetch(`${baseUrl()}${campaignsPath(campaignId)}/subjects/imports`, {
+    method: 'POST',
+    headers: { ...authHeaders() },
+    body: form,
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    let message = text.slice(0, 300) || res.statusText;
+    try {
+      const parsed = JSON.parse(text) as { message?: string };
+      message = parsed.message || message;
+    } catch {
+      /* keep the raw text */
+    }
+    throw new ApiError(message, res.status);
+  }
+  const envelope = (await res.json()) as { data: CampaignSubjectImport };
+  return envelope.data;
+}
+
+export const listCampaignRosterImports = (campaignId: string) =>
+  request<CampaignSubjectImport[]>(`${campaignsPath(campaignId)}/subjects/imports`);
+
+export const getCampaignRosterImport = (campaignId: string, importId: string) =>
+  request<CampaignSubjectImport>(`${campaignsPath(campaignId)}/subjects/imports/${importId}`);
+
+export const deleteCampaignRosterImport = (campaignId: string, importId: string) =>
+  request<{ id: string }>(`${campaignsPath(campaignId)}/subjects/imports/${importId}`, { method: 'DELETE' });
+
+export function listCampaignSubjects(
+  campaignId: string,
+  params: { status?: CampaignSubjectStatus; q?: string; page?: number; limit?: number } = {},
+): Promise<Paginated<CampaignSubject>> {
+  const search = new URLSearchParams();
+  if (params.status) search.set('status', params.status);
+  if (params.q) search.set('q', params.q);
+  if (params.page) search.set('page', String(params.page));
+  if (params.limit) search.set('limit', String(params.limit));
+  const qs = search.toString();
+  return request<Paginated<CampaignSubject>>(`${campaignsPath(campaignId)}/subjects${qs ? `?${qs}` : ''}`);
+}
+
+/**
+ * `GET /v1/campaigns/:id/subjects/distinct-values?field=` — real
+ * className/faculty/major values from this campaign's roster
+ * (`campaign_subjects`), for populating filter dropdowns instead of free-text
+ * inputs (plan §G.2.a, 2026-09-17). Reads from the roster itself rather than
+ * `subject_photo_sets`/`print_items` since those only cover subjects that
+ * already have a set/print item — narrower than the full roster.
+ */
+export const listCampaignSubjectDistinctValues = (campaignId: string, field: 'className' | 'faculty' | 'major') =>
+  request<{ items: string[] }>(`${campaignsPath(campaignId)}/subjects/distinct-values?field=${field}`);
+
 // --- Users (search, for the kiosk-assignment picker) -------------------------
 // `GET /v1/users?q=` — apps/api/src/modules/identity's UserQueryController
 // (`ListUsersQueryDto`/`UserReadModel`), the one real search-by-name/email
@@ -747,17 +835,35 @@ export const unassignCampaignKiosk = (campaignId: string, deviceId: string) =>
 // rather than a crash, see `CampaignAssignmentsPanel`). Only the fields this
 // client actually uses are declared here, not `UserReadModel`'s full shape.
 
+export type UserSource = 'SSO' | 'MANUAL' | 'SYNC';
+
+/**
+ * Mirrors `UserReadModel` (`apps/api/.../identity/application/queries/read-model/user.read-model.ts`)
+ * — the SAME class backs both `GET /v1/users` (list) and `GET /v1/users/:id`
+ * (detail), so every field here is already present on a list row too; this
+ * type just declares more of what was already coming back, for the plan
+ * item 12 Users page (2026-09-17) — the picker use case this file's own
+ * comment above describes only ever needed the first few fields.
+ */
 export interface UserListItem {
   id: string;
   email: string;
   displayName?: string | null;
   code?: string | null;
+  phone?: string | null;
   isAdmin: boolean;
   status: 'ACTIVE' | 'DISABLED';
+  source: UserSource;
+  roleCodes: string[];
+  lastLoginAt?: string | null;
+  createdAt?: string;
 }
 
 export interface ListUsersParams {
   q?: string;
+  roleCode?: string;
+  status?: 'ACTIVE' | 'DISABLED';
+  source?: UserSource;
   page?: number;
   limit?: number;
 }
@@ -767,6 +873,9 @@ const USERS_PATH = '/v1/users';
 export function listUsers(params: ListUsersParams = {}): Promise<Paginated<UserListItem>> {
   const search = new URLSearchParams();
   if (params.q) search.set('q', params.q);
+  if (params.roleCode) search.set('roleCode', params.roleCode);
+  if (params.status) search.set('status', params.status);
+  if (params.source) search.set('source', params.source);
   if (params.page) search.set('page', String(params.page));
   if (params.limit) search.set('limit', String(params.limit));
   const qs = search.toString();
@@ -785,6 +894,27 @@ export interface UserDetail extends UserListItem {
   roleCodes: string[];
 }
 export const getUser = (id: string) => request<UserDetail>(`${USERS_PATH}/${id}`);
+
+export interface FindOrCreateUserByEmailResult {
+  id: string;
+  email: string;
+  displayName: string | null;
+  created: boolean;
+}
+
+/**
+ * `POST /v1/users/find-or-create-by-email` — plan item 14, 2026-09-17,
+ * "gán người vào campaign theo email". Resolves an email to a `userId`
+ * (creating a MANUAL placeholder if no account exists yet, matching
+ * `SsoAuthGuard`'s own case-insensitive merge-by-email rule), used by
+ * `CampaignAssignmentsPanel.tsx`'s `AssignUserModal` before calling the
+ * existing `assignCampaignKiosk`, unchanged.
+ */
+export const findOrCreateUserByEmail = (email: string, displayName?: string) =>
+  request<FindOrCreateUserByEmailResult>(`${USERS_PATH}/find-or-create-by-email`, {
+    method: 'POST',
+    body: JSON.stringify({ email, displayName: displayName || undefined }),
+  });
 
 // --- Roles & Permissions (phân quyền) -----------------------------------
 // Mirrors apps/api/src/modules/identity's role.command.controller.ts,
@@ -934,12 +1064,20 @@ export const listCampaignsPaginated = (params: {
   limit?: number;
   status?: EffectiveStatus;
   q?: string;
+  /** Filter by pinned workflow — plan item 12, 2026-09-17 (backend already supported this, CMS never wired it). */
+  workflowId?: string;
+  /** ISO date — only campaigns whose time range intersects [from, to]. */
+  from?: string;
+  to?: string;
 }) => {
   const search = new URLSearchParams();
   search.set('page', String(params.page));
   search.set('limit', String(params.limit ?? 20));
   if (params.status) search.set('status', params.status);
   if (params.q) search.set('q', params.q);
+  if (params.workflowId) search.set('workflowId', params.workflowId);
+  if (params.from) search.set('from', params.from);
+  if (params.to) search.set('to', params.to);
   return request<Paginated<Campaign>>(`${CAMPAIGNS_PATH}?${search.toString()}`);
 };
 export const getCampaign = (id: string) => request<Campaign>(`${CAMPAIGNS_PATH}/${id}`);
@@ -1160,6 +1298,12 @@ export interface ReviewSetListItem {
   hasFallback?: boolean;
   /** Populated when `status` is `AUTO_FAILED` — e.g. "mặt quá nhỏ". */
   failReason?: string | null;
+  /** Lớp/ngành/khoa, denormalized from the campaign roster (`campaign_subjects`) at set-creation time — `undefined` when no roster row matched. */
+  className?: string;
+  major?: string;
+  faculty?: string;
+  /** Người vận hành (SSO) đã chụp phiên gốc của hồ sơ này — resolve từ `sessions.operator_user_id` → `users`, `undefined` khi chưa rõ (plan §D.3.c, 2026-09-17). */
+  operatorName?: string;
   updatedAt: string;
 }
 
@@ -1233,7 +1377,13 @@ export interface ListReviewSetsParams {
   hasAi?: boolean;
   hasUpload?: boolean;
   missingCard?: boolean;
+  /** "Quá hạn xử lý" (D-Q6) — backend has supported this since P4; plan item 12 wires it into the CMS. */
+  overdue?: boolean;
   q?: string;
+  /** Lớp/ngành/khoa (khớp đúng) — plan §G.2.b/c, 2026-09-17; populated in the CMS from `listCampaignSubjectDistinctValues`, not free text. */
+  className?: string;
+  major?: string;
+  faculty?: string;
   page?: number;
   limit?: number;
 }
@@ -1242,7 +1392,7 @@ const REVIEW_SETS_PATH = '/v1/review/sets';
 const REVIEW_JOBS_PATH = '/v1/review/jobs';
 const REVIEW_VARIANTS_PATH = '/v1/review/variants';
 
-/** `GET /v1/review/sets?campaignId&kindId&status&hasAi&hasUpload&missingCard&q&page` (§7). */
+/** `GET /v1/review/sets?campaignId&kindId&status&hasAi&hasUpload&missingCard&overdue&q&page` (§7). */
 export function listReviewSets(params: ListReviewSetsParams = {}): Promise<Paginated<ReviewSetListItem>> {
   const search = new URLSearchParams();
   if (params.campaignId) search.set('campaignId', params.campaignId);
@@ -1251,7 +1401,11 @@ export function listReviewSets(params: ListReviewSetsParams = {}): Promise<Pagin
   if (params.hasAi) search.set('hasAi', 'true');
   if (params.hasUpload) search.set('hasUpload', 'true');
   if (params.missingCard) search.set('missingCard', 'true');
+  if (params.overdue) search.set('overdue', 'true');
   if (params.q) search.set('q', params.q);
+  if (params.className) search.set('className', params.className);
+  if (params.major) search.set('major', params.major);
+  if (params.faculty) search.set('faculty', params.faculty);
   if (params.page) search.set('page', String(params.page));
   if (params.limit) search.set('limit', String(params.limit));
   const qs = search.toString();
@@ -1351,7 +1505,7 @@ export interface UpdatePhotoKindInput {
   active?: boolean;
 }
 
-/** Every kind in one call — for a card-spec picker (e.g. `CaptureConfigurationsPage.tsx`). Use `listPhotoKindsPaginated` for a management list instead. */
+/** Every kind in one call — for a card-spec picker. Use `listPhotoKindsPaginated` for a management list instead. */
 const PHOTO_KINDS_PATH = '/v1/photo-kinds';
 
 export const listPhotoKinds = () => request<PhotoKind[]>(PHOTO_KINDS_PATH);
@@ -1549,6 +1703,8 @@ export interface PrintItem {
   reprintOfItemId?: string | null;
   /** Computed at read time from missing fullName/className/faculty/variantId — never stored, see `PrintItemListItemDao`'s own doc comment. */
   missingFields: string[];
+  /** "Người chụp" — resolved from `sessions.operator_user_id` via the set's `source_session_id` (plan §D.3.c point 2, 2026-09-17). Null if the session had no operator set. */
+  operatorName?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -1587,6 +1743,8 @@ export function listPrintItems(
     className?: string;
     faculty?: string;
     q?: string;
+    /** `statusPriority` — "chưa in" lên đầu (plan item 8, §5 Q2). Default (omitted) keeps createdAt DESC. */
+    sort?: 'createdAt' | 'statusPriority';
     page?: number;
     limit?: number;
   } = {}
@@ -1597,6 +1755,7 @@ export function listPrintItems(
   if (params.status) search.set('status', params.status);
   if (params.className) search.set('className', params.className);
   if (params.faculty) search.set('faculty', params.faculty);
+  if (params.sort) search.set('sort', params.sort);
   if (params.q) search.set('q', params.q);
   if (params.page) search.set('page', String(params.page));
   if (params.limit) search.set('limit', String(params.limit));
@@ -2087,10 +2246,10 @@ export const getReviewStats = (params: { campaignId?: string; from?: string; to?
 // for the exact 6-group `config` shape this client passes through mostly
 // opaquely — only `eligibility`/`identification` get a structured CMS
 // editor (WorkflowConfigEditor.tsx); the other 4 groups are edited as raw
-// JSON there, out of scope for a rich editor this pass (no mockup for it,
-// and capture/output already overlap with the separate, older
-// `CaptureConfiguration` system — a real unification is a bigger, separate
-// piece of work).
+// JSON there, out of scope for a rich editor this pass (no mockup for it).
+// `capture`/`output` used to overlap with a separate, older
+// `CaptureConfiguration` ("Mẫu chụp") system — retired 2026-09-17 in favor
+// of this one, see `CampaignForm.tsx`'s own doc comment.
 
 export type WorkflowStatus = 'DRAFT' | 'ACTIVE' | 'ARCHIVED';
 
@@ -2100,9 +2259,39 @@ export interface WorkflowConfigEligibilityRule {
   message: string;
 }
 
+export type EligibilityApiAuthType = 'NONE' | 'API_KEY_HEADER' | 'BEARER_TOKEN' | 'QUERY_PARAM';
+export type EligibilityApiRequestMethod = 'GET' | 'POST';
+
+/**
+ * Inline, per-workflow API config (2026-09-17 redo of plan item 7 — the
+ * first version of this had `api: {clientCode, keyField, requiredFields}`
+ * referencing a shared, DB-wide `eligibility_api_clients` catalog; the user
+ * explicitly rejected that: "API điều kiện tiếp nhận là config trong
+ * workflow luôn chứ không dùng chung như hiện tại"). Every field this
+ * workflow's own API call needs lives here, versioned/immutable with the
+ * rest of `WorkflowConfig` — no separate table, no cross-workflow reuse.
+ *
+ * `credential` (write path, plaintext — only sent when actually setting a
+ * new one) and `hasCredential` (read path — `GET /v1/workflows/:id` never
+ * echoes the encrypted value back, only whether one is stored) are BOTH
+ * declared, same dual-purpose-field convention the server schema uses.
+ */
+export interface WorkflowConfigEligibilityApi {
+  baseUrl: string;
+  requestMethod: EligibilityApiRequestMethod;
+  requestPath: string;
+  requestBodyTemplate?: Record<string, unknown>;
+  authType: EligibilityApiAuthType;
+  authParamName?: string;
+  credential?: string;
+  hasCredential?: boolean;
+  keyResponsePath?: string;
+  requiredFields?: string[];
+}
+
 export interface WorkflowConfigEligibility {
   mode: 'NONE' | 'ROSTER' | 'EXTERNAL_API' | 'ROSTER_AND_API';
-  api?: { clientCode: string; keyField: string; requiredFields?: string[] };
+  api?: WorkflowConfigEligibilityApi;
   rules?: WorkflowConfigEligibilityRule[];
   rosterTemplate?: string;
 }
@@ -2112,13 +2301,28 @@ export interface WorkflowConfigIdentification {
   lookupKeyField: 'citizenId' | 'studentCode';
 }
 
-/** The 6-group `config` jsonb — `capture`/`aiProcessing`/`output`/`printing` stay `Record<string, unknown>` here (edited as raw JSON in the CMS, see this section's own doc comment), only `eligibility`/`identification` get real field types. */
+export type WorkflowClickMode = 'MANUAL_SEQUENTIAL' | 'MANUAL_ALL_AT_ONCE' | 'AUTO_AI';
+
+/** `capture.angles` entries stay loose (`Record<string, unknown>`) — same shape `rowToCaptureStep`/`captureStepToRow` (`captureAngleSteps.ts`) convert to/from for `WorkflowConfigEditor.tsx`'s `CaptureAnglesTable`, reused here (plan item 6, 2026-09-17) instead of a raw-JSON textarea. */
+export interface WorkflowConfigCapture {
+  angles: Record<string, unknown>[];
+  clickMode: { default: WorkflowClickMode; allowed: WorkflowClickMode[] };
+  shotsPerCamera?: number;
+  cardSourceAngleCode?: string | null;
+}
+
+export interface WorkflowConfigOutput {
+  photoKindCode: string;
+  cardSpec: CardSpec;
+}
+
+/** The 6-group `config` jsonb — `aiProcessing`/`printing` stay `Record<string, unknown>` (edited as raw JSON in the CMS, no structured CMS equivalent exists for them yet — see `WorkflowConfigEditor.tsx`'s own doc comment); `capture`/`output` reuse `CaptureAnglesTable`/`CardSpecFields` as of plan item 6, and `eligibility`/`identification` have their own real field types. */
 export interface WorkflowConfig {
-  capture: Record<string, unknown>;
+  capture: WorkflowConfigCapture;
   identification: WorkflowConfigIdentification;
   eligibility: WorkflowConfigEligibility;
   aiProcessing: Record<string, unknown>;
-  output: Record<string, unknown>;
+  output: WorkflowConfigOutput;
   printing: Record<string, unknown>;
 }
 
@@ -2205,25 +2409,53 @@ export interface WorkflowConfigValidation {
 export const validateWorkflowConfig = (config: unknown) =>
   request<WorkflowConfigValidation>(`${WORKFLOWS_PATH}/validate`, { method: 'POST', body: JSON.stringify(config) });
 
-export interface EligibilityApiClient {
-  code: string;
-  name: string;
-  fields: string[];
-}
-
-const ELIGIBILITY_API_CLIENTS_PATH = '/v1/eligibility/api-clients';
 const ELIGIBILITY_TEST_LOOKUP_PATH = '/v1/eligibility/test-lookup';
-
-export const listEligibilityApiClients = () => request<EligibilityApiClient[]>(ELIGIBILITY_API_CLIENTS_PATH);
 
 export interface EligibilityTestLookupResult {
   success: boolean;
   message: string | null;
   sampleRecord: Record<string, unknown> | null;
+  /** Full raw response — the CMS derives the `requiredFields` picker's choices from this, kept only in local state (never persisted). */
+  rawResponse: unknown;
 }
 
-export const testEligibilityLookup = (clientCode: string, key: string) =>
-  request<EligibilityTestLookupResult>(ELIGIBILITY_TEST_LOOKUP_PATH, { method: 'POST', body: JSON.stringify({ clientCode, key }) });
+/**
+ * `POST /v1/eligibility/test-lookup` — ad-hoc (2026-09-17 redo of plan item
+ * 7): takes the FULL API config directly (same shape `WorkflowConfigEligibilityApi`
+ * above), not a `clientCode` looked up from a shared catalog. Lets a
+ * workflow author test-call an endpoint while still editing a not-yet-saved
+ * draft — nothing needs to be saved first.
+ */
+export const testEligibilityLookup = (api: WorkflowConfigEligibilityApi, key: string) =>
+  request<EligibilityTestLookupResult>(ELIGIBILITY_TEST_LOOKUP_PATH, {
+    method: 'POST',
+    body: JSON.stringify({
+      baseUrl: api.baseUrl,
+      requestMethod: api.requestMethod,
+      requestPath: api.requestPath,
+      requestBodyTemplate: api.requestBodyTemplate,
+      authType: api.authType,
+      authParamName: api.authParamName,
+      credential: api.credential,
+      keyResponsePath: api.keyResponsePath,
+      key,
+    }),
+  });
+
+/**
+ * `POST /v1/campaigns/:campaignId/subjects/test-roster-lookup` (plan item
+ * E.3, 2026-09-17) — ad-hoc dry-run for ROSTER/ROSTER_AND_API eligibility
+ * mode, mirroring `testEligibilityLookup`'s UX: takes the in-progress
+ * workflow draft's `eligibility.rules` directly from the form, not-yet-saved,
+ * so a workflow author can test against the campaign's already-imported
+ * roster before publishing. Does not write `eligibility_check_logs` — this
+ * is a config-screen dry-run, not a real kiosk lookup.
+ */
+export const testRosterLookup = (campaignId: string, key: string, rules: WorkflowConfigEligibilityRule[]) =>
+  request<{ found: boolean; subject: unknown; eligible: boolean; reason?: string; context?: Record<string, unknown> }>(
+    `/v1/campaigns/${campaignId}/subjects/test-roster-lookup`,
+    { method: 'POST', body: JSON.stringify({ key, rules }) },
+  );
 
 /** `identification_methods` catalog row (mirrors `IdentificationMethodDao`) — the pool `WorkflowConfigEditor`'s identification-methods multi-select picks from, and its own dedicated management screen (`IdentificationMethodsPage.tsx`). */
 export interface IdentificationMethod {

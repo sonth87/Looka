@@ -218,6 +218,10 @@ function StudentDetailDrawer({ subjectCode, onClose }: { subjectCode: string; on
                   {s.deviceName ?? '—'} · {SOURCE_LABEL[s.source]} · {s.photos.length} ảnh
                   {s.videos.length > 0 ? ` · ${s.videos.length} video` : ''}
                 </div>
+                {/* Người vận hành (SSO) đã chụp phiên này (2026-09-17) — "—" khi
+                    phiên chưa từng có operator (chưa đăng nhập SSO khi chụp, hoặc
+                    một kiosk build cũ chưa gửi field này). */}
+                <div className="text-xs text-gray-400 mt-0.5">Người chụp: {s.operatorName ?? '—'}</div>
               </div>
               <span className="text-gray-400 shrink-0">→</span>
             </button>

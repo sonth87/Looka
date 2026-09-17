@@ -14,7 +14,7 @@ router = APIRouter()
 class CardSpec(BaseModel):
     size: Literal["3x4", "4x6"]
     dpi: Literal[300, 600]
-    backgroundColor: str = "#FFFFFF"
+    backgroundColor: str = "#F67220"
     headHeightRatio: Tuple[float, float] = (0.70, 0.80)
     eyeLineRatio: Tuple[float, float] = (0.40, 0.45)
 

@@ -13,7 +13,7 @@ router = APIRouter()
 
 class BackgroundRequest(BaseModel):
     image_data: str
-    backgroundColor: str = "#FFFFFF"
+    backgroundColor: str = "#F67220"
 
 
 class BackgroundResponse(BaseModel):

@@ -35,17 +35,21 @@ export class BrowserCameraService implements CameraService {
   /**
    * Whether stills are written mirrored.
    *
-   * Stills default to the raw sensor orientation, unmirrored: these are ID
-   * photos, and they must be true-to-life — text on clothing reads correctly,
-   * hair parting and asymmetric features stay on the side they are really on.
-   * The capture views' live preview (CameraPreview + overlays) IS mirrored
-   * again as of product decision 2026-09-05, for self-positioning — this
-   * class has no say in that, it is a CSS transform applied purely on the
-   * consumer's `<video>` element. This still deliberately does not follow it:
-   * the drift between what the operator sees (a mirror image) and what gets
-   * saved (the true, unmirrored view) is intentional here, not a bug.
-   * `setMirrorStills(true)` remains available for a selfie-style consumer
-   * that wants its saved image to match the mirror convention too.
+   * Defaults to the raw sensor orientation, unmirrored, for any consumer that
+   * doesn't opt in — the true-to-life orientation matters if a saved photo is
+   * later compared against another source (text reads correctly, hair
+   * parting and asymmetric features stay on the side they really are; face
+   * embeddings are also not mirror-invariant, so enrolment/matching must
+   * agree on whichever side is picked).
+   *
+   * The kiosk ID-capture flow (`FaceCaptureApp.tsx`) calls
+   * `setMirrorStills(true)` as of product decision 2026-09-17, so its saved
+   * stills match the mirrored live preview the operator sees (CameraPreview +
+   * overlays have mirrored the preview via CSS since 2026-09-05) — this
+   * reverses the earlier 2026-09-05 decision to keep stills unmirrored, so
+   * the accuracy trade-off above now applies to ID photos too; the flag
+   * itself stays available for any other consumer that wants either
+   * behaviour.
    */
   private mirrorStills = false;
   /**
@@ -466,13 +470,14 @@ export class BrowserCameraService implements CameraService {
   /**
    * Override the still's mirroring (default: unmirrored — see `mirrorStills`).
    *
-   * Pass true only for a selfie-style consumer that wants the mirror
-   * convention on its saved image. ID-photo capture must never call this with
-   * true: the stored image needs to be the true, unmirrored view — text on a
-   * badge reads correctly and asymmetric features stay on the side they
-   * really are, which matters if the photo is later compared against another
-   * source. Note that face embeddings are not mirror-invariant, so enrolment
-   * and matching must agree on this.
+   * Pass true for a consumer that wants its saved image to match the mirror
+   * convention its live preview already shows (the kiosk ID-capture flow
+   * does this as of 2026-09-17 — see `mirrorStills`'s own doc comment for the
+   * accuracy trade-off that decision accepts). Passing true means the stored
+   * image is no longer the true, unmirrored sensor view, so anything that
+   * later compares it against another source (text/asymmetric-feature
+   * orientation, face embeddings — not mirror-invariant) must be aware of
+   * and agree on that.
    */
   public setMirrorStills(mirrored: boolean): void {
     this.mirrorStills = mirrored;

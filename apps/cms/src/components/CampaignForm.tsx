@@ -5,13 +5,10 @@ import {
   CameraRoleName,
   Campaign,
   CampaignPurpose,
-  CaptureConfiguration,
-  CardSpec,
   CreateCampaignInput,
   UpdateCampaignInput,
   WorkflowDetail,
   createCampaign,
-  listCaptureConfigurations,
   listWorkflows,
   updateCampaign,
 } from '../api';
@@ -23,7 +20,6 @@ import {
   PURPOSE_LABEL,
   computeEffectiveStatus,
 } from '../campaignFormat';
-import { DEFAULT_CARD_SPEC } from './CardSpecFields';
 
 const CAMERA_ROLES: CameraRoleName[] = ['CENTER', 'LEFT', 'RIGHT', 'UP', 'DOWN'];
 
@@ -63,29 +59,40 @@ function Section({
 
 const SECTIONS = [
   { id: 'section-info', label: '1. Thông tin' },
-  { id: 'section-capture', label: '2. Cấu hình chụp' },
-  { id: 'section-workflow', label: '3. Workflow' },
+  { id: 'section-workflow', label: '2. Workflow' },
 ] as const;
 
 /**
- * Shared 2-part campaign form — Thông tin / Cấu hình chụp, with a left-side
+ * Shared 2-part campaign form — Thông tin / Workflow, with a left-side
  * section nav (ui-redesign-plan.md C2.2's mockup) — merges what used to be
  * two near-duplicate forms (`CreateCampaignPage`'s inline form and
  * `EditCampaignPage`'s `CampaignSettingsForm`). Capture-mode/simultaneous-
  * capture controls are gone entirely (moved to the kiosk's own Camera Setup
  * screen, per `campaign-config-sso-card-photo-discussion.md` §3.1.1's Q11).
  *
- * **2026-09-09 simplification** (product feedback, same day "Cấu hình mẫu
- * chụp"/`CaptureConfiguration` shipped): a campaign no longer builds its own
- * angle table / card-spec inline — it just PICKS a saved capture
- * configuration and uses it as-is. The old inline `CaptureAnglesTable`/
- * `CardSpecFields` editors moved to `CaptureConfigurationsPage.tsx`, the
- * only place that shape gets authored now; this form only ever *copies* a
- * chosen configuration's `captureAngles`/`cardSpec` into the campaign at
- * save time — see `applyCaptureConfiguration` below. `captureAngles`/
- * `cardSpec` stay campaign-owned columns (unchanged server-side, still a
- * one-time copy, never a live link to the configuration), so this is a UI
- * simplification only, not a data-model change.
+ * **2026-09-17 retirement of "Mẫu chụp" (`CaptureConfiguration`)** — the
+ * user flagged that Workflow and the standalone "Mẫu chụp" picker this form
+ * used to have (2026-09-09 through 2026-09-16) carried the exact same
+ * fields (capture angles, card spec) and made an operator configure them
+ * TWICE: once in a `CaptureConfiguration` template, again by picking one
+ * here ("workflow và mẫu chụp đang có nhiều trường thông tin giống nhau …
+ * chỉ config 1 lần"). Direction confirmed via AskUserQuestion: the "Tạo
+ * Workflow" screen (`WorkflowsPage.tsx`'s `WorkflowConfigEditor`, already
+ * has a full capture+card-spec editor since plan item 6) becomes the SINGLE
+ * place that config gets authored; this form only ever *picks* a published
+ * workflow version, never edits or copies angles/card-spec itself.
+ *
+ * This form no longer sends `captureAngles`/`cardSpec` at all — those stay
+ * whatever they already are on the campaign row (`undefined` in the
+ * request body means "leave unchanged", see `CampaignService.updateCampaign`).
+ * `GET`s already resolve the *effective* angles/card-spec from the pinned
+ * workflow whenever the campaign's own columns are null
+ * (`CampaignService.toCampaignResponse`'s override-merge, P2) — so a
+ * campaign created here purely from a workflow pin has nothing of its own
+ * to conflict with a later re-pin. A campaign that still carries values
+ * copied in by the old "Mẫu chụp" flow keeps using those verbatim (this
+ * form has no way to clear that legacy column) — a known, low-volume gap
+ * from before this retirement, not something a re-pin here can fix.
  *
  * `mode="create"` calls `createCampaign`; `mode="edit"` calls `updateCampaign`
  * with only the fields this form owns (same partial-PATCH shape the old
@@ -118,55 +125,16 @@ export function CampaignForm({
   const [manualStatus, setManualStatus] = useState<'' | 'PAUSED' | 'CLOSED'>(campaign?.manualStatus ?? '');
   const [consentContent, setConsentContent] = useState(campaign?.consentContent ?? '');
 
-  // 2026-09-09: no more inline angle-table/card-spec editing here — a
-  // campaign just picks a saved `CaptureConfiguration` and copies its
-  // `captureAngles`/`cardSpec` verbatim. `captureAngles` stays the raw
-  // `Record<string, unknown>[]` shape `CreateCampaignInput`/
-  // `UpdateCampaignInput` already expect — no more round-tripping through
-  // `CaptureAngleRow`/`rowToCaptureStep`, since nothing here builds rows by
-  // hand any more. See `applyCaptureConfiguration` below for the copy, and
-  // `CaptureConfigurationsPage.tsx` for where that shape is actually authored.
-  const [captureAngles, setCaptureAngles] = useState<Record<string, unknown>[]>(
-    () => campaign?.captureAngles ?? []
-  );
   const [recordVideo, setRecordVideo] = useState(campaign?.recordVideo ?? false);
   const [recordVideoRoles, setRecordVideoRoles] = useState<Set<CameraRoleName>>(
     () => new Set((campaign?.recordVideoRoles as CameraRoleName[] | undefined) ?? [])
   );
   const [requiresEmbedding, setRequiresEmbedding] = useState(campaign?.requiresEmbedding ?? true);
 
-  const [cardSpec, setCardSpec] = useState<CardSpec>(() => ({ ...DEFAULT_CARD_SPEC, ...(campaign?.cardSpec ?? {}) }));
-
-  // "Chọn cấu hình mẫu chụp" (item 10, 2026-09-09; required-picker
-  // simplification the same day) — a saved CaptureConfiguration is a
-  // one-time-copy template: picking one below replaces `captureAngles`/
-  // `cardSpec` with its stored values outright. Nothing about the
-  // campaign's own fields becomes a link to the configuration — see
-  // `CaptureConfiguration`'s own doc comment on the API side.
-  const [captureConfigurations, setCaptureConfigurations] = useState<CaptureConfiguration[] | null>(null);
-  const [selectedConfigId, setSelectedConfigId] = useState('');
-
-  useEffect(() => {
-    listCaptureConfigurations()
-      .then(setCaptureConfigurations)
-      .catch(() => setCaptureConfigurations([])); // non-critical — the picker just shows empty rather than blocking the form
-  }, []);
-
-  function applyCaptureConfiguration(configId: string) {
-    setSelectedConfigId(configId);
-    const config = captureConfigurations?.find((c) => c.id === configId);
-    if (!config) return;
-    setCaptureAngles(config.captureAngles);
-    if (config.cardSpec) {
-      setCardSpec((prev) => ({ ...prev, ...config.cardSpec }));
-    }
-  }
-
-  const selectedConfig = captureConfigurations?.find((c) => c.id === selectedConfigId) ?? null;
-
-  // "3. Workflow" (Phase 5, cms-8-screens-api-plan.md §2.2/P2) — optional
-  // pin to a PUBLISHED workflow version; picking one just sets
-  // `workflowVersionId`, `workflowId` itself is derived server-side (see
+  // "2. Workflow" (Phase 5, cms-8-screens-api-plan.md §2.2/P2; sole capture-
+  // config source as of the 2026-09-17 "Mẫu chụp" retirement above) — pin to
+  // a PUBLISHED workflow version; picking one just sets `workflowVersionId`,
+  // `workflowId` itself is derived server-side (see
   // `CreateCampaignDto.workflowVersionId`'s own doc comment) so it's never
   // sent from here. Only ACTIVE workflows that have actually published at
   // least once (`currentVersionId != null`) are selectable — a draft-only
@@ -187,12 +155,29 @@ export function CampaignForm({
   const pinnedWorkflowMissing =
     campaign?.workflow != null && !selectableWorkflows.some((w) => w.currentVersionId === campaign.workflow?.versionId);
 
+  const selectedWorkflow = selectableWorkflows.find((w) => w.currentVersionId === workflowVersionId) ?? null;
+  // Only show the SELECTED workflow's own config as a live preview once the
+  // picker actually changed from the campaign's current pin — until then,
+  // `campaign.captureAngles`/`cardSpec` (already the server's resolved,
+  // possibly-workflow-merged values, see this component's own doc comment)
+  // are the more accurate "what this campaign currently uses" preview.
+  const workflowPinChanged = workflowVersionId !== (campaign?.workflow?.versionId ?? '');
+  const previewAngles = workflowPinChanged
+    ? selectedWorkflow?.currentConfig?.capture.angles ?? null
+    : campaign?.captureAngles ?? null;
+  const previewCardSpec = workflowPinChanged
+    ? selectedWorkflow?.currentConfig?.output.cardSpec ?? null
+    : campaign?.cardSpec ?? null;
+
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const cardSourceCount = captureAngles.filter((a) => (a as { isCardSource?: boolean }).isCardSource === true).length;
-  const tooFewRows = captureAngles.length < 1;
-  const canSubmit = name.trim().length > 0 && !tooFewRows && cardSourceCount === 1;
+  // A new campaign has nowhere else to get capture angles/card spec from
+  // now that "Mẫu chụp" is gone — picking a workflow is required on create.
+  // An existing campaign edited here keeps whatever it already has even if
+  // no workflow is (re-)selected, so editing an old campaign never gets
+  // newly blocked by this rule.
+  const canSubmit = name.trim().length > 0 && (mode === 'edit' || workflowVersionId !== '');
 
   const effectiveStatus = computeEffectiveStatus({
     effectiveStatus: undefined,
@@ -231,11 +216,9 @@ export function CampaignForm({
           quotaPlanned: parsedQuota,
           manualStatus: manualStatus || null,
           consentContent: consentContent.trim() || undefined,
-          captureAngles,
           recordVideo,
           recordVideoRoles: recordVideoRoles.size > 0 ? Array.from(recordVideoRoles) : null,
           requiresEmbedding,
-          cardSpec,
           workflowVersionId: workflowVersionId || undefined,
         };
         const created = await createCampaign(input);
@@ -251,11 +234,9 @@ export function CampaignForm({
           quotaPlanned: parsedQuota,
           manualStatus: manualStatus || null,
           consentContent: consentContent.trim() || undefined,
-          captureAngles,
           recordVideo,
           recordVideoRoles: recordVideoRoles.size > 0 ? Array.from(recordVideoRoles) : null,
           requiresEmbedding,
-          cardSpec,
           workflowVersionId: workflowVersionId || null,
         };
         const updated = await updateCampaign(campaign.id, input);
@@ -414,54 +395,51 @@ export function CampaignForm({
         </Section>
 
         <Section
-          id="section-capture"
-          title="2. Cấu hình chụp"
-          subtitle="Chọn một mẫu cấu hình có sẵn (góc chụp + chuẩn ảnh thẻ) — quản lý các mẫu ở trang riêng"
+          id="section-workflow"
+          title="2. Workflow"
+          subtitle="Nguồn duy nhất cho góc chụp, chuẩn ảnh thẻ, điều kiện tiếp nhận và phương thức định danh — quản lý các workflow ở trang riêng"
         >
           <div>
-            <label className="block text-sm text-gray-700 font-medium mb-1">Cấu hình mẫu chụp</label>
-            <div className="flex items-center gap-3 flex-wrap">
-              <select
-                value={selectedConfigId}
-                onChange={(e) => applyCaptureConfiguration(e.target.value)}
-                className="flex-1 min-w-[12rem] bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
-              >
-                <option value="">— Chọn cấu hình —</option>
-                {captureConfigurations?.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name} ({c.captureAngles.length} ảnh · cần tối đa {c.requiredCameraCount} camera)
-                  </option>
-                ))}
-              </select>
-              <Link
-                to="/capture-configurations"
-                className="text-xs text-blue-700 hover:text-blue-900 underline shrink-0"
-              >
-                Quản lý mẫu cấu hình →
-              </Link>
-            </div>
+            <label className="block text-sm text-gray-700 font-medium mb-1">
+              Workflow{mode === 'create' ? ' *' : ''}
+            </label>
+            <select
+              value={workflowVersionId}
+              onChange={(e) => setWorkflowVersionId(e.target.value)}
+              className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
+            >
+              <option value="">— Không dùng workflow —</option>
+              {pinnedWorkflowMissing && campaign?.workflow && (
+                <option value={campaign.workflow.versionId}>
+                  {campaign.workflow.code} (v{campaign.workflow.version}) — hiện đang gán, không còn ở trạng thái Đang dùng
+                </option>
+              )}
+              {selectableWorkflows.map((w) => (
+                <option key={w.id} value={w.currentVersionId ?? ''}>
+                  {w.code} — {w.name} (v{w.currentVersion})
+                </option>
+              ))}
+            </select>
             <p className="text-xs text-gray-500 mt-1">
-              Chọn mẫu sẽ điền góc chụp và chuẩn ảnh thẻ ngay bên dưới — chọn mẫu không tạo liên kết lâu dài với
-              campaign này, sửa mẫu sau này không ảnh hưởng campaign đã tạo.
+              Ghim vào version workflow đã publish tại thời điểm chọn — publish version mới sau đó không tự áp dụng lại,
+              cần chọn lại ở đây.{' '}
+              <Link to="/workflows" className="text-blue-600 hover:text-blue-800 underline">
+                Quản lý workflow →
+              </Link>
             </p>
           </div>
 
-          {captureAngles.length > 0 ? (
+          {previewAngles && previewAngles.length > 0 ? (
             <div className="p-4 rounded-xl border border-gray-200 bg-gray-50 space-y-3">
-              {!selectedConfig && mode === 'edit' && (
-                <p className="text-xs text-amber-700">
-                  Đang dùng cấu hình đã lưu của campaign này — chọn một mẫu ở trên để thay thế.
-                </p>
-              )}
               <div>
                 <div className="text-xs text-gray-500 mb-1.5">
-                  {captureAngles.length} góc chụp · cần tối đa{' '}
-                  {new Set(captureAngles.map((a) => (a as { cameraRole?: string }).cameraRole).filter(Boolean)).size ||
+                  {previewAngles.length} góc chụp · cần tối đa{' '}
+                  {new Set(previewAngles.map((a) => (a as { cameraRole?: string }).cameraRole).filter(Boolean)).size ||
                     1}{' '}
                   camera
                 </div>
                 <div className="flex flex-wrap gap-1.5">
-                  {captureAngles.map((a, i) => {
+                  {previewAngles.map((a, i) => {
                     const angle = a as { angleCode?: string; cameraRole?: string; isCardSource?: boolean };
                     return (
                       <span
@@ -480,23 +458,29 @@ export function CampaignForm({
                   })}
                 </div>
               </div>
-              <div className="flex items-center gap-3 text-xs text-gray-600 pt-2 border-t border-gray-200">
-                <span>
-                  Ảnh thẻ: {cardSpec.size ?? '4x6'} cm · {cardSpec.dpi ?? 300} dpi
-                </span>
-                <span className="flex items-center gap-1.5">
-                  Nền:
-                  <span
-                    className="w-4 h-4 rounded border border-gray-300 inline-block"
-                    style={{ backgroundColor: cardSpec.backgroundColor ?? '#FFFFFF' }}
-                  />
-                  {cardSpec.backgroundColor ?? '#FFFFFF'}
-                </span>
-                {cardSpec.retouch?.enabled && <span>Làm mịn: {cardSpec.retouch.strength ?? 'LIGHT'}</span>}
-              </div>
+              {previewCardSpec && (
+                <div className="flex items-center gap-3 text-xs text-gray-600 pt-2 border-t border-gray-200">
+                  <span>
+                    Ảnh thẻ: {previewCardSpec.size ?? '4x6'} cm · {previewCardSpec.dpi ?? 300} dpi
+                  </span>
+                  <span className="flex items-center gap-1.5">
+                    Nền:
+                    <span
+                      className="w-4 h-4 rounded border border-gray-300 inline-block"
+                      style={{ backgroundColor: previewCardSpec.backgroundColor ?? '#FFFFFF' }}
+                    />
+                    {previewCardSpec.backgroundColor ?? '#FFFFFF'}
+                  </span>
+                  {previewCardSpec.retouch?.enabled && <span>Làm mịn: {previewCardSpec.retouch.strength ?? 'LIGHT'}</span>}
+                </div>
+              )}
             </div>
           ) : (
-            <p className="text-sm text-gray-500">Chưa chọn cấu hình — chọn một mẫu ở trên để tiếp tục.</p>
+            <p className="text-sm text-gray-500">
+              {workflowVersionId
+                ? 'Workflow này chưa cấu hình góc chụp.'
+                : 'Chưa chọn workflow — góc chụp và chuẩn ảnh thẻ lấy từ workflow được chọn ở trên.'}
+            </p>
           )}
 
           <div className="pt-3 border-t border-gray-100">
@@ -551,40 +535,6 @@ export function CampaignForm({
           </div>
         </Section>
 
-        <Section
-          id="section-workflow"
-          title="3. Workflow"
-          subtitle="Điều kiện tiếp nhận và phương thức định danh cho campaign này — tuỳ chọn, quản lý các workflow ở trang riêng"
-        >
-          <div>
-            <label className="block text-sm text-gray-700 font-medium mb-1">Workflow</label>
-            <select
-              value={workflowVersionId}
-              onChange={(e) => setWorkflowVersionId(e.target.value)}
-              className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
-            >
-              <option value="">— Không dùng workflow —</option>
-              {pinnedWorkflowMissing && campaign?.workflow && (
-                <option value={campaign.workflow.versionId}>
-                  {campaign.workflow.code} (v{campaign.workflow.version}) — hiện đang gán, không còn ở trạng thái Đang dùng
-                </option>
-              )}
-              {selectableWorkflows.map((w) => (
-                <option key={w.id} value={w.currentVersionId ?? ''}>
-                  {w.code} — {w.name} (v{w.currentVersion})
-                </option>
-              ))}
-            </select>
-            <p className="text-xs text-gray-500 mt-1">
-              Ghim vào version workflow đã publish tại thời điểm chọn — publish version mới sau đó không tự áp dụng lại,
-              cần chọn lại ở đây.{' '}
-              <Link to="/workflows" className="text-blue-600 hover:text-blue-800 underline">
-                Quản lý workflow →
-              </Link>
-            </p>
-          </div>
-        </Section>
-
         {error && <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">{error}</div>}
 
         <div className="flex items-center gap-3">
@@ -598,13 +548,8 @@ export function CampaignForm({
           <button type="button" onClick={onCancel} className="text-sm text-gray-500 hover:text-gray-700">
             Huỷ
           </button>
-          {tooFewRows && (
-            <span className="text-xs text-red-600 font-medium">Cần chọn một cấu hình mẫu chụp</span>
-          )}
-          {!tooFewRows && cardSourceCount !== 1 && (
-            <span className="text-xs text-red-600 font-medium">
-              Cấu hình đã chọn không hợp lệ (cần đúng 1 góc làm ảnh thẻ)
-            </span>
+          {mode === 'create' && workflowVersionId === '' && (
+            <span className="text-xs text-red-600 font-medium">Cần chọn một workflow</span>
           )}
         </div>
       </div>

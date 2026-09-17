@@ -73,7 +73,7 @@ import {
 import { openCameraSetupWindow } from './cameraSetupWindow.js';
 import { openSsoLoginWindow } from './ssoLogin.js';
 import { openRecentStudentsWindow } from './recentStudentsWindow.js';
-import { getDeviceAccessStatus } from './deviceApi.js';
+import { fetchRecentCaptures, getDeviceAccessStatus } from './deviceApi.js';
 import { startVideoStream, endVideoStream, discardSessionVideos } from './streams.js';
 import { recordStatsEvent, startStatsEventPush, stopStatsEventPush } from './statsEvents.js';
 import { CapturedStudentRepository } from '@face/database';
@@ -719,6 +719,15 @@ app.whenReady().then(async () => {
   ipcMain.handle('students:listRecent', (_, limit: unknown) => {
     const repo = new CapturedStudentRepository(getDatabase());
     return repo.listRecentStudents(typeof limit === 'number' ? limit : undefined);
+  });
+  /**
+   * "Cả campaign khi online" (plan item 13, 2026-09-17) — the
+   * `CapturedListPanel` renderer falls back to `students:listRecent` above
+   * (this device only) whenever this returns `null` (offline, no device
+   * identity, or the server rejected the call).
+   */
+  ipcMain.handle('students:listCampaignRecent', (_, limit: unknown) => {
+    return fetchRecentCaptures(typeof limit === 'number' ? limit : 20);
   });
   ipcMain.handle('students:listSessions', (_, subjectCode: unknown) => {
     if (typeof subjectCode !== 'string' || !subjectCode) return [];

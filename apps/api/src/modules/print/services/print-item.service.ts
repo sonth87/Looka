@@ -98,12 +98,32 @@ export class PrintItemService {
         q: `%${query.q}%`,
       });
     }
-    qb.orderBy('i.createdAt', 'DESC');
+    if (query.sort === 'statusPriority') {
+      // Plan item 8, §5 Q2 (chốt 2026-09-17): "chưa in" lên đầu, rồi "đang
+      // in", rồi "đã in" — done as a DB-side ORDER BY (not client sort) so
+      // it stays correct across pages.
+      qb.addSelect(
+        `CASE i.status
+           WHEN 'PENDING' THEN 0 WHEN 'RENDERED' THEN 0 WHEN 'FAILED' THEN 0
+           WHEN 'REPRINT_REQUESTED' THEN 0 WHEN 'CANCELLED' THEN 0
+           WHEN 'QUEUED' THEN 1 WHEN 'PRINTING' THEN 1
+           WHEN 'PRINTED' THEN 2 ELSE 3 END`,
+        'status_priority',
+      );
+      qb.orderBy('status_priority', 'ASC').addOrderBy('i.subjectCode', 'ASC');
+    } else {
+      qb.orderBy('i.createdAt', 'DESC');
+    }
     qb.skip((page - 1) * limit).take(limit);
 
     const [rows, totalItems] = await qb.getManyAndCount();
+    const operatorNames = await this.resolveOperatorNames(
+      rows.map((row) => row.setId),
+    );
     return new Pagination(
-      rows.map((row) => PrintItemListItemDao.from(row)),
+      rows.map((row) =>
+        PrintItemListItemDao.from(row, operatorNames.get(row.setId) ?? null),
+      ),
       {
         itemCount: rows.length,
         totalItems,
@@ -112,6 +132,33 @@ export class PrintItemService {
         currentPage: page,
       },
     );
+  }
+
+  /**
+   * `setId` → `subject_photo_sets.source_session_id` →
+   * `sessions.operator_user_id` → `users` — cross-module raw SQL read, same
+   * convention as `CampaignService.bulkCapturedCounts`/
+   * `DeviceEventService.campaignOperatorStats` (the latter is the source of
+   * the `COALESCE(u.display_name, u.email)` display-name rule reused here).
+   * Plan §D.3.c ("In thẻ theo campaign"). Batched by `setId` (not per-row)
+   * for the same N+1-avoidance reason those two callers batch by
+   * `campaignId`.
+   */
+  private async resolveOperatorNames(
+    setIds: string[],
+  ): Promise<Map<string, string | null>> {
+    if (setIds.length === 0) return new Map();
+    const rows: Array<{ set_id: string; operator_name: string | null }> =
+      await this.dataSource.query(
+        `SELECT sps.id AS set_id,
+                COALESCE(u.display_name, u.email) AS operator_name
+           FROM subject_photo_sets sps
+           LEFT JOIN sessions s ON s.id = sps.source_session_id
+           LEFT JOIN users u ON u.id = s.operator_user_id
+          WHERE sps.id = ANY($1)`,
+        [setIds],
+      );
+    return new Map(rows.map((r) => [r.set_id, r.operator_name]));
   }
 
   /** `GET /v1/print/items/groups` — plan §2.5's "gom nhóm" (group by class/faculty with per-status counts), one aggregate query rather than N list calls. */

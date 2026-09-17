@@ -1,19 +1,24 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { ApiError, Campaign, Device, getCampaign, listDevices } from '../api';
+import { ApiError, Campaign, Device, downloadCampaignApprovedPhotos, getCampaign, listDevices } from '../api';
 import { StatsPanel } from './StatsPanel';
 import { SessionsPanel } from './SessionsPanel';
 import { CampaignDangerActions } from './CampaignDangerActions';
 import { CampaignStudentsPanel } from './CampaignStudentsPanel';
 import { CampaignAssignmentsPanel } from './CampaignAssignmentsPanel';
+import { CampaignRosterPanel } from './CampaignRosterPanel';
 import { EFFECTIVE_STATUS_BADGE_CLASS, EFFECTIVE_STATUS_LABEL, PURPOSE_LABEL, computeEffectiveStatus, formatExpiry, isExpired } from '../campaignFormat';
 
-type Tab = 'stats' | 'sessions' | 'students' | 'assignments' | 'settings';
+type Tab = 'stats' | 'sessions' | 'students' | 'roster' | 'assignments' | 'settings';
 
 const TABS: { key: Tab; label: string }[] = [
   { key: 'stats', label: 'Thống kê' },
   { key: 'sessions', label: 'Phiên chụp' },
   { key: 'students', label: 'Sinh viên' },
+  // "Roster" (plan item 15, 2026-09-17) — the EXPECTED/eligible roster
+  // (campaign_subjects, imported from Excel), distinct from "Sinh viên"
+  // above (who actually got captured) — see this file's own doc comment.
+  { key: 'roster', label: 'Roster' },
   { key: 'assignments', label: 'Thiết bị & Nhân sự' },
   { key: 'settings', label: 'Cài đặt' },
 ];
@@ -95,6 +100,7 @@ export function CampaignDetail() {
    * removed.
    */
   const [focusDeviceId] = useState<string | undefined>(undefined);
+  const [exportingPhotos, setExportingPhotos] = useState(false);
 
   const reload = () => {
     if (!id) return;
@@ -107,6 +113,32 @@ export function CampaignDetail() {
   };
 
   useEffect(reload, [id]);
+
+  /**
+   * "Xuất ảnh đã duyệt" (Phase F.4,
+   * docs/plans/card-photo-export-and-filters-plan-2026-09-17.md) — downloads
+   * `GET /v1/campaigns/:id/export-approved-photos` (roster CSV +
+   * approved-photos CSV + one `{subjectCode}.jpg` per approved set) as a
+   * zip, same `createObjectURL`-then-click-an-`<a>` pattern
+   * `CampaignRosterPanel.downloadTemplate` already uses.
+   */
+  async function handleExportApprovedPhotos() {
+    if (!id) return;
+    setExportingPhotos(true);
+    try {
+      const { blob, filename } = await downloadCampaignApprovedPhotos(id);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setExportingPhotos(false);
+    }
+  }
 
   if (error) return <div className="p-4 rounded-xl bg-red-50 border border-red-200 text-red-700">{error}</div>;
   if (!campaign || !id) return <p className="text-gray-500">Đang tải...</p>;
@@ -156,6 +188,14 @@ export function CampaignDetail() {
         </div>
 
         <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={handleExportApprovedPhotos}
+            disabled={exportingPhotos}
+            className="px-3 py-1.5 rounded-lg bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm font-semibold disabled:opacity-50"
+          >
+            {exportingPhotos ? 'Đang xuất...' : 'Xuất ảnh đã duyệt'}
+          </button>
           <Link
             to={`/campaigns/${campaign.id}/edit`}
             className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold"
@@ -185,6 +225,8 @@ export function CampaignDetail() {
       {tab === 'sessions' && <SessionsPanel campaignId={id} devices={devices} focusDeviceId={focusDeviceId} />}
 
       {tab === 'students' && <CampaignStudentsPanel campaignId={id} />}
+
+      {tab === 'roster' && <CampaignRosterPanel campaignId={id} />}
 
       {tab === 'assignments' && <CampaignAssignmentsPanel campaignId={id} />}
 

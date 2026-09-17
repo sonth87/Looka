@@ -25,11 +25,14 @@ import { FileStorageService } from '@app/modules/file-storage/services/file-stor
 import { PermissionsGuard } from '../guards/permissions.guard';
 import { RequirePermission } from '../guards/require-permission.decorator';
 import { CreateUserCommand } from '../../application/commands/command/create-user.command';
+import { FindOrCreateUserByEmailCommand } from '../../application/commands/command/find-or-create-user-by-email.command';
+import type { FindOrCreateUserByEmailResult } from '../../application/commands/handler/find-or-create-user-by-email.handler';
 import { UpdateUserProfileCommand } from '../../application/commands/command/update-user-profile.command';
 import { SetUserStatusCommand } from '../../application/commands/command/set-user-status.command';
 import { SetUserAvatarCommand } from '../../application/commands/command/set-user-avatar.command';
 import { SyncUsersCommand } from '../../application/commands/command/sync-users.command';
 import { CreateUserDto } from '../../application/commands/transfer-model/create-user.dto';
+import { FindOrCreateUserByEmailDto } from '../../application/commands/transfer-model/find-or-create-user-by-email.dto';
 import { UpdateUserDto } from '../../application/commands/transfer-model/update-user.dto';
 import { UserDirectorySyncStatus } from '../../application/user-directory-sync.service';
 
@@ -78,6 +81,35 @@ export class UserCommandController {
         dto.code,
         dto.phone,
         dto.roleIds,
+        req.user?.id ?? null,
+      ),
+    );
+  }
+
+  /**
+   * "Gán người vào campaign theo email" (plan item 14, 2026-09-17) — CMS
+   * calls this first to resolve an email to a `userId` (creating a MANUAL
+   * placeholder if no account exists yet), then calls the existing
+   * kiosk-assignment endpoint with that id. See
+   * `FindOrCreateUserByEmailHandler`'s own doc comment for why this is a
+   * second entry point into the same "MANUAL placeholder, merged by
+   * `SsoAuthGuard` on first real login" mechanism `POST /v1/users` (above)
+   * already established, not a new concept.
+   */
+  @Post('find-or-create-by-email')
+  @ApiOperation({
+    summary:
+      'Tìm user theo email (không phân biệt hoa/thường), tạo placeholder MANUAL nếu chưa có',
+  })
+  @ApiResponseDecorator(Object, { status: 200 })
+  findOrCreateByEmail(
+    @Body() dto: FindOrCreateUserByEmailDto,
+    @Req() req: Request,
+  ): Promise<FindOrCreateUserByEmailResult> {
+    return this.commandBus.execute(
+      new FindOrCreateUserByEmailCommand(
+        dto.email,
+        dto.displayName,
         req.user?.id ?? null,
       ),
     );

@@ -1,8 +1,14 @@
-import { ApiResponseDecorator } from '@app/shared/http/api-response.decorator';
+import {
+  ApiResponseArrayDecorator,
+  ApiResponseDecorator,
+} from '@app/shared/http/api-response.decorator';
 import { CustomException, ERROR_CODE } from '@app/shared/errors/legacy';
 import { toDao } from '@app/shared/http/to-dao.helper';
 import { AddDevicePhotoDto, AddDeviceVideoDto } from '@app/modules/capture/dto';
+import { ListSessionsQueryDto } from '@app/modules/capture/dto/list-sessions-query.dto';
+import { SessionListItemDao } from '@app/modules/capture/dao';
 import { PhotoService } from '@app/modules/capture/services/photo.service';
+import { SessionService } from '@app/modules/capture/services/session.service';
 import { SessionVideoService } from '@app/modules/capture/services/session-video.service';
 import {
   Body,
@@ -11,6 +17,7 @@ import {
   HttpCode,
   HttpStatus,
   Post,
+  Query,
   Req,
   UseGuards,
 } from '@nestjs/common';
@@ -39,6 +46,7 @@ export class DeviceSelfController {
     private readonly deviceEventService: DeviceEventService,
     private readonly photoService: PhotoService,
     private readonly sessionVideoService: SessionVideoService,
+    private readonly sessionService: SessionService,
   ) {}
 
   /**
@@ -174,5 +182,41 @@ export class DeviceSelfController {
       req.device!.campaignId,
       dto,
     );
+  }
+
+  /**
+   * Recently completed sessions across the CALLING KIOSK'S WHOLE CAMPAIGN
+   * (plan item 13, 2026-09-17) — `CapturedListPanel`'s "Q19: cả campaign khi
+   * online" branch, never implemented before this (the kiosk read only its
+   * own local SQLite `captured_students`). `campaignId` comes from the
+   * authenticated device, same as every other route here — a kiosk can
+   * only ever see its own campaign's sessions, never one it merely guesses
+   * the id of. Reuses `SessionService.listSessions` unchanged (the exact
+   * query `GET /v1/sessions` — SSO/CMS-only — already runs), just exposed
+   * through a device-credentialed route instead, since a kiosk has no SSO
+   * bearer token to call that one with.
+   */
+  @Get('recent-captures')
+  @ApiOperation({
+    summary: "Recent completed sessions across this kiosk's whole campaign",
+  })
+  @ApiResponseArrayDecorator(SessionListItemDao)
+  async recentCaptures(
+    @Req() req: Request,
+    @Query('limit') limitRaw?: string,
+  ): Promise<SessionListItemDao[]> {
+    if (!req.device!.campaignId) {
+      throw new CustomException(
+        'This device has no campaign (self-enrolled) — recent-captures requires a campaign',
+        ERROR_CODE.DEVICE_HAS_NO_CAMPAIGN,
+        HttpStatus.CONFLICT,
+      );
+    }
+    const query = new ListSessionsQueryDto();
+    query.campaignId = req.device!.campaignId;
+    query.page = 1;
+    query.limit = Math.min(50, Math.max(1, Number(limitRaw) || 20));
+    const result = await this.sessionService.listSessions(query);
+    return result.items;
   }
 }

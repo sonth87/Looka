@@ -25,6 +25,17 @@ export interface DevicePhotoInput {
    * row.
    */
   userCode?: string;
+  /**
+   * The SSO `users.id` of whoever was logged in on this kiosk when the
+   * capture was taken, when known (2026-09-17, "theo dõi ai chụp/ai upload")
+   * — threaded through from `apps/desktop`'s local outbox `metadata` (see
+   * `ApiPhotoUploadClient.routeUpload`'s own doc comment), same "rides along
+   * the request, never touches fs-core" treatment as `identityNumber`/
+   * `userCode` above. `PhotoService.addDevicePhoto` uses it to set
+   * `sessions.operator_user_id` as early as possible, instead of only once
+   * a later `SESSION_REPORT` device-event lands.
+   */
+  operatorUserId?: string;
 }
 
 /**
@@ -302,6 +313,56 @@ export class DeviceApiClient {
 
     const envelope = (await res.json()) as { data: { videoId: string } };
     return envelope.data;
+  }
+}
+
+/** One row of `GET /v1/devices/recent-captures` — mirrors `SessionListItemDao`'s fields this caller actually uses, plus `isThisDevice` computed here (main process is where the calling kiosk's own device id is known — see `fetchRecentCaptures`). */
+export interface RecentCaptureEntry {
+  id: string;
+  deviceId?: string;
+  deviceName?: string;
+  subjectCode?: string;
+  subjectName?: string;
+  capturedAt?: string;
+  completedAt?: string;
+  photoCount: number;
+  isThisDevice: boolean;
+}
+
+/**
+ * "Cả campaign khi online" (plan item 13, 2026-09-17 — `CapturedListPanel`'s
+ * own Q19 doc comment, never implemented before this). Returns `null` on
+ * any failure (no device identity, unreachable, rejected) — same
+ * offline-first contract as `fetchCampaignConfig`: the caller
+ * (`FaceCaptureApp.tsx`'s `refreshRecentStudents`) falls back to the local
+ * SQLite `captured_students` read it already had.
+ */
+export async function fetchRecentCaptures(
+  limit: number,
+  fetchImpl: typeof fetch = globalThis.fetch,
+): Promise<RecentCaptureEntry[] | null> {
+  const creds = getDeviceCredentials();
+  if (!creds || !creds.apiBaseUrl) return null;
+
+  try {
+    const res = await fetchImpl(
+      `${creds.apiBaseUrl}/v1/devices/recent-captures?limit=${limit}`,
+      {
+        headers: {
+          'x-device-id': creds.deviceId,
+          'x-device-secret': creds.deviceSecret,
+        },
+      },
+    );
+    if (!res.ok) {
+      console.error(`[deviceApi] recent-captures fetch failed: ${res.status}`);
+      return null;
+    }
+    const envelope = (await res.json()) as { data: Omit<RecentCaptureEntry, 'isThisDevice'>[] };
+    return envelope.data.map((row) => ({ ...row, isThisDevice: row.deviceId === creds.deviceId }));
+  } catch (err) {
+    console.error('[deviceApi] recent-captures fetch failed:', (err as Error).message);
+    return null;
   }
 }
 

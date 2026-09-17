@@ -147,6 +147,13 @@ export class ReviewSetListItemDao {
   citizenId?: string;
 
   @ApiPropertyOptional({
+    description:
+      'Nguoi chup (operator SSO), resolve tu sessions.operator_user_id -> users; undefined neu chua ro',
+  })
+  @Expose()
+  operatorName?: string;
+
+  @ApiPropertyOptional({
     description: 'Han xu ly - null neu campaign khong dat SLA (P4/D-Q6)',
   })
   @Expose()
