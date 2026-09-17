@@ -91,6 +91,7 @@ export class CardTemplateAssetService {
     return CardTemplateAssetDao.from(saved);
   }
 
+  /** The remote file-service copy is left in place — see the removed `FileStorageService.deleteFile` capability's own history: fs-core's DELETE endpoint always denies a bare service API-key caller (it requires the actual owner or a tenant admin), so this cleanup could never have succeeded. */
   async delete(templateId: string, assetId: string): Promise<void> {
     const asset = await this.assets.findOne({
       where: { id: assetId, templateId },
@@ -98,7 +99,6 @@ export class CardTemplateAssetService {
     if (!asset) {
       throw new NotFoundException('Không tìm thấy asset');
     }
-    await this.fileStorage.deleteFile(asset.fsFileId).catch(() => undefined);
     await this.assets.remove(asset);
   }
 }

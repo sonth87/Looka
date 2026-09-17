@@ -78,17 +78,16 @@ const LOCAL_FILE_ID_PREFIX = 'local:';
  * to).
  *
  * `UploadWorker` only ever calls `uploadRaw`/`upload`/`getFile`
- * (packages/fs-client/src/UploadWorker.ts) — `deleteFile`/`cancelUpload`
- * fire from other call sites in this file, both already best-effort/
- * swallowed-on-error, so they are left un-overridden; a `local:`-prefixed
- * id landing there is a harmless no-op-ish failure, not a correctness
- * issue (see this class's own note in the codebase's task notes for the
- * one narrow, pre-existing edge case this does NOT close: a capture
- * superseded — "chụp lại sau khi đã lưu" — after apps/api's own upload
- * worker has already pushed it to fs-core has no client-side
- * `deleteFile()` call left to clean up the orphaned fs-core copy; a
- * server-side fix in `CaptureReportService.applyAttemptSuperseded` is a
- * follow-up, not done here).
+ * (packages/fs-client/src/UploadWorker.ts) — `cancelUpload` fires from
+ * another call site in this file, already best-effort/swallowed-on-error,
+ * so it is left un-overridden; a `local:`-prefixed id landing there is a
+ * harmless no-op-ish failure, not a correctness issue. `deleteFile` was
+ * removed from `packages/fs-client` entirely (2026-09-16) — fs-core's
+ * DELETE endpoint always denies a bare service API-key caller (it requires
+ * the actual owner or a tenant admin), confirmed directly against fs-core's
+ * own source, so every best-effort cleanup call this file used to make
+ * (e.g. for a superseded "chụp lại sau khi đã lưu" attempt) could never
+ * have succeeded — see `supersedeStaleAttempt`'s own comment.
  *
  * Video/photo routing reads `input.virtualPath`'s own `<kind>/...` prefix
  * (`queueCapture()`/`enqueueSessionVideos()` both build it that way) rather
@@ -811,14 +810,12 @@ function supersedeStaleAttempt(
         (err as Error).message
       );
     }
-    if (item.fsFileId) {
-      client?.deleteFile(item.fsFileId).catch((err) => {
-        console.warn(
-          `[approveSessionUpload] failed to delete superseded file ${item.fsFileId} from file-service:`,
-          (err as Error).message
-        );
-      });
-    }
+    // The remote fs-core copy (if `item.fsFileId` was ever set) is left in
+    // place — `deleteFile` was removed from `packages/fs-client` entirely
+    // (2026-09-16): fs-core's DELETE endpoint always denies a bare service
+    // API-key caller (it requires the actual owner or a tenant admin),
+    // confirmed directly against fs-core's own source, so this cleanup
+    // could never have succeeded.
     recordStatsEvent('ATTEMPT_SUPERSEDED', { kind: kind === 'video' ? 'video' : 'photo', id: item.id });
   }
 }

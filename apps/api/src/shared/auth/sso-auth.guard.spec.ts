@@ -430,6 +430,77 @@ describe('SsoAuthGuard', () => {
       expect(user?.isAdmin).toBe(false);
     });
 
+    describe('users.status = DISABLED enforcement', () => {
+      it('rejects an already-linked SSO user whose account was disabled after their first login, and does not touch lastLoginAt', async () => {
+        const fetchMock = jest.fn().mockResolvedValue({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              authenticated: true,
+              user: { email: 'was-disabled@dainam.edu.vn', user_code: 'GV782' },
+            }),
+        });
+        global.fetch = fetchMock as never;
+        const staleLastLogin = new Date('2020-01-01T00:00:00.000Z');
+        const repo = fakeUserRepo([
+          {
+            id: 'disabled-existing-1',
+            ssoUserCode: 'GV782',
+            email: 'was-disabled@dainam.edu.vn',
+            source: 'SSO',
+            status: 'DISABLED',
+            isAdmin: false,
+            roles: [],
+            lastLoginAt: staleLastLogin,
+          },
+        ]);
+        const guard = new SsoAuthGuard(
+          configServiceReturning(ssoBaseUrl),
+          repo,
+        );
+
+        await expect(
+          guard.canActivate(
+            contextWithHeaders({ authorization: 'Bearer was-disabled-token' }),
+          ),
+        ).rejects.toBeInstanceOf(UnauthorizedException);
+        expect((repo.save as jest.Mock).mock.calls.length).toBe(0);
+      });
+
+      it('still allows an ACTIVE user through, unaffected by the new check', async () => {
+        const fetchMock = jest.fn().mockResolvedValue({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              authenticated: true,
+              user: { email: 'active@dainam.edu.vn', user_code: 'GV783' },
+            }),
+        });
+        global.fetch = fetchMock as never;
+        const repo = fakeUserRepo([
+          {
+            id: 'active-existing-1',
+            ssoUserCode: 'GV783',
+            email: 'active@dainam.edu.vn',
+            source: 'SSO',
+            status: 'ACTIVE',
+            isAdmin: false,
+            roles: [],
+          },
+        ]);
+        const guard = new SsoAuthGuard(
+          configServiceReturning(ssoBaseUrl),
+          repo,
+        );
+
+        const ctx = contextWithHeaders({
+          authorization: 'Bearer active-token',
+        });
+        await expect(guard.canActivate(ctx)).resolves.toBe(true);
+        expect(getUser(ctx)?.id).toBe('active-existing-1');
+      });
+    });
+
     describe('MANUAL-user merge on first real SSO login (2026-09-14, plan §2.8)', () => {
       it('merges a MANUAL row into the real SSO login by email — same id, roles/isAdmin/title carried over, source becomes SSO', async () => {
         const fetchMock = jest.fn().mockResolvedValue({
@@ -544,6 +615,44 @@ describe('SsoAuthGuard', () => {
 
         const user = getUser(ctx);
         expect(user?.id).toBe('manual-row-3');
+      });
+
+      it('rejects a MANUAL row that was disabled before ever completing its first SSO login', async () => {
+        const fetchMock = jest.fn().mockResolvedValue({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              authenticated: true,
+              user: {
+                email: 'disabled-manual@dainam.edu.vn',
+                user_code: 'GV781',
+              },
+            }),
+        });
+        global.fetch = fetchMock as never;
+        const repo = fakeUserRepo([
+          {
+            id: 'manual-row-disabled',
+            ssoUserCode: 'MANUAL:disabled-1',
+            email: 'disabled-manual@dainam.edu.vn',
+            source: 'MANUAL',
+            status: 'DISABLED',
+            isAdmin: false,
+            roles: [],
+          },
+        ]);
+        const guard = new SsoAuthGuard(
+          configServiceReturning(ssoBaseUrl),
+          repo,
+        );
+
+        await expect(
+          guard.canActivate(
+            contextWithHeaders({
+              authorization: 'Bearer disabled-manual-token',
+            }),
+          ),
+        ).rejects.toBeInstanceOf(UnauthorizedException);
       });
 
       it('does NOT merge into a SYNC-sourced row even with a matching email — only MANUAL rows are merge targets', async () => {

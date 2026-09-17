@@ -182,15 +182,42 @@ export class CampaignSubjectService extends CommonService<CampaignSubject> {
       subjectRows.push({ ...base, status, errorMessage });
     }
 
+    // Inserting the roster rows and closing the import out as DONE commit
+    // or roll back together (2026-09-16 database audit, §3.2): before this,
+    // a crash between the two left real `campaign_subjects` rows persisted
+    // while the import record was stuck at PROCESSING forever, with no
+    // reconciliation path. Deliberately does NOT also wrap the file uploads
+    // below — those are slow, external HTTP calls, and holding a DB
+    // transaction open across them would be its own new problem; they stay
+    // best-effort exactly as before, followed by a small separate update
+    // that only attaches the optional file ids once available.
     if (subjectRows.length > 0) {
-      // `extra`'s `Record<string, unknown> | null` shape doesn't structurally
-      // match `QueryDeepPartialEntity`'s jsonb expectations (it wants
-      // `() => string` as an alternative arm) — a plain data cast, not a
-      // real type hazard: every field here comes from `ParsedRow`, never a
-      // caller-supplied query fragment.
-      await this.repository.insert(
-        subjectRows as QueryDeepPartialEntity<CampaignSubject>[],
-      );
+      await this.dataSource.transaction(async (manager) => {
+        // `extra`'s `Record<string, unknown> | null` shape doesn't
+        // structurally match `QueryDeepPartialEntity`'s jsonb expectations
+        // (it wants `() => string` as an alternative arm) — a plain data
+        // cast, not a real type hazard: every field here comes from
+        // `ParsedRow`, never a caller-supplied query fragment.
+        await manager.insert(
+          CampaignSubject,
+          subjectRows as QueryDeepPartialEntity<CampaignSubject>[],
+        );
+        await manager.update(CampaignSubjectImport, importRow.id, {
+          status: 'DONE',
+          totalRows: rows.length,
+          validRows: validCount,
+          errorRows: errorCount,
+        });
+      });
+    } else {
+      // Nothing parsed at all (e.g. an empty template) — still close the
+      // import out; a single-statement UPDATE is already atomic on its own.
+      await this.importRepository.update(importRow.id, {
+        status: 'DONE',
+        totalRows: rows.length,
+        validRows: validCount,
+        errorRows: errorCount,
+      });
     }
 
     let errorReportFsFileId: string | null = null;
@@ -240,11 +267,12 @@ export class CampaignSubjectService extends CommonService<CampaignSubject> {
       );
     }
 
+    // Best-effort follow-up, same spirit as the two uploads just above: if
+    // this never runs, the import record is already correctly DONE with
+    // accurate row counts (set atomically together with the insert above)
+    // — only the downloadable file links end up missing, a far smaller
+    // failure mode than the import staying stuck at PROCESSING.
     await this.importRepository.update(importRow.id, {
-      status: 'DONE',
-      totalRows: rows.length,
-      validRows: validCount,
-      errorRows: errorCount,
       errorReportFsFileId,
       fsFileId,
     });

@@ -84,7 +84,7 @@ export class User extends BaseEntity {
   @ApiPropertyOptional({ description: 'Id ảnh thẻ trên file-service, nếu có' })
   avatarFsFileId?: string | null;
 
-  /** `ACTIVE` | `DISABLED` — a disabled account still passes `SsoAuthGuard` (SSO itself doesn't know) but should be blocked at `PermissionsGuard`/application level; wiring that check is a follow-up, this column only records the state today. */
+  /** `ACTIVE` | `DISABLED` — enforced in `SsoAuthGuard.assertNotDisabled()` (the SSO backend itself has no notion of this, so it must be checked locally on every login/re-check, not just at record-creation time). */
   @Column('varchar', { length: 10, default: 'ACTIVE' })
   @ApiProperty({
     description: 'ACTIVE hoặc DISABLED',

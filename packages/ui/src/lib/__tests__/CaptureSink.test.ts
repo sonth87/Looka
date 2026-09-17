@@ -44,7 +44,7 @@ function fakeSink(
   const approveUploadSteps: Array<ApprovalStepInfo[] | undefined> = [];
   const approveUploadVideoSessionIds: Array<string | undefined> = [];
   const approveUploadSubjects: Array<StudentSubjectInfo | undefined> = [];
-  const startSessionInputs: Array<{ subjectCode?: string; subjectName?: string; metadata?: Record<string, unknown> }> = [];
+  const startSessionInputs: Array<{ subjectCode?: string; subjectName?: string; metadata?: Record<string, unknown>; campaignId?: string }> = [];
 
   const sink: CaptureSink = {
     async startSession(input) {
@@ -272,6 +272,7 @@ test('setSubject() before the first capture makes ensure() send it to startSessi
         identityNumber: undefined,
         userCode: undefined,
       },
+      campaignId: undefined,
     },
   ]);
 });
@@ -307,6 +308,7 @@ test('with no setSubject() call, ensure() sends startSession an all-undefined su
         identityNumber: undefined,
         userCode: undefined,
       },
+      campaignId: undefined,
     },
   ]);
 });
