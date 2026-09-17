@@ -488,16 +488,6 @@ export class FsClient {
   }
 
   /**
-   * Move the file to the trash.
-   *
-   * A soft delete: the file is recoverable and permanent removal is an
-   * administrative action, so this is safe to call on a mistaken capture.
-   */
-  public async deleteFile(fileId: string): Promise<void> {
-    await this.request(`/api/v1/files/${encodeURIComponent(fileId)}`, { method: 'DELETE' });
-  }
-
-  /**
    * Replace a file's content, creating a new version.
    *
    * `etag` must be the one currently held. The service refuses to guess: without

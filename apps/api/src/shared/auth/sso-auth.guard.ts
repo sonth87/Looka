@@ -257,6 +257,7 @@ export class SsoAuthGuard implements CanActivate {
         where: { source: 'MANUAL', email: ILike(ssoUser.email) },
       });
       if (manualMatch) {
+        this.assertNotDisabled(manualMatch);
         manualMatch.ssoUserCode = ssoUser.user_code;
         manualMatch.email = ssoUser.email;
         manualMatch.displayName = ssoUser.name ?? manualMatch.displayName;
@@ -287,6 +288,7 @@ export class SsoAuthGuard implements CanActivate {
         }
       }
     } else {
+      this.assertNotDisabled(user);
       user.email = ssoUser.email;
       user.displayName = ssoUser.name ?? user.displayName;
       user.lastLoginAt = now;
@@ -302,5 +304,23 @@ export class SsoAuthGuard implements CanActivate {
       roles: user.roles,
       staffInfo: ssoUser.staff_info ?? null,
     };
+  }
+
+  /**
+   * `users.status = 'DISABLED'` used to be recorded but never checked
+   * anywhere (see `User` entity's old doc comment on that column) — an admin
+   * disabling an account from the CMS had zero effect on that account's
+   * ability to keep using the API. Checked here, the one choke point every
+   * authenticated request already passes through (`PermissionsGuard` is
+   * opt-in per route via `@RequirePermission` and several guarded surfaces —
+   * `ReviewerRoleGuard`, `CampaignMemberGuard` — never go through it at all),
+   * so this is the only place that can enforce it unconditionally. Called
+   * before any field on the row is touched, so a rejected login does not
+   * silently advance `lastLoginAt`/sync the SSO profile for a disabled row.
+   */
+  private assertNotDisabled(user: User): void {
+    if (user.status === 'DISABLED') {
+      throw new UnauthorizedException('Tài khoản đã bị vô hiệu hoá.');
+    }
   }
 }

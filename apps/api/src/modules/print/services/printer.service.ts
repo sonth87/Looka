@@ -178,6 +178,17 @@ export class PrinterService {
    * `dataSource.transaction`). Guards against a negative `blank_stock`
    * regardless of caller — a PRINT decrement racing an empty tray is a real
    * operational scenario (an operator forgot to refill), not just bad input.
+   *
+   * The guard and the write are ONE atomic `UPDATE ... WHERE blank_stock +
+   * delta >= 0`, not a separate `findOne` + JS arithmetic + `save` — that
+   * older shape read-then-wrote without a row lock, so two concurrent
+   * callers (two print-agent PRINTED callbacks landing close together, or a
+   * manual restock racing an automatic decrement) could both read the same
+   * `blankStock` and each independently write back their own result,
+   * silently losing one delta (2026-09-16 database audit, §3.1). Postgres
+   * evaluates the whole `SET`/`WHERE` clause against one consistent row
+   * version per statement, so this can never under- or over-count no matter
+   * how many callers race it.
    */
   async applyStockDelta(
     manager: EntityManager,
@@ -187,25 +198,36 @@ export class PrinterService {
     actorUserId: string | null,
     note: string | null,
   ): Promise<PrinterStockEvent> {
-    const printer = await manager.findOne(Printer, {
-      where: { id: printerId },
-    });
-    if (!printer) throw new NotFoundException('Không tìm thấy máy in');
+    // `UPDATE ... RETURNING` — per this codebase's own hard-won lesson
+    // (documented repeatedly elsewhere, e.g. `session.service.ts`'s
+    // `completeSession`), an UPDATE's `manager.query()` result is a
+    // `[rows, rowCount]` tuple, NOT a flat rows array the way INSERT's is.
+    // Destructuring straight into a rows array here would silently see an
+    // empty array on every successful update and treat every write as "not
+    // found or insufficient stock".
+    const [rows] = await manager.query<
+      [Array<{ blank_stock: number }>, number]
+    >(
+      `UPDATE printers
+         SET blank_stock = blank_stock + $1, blank_stock_updated_at = now()
+       WHERE id = $2 AND blank_stock + $1 >= 0
+       RETURNING blank_stock`,
+      [delta, printerId],
+    );
 
-    const resultingStock = printer.blankStock + delta;
-    if (resultingStock < 0) {
+    if (rows.length === 0) {
+      const exists = await manager.exists(Printer, {
+        where: { id: printerId },
+      });
+      if (!exists) throw new NotFoundException('Không tìm thấy máy in');
       throw new ConflictException('Số phôi không đủ để thực hiện thao tác này');
     }
-
-    printer.blankStock = resultingStock;
-    printer.blankStockUpdatedAt = new Date();
-    await manager.save(printer);
 
     const event = manager.create(PrinterStockEvent, {
       printerId,
       delta,
       reason,
-      resultingStock,
+      resultingStock: rows[0].blank_stock,
       actorUserId,
       note,
     });

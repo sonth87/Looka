@@ -1,6 +1,5 @@
 import { toDao } from '@app/shared/http/to-dao.helper';
 import { CustomException, ERROR_CODE } from '@app/shared/errors/legacy';
-import { FileStorageService } from '@app/modules/file-storage/services/file-storage.service';
 import { PhotoReviewService } from '@app/modules/photo-review/services/photo-review.service';
 import { CaptureStatsService } from '@app/modules/stats/services/capture-stats.service';
 import { CommonService } from '@app/shared/common/common.service';
@@ -23,7 +22,6 @@ export class SessionService extends CommonService<Session> {
     repository: Repository<Session>,
     @InjectDataSource()
     private readonly dataSource: DataSource,
-    private readonly fileStorage: FileStorageService,
     private readonly photoReview: PhotoReviewService,
     private readonly captureStats: CaptureStatsService,
   ) {
@@ -110,8 +108,6 @@ export class SessionService extends CommonService<Session> {
   async completeSession(id: string): Promise<SessionDao> {
     const session = await this.findByIdOrFail(id);
 
-    let supersededFsFileIds: string[] = [];
-
     if (session.status !== SessionStatus.COMPLETED) {
       await this.dataSource.transaction(async (manager) => {
         // Approve only the outbox row of the highest attempt per step - the
@@ -132,22 +128,13 @@ export class SessionService extends CommonService<Session> {
 
         // Deletes every attempt except the highest per step; the FK cascade
         // (upload_outbox.photo_id ON DELETE CASCADE) removes their outbox
-        // rows too. RETURNING tells us which of the deleted photos had
-        // already reached the file-service, for the best-effort cleanup
-        // below.
-        //
-        // TypeORM's query() wraps an UPDATE/DELETE's result as
-        // `[rows, rowCount]` regardless of RETURNING and regardless of
-        // DataSource vs EntityManager - only INSERT (PhotoService.addPhoto's
-        // pattern) gets a flat rows array back. Destructuring straight into
-        // a typed rows array here (as if this were an INSERT) silently gave
-        // `superseded` the two-element tuple instead, so every
-        // `row.fs_file_id` read undefined and the best-effort delete below
-        // never fired - caught only by this file's own persistence test.
-        const [superseded]: [
-          Array<{ id: string; fs_file_id: string | null }>,
-          number,
-        ] = await manager.query(
+        // rows too. A superseded photo's remote copy (if it already reached
+        // the file-service) is left in place rather than deleted there too
+        // — see the removed file-service `deleteFile` capability's own
+        // history: fs-core's DELETE endpoint was confirmed 2026-09-16 to
+        // always return 404 for a file that demonstrably exists, so the
+        // best-effort cleanup this used to attempt never actually worked.
+        await manager.query(
           `DELETE FROM photos
                WHERE session_id = $1
                  AND id NOT IN (
@@ -155,13 +142,9 @@ export class SessionService extends CommonService<Session> {
                      FROM photos
                     WHERE session_id = $1
                     ORDER BY step_id, attempt DESC
-                 )
-             RETURNING id, fs_file_id`,
+                 )`,
           [id],
         );
-        supersededFsFileIds = superseded
-          .map((row) => row.fs_file_id)
-          .filter((fsFileId): fsFileId is string => !!fsFileId);
 
         session.status = SessionStatus.COMPLETED;
         session.completedAt = new Date();
@@ -179,21 +162,8 @@ export class SessionService extends CommonService<Session> {
         );
       });
 
-      // Best-effort and outside the transaction on purpose: a file-service
-      // hiccup here must not roll back a completion the operator already
-      // confirmed - the Postgres row is gone either way, this is only
-      // trying not to leave an orphan on the file-service as well.
-      for (const fsFileId of supersededFsFileIds) {
-        await this.fileStorage.deleteFile(fsFileId).catch((err) => {
-          this.logger.warn(
-            `best-effort delete failed for superseded photo ${fsFileId}: ${(err as Error).message}`,
-          );
-        });
-      }
-
-      // Best-effort, outside the transaction, same reasoning as the
-      // superseded-file cleanup above: a photo-review hiccup must never
-      // roll back (or even delay the response for) a completion the
+      // Best-effort, outside the transaction: a photo-review hiccup must
+      // never roll back (or even delay the response for) a completion the
       // operator already confirmed. Only fires for a session that actually
       // has both a subject and a campaign — see
       // `PhotoReviewService.ensureSetForApprovedSession`'s own doc comment

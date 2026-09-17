@@ -109,46 +109,55 @@ export class CampaignKioskAssignmentService extends CommonService<CampaignKioskA
     });
 
     try {
-      let row: CampaignKioskAssignment;
-      if (existing) {
-        existing.userId = dto.userId;
-        existing.note = dto.note ?? existing.note;
-        existing.assignedByUserId = assignedByUserId;
-        existing.assignedAt = new Date();
-        row = await this.save(existing);
-      } else {
-        row = await this.create({
-          campaignId,
-          deviceId,
-          userId: dto.userId,
-          note: dto.note ?? null,
-          assignedByUserId,
-          assignedAt: new Date(),
-        });
-      }
+      // Both writes commit-or-rollback together (2026-09-16 database audit,
+      // §3.2): before this, a failure between them could leave a kiosk
+      // assigned with no corresponding approved membership row, breaking
+      // the "assignment always auto-approves membership" invariant below.
+      const row = await this.dataSource.transaction(async (manager) => {
+        let assignment: CampaignKioskAssignment;
+        if (existing) {
+          existing.userId = dto.userId;
+          existing.note = dto.note ?? existing.note;
+          existing.assignedByUserId = assignedByUserId;
+          existing.assignedAt = new Date();
+          assignment = await this.saveWithTransaction(manager, existing);
+        } else {
+          assignment = await this.createWithTransaction(manager, {
+            campaignId,
+            deviceId,
+            userId: dto.userId,
+            note: dto.note ?? null,
+            assignedByUserId,
+            assignedAt: new Date(),
+          });
+        }
 
-      // D-Q4: "gán = tự duyệt" — an assignment always leaves the assignee
-      // APPROVED for this campaign, whatever their prior membership state
-      // was (mirrors `CampaignMemberService.decide`'s own "no state-machine
-      // restriction" reasoning). `note = 'ASSIGNED'` so the CMS can show
-      // where an APPROVED row without a manual decision came from (§9.2).
-      await this.campaignMemberRepository
-        .createQueryBuilder()
-        .insert()
-        .values({
-          campaignId,
-          userId: dto.userId,
-          status: 'APPROVED',
-          requestedAt: new Date(),
-          decidedAt: new Date(),
-          decidedByUserId: assignedByUserId,
-          note: 'ASSIGNED',
-        })
-        .orUpdate(
-          ['status', 'decided_at', 'decided_by_user_id', 'note'],
-          ['campaign_id', 'user_id'],
-        )
-        .execute();
+        // D-Q4: "gán = tự duyệt" — an assignment always leaves the assignee
+        // APPROVED for this campaign, whatever their prior membership state
+        // was (mirrors `CampaignMemberService.decide`'s own "no state-machine
+        // restriction" reasoning). `note = 'ASSIGNED'` so the CMS can show
+        // where an APPROVED row without a manual decision came from (§9.2).
+        await manager
+          .createQueryBuilder()
+          .insert()
+          .into(CampaignMember)
+          .values({
+            campaignId,
+            userId: dto.userId,
+            status: 'APPROVED',
+            requestedAt: new Date(),
+            decidedAt: new Date(),
+            decidedByUserId: assignedByUserId,
+            note: 'ASSIGNED',
+          })
+          .orUpdate(
+            ['status', 'decided_at', 'decided_by_user_id', 'note'],
+            ['campaign_id', 'user_id'],
+          )
+          .execute();
+
+        return assignment;
+      });
 
       return (
         await this.attachIdentity([toDao(CampaignKioskAssignmentDao, row)])

@@ -570,6 +570,16 @@ export class PrintItemService {
         'Item đã hủy, agent không thể cập nhật trạng thái',
       );
     }
+    // Idempotency for an at-least-once HTTP callback (2026-09-16 database
+    // audit, §3.1): the print-agent retries after a lost response the same
+    // way any webhook consumer must be assumed to. Without this, a retried
+    // `PRINTED` callback would decrement `blank_stock` and increment
+    // `printedCount`/print stats a second time for one physical card — the
+    // same "retry must not be counted twice" rule `SessionService
+    // .completeSession` (module capture) already applies to `COMPLETED`.
+    if (item.status === dto.status) {
+      return;
+    }
     const fromStatus = item.status;
     const now = new Date();
 

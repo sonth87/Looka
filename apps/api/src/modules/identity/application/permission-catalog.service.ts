@@ -1,6 +1,11 @@
-import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  OnApplicationBootstrap,
+  RequestMethod,
+} from '@nestjs/common';
 import { DiscoveryService, MetadataScanner } from '@nestjs/core';
-import { PATH_METADATA } from '@nestjs/common/constants';
+import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import {
   DiscoveredPermission,
   PermissionCatalogReadRepository,
@@ -90,7 +95,12 @@ export class PermissionCatalogService implements OnApplicationBootstrap {
           byCode.set(meta.code, {
             code: meta.code,
             group: meta.code.split(':')[0] ?? meta.code,
-            method: null,
+            // Always read off the individual handler, never the class — a
+            // class-level-only @RequirePermission still covers routes that
+            // each carry their own @Get()/@Post()/etc., so there is no
+            // single "class-level" HTTP method the way there is a single
+            // path prefix.
+            method: this.methodOf(handler),
             path: fullPath || '/',
             description: meta.description ?? null,
           });
@@ -105,6 +115,14 @@ export class PermissionCatalogService implements OnApplicationBootstrap {
       REQUIRE_PERMISSION_METADATA,
       target as object,
     ) as PermissionMeta | undefined;
+  }
+
+  /** The HTTP method a route handler was declared with (`@Get()`, `@Post()`, ...), as its `RequestMethod` name — `null` for a handler `@nestjs/core`'s discovery walk somehow found with no method metadata at all (should not happen for a real route handler). */
+  private methodOf(target: unknown): string | null {
+    const raw = Reflect.getMetadata(METHOD_METADATA, target as object) as
+      RequestMethod | undefined;
+    if (raw === undefined) return null;
+    return RequestMethod[raw] ?? null;
   }
 
   private pathOf(target: unknown): string {

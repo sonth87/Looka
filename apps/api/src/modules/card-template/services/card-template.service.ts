@@ -8,7 +8,6 @@ import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
 import { DataSource, Repository } from 'typeorm';
 import { Pagination } from '@app/shared/http/pagination';
-import { FileStorageService } from '@app/modules/file-storage/services/file-storage.service';
 import {
   ALLOWED_DPI,
   DEFAULT_CARD_HEIGHT_MM,
@@ -45,7 +44,6 @@ export class CardTemplateService {
     @InjectRepository(CardTemplateAsset)
     private readonly assets: Repository<CardTemplateAsset>,
     @InjectDataSource() private readonly dataSource: DataSource,
-    private readonly fileStorage: FileStorageService,
   ) {}
 
   async list(
@@ -346,7 +344,7 @@ export class CardTemplateService {
     );
   }
 
-  /** Only a DRAFT with zero usage may be hard-deleted (plan §2.6) — cascades to `card_template_assets` at the DB level, and best-effort removes each asset's file-service copy first (same "best-effort, caller doesn't need it to block" pattern `SessionService`'s own supersede-cleanup uses). `usageCount` is real as of P6 — this guard is now actually reachable (a DRAFT template can accumulate print items via a per-item `templateId` override even before the template itself is ever published). */
+  /** Only a DRAFT with zero usage may be hard-deleted (plan §2.6) — cascades to `card_template_assets` at the DB level. The remote file-service copy of each asset is left in place (see the removed `FileStorageService.deleteFile` capability's own history: fs-core's DELETE endpoint always denies a bare service API-key caller, since it requires the actual owner or a tenant admin — Looka's auth to fs-core has never carried either, so this cleanup could never have succeeded). `usageCount` is real as of P6 — this guard is now actually reachable (a DRAFT template can accumulate print items via a per-item `templateId` override even before the template itself is ever published). */
   async delete(id: string): Promise<void> {
     const template = await this.loadOrFail(id);
     if (template.status !== 'DRAFT') {
@@ -356,10 +354,6 @@ export class CardTemplateService {
       throw new ConflictException('Phôi đã được dùng để in, không thể xóa');
     }
 
-    const assets = await this.assets.find({ where: { templateId: id } });
-    for (const asset of assets) {
-      await this.fileStorage.deleteFile(asset.fsFileId).catch(() => undefined);
-    }
     await this.templates.remove(template);
   }
 

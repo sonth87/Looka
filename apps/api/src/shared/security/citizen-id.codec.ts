@@ -1,7 +1,7 @@
 import {
   createCipheriv,
   createDecipheriv,
-  createHash,
+  createHmac,
   randomBytes,
 } from 'node:crypto';
 
@@ -20,6 +20,22 @@ import {
  * this codebase currently needs to store IV/tag as separate columns, and a
  * single opaque column is simplest to migrate away from later if the key
  * management story changes.
+ *
+ * The exact-match lookup hash is **HMAC-SHA256, keyed with the same
+ * `CITIZEN_ID_ENCRYPTION_KEY`** — not a bare `SHA-256` (2026-09-16 database
+ * audit, §2.2). A Vietnamese CCCD is a 12-digit number with a known,
+ * structured format (province + century/gender/birth-year + sequence), so
+ * its real entropy is far below 10¹²; an unkeyed hash lets anyone who
+ * obtains a DB dump precompute every plausible CCCD's hash and reverse
+ * `citizen_id_hash` in well under an hour on ordinary hardware — the column
+ * would satisfy "don't store plaintext" in form only. Keying the hash with
+ * a secret only this server holds makes that precomputation attack
+ * infeasible without the key, while still allowing an exact-match lookup
+ * with no decryption (see `hashCitizenId`). Reuses the same 32-byte secret
+ * `encryptCitizenId` already uses for AES-256-GCM rather than a second env
+ * var — HMAC-SHA256 and AES-256-GCM are different algorithms/domains, so
+ * sharing the key material here is a standard, accepted simplification, not
+ * a weakening of either.
  */
 const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 12;
@@ -52,7 +68,7 @@ function normalize(citizenId: string): string {
 export interface EncryptedCitizenId {
   /** base64(iv || authTag || ciphertext) — store as-is in `citizen_id_enc`. */
   enc: string;
-  /** sha256 hex of the normalized number — store in `citizen_id_hash`, use for exact-match lookup. */
+  /** HMAC-SHA256 (keyed) hex of the normalized number — store in `citizen_id_hash`, use for exact-match lookup. */
   hash: string;
   /** Last 4 digits — store in `citizen_id_last4`, safe to display without decrypting. */
   last4: string;
@@ -71,7 +87,7 @@ export function encryptCitizenId(citizenId: string): EncryptedCitizenId {
 
   return {
     enc: Buffer.concat([iv, authTag, ciphertext]).toString('base64'),
-    hash: createHash('sha256').update(normalized).digest('hex'),
+    hash: createHmac('sha256', key).update(normalized).digest('hex'),
     last4: normalized.slice(-4),
   };
 }
@@ -91,7 +107,9 @@ export function decryptCitizenId(enc: string): string {
   ]).toString('utf8');
 }
 
-/** For an exact-match lookup: hash the caller's query the same way `encryptCitizenId` does, without needing a key. */
+/** For an exact-match lookup: hash the caller's query the same way `encryptCitizenId` does — needs `CITIZEN_ID_ENCRYPTION_KEY`, same as encrypt/decrypt, since the hash is now keyed. */
 export function hashCitizenId(citizenId: string): string {
-  return createHash('sha256').update(normalize(citizenId)).digest('hex');
+  return createHmac('sha256', loadKey())
+    .update(normalize(citizenId))
+    .digest('hex');
 }

@@ -25,9 +25,6 @@ export class StatsDailyIdentification extends BaseEntity {
   @Column('int', { default: 0 })
   count: number;
 
-  @Column('int', { default: 0, name: 'failed_count' })
-  failedCount: number;
-
   @Column('timestamptz', { name: 'computed_at' })
   computedAt: Date;
 }

@@ -188,18 +188,4 @@ export class FileStorageService implements OnModuleInit {
       throw error;
     }
   }
-
-  /**
-   * Removes a file from the file-service. Used by
-   * `SessionService.completeSession` for a superseded attempt that already
-   * reached the file-service before the operator approved a different one
-   * (A.4). Best-effort — the caller decides whether a failure here should
-   * stop anything else, same as `cancelUpload`.
-   */
-  async deleteFile(fileId: string, tenantName?: string): Promise<void> {
-    const client = tenantName
-      ? await this.clientForTenant(tenantName)
-      : this.client;
-    await client.deleteFile(fileId);
-  }
 }

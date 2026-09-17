@@ -253,7 +253,13 @@ describeDb('capture persistence', () => {
     }
   });
 
-  test('completeSession best-effort deletes the file-service copy of a superseded, already-uploaded attempt', async () => {
+  test('completeSession removes a superseded, already-uploaded attempt from Postgres without attempting a file-service delete', async () => {
+    // `SessionService.completeSession` used to best-effort call
+    // `FileStorageService.deleteFile` for a superseded attempt's remote
+    // copy — removed entirely 2026-09-16 (fs-core's DELETE endpoint always
+    // denies a bare service API-key caller, confirmed directly against
+    // fs-core's own source, so that cleanup could never have succeeded).
+    // The Postgres-side supersede behavior itself is unchanged.
     const session = await sessionService.createSession({});
     const superseded = await photoService.addPhoto(session.id, {
       stepId: 'RIGHT',
@@ -275,9 +281,12 @@ describeDb('capture persistence', () => {
 
     await sessionService.completeSession(session.id);
 
-    expect(fileStorage.deleteFile).toHaveBeenCalledWith(
-      '11111111-1111-1111-1111-111111111111',
+    const remaining = await dataSource.query(
+      `SELECT id FROM photos WHERE id = $1`,
+      [superseded.photoId],
     );
+    expect(remaining).toHaveLength(0);
+    expect(fileStorage.deleteFile).not.toHaveBeenCalled();
   });
 
   test('claimNext ignores an unapproved row and picks it up once the session is completed', async () => {
