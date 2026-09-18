@@ -66,8 +66,9 @@ export class CampaignSubjectDao {
 
 /**
  * `GET /v1/campaigns/:id/subjects/lookup?key=` response — kiosk-facing
- * (`DeviceCredentialsGuard`). Behavior now follows the campaign's pinned
- * workflow's `eligibility.mode` (plan §2.2/§2.3) — see
+ * (`DeviceCredentialsGuard`). Behavior now follows the campaign's own
+ * `eligibilityConfig.mode` (2026-09-18, moved off the pinned workflow;
+ * plan §2.2/§2.3) — see
  * `CampaignSubjectService.lookupSubject`'s own doc comment for the full
  * NONE/ROSTER/EXTERNAL_API/ROSTER_AND_API breakdown. `subject` is only ever
  * a real `campaign_subjects` roster row; `externalRecord` (additive,

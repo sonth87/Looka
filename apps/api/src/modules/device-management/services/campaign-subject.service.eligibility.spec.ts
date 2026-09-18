@@ -5,11 +5,15 @@ import { EligibilityRule } from '../util/eligibility-rule.evaluator';
  * Plan §E.2/§E.3 (`upload-identity-and-workflow-cleanup-plan-2026-09-17.md`):
  * - `lookupSubject`'s ROSTER branch used to ignore `eligibility.rules[]`
  *   entirely — found-in-roster-with-VALID-status was always eligible, no
- *   matter what rules a workflow's CMS editor configured. These tests lock
+ *   matter what rules a campaign's CMS editor configured. These tests lock
  *   in the fix (rule pass/fail) AND the regression guarantee (no rules
  *   configured → unchanged old behavior).
  * - `testRosterLookup` is the new dry-run method backing the
- *   workflow-editing screen's "Kiểm tra theo dữ liệu đã import" button.
+ *   campaign-editing screen's "Kiểm tra theo dữ liệu đã import" button.
+ * - 2026-09-18: `eligibility` moved off the pinned workflow onto the
+ *   campaign's own `eligibilityConfig` column — these tests now set it
+ *   directly on the fake campaign returned by `findCampaignEntityOrFail`
+ *   instead of mocking a `workflowCatalog.getVersionRef` lookup.
  *
  * Fakes stay plain object shapes cast with `as never` at the constructor
  * call site, same convention `campaign-subject.service.import-roster.spec.ts`
@@ -20,7 +24,6 @@ function buildService(
     repository?: { findOne: jest.Mock };
     eligibilityLogRepository?: { create: jest.Mock; save: jest.Mock };
     campaignService?: { findCampaignEntityOrFail: jest.Mock };
-    workflowCatalog?: { getVersionRef: jest.Mock };
   } = {},
 ) {
   const repository = overrides.repository ?? { findOne: jest.fn() };
@@ -28,16 +31,15 @@ function buildService(
     create: jest.fn((x: unknown) => x),
     save: jest.fn().mockResolvedValue(undefined),
   };
-  // Default: no workflow pinned at all — same as every campaign before
-  // eligibility-mode-awareness existed, so `mode` defaults to 'ROSTER' and
-  // `eligibility` (hence `rules`) stays undefined.
+  // Default: plain ROSTER mode, no rules — this whole spec file is about
+  // the ROSTER branch specifically (the real architectural default when
+  // NOTHING is configured is 'NONE', covered by
+  // campaign-subject.service.lookup-mode.spec.ts instead).
   const campaignService = overrides.campaignService ?? {
-    findCampaignEntityOrFail: jest
-      .fn()
-      .mockResolvedValue({ id: 'campaign-1', workflowVersionId: null }),
-  };
-  const workflowCatalog = overrides.workflowCatalog ?? {
-    getVersionRef: jest.fn(),
+    findCampaignEntityOrFail: jest.fn().mockResolvedValue({
+      id: 'campaign-1',
+      eligibilityConfig: { mode: 'ROSTER' },
+    }),
   };
 
   return new CampaignSubjectService(
@@ -48,7 +50,6 @@ function buildService(
     campaignService as never,
     undefined as never,
     undefined as never,
-    workflowCatalog as never,
     undefined as never,
   );
 }
@@ -81,26 +82,23 @@ function failingRule(): EligibilityRule {
   };
 }
 
-function pinnedWorkflowCampaign() {
+function campaignWithEligibility(eligibilityConfig: unknown) {
   return {
     findCampaignEntityOrFail: jest
       .fn()
-      .mockResolvedValue({ id: 'campaign-1', workflowVersionId: 'wv-1' }),
+      .mockResolvedValue({ id: 'campaign-1', eligibilityConfig }),
   };
 }
 
 describe('CampaignSubjectService.lookupSubject — ROSTER mode now evaluates rules[] (plan §E.2)', () => {
   it('a passing rule keeps the subject eligible', async () => {
     const repository = { findOne: jest.fn().mockResolvedValue(ROSTER_ROW) };
-    const workflowCatalog = {
-      getVersionRef: jest.fn().mockResolvedValue({
-        config: { eligibility: { mode: 'ROSTER', rules: [passingRule()] } },
-      }),
-    };
     const service = buildService({
       repository,
-      campaignService: pinnedWorkflowCampaign(),
-      workflowCatalog,
+      campaignService: campaignWithEligibility({
+        mode: 'ROSTER',
+        rules: [passingRule()],
+      }),
     });
 
     const result = await service.lookupSubject('campaign-1', 'SV001');
@@ -111,15 +109,12 @@ describe('CampaignSubjectService.lookupSubject — ROSTER mode now evaluates rul
 
   it('a failing rule makes the subject ineligible, with the rule’s own message as reason', async () => {
     const repository = { findOne: jest.fn().mockResolvedValue(ROSTER_ROW) };
-    const workflowCatalog = {
-      getVersionRef: jest.fn().mockResolvedValue({
-        config: { eligibility: { mode: 'ROSTER', rules: [failingRule()] } },
-      }),
-    };
     const service = buildService({
       repository,
-      campaignService: pinnedWorkflowCampaign(),
-      workflowCatalog,
+      campaignService: campaignWithEligibility({
+        mode: 'ROSTER',
+        rules: [failingRule()],
+      }),
     });
 
     const result = await service.lookupSubject('campaign-1', 'SV001');
@@ -128,7 +123,7 @@ describe('CampaignSubjectService.lookupSubject — ROSTER mode now evaluates rul
     expect(result.reason).toBe('Không đúng lớp cho phép');
   });
 
-  it('regression: no rules configured (unpinned campaign) → found-in-roster is eligible, full stop', async () => {
+  it('regression: no rules configured → found-in-roster is eligible, full stop', async () => {
     const repository = { findOne: jest.fn().mockResolvedValue(ROSTER_ROW) };
     const service = buildService({ repository });
 
@@ -138,17 +133,11 @@ describe('CampaignSubjectService.lookupSubject — ROSTER mode now evaluates rul
     expect(result.reason).toBeUndefined();
   });
 
-  it('regression: workflow pinned but rules is an empty array → found-in-roster is still eligible, full stop', async () => {
+  it('regression: ROSTER mode but rules is an explicit empty array → found-in-roster is still eligible, full stop', async () => {
     const repository = { findOne: jest.fn().mockResolvedValue(ROSTER_ROW) };
-    const workflowCatalog = {
-      getVersionRef: jest.fn().mockResolvedValue({
-        config: { eligibility: { mode: 'ROSTER', rules: [] } },
-      }),
-    };
     const service = buildService({
       repository,
-      campaignService: pinnedWorkflowCampaign(),
-      workflowCatalog,
+      campaignService: campaignWithEligibility({ mode: 'ROSTER', rules: [] }),
     });
 
     const result = await service.lookupSubject('campaign-1', 'SV001');
@@ -168,7 +157,7 @@ describe('CampaignSubjectService.lookupSubject — ROSTER mode now evaluates rul
   });
 });
 
-describe('CampaignSubjectService.testRosterLookup — dry-run for the workflow editor (plan §E.3)', () => {
+describe('CampaignSubjectService.testRosterLookup — dry-run for the campaign editor (plan §E.3)', () => {
   it('key not found in roster → found:false, eligible:false', async () => {
     const repository = { findOne: jest.fn().mockResolvedValue(null) };
     const service = buildService({ repository });

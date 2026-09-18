@@ -12,12 +12,14 @@ export type EligibilityApiAuthType =
 export type EligibilityApiRequestMethod = 'GET' | 'POST';
 
 /**
- * Inline `eligibility.api` config, per-workflow (2026-09-17 redo of plan
- * item 7 — no separate `eligibility_api_clients` catalog anymore, see this
- * file's own doc comment below). Same shape `eligibilityApiSchema` in
- * `workflow-config.schema.ts` validates. `credentialCiphertext` is the
- * encrypted-at-rest form; a caller resolving this from a saved workflow
- * version passes it through as-is, `EligibilityHttpClient` decrypts it.
+ * Inline `eligibilityConfig.api` config, per-campaign (2026-09-17 redo of
+ * plan item 7 — no separate `eligibility_api_clients` catalog anymore, see
+ * this file's own doc comment below; 2026-09-18 — moved off the workflow
+ * onto the campaign itself, see `Campaign.eligibilityConfig`'s own doc
+ * comment). Same shape `eligibilityApiSchema` in
+ * `eligibility-config.schema.ts` validates. `credentialCiphertext` is the
+ * encrypted-at-rest form; a caller resolving this from a saved campaign
+ * passes it through as-is, `EligibilityHttpClient` decrypts it.
  */
 export interface EligibilityApiConfig {
   baseUrl: string;
@@ -28,6 +30,10 @@ export interface EligibilityApiConfig {
   authParamName?: string;
   credentialCiphertext?: string;
   keyResponsePath?: string;
+  /** 2026-09-18 — see `lookup()`'s own doc comment. `undefined` = 0 (no retry), matching pre-existing behavior for a workflow saved before this field existed. */
+  retryCount?: number;
+  /** 2026-09-18 — see `lookup()`'s own doc comment. `undefined` = the pre-existing hardcoded `DEFAULT_TIMEOUT_MS`. */
+  timeoutMs?: number;
 }
 
 export interface EligibilityLookupResult {
@@ -37,7 +43,13 @@ export interface EligibilityLookupResult {
   record: Record<string, unknown> | null;
 }
 
-const REQUEST_TIMEOUT_MS = 15_000;
+const DEFAULT_TIMEOUT_MS = 15_000;
+/** Fixed delay between retry attempts — simple, not exponential backoff; nothing in this feature's scope calls for more than that. */
+const RETRY_DELAY_MS = 500;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 /** `path` like `data[0].student_code` — supports plain `.` segments and `[N]` array indices, nothing fancier (JSONPath is overkill for "where in this JSON is the one field/record I care about"). */
 function getByPath(value: unknown, path: string): unknown {
@@ -105,17 +117,21 @@ function substituteKey(template: unknown, key: string): unknown {
 }
 
 /**
- * Generic executor for ONE workflow's own `config.eligibility.api` (2026-09-17
- * redo of plan item 7) — the first version of this class executed a row
- * from a shared, DB-wide `eligibility_api_clients` catalog; the user
- * explicitly rejected that ("API điều kiện tiếp nhận là config trong
- * workflow luôn chứ không dùng chung như hiện tại") — every workflow now
- * owns its own inline config, versioned/immutable with the rest of
+ * Generic executor for ONE campaign's own `eligibilityConfig.api`
+ * (2026-09-17 redo of plan item 7) — the first version of this class
+ * executed a row from a shared, DB-wide `eligibility_api_clients` catalog;
+ * the user explicitly rejected that ("API điều kiện tiếp nhận là config
+ * trong workflow luôn chứ không dùng chung như hiện tại") — every workflow
+ * owned its own inline config, versioned/immutable with the rest of
  * `workflow_versions.config`, no cross-workflow reuse and no separate
- * table. This class itself stays exactly as generic as before — it just
- * takes a plain `EligibilityApiConfig` object instead of an entity row, so
- * it works identically whether the config came from a saved workflow
- * version or an ad-hoc, not-yet-saved draft being test-called from the CMS.
+ * table. 2026-09-18: that inline config itself moved again, off the
+ * workflow onto the campaign (see `Campaign.eligibilityConfig`'s own doc
+ * comment) — the "own inline config, no shared table" shape this class was
+ * built for is unchanged, only WHERE that config lives moved. This class
+ * itself stays exactly as generic as before — it just takes a plain
+ * `EligibilityApiConfig` object instead of an entity row, so it works
+ * identically whether the config came from a saved campaign or an ad-hoc,
+ * not-yet-saved draft being test-called from the CMS.
  *
  * What stays genuinely generic: base URL + path + method, an auth
  * header/query-param + decrypted credential, and a request body/query
@@ -131,6 +147,18 @@ function substituteKey(template: unknown, key: string): unknown {
 export class EligibilityHttpClient {
   private readonly logger = new Logger(EligibilityHttpClient.name);
 
+  /**
+   * `config.retryCount`/`timeoutMs` (2026-09-18, product feedback — "cần
+   * retry bao lần, bao lâu là timeout") — credential resolution happens
+   * ONCE here (decrypting/validating it again on every retry would be pure
+   * waste, and a bad-credential failure is `Terminal` anyway, never
+   * retried); each actual HTTP attempt is `attemptRequest()` below. Only a
+   * `Retryable` outcome (network error/timeout — never `Terminal`, e.g. a
+   * bad credential or a real HTTP 4xx/5xx body from the remote API) is
+   * retried, up to `retryCount` MORE times after the first attempt, with a
+   * fixed `RETRY_DELAY_MS` between them. `retryCount` unset/0 keeps the
+   * exact pre-2026-09-18 behavior: one attempt, no retry.
+   */
   async lookup(
     config: EligibilityApiConfig,
     key: string,
@@ -151,6 +179,28 @@ export class EligibilityHttpClient {
       }
     }
 
+    const maxAttempts = 1 + (config.retryCount ?? 0);
+    let lastOutcome: IntegrationOutcome<EligibilityLookupResult> = retryable(
+      'Không thực hiện được request nào',
+    );
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      lastOutcome = await this.attemptRequest(config, key, credential);
+      if (lastOutcome.kind !== 'Retryable') return lastOutcome;
+      if (attempt < maxAttempts) {
+        this.logger.warn(
+          `eligibility API call failed (attempt ${attempt}/${maxAttempts}): ${lastOutcome.reason} — retrying`,
+        );
+        await delay(RETRY_DELAY_MS);
+      }
+    }
+    return lastOutcome;
+  }
+
+  private async attemptRequest(
+    config: EligibilityApiConfig,
+    key: string,
+    credential: string | null,
+  ): Promise<IntegrationOutcome<EligibilityLookupResult>> {
     const url = new URL(
       `${config.baseUrl.replace(/\/$/, '')}${config.requestPath}`,
     );
@@ -181,7 +231,10 @@ export class EligibilityHttpClient {
     }
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    const timer = setTimeout(
+      () => controller.abort(),
+      config.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    );
 
     let res: globalThis.Response;
     try {

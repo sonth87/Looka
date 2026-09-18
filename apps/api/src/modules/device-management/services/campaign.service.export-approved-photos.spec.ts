@@ -12,7 +12,7 @@ import { CampaignService } from './campaign.service';
  * docs/plans/card-photo-export-and-filters-plan-2026-09-17.md) — everything
  * is a plain fake object (repository/dataSource/fileStorage), same
  * "fake typed as a plain shape" convention
- * `campaign-kiosk-assignment.service.spec.ts` already uses, rather than a
+ * `campaign-eligibility-credential.util.spec.ts` already uses, rather than a
  * `Test.createTestingModule` + real Postgres (like
  * `device-management-persistence.spec.ts`) — no `TEST_DATABASE_URL` is
  * required to run this. `global.fetch` is stubbed instead of hitting

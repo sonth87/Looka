@@ -73,7 +73,7 @@ import {
 import { openCameraSetupWindow } from './cameraSetupWindow.js';
 import { openSsoLoginWindow } from './ssoLogin.js';
 import { openRecentStudentsWindow } from './recentStudentsWindow.js';
-import { fetchRecentCaptures, getDeviceAccessStatus } from './deviceApi.js';
+import { fetchRecentCaptures, getDeviceAccessStatus, lookupCampaignSubject } from './deviceApi.js';
 import { startVideoStream, endVideoStream, discardSessionVideos } from './streams.js';
 import { recordStatsEvent, startStatsEventPush, stopStatsEventPush } from './statsEvents.js';
 import { CapturedStudentRepository } from '@face/database';
@@ -605,6 +605,22 @@ app.whenReady().then(async () => {
     if (!identityNumber) return { found: false };
     const record = lookupCccdByIdentityNumber(identityNumber);
     return record ? { found: true, record } : { found: false };
+  });
+
+  /**
+   * The kiosk's real eligibility check for a manually-typed or bare-QR-
+   * scanned student code (2026-09-18 — see `lookupCampaignSubject`'s own doc
+   * comment in `deviceApi.ts` for why this exists and how it differs from
+   * `cccd:lookupByIdentityNumber` above). Same "never trust a renderer-
+   * supplied string blindly" re-check as that handler.
+   */
+  ipcMain.handle('campaign:lookupSubject', (_, payload: { campaignId?: unknown; key?: unknown }) => {
+    const campaignId = typeof payload?.campaignId === 'string' ? payload.campaignId.trim() : '';
+    const key = typeof payload?.key === 'string' ? payload.key.trim() : '';
+    if (!campaignId || !key) {
+      return Promise.reject(new Error('campaign:lookupSubject requires both campaignId and key'));
+    }
+    return lookupCampaignSubject(campaignId, key);
   });
 
   /** Whether the CB Help window is currently open — used to sync the kiosk UI's toggle button on mount. */

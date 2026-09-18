@@ -26,7 +26,6 @@ function buildService(dataSource: { query: jest.Mock }) {
       campaignService as never,
       {} as never, // fileStorage
       {} as never, // snapshotService
-      undefined as never, // workflowCatalog
       undefined as never, // eligibilityHttpClient
     ),
     campaignService,

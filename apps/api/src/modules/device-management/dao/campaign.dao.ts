@@ -6,6 +6,7 @@ import {
   type CampaignManualStatus,
   type CardSpec,
 } from '../entities/campaign.entity';
+import type { EligibilityConfig } from '../domain/eligibility-config.schema';
 import type { EffectiveCampaignStatus } from '../utils/campaign-status.util';
 
 /**
@@ -116,6 +117,11 @@ export class CampaignDao {
   @ApiPropertyOptional()
   @Expose()
   cardSpec?: CardSpec | null;
+
+  /** 2026-09-18 — sanitized by `CampaignService.toCampaignResponse()` (strips `credential`/`credentialCiphertext`, sets `hasCredential`) before ever reaching the CMS. */
+  @ApiProperty({ description: 'Điều kiện tiếp nhận (mode/api/rules)' })
+  @Expose()
+  eligibilityConfig: EligibilityConfig;
 
   @ApiProperty({
     description:

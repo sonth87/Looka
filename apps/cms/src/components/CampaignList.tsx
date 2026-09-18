@@ -6,14 +6,17 @@ import {
   Campaign,
   EffectiveStatus,
   Paginated,
+  UserListItem,
   WorkflowDetail,
   getAllCampaignsStats,
+  grantCampaignMembers,
   listCampaigns,
   listCampaignsPaginated,
+  listUsers,
   listWorkflows,
 } from '../api';
 import { StatTile } from './StatsPanel';
-import { CampaignDangerActions } from './CampaignDangerActions';
+import { CampaignDangerActions, ModalShell } from './CampaignDangerActions';
 import { DEFAULT_PAGE_SIZE, Pager } from './Pager';
 import { EFFECTIVE_STATUS_LABEL, PURPOSE_LABEL, formatExpiry, isExpired, isExpiringSoon } from '../campaignFormat';
 
@@ -43,6 +46,7 @@ export function CampaignList() {
   const [workflows, setWorkflows] = useState<WorkflowDetail[]>([]);
 
   const [allCampaigns, setAllCampaigns] = useState<Campaign[] | null>(null);
+  const [grantTarget, setGrantTarget] = useState<Campaign | null>(null);
   // Only used for its totalDevices figure in the stats strip below — the
   // rest of AllCampaignsStats (sessions/uploads/etc.) is Overview's job, not
   // this page's; a failure here just means that one tile doesn't render.
@@ -254,6 +258,13 @@ export function CampaignList() {
                     <Link to={`/campaigns/${c.id}/edit`} className="text-gray-600 hover:text-gray-800 font-medium">
                       Sửa
                     </Link>
+                    <button
+                      type="button"
+                      onClick={() => setGrantTarget(c)}
+                      className="text-emerald-600 hover:text-emerald-800 font-medium"
+                    >
+                      Cấp quyền
+                    </button>
                     <CampaignDangerActions campaign={c} compact onExtended={updateRow} onDeleted={() => removeRow(c.id)} />
                   </div>
                 </td>
@@ -273,6 +284,181 @@ export function CampaignList() {
           setPage(1);
         }}
       />
+
+      {grantTarget && (
+        <GrantCampaignAccessModal campaign={grantTarget} onClose={() => setGrantTarget(null)} />
+      )}
     </div>
+  );
+}
+
+/**
+ * "Cấp quyền" (2026-09-18) — replaces the old gán-người-vào-kiosk flow
+ * ("Thiết bị & Nhân sự" tab, now read-only, see `CampaignAssignmentsPanel.tsx`'s
+ * own doc comment): picks N people straight from `/campaigns` (no detour
+ * through a campaign's own detail page) and grants them APPROVED access to
+ * this one campaign in a single call (`grantCampaignMembers`). Mirrors
+ * `RolesPage.tsx`'s `AddUserToRoleModal` search+multi-select pattern, minus
+ * its "already has this?" pre-check — granting is idempotent server-side
+ * (`CampaignMemberService.grant()` always upserts to APPROVED), so there is
+ * nothing to warn about re-selecting someone already approved.
+ */
+function GrantCampaignAccessModal({ campaign, onClose }: { campaign: Campaign; onClose: () => void }) {
+  const [q, setQ] = useState('');
+  const [results, setResults] = useState<UserListItem[] | null>(null);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Map<string, UserListItem>>(new Map());
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [granted, setGranted] = useState<UserListItem[] | null>(null);
+
+  useEffect(() => {
+    const handle = setTimeout(() => {
+      setSearchError(null);
+      listUsers({ q: q.trim() || undefined, limit: 20 })
+        .then((res) => setResults(res.items))
+        .catch((err) => setSearchError(err instanceof ApiError ? err.message : String(err)));
+    }, 300);
+    return () => clearTimeout(handle);
+  }, [q]);
+
+  function toggleUser(u: UserListItem) {
+    setSelected((prev) => {
+      const next = new Map(prev);
+      if (next.has(u.id)) next.delete(u.id);
+      else next.set(u.id, u);
+      return next;
+    });
+  }
+
+  async function submit() {
+    if (selected.size === 0) return;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const users = Array.from(selected.values());
+      await grantCampaignMembers(campaign.id, users.map((u) => u.id));
+      setGranted(users);
+    } catch (err) {
+      setSaveError(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (granted) {
+    return (
+      <ModalShell title={`Đã cấp quyền vào "${campaign.name}"`} onClose={onClose}>
+        <div className="space-y-3 text-sm">
+          <p className="text-gray-600">
+            {granted.length} người đã được cấp quyền APPROVED vào campaign này:
+          </p>
+          <ul className="text-gray-900 space-y-1">
+            {granted.map((u) => (
+              <li key={u.id}>{u.displayName ?? u.email}</li>
+            ))}
+          </ul>
+          <div className="flex justify-end pt-1">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold text-sm"
+            >
+              Đóng
+            </button>
+          </div>
+        </div>
+      </ModalShell>
+    );
+  }
+
+  return (
+    <ModalShell title={`Cấp quyền vào "${campaign.name}"`} onClose={onClose}>
+      <div className="space-y-3">
+        <div>
+          <label className="block text-sm text-gray-500 mb-1">Tìm người dùng (email, tên, mã, hoặc SĐT)</label>
+          <input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Nhập để tìm..."
+            className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
+            autoFocus
+          />
+        </div>
+
+        {searchError && (
+          <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">{searchError}</div>
+        )}
+
+        {!searchError && (
+          <div className="max-h-56 overflow-y-auto border border-gray-200 rounded-lg divide-y divide-gray-100">
+            {results === null && <p className="p-3 text-sm text-gray-500">Đang tải...</p>}
+            {results !== null && results.length === 0 && (
+              <p className="p-3 text-sm text-gray-500">Không tìm thấy người dùng nào.</p>
+            )}
+            {results?.map((u) => (
+              <label
+                key={u.id}
+                className={`flex items-center gap-2.5 px-3 py-2 text-sm hover:bg-gray-50 cursor-pointer ${selected.has(u.id) ? 'bg-blue-50' : ''}`}
+              >
+                <input
+                  type="checkbox"
+                  checked={selected.has(u.id)}
+                  onChange={() => toggleUser(u)}
+                  className="rounded border-gray-300"
+                />
+                <div className="min-w-0">
+                  <div className="text-gray-900 font-medium">{u.displayName ?? u.email}</div>
+                  <div className="text-xs text-gray-500">
+                    {u.email}
+                    {u.code ? ` · ${u.code}` : ''}
+                  </div>
+                </div>
+              </label>
+            ))}
+          </div>
+        )}
+
+        {selected.size > 0 && (
+          <div>
+            <label className="block text-sm text-gray-500 mb-1.5">Đã chọn ({selected.size})</label>
+            <div className="flex flex-wrap gap-1.5">
+              {Array.from(selected.values()).map((u) => (
+                <span
+                  key={u.id}
+                  className="inline-flex items-center gap-1.5 pl-2.5 pr-1.5 py-1 rounded-full border border-gray-200 bg-gray-50 text-gray-700 text-xs font-medium"
+                >
+                  {u.displayName ?? u.email}
+                  <button
+                    type="button"
+                    onClick={() => toggleUser(u)}
+                    aria-label={`Bỏ chọn ${u.displayName ?? u.email}`}
+                    className="hover:text-red-600"
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {saveError && <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">{saveError}</div>}
+
+        <div className="flex justify-end gap-2 pt-1">
+          <button type="button" onClick={onClose} className="px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-100">
+            Huỷ
+          </button>
+          <button
+            type="button"
+            onClick={() => void submit()}
+            disabled={selected.size === 0 || saving}
+            className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold text-sm disabled:opacity-50"
+          >
+            {saving ? 'Đang cấp quyền...' : `Cấp quyền${selected.size > 0 ? ` (${selected.size})` : ''}`}
+          </button>
+        </div>
+      </div>
+    </ModalShell>
   );
 }

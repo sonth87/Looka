@@ -77,9 +77,11 @@ const QUERY_HANDLERS = [
  *
  * No more `eligibility_api_clients` catalog/repository here (2026-09-17
  * redo of plan item 7) — `EligibilityHttpClient` is still exported for
- * `device-management`'s `CampaignSubjectService` to execute a workflow's
- * OWN inline `config.eligibility.api`, but there is no longer a shared
- * catalog table for it to read from; see that class' own doc comment.
+ * `device-management`'s `CampaignSubjectService` to execute a campaign's
+ * OWN inline `eligibilityConfig.api` (2026-09-18: moved off the workflow's
+ * config onto the campaign itself — see `Campaign.eligibilityConfig`'s own
+ * doc comment), but there is no longer a shared catalog table for it to
+ * read from; see that class' own doc comment.
  */
 @Module({
   imports: [
@@ -125,9 +127,9 @@ const QUERY_HANDLERS = [
   //
   // `EligibilityHttpClient` exported for the same reason (plan item 7,
   // 2026-09-17): `CampaignSubjectService.lookupSubject` (device-management)
-  // reads a workflow's pinned version's own `eligibility.api` config
-  // (already has it via `WorkflowCatalogReadRepository`) and executes the
-  // lookup directly — no separate catalog lookup needed anymore.
+  // reads the campaign's OWN `eligibilityConfig.api` (2026-09-18 — no
+  // longer via `WorkflowCatalogReadRepository`, see above) and executes
+  // the lookup directly — no separate catalog lookup needed anymore.
   exports: [WorkflowCatalogReadRepository, EligibilityHttpClient],
 })
 export class WorkflowModule implements OnModuleInit {

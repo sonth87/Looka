@@ -401,16 +401,33 @@ export function planCaptureRounds(
  * the video's own native resolution — used to snapshot every non-CENTER
  * frame the instant the CENTER camera actually captures (see
  * FaceCaptureApp's capture-trigger handler), instead of waiting on a second
- * round trip through each frame's own capture pipeline. Not mirrored: this
- * is process evidence like the other frame streams, not the print-quality
- * CENTER still.
+ * round trip through each frame's own capture pipeline.
+ *
+ * `mirrored` (2026-09-18 field bug fix) — both real callers
+ * (`FaceCaptureApp.tsx`'s `captureRetakingSideFrame` and its
+ * `capture-trigger` simultaneous-capture fan-out) now pass `CAPTURE_MIRRORED`,
+ * matching `BrowserCameraService.captureBase64Snapshot()`'s own
+ * `mirrorStills` flip. Before this fix, every non-CENTER still went out
+ * UNMIRRORED while the CENTER still (via `captureBase64Snapshot`, since
+ * product decision 2026-09-17) went out MIRRORED — for one session, the
+ * same person's CENTER photo and side-angle photos disagreed on which side
+ * was which, silently corrupting face-embedding enrollment (embeddings are
+ * not mirror-invariant — see `BrowserCameraService.mirrorStills`'s own doc
+ * comment) and any downstream comparison of asymmetric features. Default
+ * stays `false` for any future caller that genuinely wants raw sensor
+ * orientation (e.g. a pure diagnostic frame with no save/embedding
+ * consequence) — there is no such caller today.
  *
  * Guarded against a near-black/blank frame (2026-09-05 field bug — see
  * `isFrameLikelyBlank`'s own doc comment): a `null` return here means
  * "treat as no snapshot", same as the existing `videoWidth === 0` guard —
  * callers already leave the frame pending for retake in that case.
  */
-export function snapshotVideoFrame(video: HTMLVideoElement, quality = 0.92): string | null {
+export function snapshotVideoFrame(
+  video: HTMLVideoElement,
+  quality = 0.92,
+  mirrored = false
+): string | null {
   if (video.videoWidth === 0) return null;
 
   const canvas = document.createElement('canvas');
@@ -419,6 +436,10 @@ export function snapshotVideoFrame(video: HTMLVideoElement, quality = 0.92): str
   const ctx = canvas.getContext('2d');
   if (!ctx) return null;
 
+  if (mirrored) {
+    ctx.translate(canvas.width, 0);
+    ctx.scale(-1, 1);
+  }
   ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
   if (isCanvasLikelyBlank(canvas)) return null;

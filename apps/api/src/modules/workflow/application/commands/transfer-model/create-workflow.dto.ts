@@ -23,7 +23,7 @@ export class CreateWorkflowDto {
 
   @ApiProperty({
     description:
-      'Cấu hình 6 nhóm (capture/identification/eligibility/aiProcessing/output/printing) — xem workflow-config.schema.ts. Kiểm tra kỹ ở handler, không chỉ ở đây.',
+      'Cấu hình 5 nhóm (capture/identification/aiProcessing/output/printing) — xem workflow-config.schema.ts. Điều kiện tiếp nhận (eligibility) không còn ở đây, xem Campaign.eligibilityConfig. Kiểm tra kỹ ở handler, không chỉ ở đây.',
   })
   @IsObject()
   config: WorkflowConfig;

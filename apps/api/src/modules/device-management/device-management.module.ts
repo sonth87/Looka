@@ -9,7 +9,6 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { CampaignController } from './controllers/campaign.controller';
 import { CampaignConfigController } from './controllers/campaign-config.controller';
-import { CampaignKioskAssignmentController } from './controllers/campaign-kiosk-assignment.controller';
 import { CampaignMemberController } from './controllers/campaign-member.controller';
 import { CampaignSubjectController } from './controllers/campaign-subject.controller';
 import { CampaignSubjectLookupController } from './controllers/campaign-subject-lookup.controller';
@@ -20,7 +19,6 @@ import { DeviceSelfController } from './controllers/device-self.controller';
 import { IdentificationMethodController } from './controllers/identification-method.controller';
 import { MeController } from './controllers/me.controller';
 import { Campaign } from './entities/campaign.entity';
-import { CampaignKioskAssignment } from './entities/campaign-kiosk-assignment.entity';
 import { CampaignMember } from './entities/campaign-member.entity';
 import { CampaignSubject } from './entities/campaign-subject.entity';
 import { CampaignSubjectImport } from './entities/campaign-subject-import.entity';
@@ -34,7 +32,6 @@ import { CampaignMemberGuard } from './guards/campaign-member.guard';
 import { DeviceCredentialsGuard } from './guards/device-credentials.guard';
 import { ActivationPackageService } from './services/activation-package.service';
 import { CampaignService } from './services/campaign.service';
-import { CampaignKioskAssignmentService } from './services/campaign-kiosk-assignment.service';
 import { CampaignMemberService } from './services/campaign-member.service';
 import { CampaignSubjectService } from './services/campaign-subject.service';
 import { CaptureAnglePresetService } from './services/capture-angle-preset.service';
@@ -50,7 +47,6 @@ import { IdentificationMethodService } from './services/identification-method.se
       DeviceEvent,
       CaptureAnglePreset,
       CampaignMember,
-      CampaignKioskAssignment,
       CampaignSubjectImport,
       CampaignSubject,
       IdentificationMethod,
@@ -113,7 +109,6 @@ import { IdentificationMethodService } from './services/identification-method.se
     DeviceController,
     CampaignConfigController,
     CampaignMemberController,
-    CampaignKioskAssignmentController,
     CampaignSubjectController,
     CampaignSubjectLookupController,
     CampaignSubjectPhotoStatusController,
@@ -126,7 +121,6 @@ import { IdentificationMethodService } from './services/identification-method.se
     DeviceService,
     DeviceEventService,
     CampaignMemberService,
-    CampaignKioskAssignmentService,
     CampaignSubjectService,
     IdentificationMethodService,
     CaptureAnglePresetService,
@@ -143,7 +137,6 @@ import { IdentificationMethodService } from './services/identification-method.se
     DeviceService,
     DeviceEventService,
     CampaignMemberService,
-    CampaignKioskAssignmentService,
     CampaignSubjectService,
     CaptureAnglePresetService,
   ],

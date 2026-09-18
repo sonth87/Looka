@@ -94,6 +94,16 @@ export interface Campaign {
   /** "Yêu cầu đăng ký khuôn mặt (embedding)" — whether captured photos get sent to the external face-embedding server. Default `true` server-side (embedding used to always run for every campaign). */
   requiresEmbedding: boolean;
   cardSpec?: CardSpec | null;
+  /**
+   * "Điều kiện tiếp nhận" — 2026-09-18, moved off the pinned workflow's own
+   * config onto the campaign itself (see the `EligibilityConfig` section's
+   * own header comment near the top of this file for the full rationale).
+   * Sanitized server-side before it ever reaches here: `api.credential`
+   * (plaintext) is stripped, only `api.hasCredential` says whether one is
+   * stored — same convention `cardSpec`/`captureAngles` don't need but a
+   * secret-carrying config does.
+   */
+  eligibilityConfig?: EligibilityConfig | null;
   /** Resolved server-side from `workflowVersionId` — send `workflowVersionId` to change the pin, this field is read-only. `null`/absent = no workflow pinned (or the pin no longer resolves). */
   workflow?: CampaignWorkflowRef | null;
   createdAt: string;
@@ -157,6 +167,8 @@ export interface CreateCampaignInput {
   recordVideoRoles?: string[] | null;
   requiresEmbedding?: boolean;
   cardSpec?: CardSpec | null;
+  /** See `Campaign.eligibilityConfig`'s own doc comment. Omit `api.credential` to leave an already-stored credential untouched (only meaningful on update; nothing to preserve yet on create). */
+  eligibilityConfig?: EligibilityConfig;
   /** Must be a PUBLISHED workflow version's id — `workflowId` is derived server-side, not sent here. */
   workflowVersionId?: string;
 }
@@ -176,6 +188,8 @@ export interface UpdateCampaignInput {
   recordVideoRoles?: string[] | null;
   requiresEmbedding?: boolean;
   cardSpec?: CardSpec | null;
+  /** See `Campaign.eligibilityConfig`'s own doc comment. Omit `api.credential` to leave an already-stored credential untouched. */
+  eligibilityConfig?: EligibilityConfig;
   /** Must be a PUBLISHED workflow version's id; `null` clears the pin. */
   workflowVersionId?: string | null;
 }
@@ -616,82 +630,34 @@ export const updateCampaignMember = (
     body: JSON.stringify({ action, note }),
   });
 
-// --- Campaign kiosk assignments ("Thiết bị & Nhân sự") -----------------------
-// 2026-09-14 — reverses the 2026-09-08 removal of the "Cán bộ chụp"/"Thiết
-// bị" tabs (see CampaignDetail.tsx's own doc comment for that history) under
-// new product direction: gán (assign) a staff user to a specific kiosk
-// device within a campaign. Backed by `campaign_kiosk_assignments`
-// (device-management module, apps/api), a *different* resource from the
-// dead `CampaignMember`/`listCampaignMembers`/`updateCampaignMember` code
-// just above (`campaign_members`/`/members`) — that dead code is left
-// untouched as a pattern reference only, per this task's own spec. Assigning
-// a kiosk auto-approves the assignee's `campaign_members` row server-side as
-// a side effect (`CampaignKioskAssignmentService.assign`, D-Q4 "gán = tự
-// duyệt") — there is no separate "add member" API call from this client.
-
-export interface CampaignKioskAssignment {
-  id: string;
-  campaignId: string;
-  deviceId: string;
-  /** Merged in server-side from `devices`, not a real column — same pattern as `CampaignMember.email` above. */
-  deviceName?: string;
-  userId: string;
-  userEmail?: string;
-  userDisplayName?: string | null;
-  assignedByUserId?: string | null;
-  assignedAt: string;
-  note?: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
-
 /**
- * `GET /v1/campaigns/:id/kiosks` row — one per kiosk device already set up
- * under this campaign, with its current assignee (if any) and a completed-
- * session count merged in server-side (`CampaignKioskAssignmentService.listKiosksForCampaign`).
- * `CampaignAssignmentsPanel` renders its table directly off this endpoint
- * rather than cross-referencing `listDevices()` + `listCampaignAssignments()`
- * itself, since this is a real, separate endpoint from `/assignments` (not
- * just an alias) purpose-built for exactly this dashboard-detail shape.
+ * `POST /v1/campaigns/:id/members/grant` (2026-09-18) — bulk "Cấp quyền"
+ * from `CampaignList.tsx`'s own per-row action, picking people from the
+ * existing user list (`listUsers`, same picker pattern `RolesPage.tsx`'s
+ * `AddUserToRoleModal` already uses). Replaces the deleted
+ * `campaign_kiosk_assignments`/"Thiết bị & Nhân sự" gán-người-vào-kiosk
+ * flow — that table's ONLY real purpose (besides a redundant "who's using
+ * which kiosk" display, now read straight off `listDevices()`'s own
+ * `lastUserName`) was this exact one-step "gán = tự duyệt" convenience;
+ * this call is that same convenience, no longer tied to a specific device.
+ * Idempotent — safe to call again with the same `userIds`.
  */
-export interface CampaignKioskSummary {
-  deviceId: string;
-  deviceName: string;
-  status: DeviceStatus;
-  assignedUserId?: string | null;
-  assignedUserEmail?: string | null;
-  assignedUserDisplayName?: string | null;
-  sessionsCompleted: number;
-}
-
-/** `GET /v1/campaigns/:id/assignments` — every kiosk↔person assignment row for this campaign. Added per this task's spec alongside `listCampaignKiosks`; `CampaignAssignmentsPanel` itself uses the richer `/kiosks` endpoint below, not this one. */
-export const listCampaignAssignments = (campaignId: string) =>
-  request<CampaignKioskAssignment[]>(`${CAMPAIGNS_PATH}/${campaignId}/assignments`);
-
-export const listCampaignKiosks = (campaignId: string) =>
-  request<CampaignKioskSummary[]>(`${CAMPAIGNS_PATH}/${campaignId}/kiosks`);
-
-/** `PUT /v1/campaigns/:id/assignments/:deviceId` — idempotent upsert by `(campaignId, deviceId)`; also works as "đổi người" for an already-assigned kiosk. Requires `campaign:write` (`AssignCampaignKioskDto` server-side). */
-export const assignCampaignKiosk = (campaignId: string, deviceId: string, userId: string, note?: string) =>
-  request<CampaignKioskAssignment>(`${CAMPAIGNS_PATH}/${campaignId}/assignments/${deviceId}`, {
-    method: 'PUT',
-    body: JSON.stringify({ userId, note }),
-  });
-
-/** `DELETE /v1/campaigns/:id/assignments/:deviceId` — requires `campaign:write`. Does not revoke the underlying `campaign_members` APPROVED row (left as-is server-side, same as the assign side never touching it as a separate step). */
-export const unassignCampaignKiosk = (campaignId: string, deviceId: string) =>
-  request<{ campaignId: string; deviceId: string }>(`${CAMPAIGNS_PATH}/${campaignId}/assignments/${deviceId}`, {
-    method: 'DELETE',
+export const grantCampaignMembers = (campaignId: string, userIds: string[]) =>
+  request<CampaignMember[]>(`${CAMPAIGNS_PATH}/${campaignId}/members/grant`, {
+    method: 'POST',
+    body: JSON.stringify({ userIds }),
   });
 
 // --- Campaign roster import (Excel) — plan item 15, 2026-09-17 -------------
 // Backend (`CampaignSubjectController`) has been complete since P3
 // (2026-09-14) — `POST/GET .../subjects/imports`, `GET .../subjects`,
 // `GET .../subjects/import-template` — but no CMS screen ever called any of
-// these routes before this. Used for `eligibility.mode = ROSTER`/
+// these routes before this. Used for `eligibilityConfig.mode = ROSTER`/
 // `ROSTER_AND_API` (the "import Excel" half of workflow item 7/15 — the
-// other half, "call API", is the inline `eligibility.api` fields in
-// `WorkflowConfigEditor.tsx`, not a separate catalog screen).
+// other half, "call API", is the inline `eligibilityConfig.api` fields in
+// `EligibilityConfigEditor.tsx`, now edited from `CampaignForm.tsx`
+// (2026-09-18 — moved off the workflow screen, see the `EligibilityConfig`
+// section's own header comment), not a separate catalog screen).
 
 export type CampaignSubjectStatus = 'VALID' | 'ERROR' | 'DUPLICATE';
 
@@ -894,27 +860,6 @@ export interface UserDetail extends UserListItem {
   roleCodes: string[];
 }
 export const getUser = (id: string) => request<UserDetail>(`${USERS_PATH}/${id}`);
-
-export interface FindOrCreateUserByEmailResult {
-  id: string;
-  email: string;
-  displayName: string | null;
-  created: boolean;
-}
-
-/**
- * `POST /v1/users/find-or-create-by-email` — plan item 14, 2026-09-17,
- * "gán người vào campaign theo email". Resolves an email to a `userId`
- * (creating a MANUAL placeholder if no account exists yet, matching
- * `SsoAuthGuard`'s own case-insensitive merge-by-email rule), used by
- * `CampaignAssignmentsPanel.tsx`'s `AssignUserModal` before calling the
- * existing `assignCampaignKiosk`, unchanged.
- */
-export const findOrCreateUserByEmail = (email: string, displayName?: string) =>
-  request<FindOrCreateUserByEmailResult>(`${USERS_PATH}/find-or-create-by-email`, {
-    method: 'POST',
-    body: JSON.stringify({ email, displayName: displayName || undefined }),
-  });
 
 // --- Roles & Permissions (phân quyền) -----------------------------------
 // Mirrors apps/api/src/modules/identity's role.command.controller.ts,
@@ -2239,21 +2184,19 @@ export const getReviewStats = (params: { campaignId?: string; from?: string; to?
   return request<ReviewStats>(`${REVIEW_STATS_PATH}${qs ? `?${qs}` : ''}`);
 };
 
-// --- Workflow (eligibility + identification methods config) -----------
-// Mirrors apps/api/src/modules/workflow/** (CQRS module: Workflow +
-// immutable WorkflowVersion aggregates) and the `identification_methods`
-// catalog in device-management. See workflow-config.schema.ts server-side
-// for the exact 6-group `config` shape this client passes through mostly
-// opaquely — only `eligibility`/`identification` get a structured CMS
-// editor (WorkflowConfigEditor.tsx); the other 4 groups are edited as raw
-// JSON there, out of scope for a rich editor this pass (no mockup for it).
-// `capture`/`output` used to overlap with a separate, older
-// `CaptureConfiguration` ("Mẫu chụp") system — retired 2026-09-17 in favor
-// of this one, see `CampaignForm.tsx`'s own doc comment.
+// --- Eligibility ("Điều kiện tiếp nhận") config, campaign-scoped --------
+// 2026-09-18: moved off `WorkflowConfig` onto `Campaign.eligibilityConfig`
+// (product feedback: "mục Điều kiện tiếp nhận theo các api để lấy dữ liệu
+// không cần ở màn tạo workflow nữa, thông tin đó sẽ được config trong phần
+// campaign" — a workflow is a reusable template shared across many
+// campaigns, but eligibility (roster or external-API-based) is inherently
+// specific to one campaign's own roster/integration). Edited in
+// `CampaignForm.tsx` via the shared `EligibilityConfigEditor.tsx` component
+// (moved verbatim in spirit from the old `WorkflowConfigEditor.tsx`, see
+// that file's git history). Mirrors
+// apps/api/src/modules/device-management/domain/eligibility-config.schema.ts.
 
-export type WorkflowStatus = 'DRAFT' | 'ACTIVE' | 'ARCHIVED';
-
-export interface WorkflowConfigEligibilityRule {
+export interface EligibilityRuleConfig {
   key: string;
   expr: string;
   message: string;
@@ -2263,20 +2206,21 @@ export type EligibilityApiAuthType = 'NONE' | 'API_KEY_HEADER' | 'BEARER_TOKEN' 
 export type EligibilityApiRequestMethod = 'GET' | 'POST';
 
 /**
- * Inline, per-workflow API config (2026-09-17 redo of plan item 7 — the
+ * Inline, per-campaign API config (2026-09-17 redo of plan item 7 — the
  * first version of this had `api: {clientCode, keyField, requiredFields}`
  * referencing a shared, DB-wide `eligibility_api_clients` catalog; the user
  * explicitly rejected that: "API điều kiện tiếp nhận là config trong
- * workflow luôn chứ không dùng chung như hiện tại"). Every field this
- * workflow's own API call needs lives here, versioned/immutable with the
- * rest of `WorkflowConfig` — no separate table, no cross-workflow reuse.
+ * workflow luôn chứ không dùng chung như hiện tại". 2026-09-18: that inline
+ * config itself moved again, off the workflow onto the campaign — see this
+ * section's own header comment). Every field this campaign's own API call
+ * needs lives here, no separate table, no cross-campaign reuse.
  *
  * `credential` (write path, plaintext — only sent when actually setting a
- * new one) and `hasCredential` (read path — `GET /v1/workflows/:id` never
+ * new one) and `hasCredential` (read path — `GET /v1/campaigns/:id` never
  * echoes the encrypted value back, only whether one is stored) are BOTH
  * declared, same dual-purpose-field convention the server schema uses.
  */
-export interface WorkflowConfigEligibilityApi {
+export interface EligibilityApiConfig {
   baseUrl: string;
   requestMethod: EligibilityApiRequestMethod;
   requestPath: string;
@@ -2287,14 +2231,30 @@ export interface WorkflowConfigEligibilityApi {
   hasCredential?: boolean;
   keyResponsePath?: string;
   requiredFields?: string[];
+  /** 2026-09-18 — số lần thử lại khi lỗi mạng/timeout (0-3, mặc định 0) và timeout mỗi lần gọi (ms, 1000-60000, mặc định 15000). Cả hai optional để không phá config đã lưu trước khi 2 field này tồn tại. */
+  retryCount?: number;
+  timeoutMs?: number;
 }
 
-export interface WorkflowConfigEligibility {
+export interface EligibilityConfig {
   mode: 'NONE' | 'ROSTER' | 'EXTERNAL_API' | 'ROSTER_AND_API';
-  api?: WorkflowConfigEligibilityApi;
-  rules?: WorkflowConfigEligibilityRule[];
-  rosterTemplate?: string;
+  api?: EligibilityApiConfig;
+  rules?: EligibilityRuleConfig[];
 }
+
+// --- Workflow (capture/identification/output/printing/aiProcessing) -----
+// Mirrors apps/api/src/modules/workflow/** (CQRS module: Workflow +
+// immutable WorkflowVersion aggregates) and the `identification_methods`
+// catalog in device-management. See workflow-config.schema.ts server-side
+// for the exact 5-group `config` shape this client passes through mostly
+// opaquely — only `identification` gets a structured CMS editor
+// (WorkflowConfigEditor.tsx); the other 3 groups are edited as raw JSON
+// there, out of scope for a rich editor this pass (no mockup for it).
+// `capture`/`output` used to overlap with a separate, older
+// `CaptureConfiguration` ("Mẫu chụp") system — retired 2026-09-17 in favor
+// of this one, see `CampaignForm.tsx`'s own doc comment.
+
+export type WorkflowStatus = 'DRAFT' | 'ACTIVE' | 'ARCHIVED';
 
 export interface WorkflowConfigIdentification {
   methods: string[];
@@ -2316,11 +2276,10 @@ export interface WorkflowConfigOutput {
   cardSpec: CardSpec;
 }
 
-/** The 6-group `config` jsonb — `aiProcessing`/`printing` stay `Record<string, unknown>` (edited as raw JSON in the CMS, no structured CMS equivalent exists for them yet — see `WorkflowConfigEditor.tsx`'s own doc comment); `capture`/`output` reuse `CaptureAnglesTable`/`CardSpecFields` as of plan item 6, and `eligibility`/`identification` have their own real field types. */
+/** The 5-group `config` jsonb (`eligibility` moved off this onto `Campaign.eligibilityConfig`, 2026-09-18 — see that section's own header comment) — `aiProcessing`/`printing` stay `Record<string, unknown>` (edited as raw JSON in the CMS, no structured CMS equivalent exists for them yet — see `WorkflowConfigEditor.tsx`'s own doc comment); `capture`/`output` reuse `CaptureAnglesTable`/`CardSpecFields` as of plan item 6, and `identification` has its own real field type. */
 export interface WorkflowConfig {
   capture: WorkflowConfigCapture;
   identification: WorkflowConfigIdentification;
-  eligibility: WorkflowConfigEligibility;
   aiProcessing: Record<string, unknown>;
   output: WorkflowConfigOutput;
   printing: Record<string, unknown>;
@@ -2421,12 +2380,12 @@ export interface EligibilityTestLookupResult {
 
 /**
  * `POST /v1/eligibility/test-lookup` — ad-hoc (2026-09-17 redo of plan item
- * 7): takes the FULL API config directly (same shape `WorkflowConfigEligibilityApi`
+ * 7): takes the FULL API config directly (same shape `EligibilityApiConfig`
  * above), not a `clientCode` looked up from a shared catalog. Lets a
- * workflow author test-call an endpoint while still editing a not-yet-saved
+ * campaign editor test-call an endpoint while still editing a not-yet-saved
  * draft — nothing needs to be saved first.
  */
-export const testEligibilityLookup = (api: WorkflowConfigEligibilityApi, key: string) =>
+export const testEligibilityLookup = (api: EligibilityApiConfig, key: string) =>
   request<EligibilityTestLookupResult>(ELIGIBILITY_TEST_LOOKUP_PATH, {
     method: 'POST',
     body: JSON.stringify({
@@ -2438,6 +2397,8 @@ export const testEligibilityLookup = (api: WorkflowConfigEligibilityApi, key: st
       authParamName: api.authParamName,
       credential: api.credential,
       keyResponsePath: api.keyResponsePath,
+      retryCount: api.retryCount,
+      timeoutMs: api.timeoutMs,
       key,
     }),
   });
@@ -2446,12 +2407,13 @@ export const testEligibilityLookup = (api: WorkflowConfigEligibilityApi, key: st
  * `POST /v1/campaigns/:campaignId/subjects/test-roster-lookup` (plan item
  * E.3, 2026-09-17) — ad-hoc dry-run for ROSTER/ROSTER_AND_API eligibility
  * mode, mirroring `testEligibilityLookup`'s UX: takes the in-progress
- * workflow draft's `eligibility.rules` directly from the form, not-yet-saved,
- * so a workflow author can test against the campaign's already-imported
- * roster before publishing. Does not write `eligibility_check_logs` — this
- * is a config-screen dry-run, not a real kiosk lookup.
+ * campaign draft's `eligibilityConfig.rules` directly from the form,
+ * not-yet-saved, so a campaign editor can test against the campaign's
+ * already-imported roster before saving. Does not write
+ * `eligibility_check_logs` — this is a config-screen dry-run, not a real
+ * kiosk lookup.
  */
-export const testRosterLookup = (campaignId: string, key: string, rules: WorkflowConfigEligibilityRule[]) =>
+export const testRosterLookup = (campaignId: string, key: string, rules: EligibilityRuleConfig[]) =>
   request<{ found: boolean; subject: unknown; eligible: boolean; reason?: string; context?: Record<string, unknown> }>(
     `/v1/campaigns/${campaignId}/subjects/test-roster-lookup`,
     { method: 'POST', body: JSON.stringify({ key, rules }) },

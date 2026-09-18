@@ -3,7 +3,6 @@ import { CustomException, ERROR_CODE } from '@app/shared/errors/legacy';
 import { CommonService } from '@app/shared/common/common.service';
 import { Pagination } from '@app/shared/http/pagination';
 import { FileStorageService } from '@app/modules/file-storage/services/file-storage.service';
-import { WorkflowCatalogReadRepository } from '@app/modules/workflow/infrastructure/read/workflow-catalog.read-repository';
 import { EligibilityHttpClient } from '@app/modules/workflow/infrastructure/integrations/eligibility-http.client';
 import {
   BadRequestException,
@@ -48,7 +47,7 @@ interface UploadedMulterFile {
   originalname: string;
 }
 
-/** Column order for both the template download and the parsed upload — kept in one place so the two never drift apart. */
+/** Column order for the template DOWNLOAD only as of 2026-09-18 (see `HEADER_ALIASES` below for the upload side) — kept in one place so the template and the `required` flags used to validate an upload never drift apart. */
 const ROSTER_COLUMNS = [
   { key: 'subjectCode', header: 'Mã SV', required: true },
   { key: 'fullName', header: 'Họ tên', required: true },
@@ -63,6 +62,61 @@ const ROSTER_COLUMNS = [
     required: false,
   },
 ] as const;
+
+type RosterFieldKey = (typeof ROSTER_COLUMNS)[number]['key'];
+
+/**
+ * Header-NAME matching for roster uploads (docs/plans/roster-import-header-matching-plan-2026-09-17.md,
+ * 2026-09-18 — a real file from a partner faculty had an extra `STT`
+ * column, no CCCD/Ngành, and Ngày sinh/Lớp/Khoa in a different order than
+ * `ROSTER_COLUMNS`; the old positional reader below would have silently
+ * mapped, say, a birth-date column into `citizenId`). `parseWorkbook` now
+ * looks up each expected field by its header TEXT (normalized: diacritics
+ * stripped, lowercased, `(...)` hints and extra whitespace removed), not by
+ * column position — so column order/count no longer matters, and adding
+ * support for another faculty's wording is a one-line addition here, never
+ * a code change. `STT`-shaped columns are recognized and dropped outright
+ * (no data value); anything else unmatched still falls into the `extra`
+ * jsonb catch-all, unchanged from before.
+ */
+const HEADER_ALIASES: Record<RosterFieldKey, string[]> = {
+  subjectCode: ['Mã SV', 'MSSV', 'Mã số SV', 'Mã số sinh viên'],
+  fullName: ['Họ tên', 'Họ và tên', 'Họ và tên sinh viên'],
+  citizenId: ['CCCD', 'Số CCCD', 'CMND/CCCD', 'Số CMND', 'CMND'],
+  className: ['Lớp'],
+  faculty: ['Khoa'],
+  major: ['Ngành', 'Chuyên ngành'],
+  // "Năm sinh" observed in a real file holding a full birth DATE (e.g.
+  // 04/12/2005), not just a year — treated as an alias of dateOfBirth.
+  dateOfBirth: ['Ngày sinh', 'Năm sinh'],
+  // "Niên khoá" observed in the same real file holding a date-shaped value
+  // (30-06-2028) matching "thời hạn thẻ" far better than its more common
+  // "khoá học" (K18/2018-2022) meaning — mapped here as a best-effort
+  // inference from the actual data, not a confirmed convention; split this
+  // alias out on its own if a future file uses "Niên khoá" to really mean
+  // cohort instead.
+  cardValidUntil: ['Thời hạn thẻ', 'Hạn thẻ', 'Niên khoá'],
+};
+
+/** Serial-number columns — recognized and dropped, never treated as an unknown "extra" field. */
+const IGNORED_HEADERS = ['STT', 'Số TT', 'TT', 'No', 'No.'];
+
+/** Strips a trailing "(...)" hint (e.g. "Ngày sinh (yyyy-mm-dd)"), Vietnamese diacritics, then lowercases/collapses whitespace — so header text that differs only in wording/casing/punctuation still matches. */
+function normalizeHeaderText(text: string): string {
+  const withoutHint = text.replace(/\([^)]*\)/g, '');
+  const noDiacritics = withoutHint
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .replace(/đ/gi, 'd');
+  return noDiacritics.toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+const NORMALIZED_HEADER_ALIASES: Record<string, RosterFieldKey> = Object.fromEntries(
+  (Object.entries(HEADER_ALIASES) as Array<[RosterFieldKey, string[]]>).flatMap(([field, aliases]) =>
+    aliases.map((alias) => [normalizeHeaderText(alias), field]),
+  ),
+);
+const NORMALIZED_IGNORED_HEADERS = new Set(IGNORED_HEADERS.map(normalizeHeaderText));
 
 interface ParsedRow {
   rowNo: number;
@@ -117,7 +171,6 @@ export class CampaignSubjectService extends CommonService<CampaignSubject> {
     private readonly campaignService: CampaignService,
     private readonly fileStorage: FileStorageService,
     private readonly snapshotService: CampaignSnapshotService,
-    private readonly workflowCatalog: WorkflowCatalogReadRepository,
     private readonly eligibilityHttpClient: EligibilityHttpClient,
   ) {
     super(repository);
@@ -440,11 +493,10 @@ export class CampaignSubjectService extends CommonService<CampaignSubject> {
   /**
    * `GET /v1/campaigns/:id/subjects/lookup?key=` (§2.3's kiosk note) — `key`
    * matches `subjectCode` OR `citizenId` exactly against `VALID` roster
-   * rows, for `ROSTER`/`ROSTER_AND_API` modes. Follows the campaign's
-   * pinned workflow's `eligibility.mode` (default `ROSTER` when no
-   * workflow is pinned — the exact behavior every campaign had before this
-   * mode-awareness existed, so an unpinned campaign's kiosk flow is
-   * unchanged):
+   * rows, for `ROSTER`/`ROSTER_AND_API` modes. Follows the campaign's OWN
+   * `eligibilityConfig.mode` (2026-09-18 — moved off the pinned workflow;
+   * see `Campaign.eligibilityConfig`'s own doc comment), default `NONE` when
+   * nothing is configured:
    * - `NONE`: eligible unconditionally, no roster/API call at all.
    * - `ROSTER` (previously the ONLY mode this method understood — it never
    *   actually read `eligibility.mode`, despite this DAO's own OLD doc
@@ -471,11 +523,8 @@ export class CampaignSubjectService extends CommonService<CampaignSubject> {
   ): Promise<CampaignSubjectLookupDao> {
     const campaign =
       await this.campaignService.findCampaignEntityOrFail(campaignId);
-    const eligibility = campaign.workflowVersionId
-      ? (await this.workflowCatalog.getVersionRef(campaign.workflowVersionId))
-          ?.config.eligibility
-      : undefined;
-    const mode: EligibilityMode = eligibility?.mode ?? 'ROSTER';
+    const eligibility = campaign.eligibilityConfig;
+    const mode: EligibilityMode = eligibility?.mode ?? 'NONE';
 
     if (mode === 'NONE') {
       return this.recordLookup(campaignId, key, mode, 'NONE', {
@@ -565,6 +614,8 @@ export class CampaignSubjectService extends CommonService<CampaignSubject> {
         authParamName: api.authParamName,
         credentialCiphertext: api.credentialCiphertext,
         keyResponsePath: api.keyResponsePath,
+        retryCount: api.retryCount,
+        timeoutMs: api.timeoutMs,
       },
       key,
     );
@@ -766,32 +817,58 @@ export class CampaignSubjectService extends CommonService<CampaignSubject> {
     if (!sheet) throw new Error('File không có sheet nào');
 
     const headerRow = sheet.getRow(1);
+    const columnByField: Partial<Record<RosterFieldKey, number>> = {};
     const extraHeaders: Array<{ col: number; header: string }> = [];
     headerRow.eachCell({ includeEmpty: false }, (cell, colNumber) => {
-      if (colNumber > ROSTER_COLUMNS.length) {
-        const text = this.cellToString(cell.value);
-        if (text) extraHeaders.push({ col: colNumber, header: text });
+      const text = this.cellToString(cell.value);
+      if (!text) return;
+      const normalized = normalizeHeaderText(text);
+      if (NORMALIZED_IGNORED_HEADERS.has(normalized)) return;
+      const field = NORMALIZED_HEADER_ALIASES[normalized];
+      if (field) {
+        // First column to match a field wins — a file with a genuinely
+        // duplicated header (two "Lớp" columns) keeps reading the first one,
+        // same "first match wins" convention `DISTINCT_VALUE_COLUMNS` above
+        // documents for its own lookup.
+        if (columnByField[field] === undefined) columnByField[field] = colNumber;
+        return;
       }
+      extraHeaders.push({ col: colNumber, header: text });
     });
+
+    const missingRequired = ROSTER_COLUMNS.filter(
+      (c) => c.required && columnByField[c.key] === undefined,
+    );
+    if (missingRequired.length > 0) {
+      throw new Error(
+        `Không tìm thấy cột bắt buộc trong dòng tiêu đề: ${missingRequired
+          .map((c) => c.header)
+          .join(', ')}`,
+      );
+    }
 
     const rows: ParsedRow[] = [];
     for (let r = 2; r <= sheet.rowCount; r++) {
       const excelRow = sheet.getRow(r);
       if (excelRow.cellCount === 0) continue;
 
-      const get = (col: number) =>
-        this.cellToString(excelRow.getCell(col).value);
-      const subjectCode = get(1);
-      const fullName = get(2);
+      const get = (field: RosterFieldKey): string | null => {
+        const col = columnByField[field];
+        return col === undefined ? null : this.cellToString(excelRow.getCell(col).value);
+      };
+      const getDate = (field: RosterFieldKey): string | null => {
+        const col = columnByField[field];
+        return col === undefined ? null : this.cellToDate(excelRow.getCell(col).value);
+      };
+
+      const subjectCode = get('subjectCode');
+      const fullName = get('fullName');
+      const citizenId = get('citizenId');
+      const className = get('className');
+      const faculty = get('faculty');
+      const major = get('major');
       // A fully blank row (no cell has any content) is skipped, not counted as an error row.
-      if (
-        !subjectCode &&
-        !fullName &&
-        !get(3) &&
-        !get(4) &&
-        !get(5) &&
-        !get(6)
-      ) {
+      if (!subjectCode && !fullName && !citizenId && !className && !faculty && !major) {
         continue;
       }
 
@@ -805,12 +882,12 @@ export class CampaignSubjectService extends CommonService<CampaignSubject> {
         rowNo: r,
         subjectCode: subjectCode || null,
         fullName: fullName || null,
-        citizenId: get(3) || null,
-        className: get(4) || null,
-        faculty: get(5) || null,
-        major: get(6) || null,
-        dateOfBirth: this.cellToDate(excelRow.getCell(7).value),
-        cardValidUntil: this.cellToDate(excelRow.getCell(8).value),
+        citizenId: citizenId || null,
+        className: className || null,
+        faculty: faculty || null,
+        major: major || null,
+        dateOfBirth: getDate('dateOfBirth'),
+        cardValidUntil: getDate('cardValidUntil'),
         extra: Object.keys(extra).length > 0 ? extra : null,
       });
     }
@@ -835,11 +912,35 @@ export class CampaignSubjectService extends CommonService<CampaignSubject> {
     return text || null;
   }
 
+  /**
+   * 2026-09-18 fix — discovered writing a test against the real SharePoint
+   * file: `new Date('04/12/2005')` (a Vietnamese dd/mm/yyyy value, meant as
+   * 4 Dec 2005) silently parses as US mm/dd/yyyy instead (12 Apr) — not a
+   * crash, a wrong date with no error anywhere. `'30-06-2028'` (dd-mm-yyyy
+   * with dashes) fails outright (`Invalid Date`). Both dd/mm/yyyy and
+   * dd-mm-yyyy are tried explicitly FIRST; only a string matching neither
+   * falls back to native `Date` parsing (still needed for the template's
+   * own `yyyy-mm-dd` hint, which native parsing already handles correctly).
+   */
   private cellToDate(value: ExcelJS.CellValue): string | null {
     if (value == null) return null;
     if (value instanceof Date) return value.toISOString().slice(0, 10);
     const text = this.cellToString(value);
     if (!text) return null;
+
+    const viMatch = /^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/.exec(text);
+    if (viMatch) {
+      const day = Number(viMatch[1]);
+      const month = Number(viMatch[2]);
+      const year = Number(viMatch[3]);
+      if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+        const viParsed = new Date(Date.UTC(year, month - 1, day));
+        if (!Number.isNaN(viParsed.getTime())) {
+          return viParsed.toISOString().slice(0, 10);
+        }
+      }
+    }
+
     const parsed = new Date(text);
     return Number.isNaN(parsed.getTime())
       ? null

@@ -104,6 +104,7 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
     hasCapturedImages,
     showScreenDebugStats,
     onToggleShowScreenDebugStats,
+    renderFaceDiagnostics,
     className,
     gestureState = null,
     gestureProgress,
@@ -717,8 +718,12 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
             <CameraPreview
               stream={stream}
               // Product decision 2026-09-05: the capture preview behaves like
-              // a mirror again for self-positioning. The saved still stays
-              // unmirrored regardless (BrowserCameraService.mirrorStills).
+              // a mirror again for self-positioning. Product decision
+              // 2026-09-17 (2026-09-18 fix: extended to every camera role,
+              // not just CENTER) made the SAVED still match this too — see
+              // BrowserCameraService.mirrorStills's own doc comment — so
+              // this is now the one flag every mirrored surface, live or
+              // saved, ultimately traces back to.
               mirrored={CAPTURE_MIRRORED}
               zoomScale={zoomScale}
               zoomOrigin={zoomOrigin}
@@ -736,6 +741,21 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
             >
               {/* Rule-of-thirds framing grid — this stage is always the CENTER camera (the CV-analysed feed), on by default per 2026-09-15 product decision. */}
               {stream && <CompositionGridOverlay />}
+
+              {/*
+                2026-09-18 field report: the "Phát hiện nhiều khuôn mặt! Chỉ
+                đứng 1 người" banner (and the NO_FACE/quality-rejected
+                diagnostics `renderFaceDiagnostics` also covers) stopped
+                showing on the kiosk. Root cause: the Aug 13 2026 refactor
+                that split this file out of the old monolithic
+                GuidedCaptureScreen.tsx carried the call into
+                MobileCaptureView.tsx but dropped it here — the desktop
+                kiosk build (this component) never got it back, even though
+                the underlying `faceState.presence` detection never stopped
+                working. Restored verbatim, same placement
+                MobileCaptureView.tsx uses (before the face overlay).
+              */}
+              {renderFaceDiagnostics()}
 
               {stream && (
                 <FaceOverlay
@@ -795,10 +815,18 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                 <img
                   src={freezeSnapshot}
                   alt="Snapshot Freeze"
-                  className={cn(
-                    "absolute inset-0 w-full h-full object-cover z-25 pointer-events-none transition-opacity duration-150 animate-in fade-in",
-                    CAPTURE_MIRRORED && "scale-x-[-1]"
-                  )}
+                  // 2026-09-18 field bug fix: this used to re-apply
+                  // scale-x-[-1] on top of `freezeSnapshot`, on the stale
+                  // 2026-09-05 assumption that saved stills are always the
+                  // raw unmirrored sensor image. Since product decision
+                  // 2026-09-17 (`BrowserCameraService.setMirrorStills(true)`,
+                  // extended to every camera role's still by this same fix),
+                  // the file itself is already pixel-mirrored — re-mirroring
+                  // it here flipped it right back to looking UNmirrored,
+                  // visibly disagreeing with the live preview the operator
+                  // just saw. Render it as-is now that the source data
+                  // already matches the mirrored preview.
+                  className="absolute inset-0 w-full h-full object-cover z-25 pointer-events-none transition-opacity duration-150 animate-in fade-in"
                 />
               )}
 
@@ -811,7 +839,6 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                 imageSrc={flyingState.imageSrc}
                 startRect={flyingState.startRect}
                 targetRect={flyingState.targetRect}
-                mirrored={CAPTURE_MIRRORED}
                 onAnimationEnd={() =>
                   setFlyingState({
                     imageSrc: null,

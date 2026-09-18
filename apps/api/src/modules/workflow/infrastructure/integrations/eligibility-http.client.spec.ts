@@ -137,6 +137,59 @@ describe('EligibilityHttpClient', () => {
     expect(outcome.kind).toBe('Retryable');
   });
 
+  it('retries a Retryable failure up to retryCount times, succeeding once the network recovers (2026-09-18)', async () => {
+    const fetchSpy = jest
+      .spyOn(globalThis, 'fetch')
+      .mockRejectedValueOnce(new Error('ECONNREFUSED'))
+      .mockRejectedValueOnce(new Error('ECONNREFUSED'))
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        text: () => Promise.resolve(JSON.stringify({ student_code: 'SV001' })),
+      } as unknown as Response);
+
+    const outcome = await client.lookup(makeConfig({ retryCount: 2 }), 'SV001');
+
+    expect(outcome.kind).toBe('Success');
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+  }, 10_000);
+
+  it('gives up after retryCount retries and returns the last Retryable outcome (2026-09-18)', async () => {
+    const fetchSpy = jest
+      .spyOn(globalThis, 'fetch')
+      .mockRejectedValue(new Error('ECONNREFUSED'));
+
+    const outcome = await client.lookup(makeConfig({ retryCount: 1 }), 'SV001');
+
+    expect(outcome.kind).toBe('Retryable');
+    // 1 initial attempt + 1 retry = 2 total calls, never more.
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  }, 10_000);
+
+  it('never retries a Terminal outcome, even with retryCount set (2026-09-18)', async () => {
+    const fetchSpy = mockFetchOnce({ ok: false, status: 401, body: { message: 'invalid key' } });
+
+    const outcome = await client.lookup(makeConfig({ retryCount: 3 }), 'SV001');
+
+    expect(outcome.kind).toBe('Terminal');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('respects a custom timeoutMs, aborting (Retryable) sooner than the 15s default (2026-09-18)', async () => {
+    jest.spyOn(globalThis, 'fetch').mockImplementationOnce(
+      (_url, init) =>
+        new Promise((_resolve, reject) => {
+          (init as RequestInit).signal?.addEventListener('abort', () =>
+            reject(new Error('The operation was aborted')),
+          );
+        }),
+    );
+
+    const outcome = await client.lookup(makeConfig({ timeoutMs: 50 }), 'SV001');
+
+    expect(outcome.kind).toBe('Retryable');
+  }, 5_000);
+
   it('builds a GET request with the template substituted into query params, no body', async () => {
     const fetchSpy = mockFetchOnce({
       ok: true,

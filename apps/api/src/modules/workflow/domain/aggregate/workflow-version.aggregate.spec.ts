@@ -16,7 +16,6 @@ function sampleConfig(): WorkflowConfig {
       methods: ['MANUAL_LOOKUP'],
       lookupKeyField: 'studentCode',
     },
-    eligibility: { mode: 'NONE' },
     aiProcessing: { enabled: false, steps: [] },
     output: {
       photoKindCode: 'STUDENT_CARD',

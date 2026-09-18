@@ -12,13 +12,6 @@ export interface FlyingThumbnailProps {
   startRect: RectBounds | null;
   targetRect: RectBounds | null;
   onAnimationEnd?: () => void;
-  /**
-   * Mirror the flying still horizontally, same source of truth as the
-   * capture view's `CameraPreview`/`mirrored` (product decision 2026-09-05):
-   * the animation flies out of a mirrored preview, so the frame it carries
-   * must match, display-only — the underlying file is untouched.
-   */
-  mirrored?: boolean;
 }
 
 export const FlyingThumbnail: React.FC<FlyingThumbnailProps> = ({
@@ -26,7 +19,6 @@ export const FlyingThumbnail: React.FC<FlyingThumbnailProps> = ({
   startRect,
   targetRect,
   onAnimationEnd,
-  mirrored = false,
 }) => {
   const [style, setStyle] = useState<React.CSSProperties>({});
   const [visible, setVisible] = useState(false);
@@ -52,7 +44,7 @@ export const FlyingThumbnail: React.FC<FlyingThumbnailProps> = ({
       boxShadow: '0 20px 25px -5px rgba(34, 197, 94, 0.4), 0 8px 10px -6px rgba(34, 197, 94, 0.2)',
       zIndex: 9999,
       pointerEvents: 'none',
-      transform: `translate(0, 0) scale(1)${mirrored ? ' scaleX(-1)' : ''}`,
+      transform: `translate(0, 0) scale(1)`,
       opacity: 1,
       transition: 'all 550ms cubic-bezier(0.16, 1, 0.3, 1)',
     };
@@ -70,7 +62,7 @@ export const FlyingThumbnail: React.FC<FlyingThumbnailProps> = ({
 
       setStyle({
         ...initialStyle,
-        transform: `translate(${targetX}px, ${targetY}px) scale(${finalScale})${mirrored ? ' scaleX(-1)' : ''}`,
+        transform: `translate(${targetX}px, ${targetY}px) scale(${finalScale})`,
         opacity: 0.15,
         borderRadius: '12px',
         border: '2px solid #22c55e',
@@ -86,7 +78,7 @@ export const FlyingThumbnail: React.FC<FlyingThumbnailProps> = ({
       cancelAnimationFrame(animFrame);
       clearTimeout(timer);
     };
-  }, [imageSrc, startRect?.x, startRect?.y, targetRect?.x, targetRect?.y, mirrored]);
+  }, [imageSrc, startRect?.x, startRect?.y, targetRect?.x, targetRect?.y]);
 
   if (!visible || !imageSrc) return null;
 

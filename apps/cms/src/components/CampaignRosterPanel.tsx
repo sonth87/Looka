@@ -31,9 +31,11 @@ const IMPORT_STATUS_LABEL: Record<CampaignSubjectImport['status'], string> = {
 
 /**
  * "Danh sách roster" tab (plan item 15, 2026-09-17) — import Excel roster
- * for `eligibility.mode = ROSTER`/`ROSTER_AND_API` (the other half of the
- * same ask is the "call API" path, configured inline per-workflow in
- * `WorkflowConfigEditor.tsx`'s `EligibilityApiFields`). The
+ * for `eligibilityConfig.mode = ROSTER`/`ROSTER_AND_API` (the other half of
+ * the same ask is the "call API" path, configured inline per-campaign in
+ * `EligibilityConfigEditor.tsx`'s `EligibilityApiFields`, wired into
+ * `CampaignForm.tsx` — moved there from the workflow screen 2026-09-18, see
+ * `apps/cms/src/api.ts`'s `EligibilityConfig` section header comment). The
  * backend (`CampaignSubjectController`) has existed since P3 (2026-09-14);
  * this is its first CMS screen. Deliberately separate from the "Sinh viên"
  * tab (`CampaignStudentsPanel`, captured sessions) — this is the EXPECTED

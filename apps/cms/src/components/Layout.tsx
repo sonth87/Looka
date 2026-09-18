@@ -85,11 +85,14 @@ export function Layout({ children }: { children: ReactNode }) {
             Cấu hình
           </NavLink>
           {/*
-            "Workflow" (Phase 5, cms-8-screens-api-plan.md §2.2/P2) — điều
-            kiện tiếp nhận (eligibility) + phương thức định danh cho một
-            campaign, versioned độc lập với campaign. "Phương thức định danh"
-            là danh mục dùng chung mà workflow tham chiếu tới, nên đặt cạnh
-            nhau cùng nhóm cấu hình ở trên.
+            "Workflow" (Phase 5, cms-8-screens-api-plan.md §2.2/P2) — góc
+            chụp, chuẩn ảnh thẻ và phương thức định danh cho một campaign,
+            versioned độc lập với campaign. "Điều kiện tiếp nhận"
+            (eligibility) moved off this screen 2026-09-18, now configured
+            per-campaign (`CampaignForm.tsx`) — see `apps/cms/src/api.ts`'s
+            `EligibilityConfig` section header comment. "Phương thức định
+            danh" là danh mục dùng chung mà workflow tham chiếu tới, nên đặt
+            cạnh nhau cùng nhóm cấu hình ở trên.
           */}
           <NavLink to="/workflows" className={navItemClass}>
             Workflow

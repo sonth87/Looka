@@ -1,4 +1,5 @@
 import {
+  ApiResponseArrayDecorator,
   ApiResponseDecorator,
   ApiResponsePaginatedDecorator,
 } from '@app/shared/http/api-response.decorator';
@@ -18,6 +19,7 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Request } from 'express';
 import { CampaignMemberDao } from '../dao';
 import { DecideCampaignMemberDto } from '../dto/decide-campaign-member.dto';
+import { GrantCampaignMembersDto } from '../dto/grant-campaign-members.dto';
 import { ListCampaignMembersQueryDto } from '../dto/list-campaign-members-query.dto';
 import { AdminRoleGuard } from '../guards/admin-role.guard';
 import { CampaignMemberService } from '../services/campaign-member.service';
@@ -80,5 +82,26 @@ export class CampaignMemberController {
       dto,
       req.user!.id,
     );
+  }
+
+  /**
+   * `POST /v1/campaigns/:id/members/grant` (2026-09-18) — bulk one-step
+   * "cấp quyền" from the CMS's campaign-list page, replacing the deleted
+   * `campaign_kiosk_assignments` auto-approve shortcut. See
+   * `CampaignMemberService.grant()`'s own doc comment.
+   */
+  @Post(':id/members/grant')
+  @UseGuards(SsoAuthGuard, AdminRoleGuard)
+  @ApiOperation({
+    summary:
+      'Grant APPROVED campaign membership to a batch of users in one call',
+  })
+  @ApiResponseArrayDecorator(CampaignMemberDao)
+  grantMembers(
+    @Param('id') campaignId: string,
+    @Body() dto: GrantCampaignMembersDto,
+    @Req() req: Request,
+  ): Promise<CampaignMemberDao[]> {
+    return this.campaignMemberService.grant(campaignId, dto, req.user!.id);
   }
 }
