@@ -366,6 +366,75 @@ export async function fetchRecentCaptures(
   }
 }
 
+/** One `campaign_subjects` roster row, as `GET /v1/campaigns/:id/subjects/lookup` returns it — mirrors the fields `lookupCampaignSubject`'s caller actually reads; see `CampaignSubjectLookupDao`/`CampaignSubjectDao` server-side for the full shape. */
+export interface CampaignSubjectLookupSubject {
+  subjectCode: string;
+  fullName: string;
+  className?: string | null;
+  faculty?: string | null;
+  major?: string | null;
+}
+
+/**
+ * `GET /v1/campaigns/:id/subjects/lookup?key=`'s response — mirrors
+ * `CampaignSubjectLookupDao` server-side. `eligible` is the one field a
+ * caller actually needs to gate on: a `ROSTER`/`ROSTER_AND_API` match with a
+ * failed rule still returns `subject` populated but `eligible: false` — see
+ * that DAO's own doc comment.
+ */
+export interface CampaignSubjectLookupResult {
+  eligible: boolean;
+  reason?: string;
+  subject?: CampaignSubjectLookupSubject | null;
+  /** Raw record from the external student-info API, when the campaign's `eligibilityConfig.mode` is EXTERNAL_API/ROSTER_AND_API and a match was found — arbitrary field names, the caller's own job to read the ones it needs (see `lookupStudent.ts`'s own mapping). */
+  externalRecord?: Record<string, unknown> | null;
+}
+
+/**
+ * The kiosk's real, campaign-scoped "is this student eligible to be
+ * captured" check (2026-09-18 — `packages/ui`'s `lookupStudent()` used to be
+ * a Phase-1 simulated stub with no real backend call at all; this is what it
+ * now calls through `faceAPI.lookupCampaignSubject`). Distinct from
+ * `lookupCccdByIdentityNumber` above: that one checks a single,
+ * campaign-agnostic external roster FILE for a CCCD scan; this one calls the
+ * REAL device-credential-gated API endpoint, scoped to one campaign, and
+ * understands ROSTER/EXTERNAL_API/ROSTER_AND_API modes — whatever the
+ * campaign's own `eligibilityConfig` says (see `CampaignSubjectService.
+ * lookupSubject` server-side).
+ *
+ * Throws on any failure (no device identity, network error, non-2xx) —
+ * unlike `fetchCampaignConfig`'s offline-first "return null" contract, a
+ * failed eligibility check must not silently look like "not eligible" to the
+ * operator; the renderer's own caller (`studentLookup.ts`) is what decides
+ * how to surface an error.
+ */
+export async function lookupCampaignSubject(
+  campaignId: string,
+  key: string,
+  fetchImpl: typeof fetch = globalThis.fetch,
+): Promise<CampaignSubjectLookupResult> {
+  const creds = getDeviceCredentials();
+  if (!creds || !creds.apiBaseUrl) {
+    throw new Error('No device credentials/apiBaseUrl configured');
+  }
+
+  const res = await fetchImpl(
+    `${creds.apiBaseUrl}/v1/campaigns/${encodeURIComponent(campaignId)}/subjects/lookup?key=${encodeURIComponent(key)}`,
+    {
+      headers: {
+        'x-device-id': creds.deviceId,
+        'x-device-secret': creds.deviceSecret,
+      },
+    },
+  );
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`subjects/lookup ${res.status}: ${text.slice(0, 300)}`);
+  }
+  const envelope = (await res.json()) as { data: CampaignSubjectLookupResult };
+  return envelope.data;
+}
+
 let cached: CampaignConfig | null = null;
 let cachedAt = 0;
 const CACHE_TTL_MS = 15 * 60 * 1000;

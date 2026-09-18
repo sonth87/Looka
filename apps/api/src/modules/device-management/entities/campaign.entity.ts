@@ -2,6 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { CameraRole, CaptureStep, CaptureTriggerMode } from '@face/core';
 import { Column, Entity, OneToMany } from 'typeorm';
 import { BaseEntity } from '../../../shared/database/base.entity';
+import type { EligibilityConfig } from '../domain/eligibility-config.schema';
 import { Device } from './device.entity';
 
 export enum CampaignPurpose {
@@ -266,6 +267,21 @@ export class Campaign extends BaseEntity {
   @Column('varchar', { length: 255, nullable: true })
   @ApiPropertyOptional({ description: 'Địa điểm đợt chụp' })
   location?: string | null;
+
+  /**
+   * "Điều kiện tiếp nhận" (eligibility) — 2026-09-18, moved here from
+   * `workflow_versions.config.eligibility` (product feedback: workflow is
+   * reused across many campaigns, but eligibility is inherently specific
+   * to ONE campaign's own roster/integration). See
+   * `device-management/domain/eligibility-config.schema.ts` for the shape
+   * (`{mode, api?, rules?}`) and its own doc comment for the full history.
+   * `NOT NULL DEFAULT '{"mode":"NONE"}'` at the DB level — a brand new
+   * campaign with nothing configured yet blocks nobody, matching the
+   * pre-existing `NONE` mode's own meaning ("ai cũng chụp được").
+   */
+  @Column('jsonb', { name: 'eligibility_config' })
+  @ApiProperty({ description: 'Điều kiện tiếp nhận (mode/api/rules)' })
+  eligibilityConfig: EligibilityConfig;
 
   @OneToMany(() => Device, (device) => device.campaign)
   devices?: Device[];

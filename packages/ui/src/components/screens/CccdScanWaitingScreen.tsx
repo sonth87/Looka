@@ -57,6 +57,13 @@ export interface CccdScanWaitingScreenProps {
    * cannot (yet) populate the right-column `StudentProfileCard` the way a
    * CCCD scan can; only the scan path has the matched record available
    * locally before forwarding it up (see `handleScanResult` below).
+   *
+   * 2026-09-18: also forwarded to `ScanMonitorCorner` as `onStudentCodeScan`
+   * — a bare (non-CCCD) QR, like a student ID card's, submits through this
+   * exact same callback instead of only the visible text field, so both
+   * entry methods for a student code end up identical downstream. See
+   * `ScanMonitorCorner`'s own `onStudentCodeScan` doc comment for why a
+   * SEPARATE detection path was needed rather than reusing the CCCD one.
    */
   onManualSubmit?: (code: string) => void;
   /**
@@ -148,7 +155,18 @@ export function CccdScanWaitingScreen({
                   {error}
                 </div>
               )}
-              <ScanMonitorCorner paused={submitting} onScanResult={handleScanResult} />
+              <ScanMonitorCorner
+                paused={submitting}
+                onScanResult={handleScanResult}
+                // 2026-09-18 — a bare (non-CCCD) QR, e.g. a student ID
+                // card, reuses the exact same handler a manually-typed
+                // submission already calls (`onManualSubmit`'s own doc
+                // comment explains why that's already wired for the
+                // campaign+login kiosk path) — see `ScanMonitorCorner`'s
+                // own `onStudentCodeScan` doc comment for the detection
+                // mechanism itself.
+                onStudentCodeScan={onManualSubmit}
+              />
             </CardContent>
           </Card>
 
@@ -331,25 +349,60 @@ export function extractCitizenIdFromQrPayload(raw: string): string | null {
  */
 function recoverCitizenIdFromSettledBuffer(raw: string): string | null {
   const matches = Array.from(raw.matchAll(/(\d{12})\|\d{0,9}\|/g));
-  if (matches.length > 0) return matches[matches.length - 1][1];
+  return matches.length > 0 ? matches[matches.length - 1][1] : null;
+}
 
-  // Fallback of the fallback (2026-09-15, round 6 field report, explicit
-  // product call: "lấy toàn bộ thông tin số đầu tiên khi quét ra là được" —
-  // prefer a successful read over strict field-boundary validation). A real
-  // failure's buffer was 22 characters of PURE digits with no "|" ANYWHERE
-  // — the card was pulled away before the scanner ever reached the first
-  // field separator, so the check above can never match no matter how much
-  // more validation it has. Decoding that buffer showed the true 12-digit
-  // id sitting at the very END (this scanner's continuous retransmission
-  // means a later position is more likely to be a complete, undamaged
-  // copy than an earlier one — same reasoning the match-picking above
-  // already uses), confirmed correct against the operator's own report of
-  // what the card actually says. Only the trailing 12 characters are
-  // tried, and only if they are purely digits — this still refuses a
-  // buffer that never produced a clean 12-digit run anywhere, it just no
-  // longer requires seeing a field separator to trust it.
+/**
+ * 2026-09-18 field report, confirmed product decision: a bare 12-digit run
+ * with NO pipe anywhere is NOT trusted as a CCCD anymore — a real scan
+ * ("006308004439", decoded from this kiosk's own `[ScanDiag]` log) turned
+ * out to be a genuine CCCD *value* the campaign's own `eligibilityConfig`
+ * (`identity_number` filter) resolves correctly, but the old routing sent
+ * it to `lookupCccdByIdentityNumber` instead — the campaign-AGNOSTIC
+ * external roster file, which naturally has no idea about it. This used to
+ * be `recoverCitizenIdFromSettledBuffer`'s own "fallback of the fallback"
+ * (2026-09-15, round 6 field report: "lấy toàn bộ thông tin số đầu tiên
+ * khi quét ra là được" — prefer a successful read over strict validation),
+ * kept here verbatim in spirit but now feeding `onStudentCodeScan`'s
+ * campaign lookup instead of the CCCD path — see `ScanMonitorCorner`'s own
+ * `onStudentCodeScan` doc comment for why ANY undelimited code, whatever
+ * its length, belongs to the campaign now, not the old roster file.
+ * `undefined` unless a real, un-corrupted digit run is at the very end —
+ * see `BARE_CODE_REPEAT_PATTERN`'s own doc comment for why a LATER position
+ * is trusted over an earlier one in a settled buffer.
+ */
+export function recoverBareDigitsFromSettledBuffer(raw: string): string | null {
   const tail = raw.slice(-12);
-  return /^\d{12}$/.test(tail) ? tail : null;
+  return /^\d{6,15}$/.test(tail) ? tail : null;
+}
+
+/**
+ * A student ID card's QR has no delimiter at all — just a bare run of
+ * digits (confirmed 2026-09-18: "1777020640", 10 digits) — so there is no
+ * `|` to anchor the CCCD checks above on. This scanner's own continuous
+ * retransmission (see `COMPLETE_CCCD_FIELD_PATTERN`'s doc comment) is what
+ * makes that safe to detect anyway: once the SAME digit run appears twice
+ * in a row (`\1` backreference), that is unambiguous proof of one complete,
+ * undamaged transmission — no guessing at a fixed length or a "last 12
+ * characters" window required.
+ *
+ * `{6,15}` is a sanity floor/ceiling only, not a CCCD-avoidance bound —
+ * 2026-09-18: ANY undelimited code, 12-digit-shaped or not, now routes to
+ * the campaign lookup (see this file's own top doc comment on the
+ * 2026-09-18 routing decision), so there is no longer a reason to exclude
+ * 12 specifically. The floor rules out an accidental short match (e.g. "11"
+ * repeating inside noise); the ceiling is generous enough for any real
+ * student code or CCCD value. Anchored to `^` for the same reason
+ * `COMPLETE_CCCD_FIELD_PATTERN` is: a buffer that has already picked up
+ * stray leading noise some other way should fail to match rather than risk
+ * finding a coincidental repeat further in and accepting a wrong code with
+ * false confidence.
+ */
+const BARE_CODE_REPEAT_PATTERN = /^(\d{6,15})\1/;
+
+export function extractRepeatingBareCode(raw: string): string | null {
+  const match = BARE_CODE_REPEAT_PATTERN.exec(raw);
+  return match ? match[1] : null;
 }
 
 /**
@@ -399,13 +452,46 @@ function recoverCitizenIdFromSettledBuffer(raw: string): string | null {
 function ScanMonitorCorner({
   paused,
   onScanResult,
+  onStudentCodeScan,
 }: {
   paused: boolean;
   onScanResult: (result: CccdRosterLookupResult) => void;
+  /**
+   * 2026-09-18 field report: scanning a student ID card's QR (a bare,
+   * un-delimited code — e.g. "1777020640", NOT the pipe-delimited CCCD
+   * format `extractCitizenIdFromQrPayload` expects) through this same
+   * hidden input produced a DIFFERENT wrong 12-digit value on every
+   * attempt ("391777020640", then "401777020640" for the identical card).
+   * Root cause, confirmed from this kiosk's own `[ScanDiag]` log: this
+   * scanner is continuous-read (see `COMPLETE_CCCD_FIELD_PATTERN`'s own
+   * doc comment) — with no pipe to anchor on, the buffer just kept
+   * accumulating repeated copies of the same 10-digit code
+   * ("17770206401777020640", 20 chars = two repeats), and
+   * `recoverCitizenIdFromSettledBuffer`'s `raw.slice(-12)` last-resort
+   * fallback grabbed whatever 12-character window happened to straddle the
+   * repeat seam — different each time depending on exactly how many
+   * repeats had landed before Enter/debounce fired. That fallback is
+   * correct for its OWN original case (a genuine CCCD cut short mid-read,
+   * never repeating) but actively wrong for a short code that keeps
+   * repeating — no 12-character window of a 10-digit-repeated buffer is
+   * ever the "real" value.
+   *
+   * Fix: a bare (no-pipe) run of digits that repeats immediately
+   * (`BARE_CODE_REPEAT_PATTERN` below) is unambiguous proof of the true,
+   * complete, single code — same anchoring principle
+   * `COMPLETE_CCCD_FIELD_PATTERN` already uses for CCCD (stop at the
+   * first provably-complete transmission, never guess from a partial or
+   * multi-repeat buffer), just without a delimiter to anchor on. Optional:
+   * `undefined` (the legacy per-device-secret path, `StudentIdEntryScreen`,
+   * has no equivalent bridge) makes this whole detection path inert —
+   * see `checkForCompleteMatch`'s own use of it.
+   */
+  onStudentCodeScan?: (code: string) => void;
 }) {
   const [phase, setPhase] = useState<ScanPhase>('idle');
   const [statusText, setStatusText] = useState<string | null>(null);
-  const [stableCitizenId, setStableCitizenId] = useState<string | null>(null);
+  /** `kind: 'cccd'` goes through the existing local `faceAPI.lookupCccdByIdentityNumber` roster check; `kind: 'student'` (2026-09-18, see `onStudentCodeScan`'s own doc comment) has no local check at all — it hands straight to `onStudentCodeScan`, same as a manually-typed submission, and lets the caller's own lookup (a real API call, not a local file) own the loading state via `paused`. */
+  const [stableCode, setStableCode] = useState<{ kind: 'cccd' | 'student'; value: string } | null>(null);
 
   const scannerInputRef = useRef<HTMLInputElement>(null);
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -485,31 +571,65 @@ function ScanMonitorCorner({
     input.value = '';
     if (!raw) return;
 
-    const citizenId = extractCitizenIdFromQrPayload(raw) ?? recoverCitizenIdFromSettledBuffer(raw);
-    if (!citizenId) {
-      // TEMP DIAGNOSTIC (2026-09-15) — remove once the scan-failure root
-      // cause is confirmed. Reveals exactly what the hidden input actually
-      // received (length + char codes of the first 20 chars) so a
-      // stray/invisible character or an unexpected split can be told apart
-      // from "the scanner just isn't reaching this input at all". A SINGLE
-      // string argument, not a message + object — Electron's
-      // `console-message` forwarding to the main process only carries a
-      // renderer console call's first string argument (see the identical
-      // note on `openFrameStreams`'s own diagnostic log in
-      // FaceCaptureApp.tsx), so a second object argument here would just
-      // show up as "[object Object]" instead of anything useful.
-      console.warn(
-        `[ScanMonitorCorner] scan parse failed ${JSON.stringify({
-          length: raw.length,
-          first20CharCodes: Array.from(raw.slice(0, 20)).map((c) => c.charCodeAt(0)),
-          firstFieldRaw: raw.split('|')[0] ?? '',
-        })}`
-      );
-      setStatusText('Đọc thẻ không thành công, vui lòng quét lại.');
+    const citizenId = extractCitizenIdFromQrPayload(raw);
+    if (citizenId) {
+      setStableCode({ kind: 'cccd', value: citizenId });
+      setPhase('stable');
       return;
     }
-    setStableCitizenId(citizenId);
-    setPhase('stable');
+
+    // Tried BEFORE `recoverCitizenIdFromSettledBuffer`'s own last-resort
+    // `slice(-12)` guess — 2026-09-18 field report: that guess is unsafe for
+    // a bare, un-delimited code that keeps repeating (see
+    // `BARE_CODE_REPEAT_PATTERN`'s own doc comment for the full mechanism).
+    // A confirmed repeat is strictly better evidence than an arbitrary tail
+    // window, so it always wins when both would otherwise apply.
+    const studentCode = onStudentCodeScan ? extractRepeatingBareCode(raw) : null;
+    if (studentCode) {
+      setStableCode({ kind: 'student', value: studentCode });
+      setPhase('stable');
+      return;
+    }
+
+    const recoveredCitizenId = recoverCitizenIdFromSettledBuffer(raw);
+    if (recoveredCitizenId) {
+      setStableCode({ kind: 'cccd', value: recoveredCitizenId });
+      setPhase('stable');
+      return;
+    }
+
+    // Last resort — see `recoverBareDigitsFromSettledBuffer`'s own doc
+    // comment for the 2026-09-18 routing decision this implements: a bare
+    // digit run with no pipe ANYWHERE in the buffer is no longer assumed to
+    // be a CCCD just because it happens to be 12 digits long. It goes to
+    // the campaign's own lookup instead, same as every other undelimited
+    // code shape above.
+    const recoveredBareCode = onStudentCodeScan ? recoverBareDigitsFromSettledBuffer(raw) : null;
+    if (recoveredBareCode) {
+      setStableCode({ kind: 'student', value: recoveredBareCode });
+      setPhase('stable');
+      return;
+    }
+
+    // TEMP DIAGNOSTIC (2026-09-15) — remove once the scan-failure root
+    // cause is confirmed. Reveals exactly what the hidden input actually
+    // received (length + char codes of the first 20 chars) so a
+    // stray/invisible character or an unexpected split can be told apart
+    // from "the scanner just isn't reaching this input at all". A SINGLE
+    // string argument, not a message + object — Electron's
+    // `console-message` forwarding to the main process only carries a
+    // renderer console call's first string argument (see the identical
+    // note on `openFrameStreams`'s own diagnostic log in
+    // FaceCaptureApp.tsx), so a second object argument here would just
+    // show up as "[object Object]" instead of anything useful.
+    console.warn(
+      `[ScanMonitorCorner] scan parse failed ${JSON.stringify({
+        length: raw.length,
+        first20CharCodes: Array.from(raw.slice(0, 20)).map((c) => c.charCodeAt(0)),
+        firstFieldRaw: raw.split('|')[0] ?? '',
+      })}`
+    );
+    setStatusText('Đọc thẻ không thành công, vui lòng quét lại.');
   }
 
   /**
@@ -589,9 +709,31 @@ function ScanMonitorCorner({
         debounceTimerRef.current = null;
       }
       input.value = '';
-      setStableCitizenId(match[1]);
+      setStableCode({ kind: 'cccd', value: match[1] });
       setPhase('stable');
       return true;
+    }
+
+    // Same "stop at the first provably-complete transmission" principle as
+    // the CCCD branch above, for a bare (no-pipe) code instead — see
+    // `BARE_CODE_REPEAT_PATTERN`'s own doc comment. Checked instantly, not
+    // only in the debounce fallback, for the same reason: waiting for
+    // silence risks a THIRD repeat piling onto the buffer before it ever
+    // goes quiet (this scanner's retransmission gaps run well under
+    // `SCAN_DEBOUNCE_MS`).
+    if (onStudentCodeScan) {
+      const studentCode = extractRepeatingBareCode(input.value);
+      if (studentCode) {
+        diagLog('match-student-code', { valueLen: input.value.length });
+        if (debounceTimerRef.current !== null) {
+          clearTimeout(debounceTimerRef.current);
+          debounceTimerRef.current = null;
+        }
+        input.value = '';
+        setStableCode({ kind: 'student', value: studentCode });
+        setPhase('stable');
+        return true;
+      }
     }
 
     // Fallback path — see this function's own doc comment above. Once
@@ -669,8 +811,38 @@ function ScanMonitorCorner({
   // OCR path already made — no per-read stability streak needed here (a
   // scanner decode is an exact read, not a noisy repeated guess).
   useEffect(() => {
-    if (phase !== 'stable' || !stableCitizenId) return;
-    const citizenId = stableCitizenId;
+    if (phase !== 'stable' || !stableCode) return;
+    const code = stableCode;
+
+    // Clears the buffer once a retransmitting card's card is pulled away
+    // mid-cycle — see the CCCD branch's own long-standing comment on this
+    // exact race, below. Shared by both branches (2026-09-18) since the
+    // scanner's retransmission behavior is identical either way.
+    function clearLeftoverBuffer() {
+      if (scannerInputRef.current) scannerInputRef.current.value = '';
+    }
+
+    if (code.kind === 'student') {
+      // 2026-09-18 — no local check to run here at all (unlike CCCD, which
+      // checks the campaign-agnostic roster file via `faceAPI` before
+      // deciding found/not-found): `onStudentCodeScan` hands the code
+      // straight to the SAME handler a manually-typed submission already
+      // uses, which does its own real (campaign-scoped) API lookup and owns
+      // its own loading/error state via `paused` — see `onStudentCodeScan`'s
+      // own doc comment. This corner's job ends at "reliably extracted a
+      // complete code," so it returns to idle right after handing off
+      // rather than tracking a found/not-found phase it has no way to know.
+      const timer = setTimeout(() => {
+        onStudentCodeScan?.(code.value);
+        setStableCode(null);
+        setStatusText(null);
+        setPhase('idle');
+        clearLeftoverBuffer();
+      }, STABLE_DISPLAY_MS);
+      return () => clearTimeout(timer);
+    }
+
+    const citizenId = code.value;
     const timer = setTimeout(() => {
       setPhase('checking');
       const faceAPI = (window as any).faceAPI;
@@ -688,7 +860,7 @@ function ScanMonitorCorner({
           onScanResult(result);
           setPhase(result.found ? 'found' : 'not-found');
           setTimeout(() => {
-            setStableCitizenId(null);
+            setStableCode(null);
             setStatusText(null);
             setPhase('idle');
             // 2026-09-15 round 4: this scanner keeps re-transmitting the
@@ -702,7 +874,7 @@ function ScanMonitorCorner({
             // that neither of the previous two fixes addressed, since both
             // were about a single scan's own internal handling, not
             // leftovers crossing into the next one.
-            if (scannerInputRef.current) scannerInputRef.current.value = '';
+            clearLeftoverBuffer();
           }, SUCCESS_DISPLAY_MS);
         })
         .catch((err: unknown) => {
@@ -712,10 +884,10 @@ function ScanMonitorCorner({
     }, STABLE_DISPLAY_MS);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase, stableCitizenId]);
+  }, [phase, stableCode]);
 
   function retryAfterCheckError() {
-    setStableCitizenId(null);
+    setStableCode(null);
     setStatusText(null);
     setPhase('idle');
     if (scannerInputRef.current) scannerInputRef.current.value = '';
@@ -745,7 +917,7 @@ function ScanMonitorCorner({
       />
       <span className="text-xs text-kiosk-text-muted">Trạng thái đầu đọc:</span>
       {phase === 'idle' && !statusText && <Badge variant="neutral">Sẵn sàng</Badge>}
-      {phase === 'stable' && stableCitizenId && <Badge variant="info">{stableCitizenId}</Badge>}
+      {phase === 'stable' && stableCode && <Badge variant="info">{stableCode.value}</Badge>}
       {phase === 'checking' && <Badge variant="neutral">Đang kiểm tra...</Badge>}
       {phase === 'found' && <Badge variant="success">Đã tìm thấy ✓</Badge>}
       {phase === 'not-found' && <Badge variant="warning">Không có trong danh sách</Badge>}

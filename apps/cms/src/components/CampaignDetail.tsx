@@ -19,7 +19,7 @@ const TABS: { key: Tab; label: string }[] = [
   // (campaign_subjects, imported from Excel), distinct from "Sinh viên"
   // above (who actually got captured) — see this file's own doc comment.
   { key: 'roster', label: 'Roster' },
-  { key: 'assignments', label: 'Thiết bị & Nhân sự' },
+  { key: 'assignments', label: 'Thiết bị' },
   { key: 'settings', label: 'Cài đặt' },
 ];
 
@@ -66,18 +66,24 @@ const TABS: { key: Tab; label: string }[] = [
  * `listDevices`/the `devices` list itself stays: `SessionsPanel`'s own
  * device filter dropdown (Phiên chụp tab) still reads it directly.
  *
- * 2026-09-14 UPDATE — both removals above are partially reversed by new
- * product direction: an admin now needs to assign a staff user to a
- * specific kiosk *within* a campaign (reusing the existing, already-live
- * `campaign_kiosk_assignments` "1 person ↔ 1 kiosk" mechanism, not the old
- * `campaign_members` approval-queue UI) — see the new "Thiết bị & Nhân sự"
- * tab (`CampaignAssignmentsPanel`) below. This is deliberately a fresh,
- * narrower component (assign/unassign only, driven by
- * `GET /v1/campaigns/:id/kiosks`), not a restoration of the deleted
- * `DevicesPanel`/`MembersPanel` — see `CampaignAssignmentsPanel.tsx`'s own
- * doc comment for why. Assigning a kiosk auto-approves the assignee's
- * `campaign_members` row as a side effect server-side, so there is still no
- * separate "add member" step in the CMS.
+ * 2026-09-14 UPDATE — both removals above were partially reversed: an admin
+ * could assign a staff user to a specific kiosk *within* a campaign
+ * (`campaign_kiosk_assignments`, "1 person ↔ 1 kiosk"), auto-approving the
+ * assignee's `campaign_members` row as a side effect, via a new "Thiết bị &
+ * Nhân sự" tab (`CampaignAssignmentsPanel`).
+ *
+ * 2026-09-18 UPDATE — that pairing mechanism is gone: campaign access no
+ * longer runs through a device at all (a kiosk self-enrolls once and any
+ * approved member can use any device already registered under a campaign —
+ * a session's own `device_id`/`operator_user_id` already come from the
+ * kiosk's device credentials and its logged-in operator, independent of any
+ * pairing). The "gán = tự duyệt" convenience is now
+ * `CampaignMemberService.grant()` (`POST /v1/campaigns/:id/members/grant`),
+ * surfaced as "Cấp quyền" on `CampaignList.tsx` itself — no detour through
+ * this detail page needed. The tab here (`CampaignAssignmentsPanel`,
+ * renamed "Thiết bị") is now a plain read-only device roster, driven by the
+ * same `GET /v1/campaigns/:id/devices` `SessionsPanel`'s own device filter
+ * already used — see `CampaignAssignmentsPanel.tsx`'s own doc comment.
  * Settings editing stays on its own page (`EditCampaignPage`,
  * `/campaigns/:id/edit`) — the "Cài đặt" tab here is a read-only summary
  * plus a link to it, rather than embedding the full 3-section

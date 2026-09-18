@@ -50,6 +50,8 @@ export class TestEligibilityLookupHandler implements ICommandHandler<
           ? encryptSecret(dto.credential)
           : undefined,
         keyResponsePath: dto.keyResponsePath,
+        retryCount: dto.retryCount,
+        timeoutMs: dto.timeoutMs,
       },
       dto.key,
     );

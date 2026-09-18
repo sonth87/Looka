@@ -28,14 +28,22 @@ export interface FrameTileProps {
   theme?: 'dark' | 'light';
   className?: string;
   /**
-   * Whether this tile is flipped horizontally to match a mirrored capture.
-   * Default true: every tile here is a live preview for self-positioning
-   * during simultaneous capture, same as the main `CameraPreview` (product
-   * decision 2026-09-05 — mirror the preview). The saved still (shown once
-   * COMPLETED) is display-mirrored too, so the frozen thumbnail matches the
-   * live preview the subject just posed in — the underlying file stays the
-   * raw, unmirrored sensor image (BrowserCameraService.mirrorStills is never
-   * touched by this).
+   * Whether the LIVE `<video>` preview is flipped horizontally to match a
+   * mirrored capture. Default true: every tile here is a live preview for
+   * self-positioning during simultaneous capture, same as the main
+   * `CameraPreview` (product decision 2026-09-05 — mirror the preview).
+   *
+   * Only affects the live `<video>` below, NOT the COMPLETED-thumbnail
+   * `<img>` — 2026-09-18 field bug fix: this prop used to also flip the
+   * saved still, on the stale assumption that the underlying file was
+   * always the raw, unmirrored sensor image. Since product decision
+   * 2026-09-17 (`BrowserCameraService.setMirrorStills(true)`, extended to
+   * every camera role's `snapshotVideoFrame()` still and to CB Help's own
+   * `centerPreviewDataUrl` heartbeat — both go through
+   * `captureBase64Snapshot()`), the saved/pushed still is ALREADY
+   * pixel-mirrored — re-flipping it here silently flipped it right back to
+   * looking unmirrored, disagreeing with the live preview the subject just
+   * posed in.
    */
   mirrored?: boolean;
   /**
@@ -230,17 +238,14 @@ export const FrameTile: React.FC<FrameTileProps> = ({
           <img
             src={imagePath}
             alt={label}
-            className={cn('absolute inset-0 w-full h-full object-cover', mirrored && 'scale-x-[-1]')}
+            className="absolute inset-0 w-full h-full object-cover"
           />
         ) : (
           <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-1 bg-slate-950/80">
             <img
               src={imagePath}
               alt={label}
-              className={cn(
-                'max-h-[70%] max-w-[85%] rounded-lg object-cover shadow-lg',
-                mirrored && 'scale-x-[-1]'
-              )}
+              className="max-h-[70%] max-w-[85%] rounded-lg object-cover shadow-lg"
             />
             <span className="px-2 py-0.5 rounded-full bg-emerald-500 text-white text-[10px] font-bold">
               Đã chụp

@@ -3,14 +3,20 @@ import { cn } from '../../lib/utils.js';
 
 /**
  * Single source of truth for "is the capture flow mirrored" (product
- * decision 2026-09-05). The capture views (DesktopCaptureView,
- * MobileCaptureView) pass this to `CameraPreview`'s own `mirrored` prop, and
- * every other on-screen rendering of a captured still in those views
- * (FrameTile, FlyingThumbnail, SessionReviewModal, the freeze-frame `<img>`)
- * reuses this same constant rather than a second, independently-set flag —
- * see each of those components' own `mirrored` prop doc comment. Only the
- * live/still preview is ever mirrored; saved/exported/uploaded bytes stay
- * the raw, unmirrored sensor image (BrowserCameraService.mirrorStills).
+ * decision 2026-09-05, live preview only). The capture views
+ * (DesktopCaptureView, MobileCaptureView) pass this to `CameraPreview`'s own
+ * `mirrored` prop, for the LIVE `<video>` only.
+ *
+ * 2026-09-17 (extended 2026-09-18 to every camera role, not just CENTER —
+ * see `BrowserCameraService.mirrorStills`'s and
+ * `multiFrame.ts#snapshotVideoFrame`'s own doc comments): saved stills now
+ * ALSO come out pixel-mirrored, to match this same live preview. That means
+ * every already-saved still (FrameTile's COMPLETED thumbnail, the
+ * freeze-frame `<img>`, FlyingThumbnail) must render as-is — it must NOT
+ * also apply this constant as a second CSS flip, or it visibly flips back
+ * to looking unmirrored. This constant now belongs ONLY on a live `<video>`
+ * (or a live overlay drawn on top of one, e.g. FaceOverlay/GestureOverlay),
+ * never on an already-captured `<img>`.
  */
 export const CAPTURE_MIRRORED = true;
 
@@ -23,10 +29,11 @@ export interface CameraPreviewProps {
    * MobileCaptureView) pass `mirrored={true}` explicitly: product decision
    * 2026-09-05 is that the live preview should behave like a mirror for
    * self-positioning (raising your right hand appears on the screen's right
-   * side, as in a mirror), while the saved still stays the raw, unmirrored
-   * sensor image regardless (see BrowserCameraService.mirrorStills — never
-   * flipped by this). The component default stays false for any other
-   * consumer (e.g. KioskAttendanceScreen) that hasn't opted in.
+   * side, as in a mirror). This prop only ever affects THIS live `<video>` —
+   * see `CAPTURE_MIRRORED`'s own doc comment for how the saved still's own
+   * mirroring is now handled separately (baked into the file itself as of
+   * 2026-09-17/18, not a CSS flip). The component default stays false for
+   * any other consumer (e.g. KioskAttendanceScreen) that hasn't opted in.
    *
    * If you pass true, keep any face-tracking overlay drawn on top of this
    * preview (FaceOverlay, GestureOverlay, …) in sync by mirroring it too, or

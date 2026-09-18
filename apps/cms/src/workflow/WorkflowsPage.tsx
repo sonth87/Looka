@@ -32,7 +32,6 @@ const WORKFLOW_STATUS_LABEL: Record<WorkflowStatus, string> = {
 const DEFAULT_NEW_WORKFLOW_CONFIG: WorkflowConfig = {
   capture: { angles: [], clickMode: { default: 'MANUAL_SEQUENTIAL', allowed: ['MANUAL_SEQUENTIAL'] } },
   identification: { methods: ['MANUAL_LOOKUP'], lookupKeyField: 'studentCode' },
-  eligibility: { mode: 'NONE' },
   aiProcessing: { enabled: false, steps: [] },
   output: {
     photoKindCode: 'DEFAULT',
@@ -89,7 +88,7 @@ export function WorkflowsPage() {
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Quy trình nghiệp vụ (Workflow)</h1>
           <p className="text-sm text-gray-500 mt-0.5">
-            Cấu hình điều kiện tiếp nhận và phương thức định danh cho một campaign — xem thêm{' '}
+            Cấu hình góc chụp, chuẩn ảnh thẻ và phương thức định danh cho một campaign — xem thêm{' '}
             <Link to="/identification-methods" className="text-blue-600 hover:text-blue-800 underline">
               danh mục phương thức định danh
             </Link>

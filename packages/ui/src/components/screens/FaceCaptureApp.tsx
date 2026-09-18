@@ -1679,7 +1679,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     if (!frame || frame.role === 'CENTER') return false;
 
     const videoEl = frameVideoElsRef.current[stepId];
-    const dataUrl = videoEl ? snapshotVideoFrame(videoEl) : null;
+    const dataUrl = videoEl ? snapshotVideoFrame(videoEl, undefined, CAPTURE_MIRRORED) : null;
     if (!dataUrl) {
       // 2026-09-05 black-frame fix: `snapshotVideoFrame` now also returns
       // null for a near-black/blank frame (see its own doc comment), not
@@ -1830,23 +1830,25 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   };
 
   /**
-   * Handles a submit from `StudentIdEntryScreen` — the pre-session step
-   * (2026-09-07 product request). `lookupStudent()` is currently simulated
-   * (see that function's own doc comment); everything downstream of it is
-   * real (`handleLookupResult` above) and will not need to change once it
-   * calls a real API instead.
+   * Handles a submit from `StudentIdEntryScreen` (the legacy/`apps/web`
+   * path) — the pre-session step (2026-09-07 product request) — AND, since
+   * the 2026-09-14 Bước-4 redesign, from `CccdScanWaitingScreen`'s own
+   * manual "nhập mã sinh viên" field on the campaign+login kiosk path
+   * (`onManualSubmit`), and, since 2026-09-18, that same screen's bare-QR
+   * scan detection too (`onStudentCodeScan`, routed through the identical
+   * `onManualSubmit` prop — see that component's own doc comment).
    *
-   * As of 2026-09-09 this manual-entry path only matters for the
-   * non-kiosk/legacy build (`apps/web`, or the legacy per-device-secret
-   * desktop path) — see `handleCccdScan`'s own doc comment for why the
-   * kiosk's own campaign+login path replaces this outright with CCCD
-   * scanning instead of running both side by side.
+   * `lookupStudent(code, props.campaignId)` calls the REAL, campaign-scoped
+   * eligibility check whenever `campaignId` is set and the Electron bridge
+   * exists (`lookupStudent.ts`'s own doc comment) — simulated only for the
+   * legacy/`apps/web` callers that have neither. Everything downstream
+   * (`handleLookupResult` above) is unchanged either way.
    */
   const handleStudentSubmit = async (code: string) => {
     setStudentSubmitting(true);
     setStudentLookupError(null);
     try {
-      const result = await lookupStudent(code);
+      const result = await lookupStudent(code, props.campaignId);
       await handleLookupResult(result, { notFoundMessage: MANUAL_ENTRY_NOT_FOUND_MESSAGE });
     } finally {
       setStudentSubmitting(false);
@@ -2371,7 +2373,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
                 if (sessionStep?.status === 'COMPLETED') continue;
 
                 const videoEl = frameVideoElsRef.current[rsp.step.id];
-                const dataUrl = videoEl ? snapshotVideoFrame(videoEl) : null;
+                const dataUrl = videoEl ? snapshotVideoFrame(videoEl, undefined, CAPTURE_MIRRORED) : null;
                 if (!dataUrl) {
                   // 2026-09-05 black-frame fix: this is the exact path the
                   // field bug went through — `snapshotVideoFrame` now rejects
@@ -4382,11 +4384,6 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           // Falling back to `session` keeps this working after a session ends
           // and a new one has not started yet (activeSession would be gone).
           session={activeSession ?? session}
-          // Same source of truth as the capture views' CameraPreview mirror
-          // (product decision 2026-09-05) — the operator posed in front of a
-          // mirrored preview, so the review grid must match; the underlying
-          // files (and anything exported/uploaded from them) stay unmirrored.
-          mirrored={CAPTURE_MIRRORED}
           // Captures are staged (written to disk, queued, but not yet
           // eligible for upload — see queueCapture's own doc comment) the
           // instant each step is shot, long before review. This button is the

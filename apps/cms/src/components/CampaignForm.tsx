@@ -6,6 +6,7 @@ import {
   Campaign,
   CampaignPurpose,
   CreateCampaignInput,
+  EligibilityConfig,
   UpdateCampaignInput,
   WorkflowDetail,
   createCampaign,
@@ -20,6 +21,9 @@ import {
   PURPOSE_LABEL,
   computeEffectiveStatus,
 } from '../campaignFormat';
+import { EligibilityConfigEditor } from './EligibilityConfigEditor';
+
+const DEFAULT_ELIGIBILITY_CONFIG: EligibilityConfig = { mode: 'NONE' };
 
 const CAMERA_ROLES: CameraRoleName[] = ['CENTER', 'LEFT', 'RIGHT', 'UP', 'DOWN'];
 
@@ -60,15 +64,29 @@ function Section({
 const SECTIONS = [
   { id: 'section-info', label: '1. Thông tin' },
   { id: 'section-workflow', label: '2. Workflow' },
+  { id: 'section-eligibility', label: '3. Điều kiện tiếp nhận' },
 ] as const;
 
 /**
- * Shared 2-part campaign form — Thông tin / Workflow, with a left-side
- * section nav (ui-redesign-plan.md C2.2's mockup) — merges what used to be
- * two near-duplicate forms (`CreateCampaignPage`'s inline form and
- * `EditCampaignPage`'s `CampaignSettingsForm`). Capture-mode/simultaneous-
- * capture controls are gone entirely (moved to the kiosk's own Camera Setup
- * screen, per `campaign-config-sso-card-photo-discussion.md` §3.1.1's Q11).
+ * Shared campaign form — Thông tin / Workflow / Điều kiện tiếp nhận, with a
+ * left-side section nav (ui-redesign-plan.md C2.2's mockup) — merges what
+ * used to be two near-duplicate forms (`CreateCampaignPage`'s inline form
+ * and `EditCampaignPage`'s `CampaignSettingsForm`). Capture-mode/
+ * simultaneous-capture controls are gone entirely (moved to the kiosk's own
+ * Camera Setup screen, per `campaign-config-sso-card-photo-discussion.md`
+ * §3.1.1's Q11).
+ *
+ * **2026-09-18 — "Điều kiện tiếp nhận" (eligibility) moved here from the
+ * Workflow screen** (product feedback: "mục Điều kiện tiếp nhận... không
+ * cần ở màn tạo workflow nữa, thông tin đó sẽ được config trong phần
+ * campaign" — a workflow is a reusable template shared across many
+ * campaigns, but eligibility is inherently specific to one campaign's own
+ * roster/integration). Unlike `captureAngles`/`cardSpec` below, this is
+ * NOT an override-of-workflow-default — `eligibilityConfig` is the
+ * campaign's own independent config, full stop, stored on the campaign row
+ * itself (`campaigns.eligibility_config`), never resolved from a pinned
+ * workflow. See `apps/cms/src/api.ts`'s `EligibilityConfig` section header
+ * comment and `EligibilityConfigEditor.tsx`.
  *
  * **2026-09-17 retirement of "Mẫu chụp" (`CaptureConfiguration`)** — the
  * user flagged that Workflow and the standalone "Mẫu chụp" picker this form
@@ -130,6 +148,13 @@ export function CampaignForm({
     () => new Set((campaign?.recordVideoRoles as CameraRoleName[] | undefined) ?? [])
   );
   const [requiresEmbedding, setRequiresEmbedding] = useState(campaign?.requiresEmbedding ?? true);
+
+  // "3. Điều kiện tiếp nhận" (2026-09-18 — moved here from the Workflow
+  // screen, see this component's own doc comment) — the campaign's own
+  // independent `eligibilityConfig`, not derived from the pinned workflow.
+  const [eligibilityConfig, setEligibilityConfig] = useState<EligibilityConfig>(
+    campaign?.eligibilityConfig ?? DEFAULT_ELIGIBILITY_CONFIG,
+  );
 
   // "2. Workflow" (Phase 5, cms-8-screens-api-plan.md §2.2/P2; sole capture-
   // config source as of the 2026-09-17 "Mẫu chụp" retirement above) — pin to
@@ -219,6 +244,7 @@ export function CampaignForm({
           recordVideo,
           recordVideoRoles: recordVideoRoles.size > 0 ? Array.from(recordVideoRoles) : null,
           requiresEmbedding,
+          eligibilityConfig,
           workflowVersionId: workflowVersionId || undefined,
         };
         const created = await createCampaign(input);
@@ -237,6 +263,7 @@ export function CampaignForm({
           recordVideo,
           recordVideoRoles: recordVideoRoles.size > 0 ? Array.from(recordVideoRoles) : null,
           requiresEmbedding,
+          eligibilityConfig,
           workflowVersionId: workflowVersionId || null,
         };
         const updated = await updateCampaign(campaign.id, input);
@@ -397,7 +424,7 @@ export function CampaignForm({
         <Section
           id="section-workflow"
           title="2. Workflow"
-          subtitle="Nguồn duy nhất cho góc chụp, chuẩn ảnh thẻ, điều kiện tiếp nhận và phương thức định danh — quản lý các workflow ở trang riêng"
+          subtitle="Nguồn duy nhất cho góc chụp, chuẩn ảnh thẻ và phương thức định danh — quản lý các workflow ở trang riêng"
         >
           <div>
             <label className="block text-sm text-gray-700 font-medium mb-1">
@@ -533,6 +560,18 @@ export function CampaignForm({
               </span>
             </label>
           </div>
+        </Section>
+
+        <Section
+          id="section-eligibility"
+          title="3. Điều kiện tiếp nhận"
+          subtitle="Riêng cho campaign này — theo danh sách roster đã import, gọi API ngoài, hoặc cả hai. Không lấy từ workflow."
+        >
+          <EligibilityConfigEditor
+            eligibility={eligibilityConfig}
+            onChange={setEligibilityConfig}
+            campaignId={campaign?.id ?? null}
+          />
         </Section>
 
         {error && <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">{error}</div>}

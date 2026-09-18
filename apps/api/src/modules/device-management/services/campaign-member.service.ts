@@ -6,19 +6,18 @@ import { Pagination } from '@app/shared/http/pagination';
 import { HttpStatus, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
-import { CampaignMemberDao, DeviceDao } from '../dao';
+import { CampaignMemberDao } from '../dao';
 import { MeCampaignDao } from '../dao/me.dao';
 import {
   CampaignMemberDecision,
   DecideCampaignMemberDto,
 } from '../dto/decide-campaign-member.dto';
+import { GrantCampaignMembersDto } from '../dto/grant-campaign-members.dto';
 import { ListCampaignMembersQueryDto } from '../dto/list-campaign-members-query.dto';
 import {
   CampaignMember,
   CampaignMemberStatus,
 } from '../entities/campaign-member.entity';
-import { CampaignKioskAssignment } from '../entities/campaign-kiosk-assignment.entity';
-import { Device } from '../entities/device.entity';
 import { CampaignService } from './campaign.service';
 
 @Injectable()
@@ -28,14 +27,6 @@ export class CampaignMemberService extends CommonService<CampaignMember> {
     repository: Repository<CampaignMember>,
     @InjectRepository(User)
     private readonly userRepository: Repository<User>,
-    // Repository, not `CampaignKioskAssignmentService` — that service
-    // injects `Repository<CampaignMember>` right back (to auto-approve on
-    // assign), so two services depending on each other would be a circular
-    // DI cycle. See `CampaignKioskAssignmentService`'s own doc comment.
-    @InjectRepository(CampaignKioskAssignment)
-    private readonly assignmentRepository: Repository<CampaignKioskAssignment>,
-    @InjectRepository(Device)
-    private readonly deviceRepository: Repository<Device>,
     private readonly campaignService: CampaignService,
   ) {
     super(repository);
@@ -173,6 +164,61 @@ export class CampaignMemberService extends CommonService<CampaignMember> {
     return this.attachIdentity(toDao(CampaignMemberDao, member));
   }
 
+  /**
+   * `POST /v1/campaigns/:id/members/grant` (2026-09-18) — replaces
+   * `campaign_kiosk_assignments`' auto-approve side effect (deleted the
+   * same day, see that migration's own doc comment): admins used to have
+   * to pair a person with a specific kiosk to get the "assigning also
+   * approves them" convenience (D-Q4, 2026-09-11); that pairing was never
+   * actually needed for anything else (a session's own `device_id`/
+   * `operator_user_id` come from the kiosk's device credentials and its
+   * locally-logged-in operator, entirely independent of this table — see
+   * that migration's doc comment for the full audit). This keeps the
+   * one-step convenience without the device pairing: pick N people (from
+   * the CMS's existing user list, `CampaignList.tsx`'s "Cấp quyền"),
+   * upsert every one of them straight to APPROVED for this campaign.
+   *
+   * Idempotent per user — safe to call again with the same id (e.g.
+   * re-submitting a partially-failed batch), same `orUpdate` upsert
+   * pattern the deleted `CampaignKioskAssignmentService.assign()` used.
+   * `note: 'GRANTED'` (vs. the old `'ASSIGNED'`) marks where an APPROVED
+   * row with no individual `decide()` call came from.
+   */
+  async grant(
+    campaignId: string,
+    dto: GrantCampaignMembersDto,
+    decidedByUserId: string,
+  ): Promise<CampaignMemberDao[]> {
+    await this.campaignService.findCampaignEntityOrFail(campaignId);
+
+    const now = new Date();
+    await this.repository
+      .createQueryBuilder()
+      .insert()
+      .into(CampaignMember)
+      .values(
+        dto.userIds.map((userId) => ({
+          campaignId,
+          userId,
+          status: 'APPROVED' as const,
+          requestedAt: now,
+          decidedAt: now,
+          decidedByUserId,
+          note: 'GRANTED',
+        })),
+      )
+      .orUpdate(
+        ['status', 'decided_at', 'decided_by_user_id', 'note'],
+        ['campaign_id', 'user_id'],
+      )
+      .execute();
+
+    const rows = await this.repository.find({
+      where: { campaignId, userId: In(dto.userIds) },
+    });
+    return this.attachIdentity(toDao(CampaignMemberDao, rows));
+  }
+
   private statusForDecision(
     action: CampaignMemberDecision,
   ): CampaignMemberStatus {
@@ -220,13 +266,6 @@ export class CampaignMemberService extends CommonService<CampaignMember> {
           (c) => membershipByCampaignId.get(c.id) === 'APPROVED',
         );
 
-    // D-Q17 — one batched query across every listed campaign, never one
-    // query per campaign (same batching discipline `attachIdentity` uses).
-    const assignedDevicesByCampaignId = await this.assignedDevicesForUser(
-      userId,
-      campaigns.map((c) => c.id),
-    );
-
     return Promise.all(
       campaigns.map(async (campaign) => {
         const dao = await this.campaignService.toCampaignResponse(campaign);
@@ -234,39 +273,8 @@ export class CampaignMemberService extends CommonService<CampaignMember> {
         meDao.membership = {
           status: membershipByCampaignId.get(campaign.id) ?? 'NONE',
         };
-        meDao.assignedDevices =
-          assignedDevicesByCampaignId.get(campaign.id) ?? [];
         return meDao;
       }),
     );
-  }
-
-  /** `GET /v1/me/campaigns`'s `assignedDevices[]` (D-Q17) — which kiosk(s) under each campaign are assigned to this user. */
-  private async assignedDevicesForUser(
-    userId: string,
-    campaignIds: string[],
-  ): Promise<Map<string, DeviceDao[]>> {
-    if (campaignIds.length === 0) return new Map();
-    const rows = await this.assignmentRepository.find({
-      where: { userId, campaignId: In(campaignIds) },
-    });
-    if (rows.length === 0) return new Map();
-
-    const deviceIds = [...new Set(rows.map((r) => r.deviceId))];
-    const devices = await this.deviceRepository.find({
-      where: { id: In(deviceIds) },
-    });
-    const deviceDaoById = new Map(
-      devices.map((d) => [d.id, toDao(DeviceDao, d)]),
-    );
-
-    const map = new Map<string, DeviceDao[]>();
-    for (const row of rows) {
-      const deviceDao = deviceDaoById.get(row.deviceId);
-      if (!deviceDao) continue;
-      if (!map.has(row.campaignId)) map.set(row.campaignId, []);
-      map.get(row.campaignId)!.push(deviceDao);
-    }
-    return map;
   }
 }

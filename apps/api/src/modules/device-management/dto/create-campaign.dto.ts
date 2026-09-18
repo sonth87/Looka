@@ -20,6 +20,7 @@ import {
   type CampaignManualStatus,
   type CardSpec,
 } from '../entities/campaign.entity';
+import type { EligibilityConfig } from '../domain/eligibility-config.schema';
 
 const CAMERA_ROLES = ['CENTER', 'LEFT', 'RIGHT', 'UP', 'DOWN'] as const;
 
@@ -126,6 +127,19 @@ export class CreateCampaignDto {
   @IsOptional()
   @IsObject()
   cardSpec?: CardSpec;
+
+  /**
+   * 2026-09-18 — moved here from the workflow's own config (see
+   * `Campaign.eligibilityConfig`'s own doc comment). Full shape (incl.
+   * `mode` enum, `api` field bounds) validated by
+   * `validateEligibilityConfigShape()` in the service, not here — same
+   * lightweight `@IsObject()` treatment `cardSpec`/`captureAngles` already
+   * get above for their own jsonb shapes.
+   */
+  @ApiPropertyOptional({ description: 'Điều kiện tiếp nhận (mode/api/rules)' })
+  @IsOptional()
+  @IsObject()
+  eligibilityConfig?: EligibilityConfig;
 
   @ApiPropertyOptional({ description: 'Nội dung xin đồng ý (consent)' })
   @IsOptional()

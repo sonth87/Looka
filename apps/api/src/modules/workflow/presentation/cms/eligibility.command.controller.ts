@@ -13,10 +13,12 @@ import { TestLookupResult } from '../../application/commands/handler/test-eligib
  * `POST /v1/eligibility/test-lookup` only (2026-09-17 redo of plan item 7)
  * — the `api-clients` CRUD routes this controller briefly had are gone:
  * there is no more shared catalog to manage (see this module's own
- * `eligibility-http.client.ts` doc comment). A workflow's own eligibility
- * API config lives inline in `config.eligibility.api`, edited/saved through
- * the normal `PUT /v1/workflows/:id/config` path — this route only ever
- * TRIES an ad-hoc config, it never persists one.
+ * `eligibility-http.client.ts` doc comment). A campaign's own eligibility
+ * API config lives inline in `eligibilityConfig.api` (2026-09-18 — moved
+ * off the workflow, see `Campaign.eligibilityConfig`'s own doc comment),
+ * edited/saved through the campaign create/update routes — this route
+ * only ever TRIES an ad-hoc config, it never persists one, so it needs no
+ * campaign/workflow context at all.
  */
 @Controller({ path: 'eligibility', version: '1' })
 @ApiTags('workflow')

@@ -163,8 +163,10 @@ export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
           <CameraPreview
             stream={stream}
             // Product decision 2026-09-05: the capture preview behaves like a
-            // mirror again for self-positioning. The saved still stays
-            // unmirrored regardless (BrowserCameraService.mirrorStills).
+            // mirror again for self-positioning. As of product decision
+            // 2026-09-17 (2026-09-18 fix: extended to every camera role),
+            // the saved still matches this too — see
+            // BrowserCameraService.mirrorStills's own doc comment.
             mirrored={CAPTURE_MIRRORED}
             zoomScale={zoomScale}
             zoomOrigin={zoomOrigin}
@@ -194,10 +196,12 @@ export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
               <img
                 src={freezeSnapshot}
                 alt="Snapshot Freeze"
-                className={cn(
-                  "absolute inset-0 w-full h-full object-cover z-25 pointer-events-none transition-opacity duration-150 animate-in fade-in",
-                  CAPTURE_MIRRORED && "scale-x-[-1]"
-                )}
+                // 2026-09-18 field bug fix — see DesktopCaptureView.tsx's
+                // identical fix for the full explanation: `freezeSnapshot`
+                // is now already pixel-mirrored at the source (product
+                // decision 2026-09-17), so re-applying scale-x-[-1] here
+                // flipped it back to looking unmirrored.
+                className="absolute inset-0 w-full h-full object-cover z-25 pointer-events-none transition-opacity duration-150 animate-in fade-in"
               />
             )}
             <ShutterFlashOverlay
@@ -208,7 +212,6 @@ export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
               imageSrc={flyingState.imageSrc}
               startRect={flyingState.startRect}
               targetRect={flyingState.targetRect}
-              mirrored={CAPTURE_MIRRORED}
               onAnimationEnd={() =>
                 setFlyingState({
                   imageSrc: null,

@@ -21,6 +21,14 @@ import { CreateCampaignDto, UpdateCampaignDto } from '../dto';
 import { ListCampaignsQueryDto } from '../dto/list-campaigns-query.dto';
 import { Campaign, CampaignPurpose } from '../entities/campaign.entity';
 import { Device } from '../entities/device.entity';
+import {
+  reconcileEligibilityCredential,
+  sanitizeEligibilityCredential,
+} from '../domain/campaign-eligibility-credential.util';
+import {
+  DEFAULT_ELIGIBILITY_CONFIG,
+  validateEligibilityConfigShape,
+} from '../domain/eligibility-config.schema';
 import { computeEffectiveStatus } from '../utils/campaign-status.util';
 import {
   computeRequiredCameraCount,
@@ -55,6 +63,18 @@ export class CampaignService extends CommonService<Campaign> {
       throw new BadRequestException(captureAnglesCheck.reason);
     }
 
+    const eligibilityCheck = validateEligibilityConfigShape(
+      dto.eligibilityConfig ?? DEFAULT_ELIGIBILITY_CONFIG,
+    );
+    if (!eligibilityCheck.valid) {
+      throw new BadRequestException(eligibilityCheck.errors.join('; '));
+    }
+    // No previous config to preserve a credential from — brand new campaign.
+    const eligibilityConfig = reconcileEligibilityCredential(
+      dto.eligibilityConfig ?? DEFAULT_ELIGIBILITY_CONFIG,
+      null,
+    );
+
     const workflowId = await this.resolveWorkflowId(dto.workflowVersionId);
 
     let campaign: Campaign;
@@ -88,6 +108,7 @@ export class CampaignService extends CommonService<Campaign> {
         workflowVersionId: dto.workflowVersionId ?? null,
         processingSlaHours: dto.processingSlaHours ?? null,
         location: dto.location ?? null,
+        eligibilityConfig,
       });
     } catch (error) {
       throw this.mapCodeUniqueViolation(error);
@@ -149,6 +170,9 @@ export class CampaignService extends CommonService<Campaign> {
     dao.quotaReached =
       campaign.quotaPlanned != null &&
       completedSessions >= campaign.quotaPlanned;
+    dao.eligibilityConfig = sanitizeEligibilityCredential(
+      campaign.eligibilityConfig,
+    );
 
     // cms-8-screens-api-plan.md §2.2/P2 — "gộp config cho … campaigns/:id/config".
     // When a workflow is pinned, its config fills in `captureAngles`/
@@ -257,6 +281,22 @@ export class CampaignService extends CommonService<Campaign> {
     const captureAnglesCheck = validateCaptureAngles(mergedCaptureAngles);
     if (!captureAnglesCheck.ok) {
       throw new BadRequestException(captureAnglesCheck.reason);
+    }
+
+    if (dto.eligibilityConfig !== undefined) {
+      const eligibilityCheck = validateEligibilityConfigShape(
+        dto.eligibilityConfig,
+      );
+      if (!eligibilityCheck.valid) {
+        throw new BadRequestException(eligibilityCheck.errors.join('; '));
+      }
+      // Preserves the campaign's already-stored credential when this save
+      // doesn't touch it — see `reconcileEligibilityCredential`'s own doc
+      // comment for why that's needed (GET never echoes the ciphertext back).
+      campaign.eligibilityConfig = reconcileEligibilityCredential(
+        dto.eligibilityConfig,
+        campaign.eligibilityConfig,
+      );
     }
 
     if (dto.name !== undefined) campaign.name = dto.name;

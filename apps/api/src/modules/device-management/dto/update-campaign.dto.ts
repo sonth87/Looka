@@ -16,6 +16,7 @@ import {
   ValidateIf,
 } from 'class-validator';
 import { CampaignManualStatus, CardSpec } from '../entities/campaign.entity';
+import type { EligibilityConfig } from '../domain/eligibility-config.schema';
 
 const CAMERA_ROLES = ['CENTER', 'LEFT', 'RIGHT', 'UP', 'DOWN'] as const;
 
@@ -103,6 +104,12 @@ export class UpdateCampaignDto {
   @ValidateIf((_, value) => value !== null)
   @IsObject()
   cardSpec?: CardSpec | null;
+
+  /** 2026-09-18 — see `CreateCampaignDto.eligibilityConfig`'s own doc comment. Full shape validated by `validateEligibilityConfigShape()` in the service. */
+  @ApiPropertyOptional({ description: 'Điều kiện tiếp nhận (mode/api/rules)' })
+  @IsOptional()
+  @IsObject()
+  eligibilityConfig?: EligibilityConfig;
 
   /**
    * Ghi nội dung mới — service tự tăng `consentVersion` mỗi lần field này

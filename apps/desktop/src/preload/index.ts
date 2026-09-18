@@ -217,6 +217,20 @@ export interface CccdRosterRecord {
 /** `cccd:lookupByIdentityNumber`'s result shape — `found: false` is a normal, expected outcome, never an error. */
 export type CccdLookupResult = { found: true; record: CccdRosterRecord } | { found: false };
 
+/** `campaign:lookupSubject`'s result shape — mirrors `apps/desktop/src/main/deviceApi.ts`'s `CampaignSubjectLookupResult`, same duplicate-the-IPC-payload-shape convention as `CccdRosterRecord` above. */
+export interface CampaignSubjectLookupResult {
+  eligible: boolean;
+  reason?: string;
+  subject?: {
+    subjectCode: string;
+    fullName: string;
+    className?: string | null;
+    faculty?: string | null;
+    major?: string | null;
+  } | null;
+  externalRecord?: Record<string, unknown> | null;
+}
+
 export interface EmbeddingHealthResult {
   /** False when EMBEDDING_SERVER_BASE_URL is unset — a supported "feature off" state, not an error. */
   configured: boolean;
@@ -455,6 +469,21 @@ export interface FaceAPIBridge {
   lookupCccdByIdentityNumber: (payload: { identityNumber: string }) => Promise<CccdLookupResult>;
 
   /**
+   * The kiosk's real, campaign-scoped eligibility check for a student code —
+   * see `campaign:lookupSubject`'s own doc comment in `index.ts` and
+   * `lookupCampaignSubject`'s in `deviceApi.ts`. Called from both
+   * `StudentIdEntryScreen`'s manual "nhập mã sinh viên" field (via
+   * `packages/ui`'s `lookupStudent()`) and, as of 2026-09-18, a bare
+   * (non-CCCD) QR scan through the same `onManualSubmit` path — see
+   * `CccdScanWaitingScreen.tsx`'s `ScanMonitorCorner`'s own
+   * `onStudentCodeScan` doc comment. Rejects on failure (network, no device
+   * identity, non-2xx) — unlike `lookupCccdByIdentityNumber`, there is no
+   * `{found: false}` success shape here; `eligible: false` on the resolved
+   * value is the "not eligible" outcome instead.
+   */
+  lookupCampaignSubject: (payload: { campaignId: string; key: string }) => Promise<CampaignSubjectLookupResult>;
+
+  /**
    * Publishes a fresh capture-frames snapshot for the CB Help window (§3.5)
    * — called from `FaceCaptureApp.tsx`'s `publishCbHelpState` on session
    * start, step change, every capture/retake, and on complete/cancel/
@@ -649,6 +678,7 @@ const faceAPI: FaceAPIBridge = {
 
   toggleCbHelpWindow: () => ipcRenderer.invoke('cbhelp:toggle'),
   lookupCccdByIdentityNumber: (payload) => ipcRenderer.invoke('cccd:lookupByIdentityNumber', payload),
+  lookupCampaignSubject: (payload) => ipcRenderer.invoke('campaign:lookupSubject', payload),
   isCbHelpWindowOpen: () => ipcRenderer.invoke('cbhelp:isOpen'),
   publishCbHelpState: (state) => ipcRenderer.invoke('cbhelp:publish', state),
   getCbHelpState: () => ipcRenderer.invoke('cbhelp:getState'),
