@@ -1,3 +1,4 @@
+import { ERROR_CODE } from '@app/shared/errors/legacy';
 import { CampaignMemberService } from './campaign-member.service';
 
 /**
@@ -30,8 +31,17 @@ function buildService(overrides: {
     createQueryBuilder,
     find: overrides.find ?? jest.fn().mockResolvedValue([]),
   };
+  // Default: pretend every id this file's tests ever pass ('user-1',
+  // 'user-2') exists — `grant()`'s existence pre-check (2026-09-18, plan
+  // §1.2) needs a `userRepository.find()` that resolves to something for
+  // the ids under test, or every test below trips its "not found" 400
+  // before ever reaching the upsert being tested. Individual tests still
+  // override this via `userFind` when they need a specific shape (e.g. the
+  // identity-attachment test's own `email`/`displayName`).
   const userRepository = {
-    find: overrides.userFind ?? jest.fn().mockResolvedValue([]),
+    find:
+      overrides.userFind ??
+      jest.fn().mockResolvedValue([{ id: 'user-1' }, { id: 'user-2' }]),
   };
   const campaignService = {
     findCampaignEntityOrFail:
@@ -60,13 +70,41 @@ describe('CampaignMemberService.grant', () => {
     expect(insertBuilder.insert).not.toHaveBeenCalled();
   });
 
+  it('400s when a userId does not exist — never issues the upsert (2026-09-18, plan §1.2)', async () => {
+    const userFind = jest.fn().mockResolvedValue([{ id: 'user-1' }]);
+    const { service, insertBuilder } = buildService({ userFind });
+
+    // `CustomException`'s own `.message` is always the generic "Custom
+    // Exception" — the real text/code live on `.payload` (same assertion
+    // pattern `photo-review-persistence.spec.ts`'s `expectLocked` uses).
+    await expect(
+      service.grant(
+        'campaign-1',
+        { userIds: ['user-1', 'ghost-user'] },
+        'admin-1',
+      ),
+    ).rejects.toMatchObject({
+      payload: {
+        code: ERROR_CODE.CAMPAIGN_MEMBER_GRANT_USER_NOT_FOUND,
+        error: expect.stringContaining('ghost-user'),
+      },
+    });
+    expect(insertBuilder.insert).not.toHaveBeenCalled();
+  });
+
   it('upserts one row per userId, all APPROVED, with a note marking this as a bulk grant', async () => {
     const { service, insertBuilder } = buildService({});
 
-    await service.grant('campaign-1', { userIds: ['user-1', 'user-2'] }, 'admin-1');
+    await service.grant(
+      'campaign-1',
+      { userIds: ['user-1', 'user-2'] },
+      'admin-1',
+    );
 
     expect(insertBuilder.values).toHaveBeenCalledTimes(1);
-    const values = insertBuilder.values.mock.calls[0][0] as Array<Record<string, unknown>>;
+    const values = insertBuilder.values.mock.calls[0][0] as Array<
+      Record<string, unknown>
+    >;
     expect(values).toHaveLength(2);
     for (const row of values) {
       expect(row.status).toBe('APPROVED');
@@ -77,7 +115,7 @@ describe('CampaignMemberService.grant', () => {
     expect(values.every((r) => r.campaignId === 'campaign-1')).toBe(true);
   });
 
-  it('only updates status/decidedAt/decidedByUserId/note on conflict — never requestedAt, so a re-grant does not clobber an existing row\'s original request time', async () => {
+  it("only updates status/decidedAt/decidedByUserId/note on conflict — never requestedAt, so a re-grant does not clobber an existing row's original request time", async () => {
     const { service, insertBuilder } = buildService({});
 
     await service.grant('campaign-1', { userIds: ['user-1'] }, 'admin-1');
@@ -109,12 +147,18 @@ describe('CampaignMemberService.grant', () => {
         status: 'APPROVED',
       },
     ]);
-    const userFind = jest.fn().mockResolvedValue([
-      { id: 'user-1', email: 'a@dainam.edu.vn', displayName: 'Nguyễn A' },
-    ]);
+    const userFind = jest
+      .fn()
+      .mockResolvedValue([
+        { id: 'user-1', email: 'a@dainam.edu.vn', displayName: 'Nguyễn A' },
+      ]);
     const { service } = buildService({ find, userFind });
 
-    const result = await service.grant('campaign-1', { userIds: ['user-1'] }, 'admin-1');
+    const result = await service.grant(
+      'campaign-1',
+      { userIds: ['user-1'] },
+      'admin-1',
+    );
 
     expect(result).toHaveLength(1);
     expect(result[0].email).toBe('a@dainam.edu.vn');

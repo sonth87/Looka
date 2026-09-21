@@ -68,6 +68,10 @@ const eligibilityApiSchema = z.object({
   /** 2026-09-18 — retry/timeout for the external API call, see `EligibilityHttpClient.lookup()`'s own doc comment. */
   retryCount: z.number().int().min(0).max(3).optional(),
   timeoutMs: z.number().int().min(1000).max(60_000).optional(),
+  /** 2026-09-21 (plan §3.1, feature 1) — path to the ARRAY in a full-pull response, see `EligibilityHttpClient.fetchAll()`. Unset falls back to the same shape-guessing `keyResponsePath` unset does for `lookup()`. */
+  listResponsePath: z.string().optional(),
+  /** 2026-09-21 — a full-roster pull can be an order of magnitude bigger than one lookup; kept separate from `timeoutMs` so raising it doesn't also loosen the per-student kiosk lookup's own budget. Unset falls back to `timeoutMs`, then the hardcoded default. */
+  listTimeoutMs: z.number().int().min(1000).max(120_000).optional(),
 });
 export type EligibilityApiConfig = z.infer<typeof eligibilityApiSchema>;
 

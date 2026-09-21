@@ -34,6 +34,10 @@ export interface EligibilityApiConfig {
   retryCount?: number;
   /** 2026-09-18 — see `lookup()`'s own doc comment. `undefined` = the pre-existing hardcoded `DEFAULT_TIMEOUT_MS`. */
   timeoutMs?: number;
+  /** 2026-09-21 — see `fetchAll()`'s own doc comment. */
+  listResponsePath?: string;
+  /** 2026-09-21 — see `fetchAll()`'s own doc comment. `undefined` falls back to `timeoutMs`, then `DEFAULT_TIMEOUT_MS`. */
+  listTimeoutMs?: number;
 }
 
 export interface EligibilityLookupResult {
@@ -41,6 +45,13 @@ export interface EligibilityLookupResult {
   raw: unknown;
   /** The matched record extracted from `raw` — see this file's own doc comment on how. */
   record: Record<string, unknown> | null;
+}
+
+export interface EligibilityListResult {
+  /** The full parsed response body, exactly as returned. */
+  raw: unknown;
+  /** Every record extracted from `raw` — see `fetchAll()`'s own doc comment on how. */
+  records: Record<string, unknown>[];
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -279,4 +290,150 @@ export class EligibilityHttpClient {
 
     return success({ raw, record });
   }
+
+  /**
+   * Fetches EVERY record from the same per-campaign `eligibilityConfig.api`
+   * `lookup()` calls per-key — device-management's roster-sync feature
+   * (13-features-and-2-blockers-plan-2026-09-18.md §3.1), called once per
+   * "Kéo dữ liệu" click rather than once per student. Reuses the exact
+   * auth/URL-building `attemptRequest` does, but sends
+   * `requestBodyTemplate` AS-IS (no `{{key}}` substitution — there is no
+   * single key) and extracts an ARRAY via `listResponsePath` instead of one
+   * record via `keyResponsePath`. Retries the same way `lookup()` does,
+   * using `listTimeoutMs` (falls back to `timeoutMs`, then the same
+   * hardcoded default) since a full-roster pull is an order of magnitude
+   * bigger than one lookup and may need a longer budget.
+   */
+  async fetchAll(
+    config: EligibilityApiConfig,
+  ): Promise<IntegrationOutcome<EligibilityListResult>> {
+    let credential: string | null = null;
+    if (config.authType !== 'NONE') {
+      if (!config.credentialCiphertext) {
+        return terminal(
+          `API cần credential (${config.authType}) nhưng chưa được cấu hình — nhập API key/token ở phần "Điều kiện tiếp nhận" của campaign.`,
+        );
+      }
+      try {
+        credential = decryptSecret(config.credentialCiphertext);
+      } catch (error) {
+        return terminal(
+          `Không giải mã được credential đã lưu: ${(error as Error).message}`,
+        );
+      }
+    }
+
+    const maxAttempts = 1 + (config.retryCount ?? 0);
+    let lastOutcome: IntegrationOutcome<EligibilityListResult> = retryable(
+      'Không thực hiện được request nào',
+    );
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      lastOutcome = await this.attemptListRequest(config, credential);
+      if (lastOutcome.kind !== 'Retryable') return lastOutcome;
+      if (attempt < maxAttempts) {
+        this.logger.warn(
+          `eligibility API fetchAll failed (attempt ${attempt}/${maxAttempts}): ${lastOutcome.reason} — retrying`,
+        );
+        await delay(RETRY_DELAY_MS);
+      }
+    }
+    return lastOutcome;
+  }
+
+  private async attemptListRequest(
+    config: EligibilityApiConfig,
+    credential: string | null,
+  ): Promise<IntegrationOutcome<EligibilityListResult>> {
+    const url = new URL(
+      `${config.baseUrl.replace(/\/$/, '')}${config.requestPath}`,
+    );
+    const headers: Record<string, string> = { accept: 'application/json' };
+    if (config.authType === 'API_KEY_HEADER' && credential) {
+      headers[config.authParamName || 'x-api-key'] = credential;
+    } else if (config.authType === 'BEARER_TOKEN' && credential) {
+      headers.authorization = `Bearer ${credential}`;
+    } else if (config.authType === 'QUERY_PARAM' && credential) {
+      url.searchParams.set(config.authParamName || 'api_key', credential);
+    }
+
+    let body: string | undefined;
+    if (config.requestMethod === 'GET') {
+      const params = config.requestBodyTemplate ?? {};
+      for (const [k, v] of Object.entries(params)) {
+        url.searchParams.set(k, String(v));
+      }
+    } else {
+      headers['content-type'] = 'application/json';
+      body = JSON.stringify(config.requestBodyTemplate ?? {});
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(
+      () => controller.abort(),
+      config.listTimeoutMs ?? config.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    );
+
+    let res: globalThis.Response;
+    try {
+      res = await fetch(url, {
+        method: config.requestMethod,
+        headers,
+        body,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      clearTimeout(timer);
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(
+        `could not reach the eligibility API (fetchAll): ${message}`,
+      );
+      return retryable(`Không gọi được API: ${message}`);
+    }
+    clearTimeout(timer);
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      return terminal(`API trả về HTTP ${res.status}: ${text.slice(0, 500)}`);
+    }
+
+    const text = await res.text();
+    let raw: unknown;
+    try {
+      raw = text ? JSON.parse(text) : null;
+    } catch (error) {
+      return terminal(
+        `API trả về nội dung không phải JSON: ${(error as Error).message}`,
+      );
+    }
+
+    const records = extractList(raw, config.listResponsePath);
+    return success({ raw, records });
+  }
+}
+
+/**
+ * No `listResponsePath` configured, or it doesn't point at an array — same
+ * "lookup-by-key returns a bare array, `{data: [...]}}, or a short list"
+ * shape family `guessRecord` above covers, but for the whole list rather
+ * than just its first item.
+ */
+function extractList(
+  raw: unknown,
+  listResponsePath?: string,
+): Record<string, unknown>[] {
+  const found = listResponsePath ? getByPath(raw, listResponsePath) : raw;
+  const asRecords = (value: unknown): Record<string, unknown>[] =>
+    Array.isArray(value)
+      ? value.filter(
+          (item): item is Record<string, unknown> =>
+            !!item && typeof item === 'object',
+        )
+      : [];
+
+  if (Array.isArray(found)) return asRecords(found);
+  if (found && typeof found === 'object') {
+    const data = (found as Record<string, unknown>).data;
+    if (Array.isArray(data)) return asRecords(data);
+  }
+  return [];
 }

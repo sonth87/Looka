@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "api",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--filter", "@face/api", "start:dev"],
+      "port": 3100
+    },
+    {
+      "name": "cms",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--filter", "@face/cms", "dev"],
+      "port": 5173
+    }
+  ]
+}

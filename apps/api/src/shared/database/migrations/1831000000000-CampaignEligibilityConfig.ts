@@ -27,9 +27,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * unread by anything after this migration's `up()`), so a rollback does
  * not lose the source data, only the copy.
  */
-export class CampaignEligibilityConfig1831000000000
-  implements MigrationInterface
-{
+export class CampaignEligibilityConfig1831000000000 implements MigrationInterface {
   name = 'CampaignEligibilityConfig1831000000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

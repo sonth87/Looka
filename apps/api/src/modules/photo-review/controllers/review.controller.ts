@@ -103,7 +103,11 @@ export class ReviewController {
     @Query() query: ListSetsQueryDto,
     @Req() req: Request,
   ): Promise<Pagination<ReviewSetListItemDao>> {
-    return this.photoReviewService.listSets(query, this.apiBaseUrl(req));
+    return this.photoReviewService.listSets(
+      query,
+      this.apiBaseUrl(req),
+      req.user?.id ?? null,
+    );
   }
 
   /** cms-8-screens-api-plan.md §2.9/P4 — reads from `stats_daily_review`, `byStatus` is a live count. */
@@ -132,7 +136,11 @@ export class ReviewController {
     @Param('id') id: string,
     @Req() req: Request,
   ): Promise<ReviewSetDetailDao> {
-    return this.photoReviewService.getSetDetail(id, this.apiBaseUrl(req));
+    return this.photoReviewService.getSetDetail(
+      id,
+      this.apiBaseUrl(req),
+      req.user?.id ?? null,
+    );
   }
 
   @Post('sets/:id/reprocess')
@@ -143,7 +151,7 @@ export class ReviewController {
   reprocess(
     @Param('id') id: string,
     @Req() req: Request,
-  ): Promise<PhotoVariantDao> {
+  ): Promise<ReviewSetDetailDao> {
     return this.photoReviewService.reprocess(
       id,
       req.user?.id ?? null,
@@ -183,7 +191,11 @@ export class ReviewController {
     @Param('id') id: string,
     @Req() req: Request,
   ): Promise<PhotoVariantDao> {
-    return this.photoReviewService.getJob(id, this.apiBaseUrl(req));
+    return this.photoReviewService.getJob(
+      id,
+      this.apiBaseUrl(req),
+      req.user?.id ?? null,
+    );
   }
 
   @Post('variants/:id/accept')
@@ -251,7 +263,7 @@ export class ReviewController {
     @Param('id') id: string,
     @Body() dto: SetCurrentDto,
     @Req() req: Request,
-  ): Promise<ReviewSetListItemDao> {
+  ): Promise<ReviewSetDetailDao> {
     return this.photoReviewService.setCurrent(
       id,
       dto.variantId,
@@ -266,7 +278,7 @@ export class ReviewController {
     @Param('id') id: string,
     @Body() dto: ApproveRejectDto,
     @Req() req: Request,
-  ): Promise<ReviewSetListItemDao> {
+  ): Promise<ReviewSetDetailDao> {
     return this.photoReviewService.approve(
       id,
       dto,
@@ -281,7 +293,7 @@ export class ReviewController {
     @Param('id') id: string,
     @Body() dto: ApproveRejectDto,
     @Req() req: Request,
-  ): Promise<ReviewSetListItemDao> {
+  ): Promise<ReviewSetDetailDao> {
     return this.photoReviewService.reject(
       id,
       dto,
@@ -295,8 +307,9 @@ export class ReviewController {
   listEvents(
     @Param('id') id: string,
     @Query() query: ListEventsQueryDto,
+    @Req() req: Request,
   ): Promise<Pagination<ReviewEventDao>> {
-    return this.photoReviewService.listEvents(id, query);
+    return this.photoReviewService.listEvents(id, query, req.user?.id ?? null);
   }
 
   /**

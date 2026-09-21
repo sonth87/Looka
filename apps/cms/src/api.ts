@@ -1363,33 +1363,31 @@ export const getReviewSet = (id: string) => request<ReviewSetDetail>(`${REVIEW_S
 export const reprocessReviewSet = (id: string) =>
   request<ReviewSetDetail>(`${REVIEW_SETS_PATH}/${id}/reprocess`, { method: 'POST' });
 
+/** Which existing thing this edit starts from — `VARIANT` (default, `fromVariantId`/current card) or `ORIGINAL_PHOTO` (`sourcePhotoId`, Giai đoạn 5 §5.1 feature 12). Exactly one of `fromVariantId`/`sourcePhotoId` applies, matching `sourceKind`. */
+export type AiEditSourceKind = 'VARIANT' | 'ORIGINAL_PHOTO';
+
 export interface AiEditInput {
   prompt: string;
   region: AiEditRegion;
   fromVariantId?: string;
+  sourceKind?: AiEditSourceKind;
+  sourcePhotoId?: string;
 }
 
-export type AiEditJobStatus = 'PENDING' | 'RUNNING' | 'DONE' | 'FAILED';
-
-/** `GET /v1/review/jobs/:id` poll response — a running "Sửa bằng AI" job (§5.3/§6.4). */
-export interface AiEditJob {
-  id: string;
-  status: AiEditJobStatus;
-  previewUrl?: string;
-  identitySimilarity?: number;
-  seed?: number;
-  durationMs?: number;
-  modelId?: string;
-  /** The variant to `acceptVariant`/`discardVariant` once the job is DONE. */
-  resultVariantId?: string;
-  error?: string;
-}
-
-/** `POST /v1/review/sets/:id/ai-edit` — creates a background job; a 422 (surfaced as `ApiError`) means the prompt was refused by the keyword filter (§5.3/§6.2 rule 4). */
+/**
+ * `POST /v1/review/sets/:id/ai-edit` — runs SYNCHRONOUSLY on the server
+ * (`PhotoReviewService.aiEdit`'s own doc comment) and returns the resulting
+ * `photo_variants` row directly, already at its FINAL `status`
+ * (`READY`/`FAILED`) — there is no separate job/poll contract, `PhotoVariant`
+ * is the one shape both this and `getReviewJob` return. A 422 (surfaced as
+ * `ApiError`) means the prompt was refused by the keyword filter (§5.3/§6.2
+ * rule 4).
+ */
 export const requestAiEdit = (setId: string, input: AiEditInput) =>
-  request<AiEditJob>(`${REVIEW_SETS_PATH}/${setId}/ai-edit`, { method: 'POST', body: JSON.stringify(input) });
+  request<PhotoVariant>(`${REVIEW_SETS_PATH}/${setId}/ai-edit`, { method: 'POST', body: JSON.stringify(input) });
 
-export const getReviewJob = (jobId: string) => request<AiEditJob>(`${REVIEW_JOBS_PATH}/${jobId}`);
+/** `GET /v1/review/jobs/:id` — `:id` is actually a `photo_variants.id`; kept as its own endpoint name for a possible future real job queue (server's own doc comment), but today just re-reads that variant's current state. */
+export const getReviewJob = (jobId: string) => request<PhotoVariant>(`${REVIEW_JOBS_PATH}/${jobId}`);
 
 /** Only an explicit accept turns a job's result into a real, addressable version (§5.3) — never auto-applied. */
 export const acceptVariant = (variantId: string) =>
@@ -1410,7 +1408,53 @@ export const approveReviewSet = (setId: string, note?: string) =>
 export const rejectReviewSet = (setId: string, note?: string) =>
   request<ReviewSetDetail>(`${REVIEW_SETS_PATH}/${setId}/reject`, { method: 'POST', body: JSON.stringify({ note }) });
 
-export const listReviewEvents = (setId: string) => request<ReviewEvent[]>(`${REVIEW_SETS_PATH}/${setId}/events`);
+/**
+ * `GET /v1/review/sets/:id/events` — full paginated audit log (the detail
+ * page's own "Lịch sử" strip instead reads the last 50 off
+ * `ReviewSetDetail.events`, so this is unused today; kept correct rather
+ * than deleted since the route is real). Declared type corrected 2026-09-18
+ * (plan §1.1) — the server has always returned `Pagination<ReviewEventDao>`
+ * here, never a bare array; the previous `ReviewEvent[]` declaration would
+ * have broken the first caller to actually use it.
+ */
+export const listReviewEvents = (setId: string) =>
+  request<Paginated<ReviewEvent>>(`${REVIEW_SETS_PATH}/${setId}/events`);
+
+// --- Review assignments (chia việc duyệt theo nhóm, plan §5.2 feature 13) --
+
+export type ReviewAssignmentGroupField = 'className' | 'faculty' | 'major';
+
+/** Mirrors `ReviewAssignmentDao` — a grant `(userId, groupField, groupValue)`, global (not per-campaign). Zero rows for a user = that user is unrestricted. */
+export interface ReviewAssignment {
+  id: string;
+  userId: string;
+  userName?: string;
+  groupField: ReviewAssignmentGroupField;
+  groupValue: string;
+  createdByUserId?: string;
+  createdAt: string;
+}
+
+const REVIEW_ASSIGNMENTS_PATH = '/v1/review/assignments';
+
+/** `GET /v1/review/assignments?userId=` — admin sees all/filtered by `userId`; a non-admin caller only ever gets back their own rows regardless of `userId` (server-enforced). */
+export const listReviewAssignments = (userId?: string) =>
+  request<ReviewAssignment[]>(`${REVIEW_ASSIGNMENTS_PATH}${userId ? `?userId=${userId}` : ''}`);
+
+/** `GET /v1/review/assignments/group-values?field=` — distinct className/faculty/major values across every set, for the assignment picker's value dropdown. */
+export const listReviewAssignmentGroupValues = (field: ReviewAssignmentGroupField) =>
+  request<string[]>(`${REVIEW_ASSIGNMENTS_PATH}/group-values?field=${field}`);
+
+/** `POST /v1/review/assignments` — ADMIN only. Re-granting an existing (userId, groupField, groupValue) is a harmless no-op (server returns the existing row). */
+export const createReviewAssignment = (input: {
+  userId: string;
+  groupField: ReviewAssignmentGroupField;
+  groupValue: string;
+}) => request<ReviewAssignment>(REVIEW_ASSIGNMENTS_PATH, { method: 'POST', body: JSON.stringify(input) });
+
+/** `DELETE /v1/review/assignments/:id` — ADMIN only. */
+export const deleteReviewAssignment = (id: string) =>
+  request<void>(`${REVIEW_ASSIGNMENTS_PATH}/${id}`, { method: 'DELETE' });
 
 /**
  * "Loại ảnh" — `GET/POST/PATCH /v1/photo-kinds` (ADMIN only, §7). No DELETE

@@ -542,6 +542,21 @@ export interface FaceAPIBridge {
   /** Runtime camera role mapping (§2.1) — set from the camera setup screen. */
   getCameraRoleMapping: () => Promise<CameraRoleMapping>;
   setCameraRoleMapping: (mapping: CameraRoleMapping) => Promise<boolean>;
+  /**
+   * Fires whenever the camera setup screen saves a new role mapping (D3,
+   * plan item 9, 2026-09-21) — same "live-update the already-open main
+   * window" shape as `onCbHelpVisibilityChanged` above.
+   * `FaceCaptureApp.tsx`'s `cameraRoleMapping` state used to be fetched
+   * ONCE at mount with no way to hear about a later change short of
+   * restarting the whole app: an operator who opened Camera Setup, swapped
+   * a camera, saved, and went straight back to the capture screen (no
+   * restart) kept shooting on the stale mapping — confirmed live as the
+   * root cause of item 9's "displays wrong after swap" in sequential mode,
+   * and a contributing cause of item 8 (a freshly-assigned side camera not
+   * appearing until restart). Returns an unsubscribe function, same shape
+   * as `onCbHelpVisibilityChanged`.
+   */
+  onCameraRoleMappingChanged: (callback: (mapping: CameraRoleMapping) => void) => () => void;
 
   /** Per-role physical camera mounting angle (§3.9) — set from the camera setup screen, read by round planning. */
   getCameraPhysicalAngles: () => Promise<CameraPhysicalAngleMap>;
@@ -602,6 +617,18 @@ export interface FaceAPIBridge {
   listRecentStudents: (limit?: number) => Promise<CapturedStudentItem[]>;
   listStudentSessions: (subjectCode: string) => Promise<CapturedStudentItem[]>;
   searchStudents: (query: string) => Promise<CapturedStudentItem[]>;
+  /**
+   * Item 11 ("chụp lại ghi đè ảnh cũ", 2026-09-21) — `null` when this
+   * subject has no prior local approval; otherwise the most recent prior
+   * session id to `RunScopedCaptureSession.resume()` into, plus the
+   * per-step attempt high-water mark that resume must add as an offset so
+   * the new run's captures never collide with the old ones' idempotency
+   * keys. See `capture:getRetakeContext`'s own doc comment in
+   * `main/index.ts` for the full reasoning.
+   */
+  getRetakeContext: (
+    subjectCode: string,
+  ) => Promise<{ sessionId: string; attemptOffsets: Record<string, number> } | null>;
   /**
    * "Cả campaign khi online" (plan item 13, 2026-09-17) — recent completed
    * sessions across every kiosk in this device's campaign, from the server
@@ -694,6 +721,11 @@ const faceAPI: FaceAPIBridge = {
 
   getCameraRoleMapping: () => ipcRenderer.invoke('camera:getRoleMapping'),
   setCameraRoleMapping: (mapping) => ipcRenderer.invoke('camera:setRoleMapping', mapping),
+  onCameraRoleMappingChanged: (callback) => {
+    const listener = (_: unknown, mapping: CameraRoleMapping) => callback(mapping);
+    ipcRenderer.on('camera:roleMappingChanged', listener);
+    return () => ipcRenderer.removeListener('camera:roleMappingChanged', listener);
+  },
   getCameraPhysicalAngles: () => ipcRenderer.invoke('camera:getPhysicalAngles'),
   setCameraPhysicalAngles: (angles) => ipcRenderer.invoke('camera:setPhysicalAngles', angles),
   openCameraSetup: () => ipcRenderer.invoke('camera:openSetup'),
@@ -718,6 +750,7 @@ const faceAPI: FaceAPIBridge = {
   listCampaignRecentCaptures: (limit) => ipcRenderer.invoke('students:listCampaignRecent', limit),
   listStudentSessions: (subjectCode) => ipcRenderer.invoke('students:listSessions', subjectCode),
   searchStudents: (query) => ipcRenderer.invoke('students:search', query),
+  getRetakeContext: (subjectCode) => ipcRenderer.invoke('capture:getRetakeContext', subjectCode),
 
   recordStatsEvent: (payload) => ipcRenderer.invoke('stats:recordEvent', payload),
   setFileServiceCredentials: (payload) => ipcRenderer.invoke('secrets:setFileService', payload),

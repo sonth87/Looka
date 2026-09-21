@@ -75,11 +75,16 @@ export class PrintBatch extends BaseEntity {
 
   @Column('timestamptz', { name: 'sent_at', nullable: true })
   @ApiPropertyOptional({
-    description: 'Thời điểm gửi in (DIRECT) / xuất gói (CENTRALIZED)',
+    description: 'Thời điểm gửi in (DIRECT) / xuất gói gần nhất (CENTRALIZED)',
   })
   sentAt?: Date | null;
 
   @Column('timestamptz', { name: 'done_at', nullable: true })
   @ApiPropertyOptional({ description: 'Thời điểm hoàn tất đợt' })
   doneAt?: Date | null;
+
+  /** Giai đoạn 4 (plan §4.2) — mirror của `print_items.exportedAt` mới nhất trong đợt, chỉ để hiển thị (CMS không cần join sang print_items để biết "lần xuất gần nhất"). */
+  @Column('timestamptz', { name: 'last_exported_at', nullable: true })
+  @ApiPropertyOptional({ description: 'Lần xuất gói gần nhất của đợt' })
+  lastExportedAt?: Date | null;
 }

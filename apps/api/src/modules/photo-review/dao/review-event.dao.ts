@@ -23,9 +23,12 @@ export class ReviewEventDao {
   @Expose()
   actorUserId?: string | null;
 
-  @ApiPropertyOptional({ description: 'Email người thực hiện, nếu tra được' })
+  @ApiPropertyOptional({
+    description:
+      'Tên hiển thị (hoặc email nếu chưa có tên) người thực hiện, nếu tra được',
+  })
   @Expose()
-  actorEmail?: string | null;
+  actorName?: string | null;
 
   @ApiPropertyOptional()
   @Expose()

@@ -491,9 +491,23 @@ export class RunScopedCaptureSession {
    * Deliberately bypasses `startSession()` entirely — unlike `ensure()`,
    * this never talks to the sink, since the caller already knows the id (it
    * cached it itself, right before the earlier `reset()` that cleared it).
+   *
+   * `attemptOffsets` (item 11, "chụp lại ghi đè ảnh cũ", 2026-09-21) extends
+   * this same method to a SECOND caller: a student returning after this
+   * kiosk sitting already ended (app restart, or someone else used the
+   * machine in between). That path calls this with a PRIOR session's id
+   * that has no live in-memory engine state at all — a genuinely fresh
+   * `engine.startSession()` still runs, whose own per-step attempt counter
+   * restarts at 1, exactly like any other new session. Without an offset,
+   * the very first retaken photo of each step would carry the identical
+   * `${sessionId}:${stepId}:1` idemKey the OLD approved photo already used,
+   * and the outbox's `ON CONFLICT(idem_key) DO NOTHING` would silently drop
+   * it — never uploaded, no error, the stale photo simply never replaced.
+   * See `savePhoto()` below for where this offset is actually added.
    */
-  public resume(sessionId: string): void {
+  public resume(sessionId: string, attemptOffsets?: Record<string, number>): void {
     this.sessionId = sessionId;
+    this.attemptOffsets = attemptOffsets ?? {};
   }
 
   /**
@@ -527,6 +541,9 @@ export class RunScopedCaptureSession {
    * doc comment and `ElectronCaptureSink.startSession()`'s no-op).
    */
   private pendingSubject: StudentSubjectInfo = {};
+
+  /** Set only by `resume()`'s cross-sitting retake path — see that method's own doc comment. Empty for every other run. */
+  private attemptOffsets: Record<string, number> = {};
 
   /**
    * The campaign this run belongs to, if any (2026-09-16, backend-owned face
@@ -605,12 +622,18 @@ export class RunScopedCaptureSession {
     // capture of a real (non-manual) run — see `savePhoto`'s own interface
     // doc comment for why this rides along per-photo rather than only at
     // approval time.
+    //
+    // `attemptOffsets` (item 11, 2026-09-21) — see `resume()`'s own doc
+    // comment. Zero for every run except a cross-sitting retake, so this is
+    // a no-op addition on the normal path.
+    const offset = this.attemptOffsets[input.stepId] ?? 0;
     await this.sink.savePhoto({
       sessionId,
       identityNumber: this.pendingSubject.identityNumber,
       userCode: this.pendingSubject.userCode,
       operatorUserId: this.operatorUserId,
       ...input,
+      attempt: input.attempt + offset,
     });
   }
 
@@ -658,6 +681,7 @@ export class RunScopedCaptureSession {
     this.sessionId = null;
     this.sessionPromise = null;
     this.pendingSubject = {};
+    this.attemptOffsets = {};
   }
 
   /**
@@ -669,5 +693,6 @@ export class RunScopedCaptureSession {
     this.sessionId = null;
     this.sessionPromise = null;
     this.pendingSubject = {};
+    this.attemptOffsets = {};
   }
 }

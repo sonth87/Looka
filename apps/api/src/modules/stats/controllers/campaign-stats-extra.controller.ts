@@ -5,8 +5,18 @@ import {
 import { SsoAuthGuard } from '@app/shared/auth/index';
 import { Controller, Get, Param, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
-import { CampaignTimingRowDao, IdentificationStatsDao } from '../dao';
-import { CampaignTimingQueryDto, IdentificationStatsQueryDto } from '../dto';
+import {
+  CampaignTimingRowDao,
+  IdentificationStatsDao,
+  RosterGroupFieldDao,
+  RosterGroupStatDao,
+} from '../dao';
+import {
+  CampaignTimingQueryDto,
+  IdentificationStatsQueryDto,
+  RosterGroupsQueryDto,
+} from '../dto';
+import { RosterGroupStatsService } from '../services/roster-group-stats.service';
 import { StatsQueryService } from '../services/stats-query.service';
 import { defaultDateRange } from '../util/vn-date.util';
 
@@ -27,7 +37,10 @@ import { defaultDateRange } from '../util/vn-date.util';
 @UseGuards(SsoAuthGuard)
 @ApiBearerAuth('sso')
 export class CampaignStatsExtraController {
-  constructor(private readonly statsQuery: StatsQueryService) {}
+  constructor(
+    private readonly statsQuery: StatsQueryService,
+    private readonly rosterGroupStats: RosterGroupStatsService,
+  ) {}
 
   @Get(':id/stats/timing')
   @ApiOperation({
@@ -62,5 +75,34 @@ export class CampaignStatsExtraController {
       to,
     );
     return { byMethod };
+  }
+
+  @Get(':id/stats/roster-group-fields')
+  @ApiOperation({
+    summary:
+      'Các field nhóm được cho thống kê động (cột thật + khoá phát hiện từ API pull)',
+  })
+  @ApiResponseArrayDecorator(RosterGroupFieldDao)
+  rosterGroupFields(
+    @Param('id') campaignId: string,
+  ): Promise<RosterGroupFieldDao[]> {
+    return this.rosterGroupStats.groupFields(campaignId);
+  }
+
+  @Get(':id/stats/roster-groups')
+  @ApiOperation({
+    summary:
+      'Thống kê nhóm động theo 1-2 tầng field (lớp/khoa/ngành/khoá jsonb phát hiện từ API)',
+  })
+  @ApiResponseArrayDecorator(RosterGroupStatDao)
+  rosterGroups(
+    @Param('id') campaignId: string,
+    @Query() query: RosterGroupsQueryDto,
+  ): Promise<RosterGroupStatDao[]> {
+    return this.rosterGroupStats.groupStats(
+      campaignId,
+      query.groupBy,
+      query.secondaryGroupBy,
+    );
   }
 }

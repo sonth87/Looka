@@ -263,6 +263,23 @@ export function CampaignGate({
     void refreshDeviceState();
   }, [refreshDeviceState]);
 
+  // Live-update companion (D3 fix, plan item 9, 2026-09-21) — re-runs the
+  // same fetch `refreshDeviceState` already does whenever the camera setup
+  // screen saves a new mapping, instead of only ever reading it once at
+  // mount. Without this, the footer's "đang kết nối N/M camera" dots and
+  // `mappedCameraCount` stayed frozen at whatever the mapping was when this
+  // window first loaded, even after an operator re-assigned cameras and
+  // came back without restarting the app. `onCameraRoleMappingChanged` is
+  // undefined on the web build, same guard every other `faceAPI` call here
+  // already uses.
+  useEffect(() => {
+    const faceAPI = (window as any).faceAPI;
+    const unsubscribe = faceAPI?.onCameraRoleMappingChanged?.(() => {
+      void refreshDeviceState();
+    });
+    return () => unsubscribe?.();
+  }, [refreshDeviceState]);
+
   // Live camera presence for the footer's "ready" dots — separate from
   // `refreshDeviceState` above, which only reads saved config. Refreshes on
   // mount and whenever a camera is plugged/unplugged.

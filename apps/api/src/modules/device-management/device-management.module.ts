@@ -38,6 +38,9 @@ import { CaptureAnglePresetService } from './services/capture-angle-preset.servi
 import { DeviceService } from './services/device.service';
 import { DeviceEventService } from './services/device-event.service';
 import { IdentificationMethodService } from './services/identification-method.service';
+import { CampaignSubjectPullFetchWorker } from './workers/campaign-subject-pull-fetch.worker';
+import { CampaignSubjectPullStuckJobRecoveryWorker } from './workers/campaign-subject-pull-stuck-job-recovery.worker';
+import { CampaignSubjectPullWriteWorker } from './workers/campaign-subject-pull-write.worker';
 
 @Module({
   imports: [
@@ -131,6 +134,13 @@ import { IdentificationMethodService } from './services/identification-method.se
     SsoAuthGuard,
     AdminRoleGuard,
     CampaignMemberGuard,
+    // Plain `@Cron()` providers, same "registered everywhere, only actually
+    // fire on a host with `ScheduleModule.forRoot()`" shape
+    // `stats/workers/snapshot-refresh.worker.ts`'s own doc comment
+    // documents — see 13-features-and-2-blockers-plan-2026-09-18.md §3.1.
+    CampaignSubjectPullFetchWorker,
+    CampaignSubjectPullWriteWorker,
+    CampaignSubjectPullStuckJobRecoveryWorker,
   ],
   exports: [
     CampaignService,

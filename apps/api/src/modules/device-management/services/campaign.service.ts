@@ -29,6 +29,7 @@ import {
   DEFAULT_ELIGIBILITY_CONFIG,
   validateEligibilityConfigShape,
 } from '../domain/eligibility-config.schema';
+import type { EligibilityMode } from '../domain/eligibility-config.schema';
 import { computeEffectiveStatus } from '../utils/campaign-status.util';
 import {
   computeRequiredCameraCount,
@@ -113,6 +114,14 @@ export class CampaignService extends CommonService<Campaign> {
     } catch (error) {
       throw this.mapCodeUniqueViolation(error);
     }
+
+    // Fire-and-forget: never lets a slow/failed auto-pull enqueue affect
+    // the create response — see `maybeEnqueuePull`'s own doc comment.
+    void this.maybeEnqueuePull(campaign, 'NONE').catch((err) =>
+      this.logger.warn(
+        `auto-enqueue subject pull failed for new campaign ${campaign.id}: ${(err as Error).message}`,
+      ),
+    );
 
     return this.toCampaignResponse(campaign);
   }
@@ -273,6 +282,8 @@ export class CampaignService extends CommonService<Campaign> {
     dto: UpdateCampaignDto,
   ): Promise<CampaignDao> {
     const campaign = await this.findCampaignEntityOrFail(id);
+    const previousMode: EligibilityMode =
+      campaign.eligibilityConfig?.mode ?? 'NONE';
 
     const mergedCaptureAngles =
       dto.captureAngles !== undefined
@@ -367,7 +378,58 @@ export class CampaignService extends CommonService<Campaign> {
     } catch (error) {
       throw this.mapCodeUniqueViolation(error);
     }
+
+    void this.maybeEnqueuePull(campaign, previousMode).catch((err) =>
+      this.logger.warn(
+        `auto-enqueue subject pull failed for campaign ${campaign.id}: ${(err as Error).message}`,
+      ),
+    );
+
     return this.toCampaignResponse(campaign);
+  }
+
+  /**
+   * Auto-enqueues a subject pull when a save transitions a campaign's
+   * `eligibilityConfig.mode` INTO `EXTERNAL_API`/`ROSTER_AND_API`
+   * (13-features-and-2-blockers-plan-2026-09-18.md §3.1's own "Tự động kéo
+   * khi TẠO campaign"). Only inserts the `campaign_subject_imports` row at
+   * `PENDING_FETCH` — `CampaignSubjectPullFetchWorker` picks it up on its
+   * own next tick, same as a manual `POST .../subjects/pulls`; this method
+   * itself does no HTTP call and is never awaited by its callers (both
+   * `createCampaign`/`updateCampaign` fire it with `void … .catch(...)`),
+   * so a failure here can never surface as a failed campaign save.
+   *
+   * For `updateCampaign`, ALSO requires the campaign to have no `VALID`
+   * roster row yet — a campaign with real existing data should not get an
+   * unrelated background pull silently started by an unrelated field edit;
+   * a human who wants a fresh pull on an already-populated campaign uses
+   * the explicit route (optionally with `force: true`).
+   * `createCampaign` always passes `previousMode: 'NONE'`, so a brand new
+   * `EXTERNAL_API`/`ROSTER_AND_API` campaign always qualifies (it can't
+   * have any roster rows yet either way).
+   */
+  private async maybeEnqueuePull(
+    campaign: Campaign,
+    previousMode: EligibilityMode,
+  ): Promise<void> {
+    const mode = campaign.eligibilityConfig?.mode ?? 'NONE';
+    const becameEligible =
+      (mode === 'EXTERNAL_API' || mode === 'ROSTER_AND_API') &&
+      previousMode !== 'EXTERNAL_API' &&
+      previousMode !== 'ROSTER_AND_API';
+    if (!becameEligible || !campaign.eligibilityConfig?.api) return;
+
+    const [{ count }] = await this.dataSource.query<Array<{ count: number }>>(
+      `SELECT COUNT(*)::int AS count FROM campaign_subjects WHERE campaign_id = $1 AND status = 'VALID'`,
+      [campaign.id],
+    );
+    if (count > 0) return;
+
+    await this.dataSource.query(
+      `INSERT INTO campaign_subject_imports (campaign_id, source, file_name, status)
+       VALUES ($1, 'EXTERNAL_API', $2, 'PENDING_FETCH')`,
+      [campaign.id, `external-api-${new Date().toISOString()}.json`],
+    );
   }
 
   /**

@@ -33,8 +33,8 @@ export class PrintItemEvent extends BaseEntity {
   @ApiProperty({ description: 'Trạng thái sau' })
   toStatus: string;
 
-  @Column('varchar', { length: 12 })
-  @ApiProperty({ description: 'SYSTEM | PRINT_AGENT | MANUAL' })
+  @Column('varchar', { length: 16 })
+  @ApiProperty({ description: 'SYSTEM | PRINT_AGENT | MANUAL | RESULT_UPLOAD' })
   source: PrintItemEventSource;
 
   @Column('uuid', { name: 'actor_user_id', nullable: true })

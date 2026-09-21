@@ -4,6 +4,8 @@ import {
   ApiResponsePaginatedDecorator,
 } from '@app/shared/http/api-response.decorator';
 import { SsoAuthGuard } from '@app/shared/auth/index';
+import { PermissionsGuard } from '@app/modules/identity/presentation/guards/permissions.guard';
+import { RequirePermission } from '@app/modules/identity/presentation/guards/require-permission.decorator';
 import {
   Body,
   Controller,
@@ -89,9 +91,21 @@ export class CampaignMemberController {
    * "cấp quyền" from the CMS's campaign-list page, replacing the deleted
    * `campaign_kiosk_assignments` auto-approve shortcut. See
    * `CampaignMemberService.grant()`'s own doc comment.
+   *
+   * `PermissionsGuard` + `campaign:write` (not `AdminRoleGuard`) since
+   * 2026-09-18 — found live that an `AdminRoleGuard`-gated route made this
+   * feature admin-only despite every other campaign write route already
+   * being delegable via a role (`campaign.controller.ts`'s own
+   * `campaign:write`/`campaign:delete`). A CTSV account granted
+   * `campaign:write` (seeded by default — see migration
+   * `1833000000000-SeedDefaultRolePermissions.ts`) can now use this without
+   * being `is_admin`. `PermissionsGuard.canActivate` still fast-paths any
+   * `isAdmin` account exactly as `AdminRoleGuard` did, so no admin loses
+   * access.
    */
   @Post(':id/members/grant')
-  @UseGuards(SsoAuthGuard, AdminRoleGuard)
+  @UseGuards(SsoAuthGuard, PermissionsGuard)
+  @RequirePermission('campaign:write', 'Cấp quyền campaign hàng loạt')
   @ApiOperation({
     summary:
       'Grant APPROVED campaign membership to a batch of users in one call',

@@ -22,6 +22,7 @@ import {
   CampaignSubjectLookupDao,
 } from '../dao';
 import { ListCampaignSubjectsQueryDto } from '../dto/list-campaign-subjects-query.dto';
+import { RequestSubjectPullDto } from '../dto/request-subject-pull.dto';
 import { CampaignSubjectImport } from '../entities/campaign-subject-import.entity';
 import {
   CampaignSubject,
@@ -111,12 +112,17 @@ function normalizeHeaderText(text: string): string {
   return noDiacritics.toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
-const NORMALIZED_HEADER_ALIASES: Record<string, RosterFieldKey> = Object.fromEntries(
-  (Object.entries(HEADER_ALIASES) as Array<[RosterFieldKey, string[]]>).flatMap(([field, aliases]) =>
-    aliases.map((alias) => [normalizeHeaderText(alias), field]),
-  ),
+const NORMALIZED_HEADER_ALIASES: Record<string, RosterFieldKey> =
+  Object.fromEntries(
+    (
+      Object.entries(HEADER_ALIASES) as Array<[RosterFieldKey, string[]]>
+    ).flatMap(([field, aliases]) =>
+      aliases.map((alias) => [normalizeHeaderText(alias), field]),
+    ),
+  );
+const NORMALIZED_IGNORED_HEADERS = new Set(
+  IGNORED_HEADERS.map(normalizeHeaderText),
 );
-const NORMALIZED_IGNORED_HEADERS = new Set(IGNORED_HEADERS.map(normalizeHeaderText));
 
 interface ParsedRow {
   rowNo: number;
@@ -399,7 +405,16 @@ export class CampaignSubjectService extends CommonService<CampaignSubject> {
     );
   }
 
-  /** Refused (409) if any session already references a subject this import created — "chỉ khi chưa phiên nào khớp" (§2.3). */
+  /**
+   * Refused (409) if any session already references a subject this import
+   * created — "chỉ khi chưa phiên nào khớp" (§2.3) — OR (2026-09-21, plan
+   * §3.1's own "bẫy CASCADE" warning) if any of its subjects already has
+   * `printedAt` set: `campaign_subjects.import_id` cascade-deletes, and
+   * since a re-pull re-points EVERY matching row at the newest import, the
+   * most recent `EXTERNAL_API` import is exactly the one most likely to
+   * "own" rows with real print history — deleting it would silently erase
+   * that history along with the roster rows.
+   */
   async deleteImport(campaignId: string, importId: string): Promise<void> {
     await this.findImportEntityOrFail(campaignId, importId);
 
@@ -419,8 +434,94 @@ export class CampaignSubjectService extends CommonService<CampaignSubject> {
       );
     }
 
+    const [{ printedCount }] = await this.dataSource.query<
+      Array<{ printedCount: number }>
+    >(
+      `SELECT COUNT(*)::int AS "printedCount"
+         FROM campaign_subjects
+        WHERE import_id = $1 AND printed_at IS NOT NULL`,
+      [importId],
+    );
+    if (printedCount > 0) {
+      throw new CustomException(
+        `Cannot delete import: ${printedCount} subject(s) from it already have a confirmed print`,
+        ERROR_CODE.CAMPAIGN_SUBJECT_IMPORT_IN_USE,
+        HttpStatus.CONFLICT,
+      );
+    }
+
     // `campaign_subjects` rows cascade-delete via the FK — see that entity's own doc comment.
     await this.importRepository.delete(importId);
+  }
+
+  /**
+   * `POST /v1/campaigns/:id/subjects/pulls` (plan §3.1, feature 1) — queues
+   * a full, unfiltered pull of this campaign's own `eligibilityConfig.api`
+   * into the durable 2-tier queue (`campaign_subject_import_chunks`,
+   * `CampaignSubjectPullFetchWorker` / `CampaignSubjectPullWriteWorker`,
+   * both in this module's `services/`). This method itself does no HTTP
+   * call and no heavy work — it only inserts the `campaign_subject_imports`
+   * row at `PENDING_FETCH` and returns; the workers pick it up on their own
+   * next tick (fetch worker every 5s, write worker every 2s), same "insert a row, a cron worker claims it"
+   * shape `StatsRebuildService`'s own doc comment documents choosing OVER
+   * for this exact reason: a ~24k-record/~20MB pull is an order of
+   * magnitude past `importRoster`'s "one bounded file, human is waiting"
+   * synchronous reasoning, AND unlike a plain fire-and-forget promise, a
+   * durable queue survives this process crashing mid-pull without losing
+   * anything already written (plan §3.1's own explicit reason for choosing
+   * Postgres over Redis/BullMQ here).
+   */
+  async requestPull(
+    campaignId: string,
+    triggeredByUserId: string | null,
+    dto: RequestSubjectPullDto,
+  ): Promise<CampaignSubjectImportDao> {
+    const campaign =
+      await this.campaignService.findCampaignEntityOrFail(campaignId);
+    const mode: EligibilityMode = campaign.eligibilityConfig?.mode ?? 'NONE';
+    if (mode !== 'EXTERNAL_API' && mode !== 'ROSTER_AND_API') {
+      throw new CustomException(
+        `Campaign đang ở chế độ "${mode}" — chỉ EXTERNAL_API/ROSTER_AND_API mới kéo được dữ liệu từ API`,
+        ERROR_CODE.CAMPAIGN_SUBJECT_SYNC_NO_API_CONFIG,
+        HttpStatus.CONFLICT,
+      );
+    }
+    if (!campaign.eligibilityConfig?.api) {
+      throw new CustomException(
+        'Campaign chưa cấu hình API điều kiện tiếp nhận — vào phần "Điều kiện tiếp nhận" để nhập URL/credential trước',
+        ERROR_CODE.CAMPAIGN_SUBJECT_SYNC_NO_API_CONFIG,
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+
+    if (!dto.force) {
+      const recent = await this.importRepository.findOne({
+        where: { campaignId, source: 'EXTERNAL_API' },
+        order: { createdAt: 'DESC' },
+      });
+      const stillRunning =
+        recent &&
+        ['PENDING_FETCH', 'FETCHING', 'IMPORTING'].includes(recent.status) &&
+        Date.now() - recent.createdAt.getTime() < 5 * 60_000;
+      if (stillRunning) {
+        throw new CustomException(
+          'Đã có một lần kéo dữ liệu đang chạy trong 5 phút gần đây — dùng force=true để kéo lại ngay',
+          ERROR_CODE.CAMPAIGN_SUBJECT_SYNC_NO_API_CONFIG,
+          HttpStatus.CONFLICT,
+        );
+      }
+    }
+
+    const importRow = await this.importRepository.save(
+      this.importRepository.create({
+        campaignId,
+        source: 'EXTERNAL_API',
+        fileName: `external-api-${new Date().toISOString()}.json`,
+        uploadedByUserId: triggeredByUserId,
+        status: 'PENDING_FETCH',
+      }),
+    );
+    return this.toImportDao(importRow);
   }
 
   async listSubjects(
@@ -830,7 +931,8 @@ export class CampaignSubjectService extends CommonService<CampaignSubject> {
         // duplicated header (two "Lớp" columns) keeps reading the first one,
         // same "first match wins" convention `DISTINCT_VALUE_COLUMNS` above
         // documents for its own lookup.
-        if (columnByField[field] === undefined) columnByField[field] = colNumber;
+        if (columnByField[field] === undefined)
+          columnByField[field] = colNumber;
         return;
       }
       extraHeaders.push({ col: colNumber, header: text });
@@ -854,11 +956,15 @@ export class CampaignSubjectService extends CommonService<CampaignSubject> {
 
       const get = (field: RosterFieldKey): string | null => {
         const col = columnByField[field];
-        return col === undefined ? null : this.cellToString(excelRow.getCell(col).value);
+        return col === undefined
+          ? null
+          : this.cellToString(excelRow.getCell(col).value);
       };
       const getDate = (field: RosterFieldKey): string | null => {
         const col = columnByField[field];
-        return col === undefined ? null : this.cellToDate(excelRow.getCell(col).value);
+        return col === undefined
+          ? null
+          : this.cellToDate(excelRow.getCell(col).value);
       };
 
       const subjectCode = get('subjectCode');
@@ -868,7 +974,14 @@ export class CampaignSubjectService extends CommonService<CampaignSubject> {
       const faculty = get('faculty');
       const major = get('major');
       // A fully blank row (no cell has any content) is skipped, not counted as an error row.
-      if (!subjectCode && !fullName && !citizenId && !className && !faculty && !major) {
+      if (
+        !subjectCode &&
+        !fullName &&
+        !citizenId &&
+        !className &&
+        !faculty &&
+        !major
+      ) {
         continue;
       }
 

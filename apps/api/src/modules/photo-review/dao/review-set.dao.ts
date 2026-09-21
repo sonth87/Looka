@@ -80,6 +80,10 @@ export class ReviewSetListItemDao {
   @Expose()
   campaignId: string;
 
+  @ApiPropertyOptional({ description: 'Tên campaign, nếu tra được' })
+  @Expose()
+  campaignName?: string;
+
   @ApiProperty()
   @Expose()
   subjectCode: string;
@@ -107,6 +111,13 @@ export class ReviewSetListItemDao {
   @ApiPropertyOptional()
   @Expose()
   currentCardVariantId?: string | null;
+
+  @ApiPropertyOptional({
+    description:
+      'Lý do tạo ảnh 4x6 tự động thất bại — chỉ có giá trị khi status=AUTO_FAILED, lấy từ note của variant CARD_AUTO lỗi gần nhất',
+  })
+  @Expose()
+  failReason?: string | null;
 
   @ApiPropertyOptional({ description: 'Link xem ảnh thẻ hiện tại, ngắn hạn' })
   @Expose()
@@ -176,6 +187,18 @@ export class ReviewSetListItemDao {
 
 /** `GET /v1/review/sets/:id` — the list row plus everything the detail page needs (plan §5.2). */
 export class ReviewSetDetailDao extends ReviewSetListItemDao {
+  @ApiPropertyOptional({
+    description: 'Thời điểm chụp phiên gốc (sessions.created_at)',
+  })
+  @Expose()
+  sourceCapturedAt?: Date;
+
+  @ApiPropertyOptional({
+    description: 'Tên thiết bị đã chụp phiên gốc, nếu tra được',
+  })
+  @Expose()
+  sourceDeviceName?: string;
+
   @ApiProperty({ type: [ReviewOriginalPhotoDao] })
   @Expose()
   @Type(() => ReviewOriginalPhotoDao)

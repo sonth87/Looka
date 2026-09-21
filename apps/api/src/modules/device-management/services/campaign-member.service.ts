@@ -191,6 +191,24 @@ export class CampaignMemberService extends CommonService<CampaignMember> {
   ): Promise<CampaignMemberDao[]> {
     await this.campaignService.findCampaignEntityOrFail(campaignId);
 
+    // Pre-check every id exists before the bulk insert — without this, a
+    // stale/mistyped id in `dto.userIds` hits `FK_campaign_members_user`
+    // mid-`orUpdate()` and surfaces as an opaque 500 instead of a readable
+    // 400 (plan §1.2, 2026-09-18).
+    const existingUsers = await this.userRepository.find({
+      where: { id: In(dto.userIds) },
+      select: ['id'],
+    });
+    const existingIds = new Set(existingUsers.map((u) => u.id));
+    const missingIds = dto.userIds.filter((id) => !existingIds.has(id));
+    if (missingIds.length > 0) {
+      throw new CustomException(
+        `User id(s) not found: ${missingIds.join(', ')}`,
+        ERROR_CODE.CAMPAIGN_MEMBER_GRANT_USER_NOT_FOUND,
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+
     const now = new Date();
     await this.repository
       .createQueryBuilder()

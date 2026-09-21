@@ -5,7 +5,14 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
-import { DataSource, FindOptionsWhere, In, Repository } from 'typeorm';
+import {
+  DataSource,
+  FindOptionsWhere,
+  In,
+  IsNull,
+  Not,
+  Repository,
+} from 'typeorm';
 import { Pagination } from '@app/shared/http/pagination';
 import {
   CreatePrintBatchDto,
@@ -15,6 +22,7 @@ import {
 import { PrintBatchDetailDao, PrintBatchListItemDao } from '../dao';
 import { PrintBatch } from '../entities/print-batch.entity';
 import { PrintItem } from '../entities/print-item.entity';
+import { PrintItemEvent } from '../entities/print-item-event.entity';
 import { PrintItemService } from './print-item.service';
 import { PrintPackageService } from './print-package.service';
 
@@ -35,6 +43,8 @@ export class PrintBatchService {
     @InjectRepository(PrintBatch)
     private readonly batches: Repository<PrintBatch>,
     @InjectRepository(PrintItem) private readonly items: Repository<PrintItem>,
+    @InjectRepository(PrintItemEvent)
+    private readonly events: Repository<PrintItemEvent>,
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly itemService: PrintItemService,
     private readonly packageService: PrintPackageService,
@@ -206,6 +216,57 @@ export class PrintBatchService {
     return { removed: itemIds.length };
   }
 
+  /**
+   * `POST /v1/print/batches/:id/populate` — Giai đoạn 4 (plan §4.1, feature
+   * 2). Requires the batch to already have a `campaignId` (set at create
+   * time or via `PATCH`). Reuses `PrintItemService.bulkCreate`'s existing
+   * campaign+APPROVED query for brand-new items, then ALSO attaches every
+   * already-existing item for this campaign that isn't in any batch yet —
+   * both count as "chưa được nạp vào đợt này", matching the plan's own
+   * "nạp toàn bộ ảnh đã duyệt" wording rather than only the freshly-created
+   * ones (an item can pre-exist unassigned from an earlier `bulk` call or
+   * from being removed from a different batch).
+   */
+  async populate(id: string): Promise<{
+    created: number;
+    attached: number;
+    skipped: Array<{ setId: string; reason: string }>;
+  }> {
+    const batch = await this.loadOrFail(id);
+    this.assertEditable(batch);
+    if (!batch.campaignId) {
+      throw new BadRequestException(
+        'Đợt in chưa gắn campaign — không thể nạp tự động',
+      );
+    }
+
+    const { createdIds, skipped } = await this.itemService.bulkCreate({
+      filter: { campaignId: batch.campaignId },
+    });
+
+    const unassigned = await this.items.find({
+      where: {
+        campaignId: batch.campaignId,
+        batchId: IsNull(),
+        status: Not('CANCELLED'),
+      },
+    });
+    const idsToAttach = Array.from(
+      new Set([...createdIds, ...unassigned.map((i) => i.id)]),
+    );
+    if (idsToAttach.length) {
+      await this.items.update({ id: In(idsToAttach) }, { batchId: id });
+      batch.itemCount += idsToAttach.length;
+      await this.batches.save(batch);
+    }
+
+    return {
+      created: createdIds.length,
+      attached: idsToAttach.length,
+      skipped,
+    };
+  }
+
   /** Shared by `send()`/`package()`: when a caller passes an explicit `itemIds` subset, every id must actually be a member of this batch — a foreign or unknown id is a 400, never silently ignored (task brief §Task A point 2). */
   private async assertItemsBelongToBatch(
     id: string,
@@ -270,16 +331,22 @@ export class PrintBatchService {
   }
 
   /**
-   * `POST /v1/print/batches/:id/send` — DIRECT queues every RENDERED item
-   * (`status → QUEUED`) for a print agent to drain (D-Q8: that agent is out
-   * of scope, so items simply sit QUEUED — see `PrintAgentController`'s own
-   * doc comment); CENTRALIZED goes straight to `DONE` since the system's
-   * whole job for that mode ends at "package is available to download"
-   * (`GET .../package`, built fresh on demand — see `PrintPackageService`),
-   * there is no further state a centralized batch waits through.
+   * `POST /v1/print/batches/:id/send` — DIRECT ONLY: queues every RENDERED
+   * item (`status → QUEUED`) for a print agent to drain (D-Q8: that agent
+   * is out of scope, so items simply sit QUEUED — see
+   * `PrintAgentController`'s own doc comment). CENTRALIZED used to jump
+   * straight to `DONE` here (plan §4.0 Bẫy 4, "đợt CENTRALIZED nhảy thẳng
+   * DONE") — that single step is now two explicit ones, `exportPackage()`
+   * ("Xuất gói") and `complete()` ("Hoàn tất đợt"); calling `send()` on a
+   * CENTRALIZED batch is now a 400 pointing at those instead.
    */
   async send(id: string, itemIds?: string[]): Promise<PrintBatchDetailDao> {
     const batch = await this.loadOrFail(id);
+    if (batch.mode !== 'DIRECT') {
+      throw new BadRequestException(
+        'Đợt CENTRALIZED không dùng "gửi in" — dùng "Xuất gói" (POST .../package) rồi "Hoàn tất đợt" (POST .../complete)',
+      );
+    }
     if (batch.itemCount === 0) {
       throw new BadRequestException('Đợt in chưa có item nào');
     }
@@ -292,50 +359,154 @@ export class PrintBatchService {
       await this.assertItemsBelongToBatch(id, itemIds);
     }
 
-    const now = new Date();
-    if (batch.mode === 'DIRECT') {
-      // The agent's queue poll (`GET /v1/print/queue?printerId`) filters by
-      // `print_items.printer_id` — an item must be stamped with a printer
-      // before it can ever show up there, so DIRECT `send()` requires the
-      // batch to already have one (`PATCH .../batches/:id {printerId}`
-      // beforehand), unlike CENTRALIZED where `printerId` stays optional.
-      if (!batch.printerId) {
-        throw new BadRequestException(
-          'Đợt in DIRECT cần gán máy in trước khi gửi',
-        );
-      }
-      const where: FindOptionsWhere<PrintItem> = {
-        batchId: id,
-        status: 'RENDERED',
-      };
-      if (itemIds?.length) where.id = In(itemIds);
-      const result = await this.items.update(where, {
-        status: 'QUEUED',
-        printerId: batch.printerId,
-      });
-      if (!result.affected) {
-        throw new BadRequestException(
-          'Chưa có item nào ở trạng thái RENDERED để gửi in',
-        );
-      }
-      batch.status = 'PRINTING';
-      batch.sentAt = now;
-    } else {
-      const countWhere: FindOptionsWhere<PrintItem> = {
-        batchId: id,
-        status: 'RENDERED',
-      };
-      if (itemIds?.length) countWhere.id = In(itemIds);
-      const renderedCount = await this.items.count({ where: countWhere });
-      if (renderedCount === 0) {
-        throw new BadRequestException(
-          'Chưa có item nào được render để xuất gói',
-        );
-      }
-      batch.status = 'DONE';
-      batch.sentAt = now;
-      batch.doneAt = now;
+    // The agent's queue poll (`GET /v1/print/queue?printerId`) filters by
+    // `print_items.printer_id` — an item must be stamped with a printer
+    // before it can ever show up there, so DIRECT `send()` requires the
+    // batch to already have one (`PATCH .../batches/:id {printerId}`
+    // beforehand).
+    if (!batch.printerId) {
+      throw new BadRequestException(
+        'Đợt in DIRECT cần gán máy in trước khi gửi',
+      );
     }
+    const where: FindOptionsWhere<PrintItem> = {
+      batchId: id,
+      status: 'RENDERED',
+    };
+    if (itemIds?.length) where.id = In(itemIds);
+    const result = await this.items.update(where, {
+      status: 'QUEUED',
+      printerId: batch.printerId,
+    });
+    if (!result.affected) {
+      throw new BadRequestException(
+        'Chưa có item nào ở trạng thái RENDERED để gửi in',
+      );
+    }
+    batch.status = 'PRINTING';
+    batch.sentAt = new Date();
+    const saved = await this.batches.save(batch);
+    return PrintBatchDetailDao.fromDetail(saved);
+  }
+
+  /**
+   * `POST /v1/print/batches/:id/package {itemIds?}` — Giai đoạn 4 (plan
+   * §4.0 Bẫy 4+6, §4.2) — "Xuất gói", the CENTRALIZED replacement for what
+   * `send()`'s old CENTRALIZED branch used to do. Builds the SAME zip
+   * `GET .../package` returns (read-only, unchanged, see
+   * `PrintPackageService`), but only stamps `exportedAt`/promotes
+   * RENDERED→EXPORTED items AFTER the zip has actually finished building
+   * (plan's own "sau khi zip dựng xong" — a failed zip build must never
+   * stamp anything). Repeatable: re-exporting an already-EXPORTED/PRINTED
+   * item just refreshes its `exportedAt` and appends a new
+   * `print_item_events` row, never regresses its status ("Xuất lại lần
+   * nữa thì cập nhật exported_at thành lần mới nhất").
+   */
+  async exportPackage(
+    id: string,
+    itemIds: string[] | undefined,
+    actorUserId: string | null,
+  ): Promise<{ zip: Buffer; filename: string }> {
+    const batch = await this.loadOrFail(id);
+    if (!['DRAFT', 'READY'].includes(batch.status)) {
+      throw new ConflictException(
+        `Đợt in đang ở trạng thái ${batch.status}, không thể xuất gói`,
+      );
+    }
+    if (itemIds?.length) {
+      await this.assertItemsBelongToBatch(id, itemIds);
+    }
+
+    const where: FindOptionsWhere<PrintItem> = { batchId: id };
+    if (itemIds?.length) where.id = In(itemIds);
+    const scopedItems = await this.items.find({ where });
+    // Same "not rendered yet" check `PrintPackageService.appendSide` uses
+    // to skip a side — an item with neither PNG contributes nothing to the
+    // zip, so it must not get an `exportedAt` stamp either.
+    const exportable = scopedItems.filter(
+      (i) => i.renderedFrontFsFileId || i.renderedBackFsFileId,
+    );
+    if (exportable.length === 0) {
+      throw new BadRequestException('Chưa có item nào được render để xuất gói');
+    }
+
+    const zip = await this.packageService.buildPackage(batch, itemIds);
+
+    const now = new Date();
+    await this.dataSource.transaction(async (manager) => {
+      const toPromoteIds = exportable
+        .filter((i) => i.status === 'RENDERED')
+        .map((i) => i.id);
+      const toRestampIds = exportable
+        .filter((i) => i.status !== 'RENDERED')
+        .map((i) => i.id);
+      if (toPromoteIds.length) {
+        await manager.query(
+          `UPDATE print_items SET status = 'EXPORTED', exported_at = $2, updated_at = now() WHERE id = ANY($1)`,
+          [toPromoteIds, now],
+        );
+      }
+      if (toRestampIds.length) {
+        await manager.query(
+          `UPDATE print_items SET exported_at = $2, updated_at = now() WHERE id = ANY($1)`,
+          [toRestampIds, now],
+        );
+      }
+      await manager.save(
+        PrintItemEvent,
+        exportable.map((item) =>
+          this.events.create({
+            itemId: item.id,
+            fromStatus: item.status,
+            toStatus: item.status === 'RENDERED' ? 'EXPORTED' : item.status,
+            source: 'MANUAL',
+            actorUserId,
+            message:
+              item.status === 'RENDERED'
+                ? 'Xuất gói'
+                : 'Xuất gói lại (đã EXPORTED/PRINTED trước đó)',
+          }),
+        ),
+      );
+      await manager.update(PrintBatch, id, {
+        sentAt: now,
+        lastExportedAt: now,
+      });
+    });
+
+    return { zip, filename: `print-batch-${batch.code}.zip` };
+  }
+
+  /**
+   * `POST /v1/print/batches/:id/complete` — Giai đoạn 4 (plan §4.0 Bẫy 4)
+   * — "Hoàn tất đợt", the OTHER half of what `send()`'s old CENTRALIZED
+   * branch used to do in one step. Requires at least one item already
+   * `EXPORTED`/`PRINTED` — a batch with only `RENDERED` items has nothing
+   * confirmed as physically handed off yet, so there is nothing to
+   * "complete".
+   */
+  async complete(id: string): Promise<PrintBatchDetailDao> {
+    const batch = await this.loadOrFail(id);
+    if (batch.mode !== 'CENTRALIZED') {
+      throw new BadRequestException(
+        'Chỉ đợt CENTRALIZED mới dùng "Hoàn tất đợt"',
+      );
+    }
+    if (!['DRAFT', 'READY'].includes(batch.status)) {
+      throw new ConflictException(
+        `Đợt in đang ở trạng thái ${batch.status}, không thể hoàn tất`,
+      );
+    }
+    const exportedCount = await this.items.count({
+      where: { batchId: id, status: In(['EXPORTED', 'PRINTED']) },
+    });
+    if (exportedCount === 0) {
+      throw new BadRequestException(
+        'Chưa xuất gói item nào — xuất gói trước khi hoàn tất đợt',
+      );
+    }
+    batch.status = 'DONE';
+    batch.doneAt = new Date();
     const saved = await this.batches.save(batch);
     return PrintBatchDetailDao.fromDetail(saved);
   }
@@ -355,6 +526,14 @@ export class PrintBatchService {
     return PrintBatchDetailDao.fromDetail(saved);
   }
 
+  /**
+   * `GET /v1/print/batches/:id/package` — read-only re-download, UNCHANGED
+   * by Giai đoạn 4 (plan §4.0 Bẫy 6: "giữ nguyên GET... làm đường tải lại
+   * thuần đọc"). Never stamps `exportedAt` or touches item status — a
+   * browser prefetch/retry/shared link all fire plain GETs, so a GET must
+   * never have a side effect. Use `exportPackage()` (the `POST` twin) to
+   * actually record an export.
+   */
   async package(
     id: string,
     itemIds?: string[],

@@ -153,6 +153,7 @@ export class PrintItemController {
   })
   bulkCreate(@Body() dto: BulkCreatePrintItemsDto): Promise<{
     created: number;
+    createdIds: string[];
     skipped: Array<{ setId: string; reason: string }>;
   }> {
     return this.itemService.bulkCreate(dto);

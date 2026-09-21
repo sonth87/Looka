@@ -7,17 +7,20 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { PrintAgentController } from './controllers/print-agent.controller';
 import { PrintBatchController } from './controllers/print-batch.controller';
 import { PrintItemController } from './controllers/print-item.controller';
+import { PrintResultImportController } from './controllers/print-result-import.controller';
 import { PrinterAgentController } from './controllers/printer-agent.controller';
 import { PrinterController } from './controllers/printer.controller';
 import { PrintBatch } from './entities/print-batch.entity';
 import { PrintItem } from './entities/print-item.entity';
 import { PrintItemEvent } from './entities/print-item-event.entity';
+import { PrintResultImport } from './entities/print-result-import.entity';
 import { Printer } from './entities/printer.entity';
 import { PrinterStockEvent } from './entities/printer-stock-event.entity';
 import { PrinterAgentGuard } from './guards/printer-agent.guard';
 import { PrintBatchService } from './services/print-batch.service';
 import { PrintItemService } from './services/print-item.service';
 import { PrintPackageService } from './services/print-package.service';
+import { PrintResultImportService } from './services/print-result-import.service';
 import { PrinterService } from './services/printer.service';
 
 /**
@@ -51,6 +54,7 @@ import { PrinterService } from './services/printer.service';
       PrintBatch,
       PrintItem,
       PrintItemEvent,
+      PrintResultImport,
       Printer,
       PrinterStockEvent,
     ]),
@@ -62,6 +66,7 @@ import { PrinterService } from './services/printer.service';
   controllers: [
     PrintItemController,
     PrintBatchController,
+    PrintResultImportController,
     PrintAgentController,
     PrinterController,
     PrinterAgentController,
@@ -71,6 +76,7 @@ import { PrinterService } from './services/printer.service';
     PrintBatchService,
     PrinterService,
     PrintPackageService,
+    PrintResultImportService,
     PrinterAgentGuard,
   ],
 })

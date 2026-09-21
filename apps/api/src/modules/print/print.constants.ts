@@ -21,9 +21,17 @@ export const PRINT_BATCH_STATUSES: PrintBatchStatus[] = [
   'CANCELLED',
 ];
 
+/**
+ * `EXPORTED` (Giai đoạn 4, plan §4.0) — "đã xuất gói, chờ kết quả in", sits
+ * between `RENDERED` and `PRINTED`:
+ * `PENDING → RENDERED → EXPORTED → PRINTED`, with a failed/rejected upload
+ * result sending an `EXPORTED` item back to `RENDERED` (never `FAILED` —
+ * see `PRINT_ITEM_INACTIVE_STATUSES`'s own doc comment, Bẫy 1).
+ */
 export type PrintItemStatus =
   | 'PENDING'
   | 'RENDERED'
+  | 'EXPORTED'
   | 'QUEUED'
   | 'PRINTING'
   | 'PRINTED'
@@ -33,6 +41,7 @@ export type PrintItemStatus =
 export const PRINT_ITEM_STATUSES: PrintItemStatus[] = [
   'PENDING',
   'RENDERED',
+  'EXPORTED',
   'QUEUED',
   'PRINTING',
   'PRINTED',
@@ -57,6 +66,12 @@ export const PRINT_ITEM_STATUSES: PrintItemStatus[] = [
  * (it really was printed, or at least queued, before being superseded);
  * this list is specifically about who may hold the one active
  * `print_items` slot for a given `subject_photo_sets` row.
+ *
+ * `EXPORTED` deliberately does NOT belong here (Giai đoạn 4, plan §4.0
+ * Bẫy 1) — a card that has been packaged/sent for physical printing is
+ * still very much "in flight" for that subject; excluding it would let a
+ * fresh `bulkCreate` silently insert a duplicate active item for the same
+ * `subject_photo_sets` row while the first one is still out being printed.
  */
 export const PRINT_ITEM_INACTIVE_STATUSES: PrintItemStatus[] = [
   'CANCELLED',
@@ -64,7 +79,9 @@ export const PRINT_ITEM_INACTIVE_STATUSES: PrintItemStatus[] = [
   'REPRINT_REQUESTED',
 ];
 
-export type PrintItemEventSource = 'SYSTEM' | 'PRINT_AGENT' | 'MANUAL';
+/** `RESULT_UPLOAD` (Giai đoạn 4, plan §4.0 Bẫy 3) — a bulk print-result-file upload, distinct from `MANUAL` (one card, one click in the CMS) so an audit trail can tell "người bấm tay từng thẻ" apart from "người upload file kết quả". */
+export type PrintItemEventSource =
+  'SYSTEM' | 'PRINT_AGENT' | 'MANUAL' | 'RESULT_UPLOAD';
 
 export type PrinterPrintMode = 'SINGLE_SIDE' | 'DUPLEX';
 export const PRINTER_PRINT_MODES: PrinterPrintMode[] = [

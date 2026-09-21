@@ -15,7 +15,7 @@ import { cn } from "../../lib/utils.js";
 import { LiquidGlassCard } from "../theme/LiquidGlassCard.js";
 import { DesktopCaptureView } from "./views/DesktopCaptureView.js";
 import { MobileCaptureView } from "./views/MobileCaptureView.js";
-import { SharedCaptureViewProps, MultiFrameViewProps } from "./views/types.js";
+import { SharedCaptureViewProps, MultiFrameViewProps, MultiFrameViewFrame } from "./views/types.js";
 import type { CameraScale } from "./views/types.js";
 import type { StudentSubjectInfo } from "../../lib/CaptureSink.js";
 import type { CapturedListCurrent, CapturedListRecentEntry } from "../workflow/CapturedListPanel.js";
@@ -80,6 +80,8 @@ export interface GuidedCaptureScreenProps {
   latestCapturedImage?: { stepId: string; imagePath: string } | null;
   /** See MultiFrameViewProps. Absent (undefined) on the sequential single-camera path. */
   multiFrame?: MultiFrameViewProps;
+  /** See SharedCaptureViewProps.sidePreviewFrames (views/types.ts) — plan item 8, 2026-09-21. */
+  sidePreviewFrames?: MultiFrameViewFrame[];
   /** See SharedCaptureViewProps.recordingFailed (views/types.ts) — §3.10 layer 2. */
   recordingFailed?: Record<string, boolean>;
   /** See SharedCaptureViewProps.subjectInfo (views/types.ts) — S5 left zone. */
@@ -143,6 +145,7 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (
     onAutoHoldMsChange: externalOnAutoHoldMsChange,
     latestCapturedImage,
     multiFrame,
+    sidePreviewFrames,
     recordingFailed,
     subjectInfo,
     capturedList,
@@ -547,6 +550,7 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (
     activeSensitivity,
     handleSensitivityChange,
     multiFrame,
+    sidePreviewFrames,
     recordingFailed,
     subjectInfo,
     capturedList,

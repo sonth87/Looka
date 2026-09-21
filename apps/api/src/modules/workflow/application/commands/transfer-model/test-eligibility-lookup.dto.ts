@@ -75,14 +75,20 @@ export class TestEligibilityLookupDto {
   @MaxLength(200)
   keyResponsePath?: string;
 
-  @ApiPropertyOptional({ description: 'Số lần retry khi API lỗi mạng/timeout, 0-3', default: 0 })
+  @ApiPropertyOptional({
+    description: 'Số lần retry khi API lỗi mạng/timeout, 0-3',
+    default: 0,
+  })
   @IsOptional()
   @IsInt()
   @Min(0)
   @Max(3)
   retryCount?: number;
 
-  @ApiPropertyOptional({ description: 'Timeout mỗi lần gọi, mili-giây, 1000-60000', default: 15000 })
+  @ApiPropertyOptional({
+    description: 'Timeout mỗi lần gọi, mili-giây, 1000-60000',
+    default: 15000,
+  })
   @IsOptional()
   @IsInt()
   @Min(1000)

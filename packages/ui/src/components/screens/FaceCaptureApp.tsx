@@ -1568,13 +1568,6 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     workflow: CaptureWorkflow
   ): Promise<CaptureWorkflow | null> => {
     setSimultaneousCapture(simultaneous);
-    if (!simultaneous) {
-      closeFrameStreams();
-      capturePlanRef.current = null;
-      stepRoundIndexRef.current = new Map();
-      roundDrivingStepRef.current = new Map();
-      return workflow;
-    }
 
     const faceAPI = (window as any).faceAPI;
     let mapping: Record<string, string> = {};
@@ -1584,6 +1577,50 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
       /* no bridge, or no mapping saved yet — stay on {} */
     }
     setCameraRoleMapping(mapping);
+
+    if (!simultaneous) {
+      capturePlanRef.current = null;
+      stepRoundIndexRef.current = new Map();
+      roundDrivingStepRef.current = new Map();
+      // Feature 8 fix (2026-09-21, plan item 8): open PREVIEW-ONLY streams
+      // for every mapped side role, even in sequential mode — previously
+      // this branch unconditionally called `closeFrameStreams()` and
+      // returned, so an assigned side camera never appeared anywhere on
+      // the capture screen until the operator switched to "Đồng thời"
+      // mode. These streams are NEVER added to a capture plan
+      // (`capturePlanRef.current` stays null, exactly as before) and
+      // sequential capture still shoots one step at a time through the
+      // single analysed camera unchanged — see `sidePreviewFrames` below
+      // for the read-only tile list built from these streams, and
+      // `DesktopCaptureView`'s own doc comment for why this renders as a
+      // small strip next to the mirror view instead of switching the whole
+      // screen to the 4-cam grid layout.
+      //
+      // One tile per ROLE, not per step: a campaign can have more than one
+      // step resolve to the same role (e.g. two FRONT-type steps both
+      // defaulting to CENTER), which would otherwise open/show the same
+      // physical camera as duplicate tiles.
+      const seenRoles = new Set<CameraRole>();
+      const previewFrames: FrameReadiness[] = [];
+      for (const f of framesForWorkflow(workflow)) {
+        if (f.role === 'CENTER' || seenRoles.has(f.role)) continue;
+        seenRoles.add(f.role);
+        const deviceId = mapping[f.role] ?? null;
+        previewFrames.push({ ...f, deviceId, deviceLabel: null, connected: !!deviceId });
+      }
+      const wantedStepIds = new Set(previewFrames.map((f) => f.stepId));
+      const staleStepIds = Object.keys(frameStreamsRef.current).filter((id) => !wantedStepIds.has(id));
+      if (staleStepIds.length > 0) closeFrameStreams(staleStepIds);
+      // Not gated on the return value: a side PREVIEW camera failing to
+      // open must never block a sequential session — sequential capture
+      // never depended on these streams before this feature existed, and
+      // still doesn't. `openFrameStreams` already surfaces a dismissible
+      // banner naming which role failed, which is enough operator feedback
+      // on its own.
+      void openFrameStreams(previewFrames);
+      return workflow;
+    }
+
     // Per-role physical mounting angle override (§3.9, item 2 2026-09-09) —
     // set from CameraSetupScreen, consumed here so a step's subject-facing
     // pose target gets translated into the correct gate pose for whichever
@@ -1814,6 +1851,32 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     lastCompletedSessionRef.current = null;
     setIsPostSaveReview(false);
     retookSinceReopenRef.current = false;
+
+    // Item 11 ("chụp lại ghi đè ảnh cũ", 2026-09-21) — this student may have
+    // a prior LOCAL session from a completely different kiosk sitting (app
+    // restarted, or someone else used the machine in between —
+    // `lastCompletedSessionRef` above only ever covers "still the same
+    // sitting"). `getRetakeContext` is undefined on the web build and
+    // resolves null when this subject has no prior local approval at all —
+    // both cases fall through to the normal fresh-session path below,
+    // unchanged. When it DOES find one, `resume()` primes the sink to reuse
+    // that session id (see its own doc comment) — `handleStartWorkflow`
+    // right below still starts a genuinely fresh ENGINE session as normal;
+    // only the outbox-side session id and attempt numbering are affected.
+    // The existing post-approval `ATTEMPT_SUPERSEDED` machinery
+    // (apps/desktop's `approveSessionUpload`) then deletes the old photos
+    // for free, because the new approval's rows now share that same
+    // session id — no new supersede logic needed.
+    try {
+      const retakeContext = await (window as any).faceAPI?.getRetakeContext?.(result.code);
+      if (retakeContext?.sessionId) {
+        runSessionRef.current.resume(retakeContext.sessionId, retakeContext.attemptOffsets ?? {});
+      }
+    } catch (err) {
+      // Best-effort only — a failed lookup just means this capture proceeds
+      // as a normal new session (old photos left in place), not a hard stop.
+      console.error('[FaceCaptureApp] getRetakeContext failed, proceeding as a new session:', err);
+    }
 
     publishCbHelpState({
       greeting: {
@@ -3026,6 +3089,27 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   }, []);
 
   /**
+   * Live-update companion to the mount-only fetch above (D3 fix, plan item
+   * 9, 2026-09-21) — an operator who opens Camera Setup, changes the
+   * mapping, saves, and returns to this already-mounted screen used to keep
+   * shooting on the stale `{}`/old mapping until the whole app restarted,
+   * since nothing here ever heard about the change. `onCameraRoleMappingChanged`
+   * is undefined on the web build (same guard as the fetch above), so this
+   * stays a no-op there. Every consumer of `cameraRoleMapping` below reads
+   * the React state (or `cameraRoleMappingRef`, kept in sync a few hundred
+   * lines down), so simply updating this state is enough for a live
+   * side-camera preview or a sequential-mode step-camera switch to pick up
+   * the change — no extra plumbing needed.
+   */
+  useEffect(() => {
+    const faceAPI = (window as any).faceAPI;
+    const unsubscribe = faceAPI?.onCameraRoleMappingChanged?.((m: Record<string, string>) => {
+      setCameraRoleMapping(m ?? {});
+    });
+    return () => unsubscribe?.();
+  }, []);
+
+  /**
    * The CB Help extended-display window's open/closed state (§3.5) —
    * reflects the "Màn hình mở rộng" toggle button below. Note the window it
    * toggles is no longer a mirror of this whole app (that decision was
@@ -4052,6 +4136,111 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         }
       : undefined;
 
+  /**
+   * Read-only side-camera preview strip for the SEQUENTIAL path (plan item
+   * 8, 2026-09-21) — see `SharedCaptureViewProps.sidePreviewFrames`'s own
+   * doc comment (views/types.ts) for why this is a separate prop from
+   * `multiFrameProp` rather than reusing it. Sourced from the exact same
+   * `frameStreams`/`frameReadiness` state `multiFrameProp` reads, now
+   * populated in sequential mode too by `runSimultaneousCaptureGate`'s
+   * preview-only `openFrameStreams` call. One tile per ROLE (not per step),
+   * same dedup reasoning as that call. Never computed while
+   * `simultaneousCapture` — that path already shows every side camera via
+   * the full `multiFrameProp` grid.
+   */
+  const sidePreviewFrames: MultiFrameViewFrame[] | undefined = simultaneousCapture
+    ? undefined
+    : (() => {
+        const seenRoles = new Set<CameraRole>();
+        const frames: MultiFrameViewFrame[] = [];
+        for (const frame of framesForWorkflow(activeWorkflow)) {
+          if (frame.role === 'CENTER' || seenRoles.has(frame.role)) continue;
+          seenRoles.add(frame.role);
+          const deviceId = cameraRoleMapping[frame.role];
+          const deviceLabel = devices.find((d) => d.id === deviceId)?.label ?? null;
+          const frameStream = frameStreams[frame.stepId] ?? null;
+          const isMissing = isFrameMissingDevice(frame.role);
+          const isReady = frameReadiness[frame.stepId] === true;
+          frames.push({
+            stepId: frame.stepId,
+            label: frame.label,
+            roleLabel: CAMERA_ROLE_LABELS_VI[frame.role],
+            deviceLabel,
+            stream: frameStream,
+            status: isMissing ? (frameStream ? 'UNASSIGNED' : 'MISSING') : isReady ? 'READY' : 'PENDING',
+            imagePath: null,
+          });
+        }
+        return frames;
+      })();
+
+  /**
+   * Enter/Space to capture (plan item 10, 2026-09-21) — mirrors the exact
+   * "enabled" gate `ShutterButton`/the sidebar CTA in DesktopCaptureView.tsx
+   * already use (face detected + single face + quality accepted + every
+   * side frame ready in simultaneous mode), so a keyboard trigger can never
+   * fire a capture the on-screen button itself would have refused.
+   *
+   * Placed here — after `multiFrameProp` is computed, not right after
+   * `handleShutterCapture` far above — because the side-frame-readiness
+   * check needs `multiFrameProp`; referencing it any earlier in this
+   * function body would be a temporal-dead-zone error, not just
+   * inconvenient.
+   */
+  const capturingRef = useRef(false);
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
+      // Auto-repeat while held must never re-fire a capture per tick.
+      if (e.repeat) return;
+
+      const active = document.activeElement as HTMLElement | null;
+      if (active) {
+        // Same "is this a real input" test CccdScanWaitingScreen's own
+        // refocus loop uses — most importantly this lets Space typed into
+        // the hidden barcode-scanner input through untouched (no
+        // `preventDefault()` below happens for this branch), since a
+        // scanner's payload can itself contain a literal space character.
+        const tag = active.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || active.isContentEditable) return;
+        // A focused native button already fires its own click on
+        // Enter/Space — firing `handleShutterCapture` here too would
+        // double-fire it.
+        if (tag === 'BUTTON') return;
+      }
+
+      if (effectiveTriggerConfig.mode !== 'OFF') return; // only the manual-shutter trigger mode has anything to fire
+      if (!isWorkflowStartedRef.current) return; // no session running yet
+      if (awaitingStudentRef.current) return; // still identifying the student
+      if (showReviewModal || thankYouStudent || isAcceptingRef.current) return; // confirm modal / thank-you overlay / accept in flight
+      if (capturingRef.current) return; // a previous key-triggered capture hasn't settled yet — new re-entrancy guard, `handleShutterCapture` never had one before this
+
+      const faceReady =
+        faceState?.detected === true &&
+        faceState?.presence === 'SINGLE_FACE' &&
+        faceState?.quality?.accepted === true &&
+        (!multiFrameProp || multiFrameProp.allSideFramesReady);
+      if (!faceReady) return;
+
+      // Every guard passed — only now consume the key, so a rejected
+      // Enter/Space (e.g. no face yet) never blocks whatever else on the
+      // page might have wanted it.
+      e.preventDefault();
+      capturingRef.current = true;
+      handleShutterCapture();
+      // Released on a short timer rather than tied to a future engine
+      // event — `handleShutterCapture` is fire-and-forget (returns void,
+      // nothing to await), and the pose/step the engine gates on will have
+      // already moved on well before a human can press the key again.
+      setTimeout(() => {
+        capturingRef.current = false;
+      }, 500);
+    }
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [effectiveTriggerConfig.mode, faceState, multiFrameProp, showReviewModal, thankYouStudent, handleShutterCapture]);
+
   /*
    * Item 8 (2026-09-09): "Mô phỏng (Simulation)" / "Live Camera" mode-toggle
    * pill pair removed — live mode is the only mode now, so there is nothing
@@ -4351,6 +4540,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         onAutoHoldMsChange={handleAutoHoldMsChange}
         latestCapturedImage={latestCapturedImage}
         multiFrame={multiFrameProp}
+        sidePreviewFrames={sidePreviewFrames}
         recordingFailed={recordingFailed}
         // ui-redesign-plan.md S5 left zone. `subject`/photo counts are real,
         // already-available state; `round`/`roundCount` are placeholders

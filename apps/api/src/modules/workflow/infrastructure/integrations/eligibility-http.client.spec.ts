@@ -167,7 +167,11 @@ describe('EligibilityHttpClient', () => {
   }, 10_000);
 
   it('never retries a Terminal outcome, even with retryCount set (2026-09-18)', async () => {
-    const fetchSpy = mockFetchOnce({ ok: false, status: 401, body: { message: 'invalid key' } });
+    const fetchSpy = mockFetchOnce({
+      ok: false,
+      status: 401,
+      body: { message: 'invalid key' },
+    });
 
     const outcome = await client.lookup(makeConfig({ retryCount: 3 }), 'SV001');
 

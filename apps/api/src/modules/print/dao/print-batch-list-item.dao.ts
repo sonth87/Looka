@@ -16,6 +16,7 @@ export class PrintBatchListItemDao {
   @ApiProperty() failedCount: number;
   @ApiPropertyOptional() sentAt?: Date | null;
   @ApiPropertyOptional() doneAt?: Date | null;
+  @ApiPropertyOptional() lastExportedAt?: Date | null;
   @ApiProperty() createdAt: Date;
   @ApiProperty() updatedAt: Date;
 
@@ -35,6 +36,7 @@ export class PrintBatchListItemDao {
     dao.failedCount = batch.failedCount;
     dao.sentAt = batch.sentAt ?? null;
     dao.doneAt = batch.doneAt ?? null;
+    dao.lastExportedAt = batch.lastExportedAt ?? null;
     dao.createdAt = batch.createdAt;
     dao.updatedAt = batch.updatedAt;
     return dao;

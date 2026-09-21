@@ -31,6 +31,7 @@ export class PrintItemListItemDao {
   @ApiPropertyOptional() printerId?: string | null;
   @ApiPropertyOptional() printedAt?: Date | null;
   @ApiPropertyOptional() renderedAt?: Date | null;
+  @ApiPropertyOptional() exportedAt?: Date | null;
   @ApiPropertyOptional() errorMessage?: string | null;
   @ApiPropertyOptional() reprintOfItemId?: string | null;
   @ApiProperty({
@@ -65,6 +66,7 @@ export class PrintItemListItemDao {
     dao.printerId = item.printerId ?? null;
     dao.printedAt = item.printedAt ?? null;
     dao.renderedAt = item.renderedAt ?? null;
+    dao.exportedAt = item.exportedAt ?? null;
     dao.errorMessage = item.errorMessage ?? null;
     dao.reprintOfItemId = item.reprintOfItemId ?? null;
     dao.missingFields = computeMissingFields(item);
