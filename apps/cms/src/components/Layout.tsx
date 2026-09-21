@@ -114,6 +114,10 @@ export function Layout({ children }: { children: ReactNode }) {
             <NavLink to="/review" className={navItemClass}>
               Duyệt ảnh
             </NavLink>
+            {/* "Phân công duyệt" (plan §5.2, feature 13) — who reviews which lớp/khoa/ngành. Write actions are ADMIN only server-side. */}
+            <NavLink to="/review/assignments" className={navItemClass}>
+              Phân công duyệt
+            </NavLink>
             <NavLink to="/print" className={navItemClass}>
               In thẻ
             </NavLink>

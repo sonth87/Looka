@@ -95,7 +95,10 @@ describe('reconcileEligibilityCredential', () => {
   });
 
   it('a brand-new campaign (previous: null) with no credential typed yet ends up with no ciphertext', () => {
-    const config: EligibilityConfig = { mode: 'EXTERNAL_API', api: { ...BASE_API } };
+    const config: EligibilityConfig = {
+      mode: 'EXTERNAL_API',
+      api: { ...BASE_API },
+    };
     const result = reconcileEligibilityCredential(config, null);
     expect(result.api?.credentialCiphertext).toBeUndefined();
   });
@@ -119,7 +122,10 @@ describe('sanitizeEligibilityCredential', () => {
   });
 
   it('hasCredential is false when there is no ciphertext stored', () => {
-    const config: EligibilityConfig = { mode: 'EXTERNAL_API', api: { ...BASE_API } };
+    const config: EligibilityConfig = {
+      mode: 'EXTERNAL_API',
+      api: { ...BASE_API },
+    };
     const result = sanitizeEligibilityCredential(config);
     expect(result.api?.hasCredential).toBe(false);
   });

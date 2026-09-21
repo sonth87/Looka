@@ -22,6 +22,7 @@
     "typeorm:run-migrations": "npm run typeorm migration:run -- -d ./src/shared/database/db.migrate.config.ts",
     "typeorm:generate-migration": "npm run typeorm -- -d ./src/shared/database/db.migrate.config.ts migration:generate",
     "typeorm:revert-migration": "npm run typeorm -- -d ./src/shared/database/db.migrate.config.ts migration:revert",
+    "seed:role-permissions": "nest build && node dist/scripts/seed-default-role-permissions.js",
     "clean": "rimraf dist tsconfig.build.tsbuildinfo"
   },
   "dependencies": {

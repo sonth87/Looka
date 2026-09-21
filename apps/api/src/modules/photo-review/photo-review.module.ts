@@ -4,17 +4,20 @@ import { StatsModule } from '@app/modules/stats/stats.module';
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { PhotoKindController } from './controllers/photo-kind.controller';
+import { ReviewAssignmentController } from './controllers/review-assignment.controller';
 import { ReviewController } from './controllers/review.controller';
 import { VariantContentController } from './controllers/variant-content.controller';
 import { PhotoKind } from './entities/photo-kind.entity';
 import { PhotoReviewEvent } from './entities/photo-review-event.entity';
 import { PhotoVariant } from './entities/photo-variant.entity';
+import { ReviewAssignment } from './entities/review-assignment.entity';
 import { SubjectPhotoSet } from './entities/subject-photo-set.entity';
 import { VariantUploadOutboxEntry } from './entities/variant-upload-outbox.entity';
 import { ReviewerRoleGuard } from './guards/reviewer-role.guard';
 import { PhotoKindService } from './services/photo-kind.service';
 import { PhotoReviewSidecarService } from './services/photo-review-sidecar.service';
 import { PhotoReviewService } from './services/photo-review.service';
+import { ReviewAssignmentService } from './services/review-assignment.service';
 import { VariantUploadWorkerService } from './services/variant-upload-worker.service';
 
 /**
@@ -45,6 +48,7 @@ import { VariantUploadWorkerService } from './services/variant-upload-worker.ser
       PhotoVariant,
       PhotoReviewEvent,
       PhotoKind,
+      ReviewAssignment,
       // Not injected as a `Repository` anywhere (see that entity's own doc
       // comment — every read/write against it goes through raw SQL, the
       // same convention `capture`'s `UploadOutboxEntry` is actually used
@@ -61,11 +65,13 @@ import { VariantUploadWorkerService } from './services/variant-upload-worker.ser
   ],
   controllers: [
     ReviewController,
+    ReviewAssignmentController,
     PhotoKindController,
     VariantContentController,
   ],
   providers: [
     PhotoReviewService,
+    ReviewAssignmentService,
     PhotoKindService,
     PhotoReviewSidecarService,
     // Drains `variant_upload_outbox` to fs-core in the background — the

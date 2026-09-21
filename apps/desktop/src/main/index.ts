@@ -76,7 +76,7 @@ import { openRecentStudentsWindow } from './recentStudentsWindow.js';
 import { fetchRecentCaptures, getDeviceAccessStatus, lookupCampaignSubject } from './deviceApi.js';
 import { startVideoStream, endVideoStream, discardSessionVideos } from './streams.js';
 import { recordStatsEvent, startStatsEventPush, stopStatsEventPush } from './statsEvents.js';
-import { CapturedStudentRepository } from '@face/database';
+import { CapturedStudentRepository, UploadOutboxRepository } from '@face/database';
 import type { StatsEventType } from '@face/database';
 import {
   enrollAttendancePerson,
@@ -651,7 +651,15 @@ app.whenReady().then(async () => {
    */
   ipcMain.handle('camera:getRoleMapping', () => getCameraRoleMapping());
   ipcMain.handle('camera:setRoleMapping', (_, mapping: unknown) => {
-    setCameraRoleMapping(sanitizeCameraRoleMapping(mapping));
+    const sanitized = sanitizeCameraRoleMapping(mapping);
+    setCameraRoleMapping(sanitized);
+    // D3 fix (2026-09-21, plan item 9): broadcast so the main window's
+    // already-mounted `FaceCaptureApp` picks up the new mapping without a
+    // restart — this handler used to save and return with no notification
+    // at all, unlike `camera:setCbHelpVisibility` right below it. See
+    // preload's `onCameraRoleMappingChanged` doc comment for the live bug
+    // this caused.
+    mainWindow?.webContents.send('camera:roleMappingChanged', sanitized);
     return true;
   });
 
@@ -749,6 +757,44 @@ app.whenReady().then(async () => {
     if (typeof subjectCode !== 'string' || !subjectCode) return [];
     const repo = new CapturedStudentRepository(getDatabase());
     return repo.listByStudent(subjectCode);
+  });
+  /**
+   * Item 11 ("chụp lại ghi đè ảnh cũ", 2026-09-21) — the context
+   * `FaceCaptureApp.tsx` needs to reuse a PRIOR local session's id for a
+   * student returning after this kiosk sitting ended (someone else used the
+   * machine in between, or the app restarted). Returns `null` when this
+   * subject has no prior local approval at all — the normal "genuinely new
+   * student" path then runs unchanged.
+   *
+   * `attemptOffsets` (max `attempt` already used per `stepId`, photo rows
+   * only) is the other half of this fix: `RunScopedCaptureSession.resume()`
+   * only ever set which sessionId new captures use, never how attempt
+   * numbers continue from it — reusing the same session id with the
+   * engine's own attempt-from-1 counter would silently collide with
+   * `${sessionId}:${stepId}:1`'s existing idemKey and get dropped by
+   * `ON CONFLICT DO NOTHING` before ever reaching a stream. Computed here,
+   * not with a dedicated SQL aggregate, by reusing
+   * `UploadOutboxRepository.listBySession` (already returns every row's
+   * `attempt`/`stepId`/`kind`) — this call is infrequent (once per
+   * returning-student identification, not per capture), so a second SQL
+   * method purely for this would be more surface for no real benefit.
+   */
+  ipcMain.handle('capture:getRetakeContext', (_, subjectCode: unknown) => {
+    if (typeof subjectCode !== 'string' || !subjectCode) return null;
+    const studentRepo = new CapturedStudentRepository(getDatabase());
+    const priorSessions = studentRepo.listByStudent(subjectCode);
+    const latest = priorSessions[0];
+    if (!latest) return null;
+
+    const outboxRepo = new UploadOutboxRepository(getDatabase());
+    const rows = outboxRepo.listBySession(latest.sessionId);
+    const attemptOffsets: Record<string, number> = {};
+    for (const row of rows) {
+      if (row.kind !== 'photo' || !row.stepId || row.attempt === null) continue;
+      const current = attemptOffsets[row.stepId] ?? 0;
+      if (row.attempt > current) attemptOffsets[row.stepId] = row.attempt;
+    }
+    return { sessionId: latest.sessionId, attemptOffsets };
   });
   ipcMain.handle('students:search', (_, query: unknown) => {
     if (typeof query !== 'string' || !query.trim()) return [];

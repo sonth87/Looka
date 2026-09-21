@@ -85,8 +85,11 @@ export class PrintItemService {
       qb.andWhere('i.campaignId = :campaignId', {
         campaignId: query.campaignId,
       });
-    if (query.batchId)
+    if (query.batchId) {
       qb.andWhere('i.batchId = :batchId', { batchId: query.batchId });
+    } else if (query.unassigned) {
+      qb.andWhere('i.batchId IS NULL');
+    }
     if (query.status)
       qb.andWhere('i.status = :status', { status: query.status });
     if (query.className)
@@ -706,6 +709,7 @@ export class PrintItemService {
    */
   async bulkCreate(dto: BulkCreatePrintItemsDto): Promise<{
     created: number;
+    createdIds: string[];
     skipped: Array<{ setId: string; reason: string }>;
   }> {
     if (!dto.setIds?.length && !dto.filter) {
@@ -766,6 +770,7 @@ export class PrintItemService {
     }
 
     let created = 0;
+    const createdIds: string[] = [];
     for (const row of candidates) {
       if (alreadyActive.has(row.id)) {
         skipped.push({ setId: row.id, reason: 'ALREADY_HAS_ACTIVE_ITEM' });
@@ -803,9 +808,10 @@ export class PrintItemService {
         'Tạo từ bulk-create',
       );
       created += 1;
+      createdIds.push(saved.id);
     }
 
-    return { created, skipped };
+    return { created, createdIds, skipped };
   }
 
   /**

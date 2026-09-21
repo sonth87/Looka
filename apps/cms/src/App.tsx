@@ -1,5 +1,6 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { AuthGate } from './auth/AuthGate';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { Layout } from './components/Layout';
 import { OverviewPage } from './components/OverviewPage';
 import { CampaignList } from './components/CampaignList';
@@ -13,6 +14,7 @@ import { RolesPage } from './components/RolesPage';
 import { UsersPage } from './components/UsersPage';
 import { ReviewListPage } from './photo-review/ReviewListPage';
 import { ReviewDetailPage } from './photo-review/ReviewDetailPage';
+import { ReviewAssignmentsPage } from './photo-review/ReviewAssignmentsPage';
 import { PrintPage } from './print/PrintPage';
 import { PrintBatchDetailPage } from './print/PrintBatchDetailPage';
 import { CampaignPrintStatusPage } from './print/CampaignPrintStatusPage';
@@ -54,32 +56,35 @@ export default function App() {
     <AuthGate>
       <BrowserRouter>
         <Layout>
-          <Routes>
-            <Route path="/" element={<OverviewPage />} />
-            {/* Plan item 11, 2026-09-17: "Vận hành" merged into "Tổng quan" (now tabs on `/`) — redirect old bookmarks/links instead of 404ing. */}
-            <Route path="/dashboard" element={<Navigate to="/" replace />} />
-            <Route path="/campaigns" element={<CampaignList />} />
-            <Route path="/campaigns/new" element={<CreateCampaignPage />} />
-            <Route path="/campaigns/:id" element={<CampaignDetail />} />
-            <Route path="/campaigns/:id/edit" element={<EditCampaignPage />} />
-            <Route path="/angle-presets" element={<AnglePresetsPage />} />
-            {/* "Mẫu chụp" (`capture_configurations`) retired 2026-09-17 — Workflow (`/workflows`) is now the single config entry point. */}
-            <Route path="/capture-configurations" element={<Navigate to="/workflows" replace />} />
-            <Route path="/config" element={<PhotoKindsPage />} />
-            <Route path="/review" element={<ReviewListPage />} />
-            <Route path="/review/:id" element={<ReviewDetailPage />} />
-            <Route path="/print" element={<PrintPage />} />
-            <Route path="/print/by-campaign" element={<CampaignPrintStatusPage />} />
-            <Route path="/print/batches/:id" element={<PrintBatchDetailPage />} />
-            <Route path="/card-templates" element={<CardTemplatesPage />} />
-            <Route path="/card-templates/:id" element={<CardTemplateDetailPage />} />
-            <Route path="/printers" element={<PrintersPage />} />
-            <Route path="/users" element={<UsersPage />} />
-            <Route path="/roles" element={<RolesPage />} />
-            <Route path="/workflows" element={<WorkflowsPage />} />
-            <Route path="/identification-methods" element={<IdentificationMethodsPage />} />
-            <Route path="/desktop-callback" element={<DesktopCallbackPage />} />
-          </Routes>
+          <ErrorBoundary>
+            <Routes>
+              <Route path="/" element={<OverviewPage />} />
+              {/* Plan item 11, 2026-09-17: "Vận hành" merged into "Tổng quan" (now tabs on `/`) — redirect old bookmarks/links instead of 404ing. */}
+              <Route path="/dashboard" element={<Navigate to="/" replace />} />
+              <Route path="/campaigns" element={<CampaignList />} />
+              <Route path="/campaigns/new" element={<CreateCampaignPage />} />
+              <Route path="/campaigns/:id" element={<CampaignDetail />} />
+              <Route path="/campaigns/:id/edit" element={<EditCampaignPage />} />
+              <Route path="/angle-presets" element={<AnglePresetsPage />} />
+              {/* "Mẫu chụp" (`capture_configurations`) retired 2026-09-17 — Workflow (`/workflows`) is now the single config entry point. */}
+              <Route path="/capture-configurations" element={<Navigate to="/workflows" replace />} />
+              <Route path="/config" element={<PhotoKindsPage />} />
+              <Route path="/review" element={<ReviewListPage />} />
+              <Route path="/review/assignments" element={<ReviewAssignmentsPage />} />
+              <Route path="/review/:id" element={<ReviewDetailPage />} />
+              <Route path="/print" element={<PrintPage />} />
+              <Route path="/print/by-campaign" element={<CampaignPrintStatusPage />} />
+              <Route path="/print/batches/:id" element={<PrintBatchDetailPage />} />
+              <Route path="/card-templates" element={<CardTemplatesPage />} />
+              <Route path="/card-templates/:id" element={<CardTemplateDetailPage />} />
+              <Route path="/printers" element={<PrintersPage />} />
+              <Route path="/users" element={<UsersPage />} />
+              <Route path="/roles" element={<RolesPage />} />
+              <Route path="/workflows" element={<WorkflowsPage />} />
+              <Route path="/identification-methods" element={<IdentificationMethodsPage />} />
+              <Route path="/desktop-callback" element={<DesktopCallbackPage />} />
+            </Routes>
+          </ErrorBoundary>
         </Layout>
       </BrowserRouter>
     </AuthGate>

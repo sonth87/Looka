@@ -101,6 +101,18 @@ export const ALLOWED_UPLOAD_MIME_TYPES: readonly string[] = [
 export const SIDECAR_TIMEOUT_MS = 30_000;
 
 /**
+ * `review_assignments.group_field` allowlist (plan §5.2, feature 13) — the
+ * 3 real denormalized columns on `SubjectPhotoSet`, not full jsonb-discovered
+ * generality (that table has no `extra` jsonb of its own, unlike
+ * `campaign_subjects`).
+ */
+export const REVIEW_ASSIGNMENT_GROUP_FIELDS = [
+  'className',
+  'faculty',
+  'major',
+] as const;
+
+/**
  * Local error-code range for this module (9xxx) — mirrors the numbering
  * convention in `apps/api/src/common/errors/code.constants.error.ts` (each
  * module owns a range) without editing that shared file, which is out of
@@ -127,4 +139,6 @@ export const PHOTO_REVIEW_ERROR_CODE = {
   SESSION_NOT_FOUND: 9016,
   VARIANT_LOCAL_TOKEN_INVALID: 9017,
   VARIANT_NOT_VIEWABLE: 9018,
+  OUT_OF_SCOPE: 9019,
+  INVALID_GROUP_FIELD: 9020,
 } as const;

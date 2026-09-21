@@ -59,6 +59,12 @@ export class CampaignSubjectDao {
   @Expose()
   errorMessage?: string | null;
 
+  @ApiPropertyOptional({
+    description: 'Thời điểm được xác nhận đã in thẻ, nếu có',
+  })
+  @Expose()
+  printedAt?: Date | null;
+
   @ApiProperty()
   @Expose()
   createdAt: Date;

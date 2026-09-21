@@ -18,6 +18,12 @@ export type CampaignSubjectStatus = 'VALID' | 'ERROR' | 'DUPLICATE';
  * Only a `VALID` row is unique per `(campaignId, subjectCode)` (a partial
  * index in the migration) — a re-upload of the same student is expected to
  * collide and lands as `DUPLICATE`, not a hard constraint violation.
+ *
+ * 2026-09-21 (13-features-and-2-blockers-plan §3.1) — `importId` now also
+ * covers an API pull: `CampaignSubjectImport.source` distinguishes `EXCEL`
+ * from `EXTERNAL_API`, so there is only ever ONE "how did this row get
+ * here" pointer, not two competing ones (an earlier draft of this feature
+ * tried a separate nullable `syncId` FK — reverted, see git history).
  */
 @Entity('campaign_subjects')
 export class CampaignSubject extends BaseEntity {
@@ -32,7 +38,9 @@ export class CampaignSubject extends BaseEntity {
 
   @Column('uuid', { name: 'import_id' })
   @Index()
-  @ApiProperty({ description: 'Lần import đã tạo dòng này' })
+  @ApiProperty({
+    description: 'Lần import (Excel hoặc API pull) đã tạo dòng này',
+  })
   importId: string;
 
   @ManyToOne(() => CampaignSubjectImport, { onDelete: 'CASCADE' })
@@ -86,8 +94,33 @@ export class CampaignSubject extends BaseEntity {
   @ApiPropertyOptional({ description: 'Lý do lỗi/trùng, nếu có' })
   errorMessage?: string | null;
 
-  /** Cột thừa trong file Excel không map vào field nào ở trên — giữ lại thay vì bỏ (E6). */
+  /**
+   * Cột thừa trong file Excel không map vào field nào ở trên — giữ lại thay
+   * vì bỏ (E6). Với dòng đến từ API pull, đây là TOÀN BỘ bản ghi thô (plan
+   * §3.1) chứ không chỉ phần "thừa" — xem `CampaignSubjectPullWriteWorker`.
+   */
   @Column('jsonb', { nullable: true })
-  @ApiPropertyOptional({ description: 'Cột khác từ file, nếu có' })
+  @ApiPropertyOptional({
+    description:
+      'Cột khác từ file, hoặc toàn bộ bản ghi thô nếu đến từ API pull',
+  })
   extra?: Record<string, unknown> | null;
+
+  /**
+   * Feature 6 — set by the print-result-upload flow (Giai đoạn 4) when a
+   * human confirms this subject's card actually printed; NEVER set/cleared
+   * by a roster import or API pull (see `CampaignSubjectPullWriteWorker`'s
+   * own doc comment on its upsert SQL). `null` means "chưa in", not "no
+   * data".
+   */
+  @Column('timestamptz', { nullable: true, name: 'printed_at' })
+  @ApiPropertyOptional({
+    description: 'Thời điểm SV này được xác nhận đã in thẻ',
+  })
+  printedAt?: Date | null;
+
+  /** Đợt in đã in thẻ này — không FK, trỏ chéo sang module `print` (`print_batches`). */
+  @Column('uuid', { nullable: true, name: 'printed_batch_id' })
+  @ApiPropertyOptional({ description: 'Đợt in đã in thẻ này, nếu có' })
+  printedBatchId?: string | null;
 }

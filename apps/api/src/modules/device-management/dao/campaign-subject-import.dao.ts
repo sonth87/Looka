@@ -1,6 +1,9 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Expose } from 'class-transformer';
-import type { CampaignSubjectImportStatus } from '../entities/campaign-subject-import.entity';
+import type {
+  CampaignSubjectImportSource,
+  CampaignSubjectImportStatus,
+} from '../entities/campaign-subject-import.entity';
 
 export class CampaignSubjectImportDao {
   @ApiProperty()
@@ -11,6 +14,14 @@ export class CampaignSubjectImportDao {
   @Expose()
   campaignId: string;
 
+  @ApiProperty({ enum: ['EXCEL', 'EXTERNAL_API'] })
+  @Expose()
+  source: CampaignSubjectImportSource;
+
+  @ApiPropertyOptional()
+  @Expose()
+  sourceDetail?: Record<string, unknown> | null;
+
   @ApiProperty()
   @Expose()
   fileName: string;
@@ -19,7 +30,16 @@ export class CampaignSubjectImportDao {
   @Expose()
   uploadedByUserId?: string | null;
 
-  @ApiProperty({ enum: ['PROCESSING', 'DONE', 'FAILED'] })
+  @ApiProperty({
+    enum: [
+      'PROCESSING',
+      'PENDING_FETCH',
+      'FETCHING',
+      'IMPORTING',
+      'DONE',
+      'FAILED',
+    ],
+  })
   @Expose()
   status: CampaignSubjectImportStatus;
 
@@ -42,6 +62,10 @@ export class CampaignSubjectImportDao {
   @ApiPropertyOptional()
   @Expose()
   failureReason?: string | null;
+
+  @ApiPropertyOptional({ description: 'Lúc job nền hoàn tất, nếu là API pull' })
+  @Expose()
+  finishedAt?: Date | null;
 
   @ApiProperty()
   @Expose()

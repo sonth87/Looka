@@ -15,3 +15,4 @@ export * from './create-printer.dto';
 export * from './update-printer.dto';
 export * from './printer-stock-adjust.dto';
 export * from './printer-heartbeat.dto';
+export * from './export-print-batch.dto';

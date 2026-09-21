@@ -111,6 +111,16 @@ export class PrintItem extends BaseEntity {
   @ApiPropertyOptional({ description: 'Lần render gần nhất' })
   renderedAt?: Date | null;
 
+  /**
+   * Giai đoạn 4 (plan §4.2, feature 3) — lần xuất gói gần nhất mà item này
+   * nằm trong file zip (`PrintBatchService.exportPackage`). Xuất lại lần
+   * nữa (item đã `EXPORTED`/`PRINTED`) chỉ cập nhật mốc này, không lùi lại
+   * trạng thái.
+   */
+  @Column('timestamptz', { name: 'exported_at', nullable: true })
+  @ApiPropertyOptional({ description: 'Lần xuất gói gần nhất có mặt item này' })
+  exportedAt?: Date | null;
+
   @Column('varchar', { length: 20, default: 'PENDING' })
   @Index()
   @ApiProperty({ description: 'Trạng thái item', enum: PRINT_ITEM_STATUSES })

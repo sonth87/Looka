@@ -7,3 +7,4 @@ export * from './print-batch-detail.dao';
 export * from './printer-list-item.dao';
 export * from './printer-detail.dao';
 export * from './printer-stock-event.dao';
+export * from './print-result-import.dao';

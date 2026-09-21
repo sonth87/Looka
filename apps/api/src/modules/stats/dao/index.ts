@@ -3,3 +3,4 @@ export * from './stats-job.dao';
 export * from './campaign-timing.dao';
 export * from './review-stats.dao';
 export * from './identification-stats.dao';
+export * from './roster-group-stats.dao';

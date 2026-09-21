@@ -26,6 +26,7 @@ import { PrintBatchDetailDao, PrintBatchListItemDao } from '../dao';
 import {
   BatchItemsDto,
   CreatePrintBatchDto,
+  ExportPrintBatchDto,
   ListPrintBatchesQueryDto,
   PrintPackageQueryDto,
   SendPrintBatchDto,
@@ -118,6 +119,20 @@ export class PrintBatchController {
     return this.batchService.removeItems(id, dto.itemIds);
   }
 
+  @Post(':id/populate')
+  @RequirePermission('print-batch:write', 'Nạp tự động ảnh đã duyệt vào đợt in')
+  @ApiOperation({
+    summary:
+      'Tạo + gắn toàn bộ item chưa in của campaign (đã duyệt) vào đợt in (plan §4.1)',
+  })
+  populate(@Param('id') id: string): Promise<{
+    created: number;
+    attached: number;
+    skipped: Array<{ setId: string; reason: string }>;
+  }> {
+    return this.batchService.populate(id);
+  }
+
   @Post(':id/render')
   @RequirePermission('print-batch:write', 'Render toàn bộ đợt in')
   @ApiOperation({
@@ -136,7 +151,7 @@ export class PrintBatchController {
   @RequirePermission('print-batch:write', 'Gửi in đợt in')
   @ApiOperation({
     summary:
-      'DIRECT: xếp hàng cho print-agent (QUEUED). CENTRALIZED: hoàn tất, sẵn sàng tải gói. Bỏ trống itemIds = cả đợt.',
+      'DIRECT ONLY: xếp hàng cho print-agent (QUEUED). Đợt CENTRALIZED dùng "Xuất gói" + "Hoàn tất đợt" thay vì route này. Bỏ trống itemIds = cả đợt.',
   })
   @ApiResponseDecorator(PrintBatchDetailDao)
   send(
@@ -151,7 +166,7 @@ export class PrintBatchController {
   @Header('Content-Type', 'application/zip')
   @ApiOperation({
     summary:
-      'Tải zip (ảnh mặt trước/sau + manifest.csv) — thay dần review/export. Bỏ trống itemIds = cả đợt.',
+      'Tải lại zip (ảnh mặt trước/sau + manifest.csv) — CHỈ ĐỌC, không đóng dấu ngày xuất. Bỏ trống itemIds = cả đợt.',
   })
   async downloadPackage(
     @Param('id') id: string,
@@ -164,6 +179,39 @@ export class PrintBatchController {
     return new StreamableFile(zip, {
       disposition: `attachment; filename="${filename}"`,
     });
+  }
+
+  @Post(':id/package')
+  @RequirePermission('print-batch:write', 'Xuất gói in tập trung')
+  @Header('Content-Type', 'application/zip')
+  @ApiOperation({
+    summary:
+      '"Xuất gói" (CENTRALIZED) — tải zip VÀ đóng dấu exported_at, RENDERED→EXPORTED cho các item có trong gói. Bỏ trống itemIds = cả đợt.',
+  })
+  async exportPackage(
+    @Param('id') id: string,
+    @Body() dto: ExportPrintBatchDto,
+    @Req() req: Request,
+  ): Promise<StreamableFile> {
+    const { zip, filename } = await this.batchService.exportPackage(
+      id,
+      dto.itemIds,
+      req.user?.id ?? null,
+    );
+    return new StreamableFile(zip, {
+      disposition: `attachment; filename="${filename}"`,
+    });
+  }
+
+  @Post(':id/complete')
+  @RequirePermission('print-batch:write', 'Hoàn tất đợt in')
+  @ApiOperation({
+    summary:
+      '"Hoàn tất đợt" (CENTRALIZED) — chuyển đợt sang DONE, cần ít nhất 1 item đã EXPORTED/PRINTED',
+  })
+  @ApiResponseDecorator(PrintBatchDetailDao)
+  complete(@Param('id') id: string): Promise<PrintBatchDetailDao> {
+    return this.batchService.complete(id);
   }
 
   @Post(':id/cancel')

@@ -154,11 +154,22 @@ export function ReviewDetailContent({ id, onClose }: { id: string; onClose?: () 
   const locked = isReviewSetLocked(set);
   const canReprocess = set.status === 'AUTO_FAILED';
 
-  async function withBusy(action: () => Promise<ReviewSetDetail>) {
+  // Layer 2 of the 2026-09-18 white-screen fix (plan §1.1): reload the
+  // detail from `getReviewSet` after an action succeeds, rather than
+  // rendering whatever the action's own response happens to be. The server
+  // side of this fix (`approve`/`reject`/`setCurrent`/`reprocess` now all
+  // return the full `ReviewSetDetailDao`) already makes `action()`'s return
+  // value correct on its own, but trusting it directly here is exactly the
+  // assumption that produced the original crash (`set.variants` reading
+  // `undefined` off a narrower shape) — this makes the page correct even if
+  // a route's contract drifts again later, at the cost of one extra GET per
+  // action.
+  async function withBusy(action: () => Promise<unknown>) {
     setBusy(true);
     setError(null);
     try {
-      setSet(await action());
+      await action();
+      setSet(await getReviewSet(id));
     } catch (err) {
       setError(err instanceof ApiError ? err.message : String(err));
     } finally {
@@ -354,7 +365,10 @@ export function ReviewDetailContent({ id, onClose }: { id: string; onClose?: () 
       {aiModalOpen && (
         <AiEditModal
           setId={id}
-          fromVariantId={set.currentCardVariantId ?? undefined}
+          currentCardVariantId={set.currentCardVariantId ?? undefined}
+          originalPhotos={set.originalPhotos}
+          photoLinks={photoLinks}
+          variants={set.variants}
           onClose={() => setAiModalOpen(false)}
           onAccepted={() => {
             setAiModalOpen(false);

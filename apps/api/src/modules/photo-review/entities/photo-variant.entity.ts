@@ -9,11 +9,17 @@ import { SubjectPhotoSet } from './subject-photo-set.entity';
 
 /**
  * One version of a card photo (plan §2) — automatic, AI-edited, or
- * uploaded. NEVER hard-deleted by any endpoint in this module — only
- * `DISCARDED` (kept for audit, plan R-Q6). `sourcePhotoId` intentionally
- * has no FK: it points at the `photos` table owned by the `capture` module,
- * which this module must not structurally depend on (read via plain SQL
- * against the table name instead — see `PhotoReviewService`).
+ * uploaded. Almost never hard-deleted — `DISCARDED` (kept for audit, plan
+ * R-Q6) is the rule for every path except one deliberate, narrow
+ * exception: `PhotoReviewService.acceptVariant` hard-deletes the PREVIOUS
+ * current variant when accepting a new `CARD_AI` one, but ONLY if that
+ * previous variant was itself `CARD_AI` (Giai đoạn 5, plan §5.1 feature
+ * 12's "xóa hẳn ảnh AI cũ" decision — see that method's own doc comment
+ * for why this is safe given the FKs into this table).
+ * `sourcePhotoId` intentionally has no FK: it points at the `photos` table
+ * owned by the `capture` module, which this module must not structurally
+ * depend on (read via plain SQL against the table name instead — see
+ * `PhotoReviewService`).
  */
 @Entity('photo_variants')
 export class PhotoVariant extends BaseEntity {

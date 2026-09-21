@@ -13,7 +13,9 @@ import { CampaignSubjectService } from './campaign-subject.service';
  * existed. ROSTER/EXTERNAL_API/ROSTER_AND_API branch behavior itself is
  * covered by `campaign-subject.service.eligibility.spec.ts`.
  */
-function buildService(campaignService: { findCampaignEntityOrFail: jest.Mock }) {
+function buildService(campaignService: {
+  findCampaignEntityOrFail: jest.Mock;
+}) {
   const repository = { findOne: jest.fn() };
   const eligibilityLogRepository = {
     create: jest.fn((x: unknown) => x),

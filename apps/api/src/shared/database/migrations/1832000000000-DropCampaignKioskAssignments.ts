@@ -29,13 +29,13 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * as `1815000000000-CampaignExtendedFields.ts` originally created) for a
  * clean rollback — it does not and cannot restore the dropped rows.
  */
-export class DropCampaignKioskAssignments1832000000000
-  implements MigrationInterface
-{
+export class DropCampaignKioskAssignments1832000000000 implements MigrationInterface {
   name = 'DropCampaignKioskAssignments1832000000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.query(`DROP TABLE IF EXISTS "campaign_kiosk_assignments"`);
+    await queryRunner.query(
+      `DROP TABLE IF EXISTS "campaign_kiosk_assignments"`,
+    );
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {

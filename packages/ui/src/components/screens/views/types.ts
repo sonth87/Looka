@@ -150,6 +150,22 @@ export interface SharedCaptureViewProps {
   /** See MultiFrameViewProps. Absent (undefined) on the sequential single-camera path. */
   multiFrame?: MultiFrameViewProps;
   /**
+   * Read-only side-camera preview tiles for the SEQUENTIAL path (plan item
+   * 8, 2026-09-21) — deliberately a separate prop from `multiFrame`, not a
+   * second way to populate it: `multiFrame`/`hasMultiFrame` doubles as the
+   * signal that decides the WHOLE screen layout (`isMirrorMode` in
+   * DesktopCaptureView.tsx switches between "Bước 5" 4-cam grid and "Bước
+   * 6" mirror view), so making it truthy for sequential mode would silently
+   * flip every sequential session over to the grid layout instead of just
+   * showing a preview. This only ever carries a small read-only strip next
+   * to the existing mirror view — never `undefined`/populated at the same
+   * time as `multiFrame` (sequential vs. simultaneous are mutually
+   * exclusive per session). Every frame's `status` here is only ever
+   * `READY | PENDING | MISSING | UNASSIGNED` — never `CURRENT`/`COMPLETED`/
+   * `FAILED`, since these tiles are not tied to a capture step or round.
+   */
+  sidePreviewFrames?: MultiFrameViewFrame[];
+  /**
    * §3.10 layer 2 ("Trong phiên") — recording channels the byte-liveness
    * monitor in FaceCaptureApp's two recording effects has declared failed
    * (a 3s data gap, one automatic restart attempt, then another 3s gap with

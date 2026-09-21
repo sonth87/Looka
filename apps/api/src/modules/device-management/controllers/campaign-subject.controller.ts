@@ -37,6 +37,7 @@ import {
 import { TestRosterLookupResultDao } from '../dao/test-roster-lookup-result.dao';
 import { DistinctSubjectValuesQueryDto } from '../dto/distinct-subject-values-query.dto';
 import { ListCampaignSubjectsQueryDto } from '../dto/list-campaign-subjects-query.dto';
+import { RequestSubjectPullDto } from '../dto/request-subject-pull.dto';
 import { TestRosterLookupDto } from '../dto/test-roster-lookup.dto';
 import { CampaignSubjectService } from '../services/campaign-subject.service';
 
@@ -118,6 +119,36 @@ export class CampaignSubjectController {
   ): Promise<{ id: string }> {
     await this.subjectService.deleteImport(campaignId, importId);
     return { id: importId };
+  }
+
+  /**
+   * `POST /v1/campaigns/:id/subjects/pulls` (plan §3.1, feature 1) — queues
+   * a full pull of this campaign's own `eligibilityConfig.api` into the
+   * durable 2-tier queue and returns the new `campaign_subject_imports`
+   * row immediately at `PENDING_FETCH` (see
+   * `CampaignSubjectService.requestPull`'s own doc comment). Poll it via
+   * the existing `GET :id/subjects/imports/:importId` — no separate
+   * "list pulls" route needed, a pull is just an import with
+   * `source: 'EXTERNAL_API'`. 3 segments after `:id`
+   * (`subjects`/`pulls` literal) — no shadowing risk against this
+   * controller's other routes, same reasoning as their own doc comments.
+   */
+  @Post(':id/subjects/pulls')
+  @ApiOperation({
+    summary:
+      'Kéo toàn bộ dữ liệu từ API điều kiện tiếp nhận của campaign về roster — chạy nền qua hàng đợi',
+  })
+  @ApiResponseDecorator(CampaignSubjectImportDao, { status: 202 })
+  requestPull(
+    @Param('id') campaignId: string,
+    @Body() dto: RequestSubjectPullDto,
+    @Req() req: Request,
+  ): Promise<CampaignSubjectImportDao> {
+    return this.subjectService.requestPull(
+      campaignId,
+      req.user?.id ?? null,
+      dto,
+    );
   }
 
   @Get(':id/subjects')

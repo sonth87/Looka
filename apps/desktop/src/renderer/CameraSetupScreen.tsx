@@ -377,31 +377,52 @@ export default function CameraSetupScreen() {
 
   /**
    * Assigns `deviceId` to `role` ("" clears it). A camera can back at most
-   * one role: if it's already assigned elsewhere, this moves it here and
-   * leaves `moveNotice` for the banner near the header — the alternative
-   * (block the change instead) was considered and rejected, see this
-   * function's own file-level doc comment.
+   * one role, so if it's already assigned elsewhere this is a genuine SWAP
+   * (2026-09-21, plan item 9/D2) rather than a move-and-clear: `role`
+   * receives `deviceId`, and whatever camera `role` held before (if any)
+   * goes to the role that used to hold `deviceId` — so the operator never
+   * ends up with a role silently emptied out as a side effect of assigning
+   * a camera somewhere else. Clearing `role` outright (`deviceId === ''`)
+   * is not a swap — nothing else changes.
+   *
+   * A previous version of this function only ever cleared the donor role,
+   * never refilled it — confirmed live as the root cause of item 9's "swap
+   * displays wrong": clearing (not swapping) the donor role could leave the
+   * mapping with no CENTER at all, which `resolveStepCamera`
+   * (packages/ui/src/lib/multiFrame.ts) then silently resolves to the wrong
+   * physical camera for every FRONT-type step. See `handleSave`'s CENTER
+   * check below for the other half of that fix.
    */
   const assignRole = (role: CameraRole, deviceId: string) => {
     const movedFrom = deviceId ? ROLES.find((r) => r !== role && mapping[r] === deviceId) : undefined;
+    const previousDeviceId = mapping[role];
     setMapping((prev) => {
       const next: CameraRoleMapping = { ...prev };
-      delete next[role];
       if (deviceId) {
-        for (const r of ROLES) {
-          if (r !== role && next[r] === deviceId) delete next[r];
-        }
         next[role] = deviceId;
+        if (movedFrom) {
+          if (previousDeviceId) next[movedFrom] = previousDeviceId;
+          else delete next[movedFrom];
+        }
+      } else {
+        delete next[role];
       }
       mappingRef.current = next;
       return next;
     });
     setSaved(false);
-    setMoveNotice(
-      movedFrom
-        ? `${devices.find((d) => d.id === deviceId)?.label ?? 'Camera này'} đã được chuyển từ "${ROLE_LABEL[movedFrom]}" sang "${ROLE_LABEL[role]}".`
-        : null
-    );
+    if (!movedFrom) {
+      setMoveNotice(null);
+    } else if (previousDeviceId) {
+      const movedLabel = devices.find((d) => d.id === deviceId)?.label ?? 'Camera này';
+      const swappedLabel = devices.find((d) => d.id === previousDeviceId)?.label ?? 'Camera kia';
+      setMoveNotice(
+        `Đã đổi chỗ: "${movedLabel}" chuyển sang "${ROLE_LABEL[role]}", "${swappedLabel}" chuyển sang "${ROLE_LABEL[movedFrom]}".`
+      );
+    } else {
+      const movedLabel = devices.find((d) => d.id === deviceId)?.label ?? 'Camera này';
+      setMoveNotice(`${movedLabel} đã được chuyển từ "${ROLE_LABEL[movedFrom]}" sang "${ROLE_LABEL[role]}".`);
+    }
   };
 
   const handleAngleChange = (role: CameraRole, axis: 'yaw' | 'pitch', value: number) => {
@@ -415,6 +436,20 @@ export default function CameraSetupScreen() {
   };
 
   const handleSave = async () => {
+    // D2 fix (2026-09-21, plan item 9): a half-finished swap used to be able
+    // to persist a mapping with NO CENTER at all. With no CENTER,
+    // `resolveStepCamera` (packages/ui/src/lib/multiFrame.ts) falls through
+    // to a deterministic-but-wrong fallback (the first mapped role in
+    // `CAMERA_ROLES` order, i.e. LEFT) for every step that would otherwise
+    // resolve to CENTER — a FRONT step silently gets shot on the wrong
+    // physical camera, labelled "Camera trái" instead of "Giữa". Block the
+    // save outright instead of persisting that.
+    if (!mapping.CENTER) {
+      setError('Chưa gán camera cho "Giữa (bắt buộc)" — không thể lưu khi thiếu camera này.');
+      setSaved(false);
+      return;
+    }
+    setError(null);
     const faceAPI = (window as any).faceAPI;
     await faceAPI?.setCameraRoleMapping?.(mapping);
     await faceAPI?.setCameraPhysicalAngles?.(physicalAngles);
@@ -711,7 +746,21 @@ function RoleCard({
         <video
           ref={(el) => {
             videoRefs.current.set(role, el);
-            if (el && deviceId && streamsRef.current.has(deviceId)) el.srcObject = streamsRef.current.get(deviceId)!;
+            if (!el) return;
+            // D1 fix (2026-09-21, plan item 9): this ref callback re-runs on
+            // every render, and used to ONLY ever set `srcObject`, never
+            // clear it — so a role just cleared/swapped away from a camera
+            // kept showing that camera's last frame, live-confirmed as one
+            // of the "swap displays wrong" symptoms (two cards showing the
+            // same feed, one of them labelled unassigned). Now explicitly
+            // clears the element when this role no longer has a matching
+            // open stream, so the video goes blank the instant the
+            // assignment changes rather than only on the next real reflow.
+            if (deviceId && streamsRef.current.has(deviceId)) {
+              el.srcObject = streamsRef.current.get(deviceId)!;
+            } else if (el.srcObject) {
+              el.srcObject = null;
+            }
           }}
           autoPlay
           muted

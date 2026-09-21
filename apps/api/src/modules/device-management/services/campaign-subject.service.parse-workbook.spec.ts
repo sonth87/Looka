@@ -61,8 +61,28 @@ async function parse(service: CampaignSubjectService, buffer: Buffer) {
 describe('CampaignSubjectService.parseWorkbook — header-name matching (2026-09-18)', () => {
   it('reads the canonical ROSTER_COLUMNS template unchanged (regression)', async () => {
     const buffer = await buildWorkbookBuffer(
-      ['Mã SV', 'Họ tên', 'CCCD', 'Lớp', 'Khoa', 'Ngành', 'Ngày sinh (yyyy-mm-dd)', 'Thời hạn thẻ (yyyy-mm-dd)'],
-      [['SV001', 'Nguyễn Văn A', '012345678', 'CNTT-K20', 'CNTT', 'KTPM', '2005-01-01', '2029-01-01']],
+      [
+        'Mã SV',
+        'Họ tên',
+        'CCCD',
+        'Lớp',
+        'Khoa',
+        'Ngành',
+        'Ngày sinh (yyyy-mm-dd)',
+        'Thời hạn thẻ (yyyy-mm-dd)',
+      ],
+      [
+        [
+          'SV001',
+          'Nguyễn Văn A',
+          '012345678',
+          'CNTT-K20',
+          'CNTT',
+          'KTPM',
+          '2005-01-01',
+          '2029-01-01',
+        ],
+      ],
     );
     const rows = await parse(buildService(), buffer);
     expect(rows).toHaveLength(1);
@@ -78,8 +98,26 @@ describe('CampaignSubjectService.parseWorkbook — header-name matching (2026-09
 
   it('reads the real partner-faculty layout (STT/MSSV/HỌ VÀ TÊN SINH VIÊN/Năm sinh/Lớp/KHOA/Niên khoá) correctly, ignoring STT', async () => {
     const buffer = await buildWorkbookBuffer(
-      ['STT', 'MSSV', 'HỌ VÀ TÊN SINH VIÊN', 'Năm sinh', 'Lớp', 'KHOA', 'Niên khoá'],
-      [[1, '1777020640', 'HÀ ÁNH THỦY', '04/12/2005', 'TT 18-07', 'NN và VH Trung Quốc', '30-06-2028']],
+      [
+        'STT',
+        'MSSV',
+        'HỌ VÀ TÊN SINH VIÊN',
+        'Năm sinh',
+        'Lớp',
+        'KHOA',
+        'Niên khoá',
+      ],
+      [
+        [
+          1,
+          '1777020640',
+          'HÀ ÁNH THỦY',
+          '04/12/2005',
+          'TT 18-07',
+          'NN và VH Trung Quốc',
+          '30-06-2028',
+        ],
+      ],
     );
     const rows = await parse(buildService(), buffer);
     expect(rows).toHaveLength(1);
@@ -116,7 +154,12 @@ describe('CampaignSubjectService.parseWorkbook — header-name matching (2026-09
 
   it('parses Vietnamese dd/mm/yyyy and dd-mm-yyyy dates correctly, not as US mm/dd/yyyy (2026-09-18 fix)', async () => {
     const buffer = await buildWorkbookBuffer(
-      ['Mã SV', 'Họ tên', 'Ngày sinh (yyyy-mm-dd)', 'Thời hạn thẻ (yyyy-mm-dd)'],
+      [
+        'Mã SV',
+        'Họ tên',
+        'Ngày sinh (yyyy-mm-dd)',
+        'Thời hạn thẻ (yyyy-mm-dd)',
+      ],
       [['SV004', 'Phạm Thị D', '04/12/2005', '30-06-2028']],
     );
     const rows = await parse(buildService(), buffer);

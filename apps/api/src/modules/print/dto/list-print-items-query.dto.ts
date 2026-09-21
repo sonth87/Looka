@@ -1,5 +1,6 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsIn, IsOptional, IsString, IsUUID } from 'class-validator';
+import { Transform } from 'class-transformer';
+import { IsBoolean, IsIn, IsOptional, IsString, IsUUID } from 'class-validator';
 import { QueryPaginateDto } from '@app/shared/http/query-paginate.dto';
 import { PRINT_ITEM_STATUSES, type PrintItemStatus } from '../print.constants';
 
@@ -26,6 +27,20 @@ export class ListPrintItemsQueryDto extends QueryPaginateDto {
   @IsOptional()
   @IsUUID()
   batchId?: string;
+
+  /**
+   * `unassigned=true` (Giai đoạn 4, plan §4.1, feature 2) — items with no
+   * `batchId` at all. Replaces the CMS's old client-side hack (paginate
+   * 100 rows, filter `!i.batchId` in the browser, `limit:200` silently
+   * breaking against this DTO's own `@Max(100)`) with a real server-side
+   * filter. Mutually exclusive with `batchId` in practice — if both are
+   * sent, `batchId` wins (checked first below in the service).
+   */
+  @ApiPropertyOptional({ description: 'true = chỉ item chưa thuộc đợt in nào' })
+  @IsOptional()
+  @Transform(({ value }) => value === 'true' || value === true)
+  @IsBoolean()
+  unassigned?: boolean;
 
   @ApiPropertyOptional({ enum: PRINT_ITEM_STATUSES })
   @IsOptional()

@@ -106,6 +106,12 @@ export class PhotoVariantDao {
   @Expose()
   createdByUserId?: string | null;
 
+  @ApiPropertyOptional({
+    description: 'Tên hiển thị (hoặc email) người tạo, nếu tra được',
+  })
+  @Expose()
+  createdByName?: string | null;
+
   @ApiPropertyOptional()
   @Expose()
   note?: string | null;

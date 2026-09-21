@@ -14,6 +14,7 @@ import { CampaignSnapshotService } from './services/campaign-snapshot.service';
 import { CaptureStatsService } from './services/capture-stats.service';
 import { PrintStatsService } from './services/print-stats.service';
 import { ReviewStatsService } from './services/review-stats.service';
+import { RosterGroupStatsService } from './services/roster-group-stats.service';
 import { StatsJobService } from './services/stats-job.service';
 import { StatsQueryService } from './services/stats-query.service';
 import { StatsRebuildService } from './services/stats-rebuild.service';
@@ -64,6 +65,7 @@ import { SnapshotRefreshWorker } from './workers/snapshot-refresh.worker';
     StatsJobService,
     StatsQueryService,
     StatsRebuildService,
+    RosterGroupStatsService,
     SnapshotRefreshWorker,
     DailyRecomputeWorker,
   ],

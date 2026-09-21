@@ -139,6 +139,7 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
     activeSensitivity,
     handleSensitivityChange,
     multiFrame,
+    sidePreviewFrames,
     subjectInfo,
     capturedList,
     recordingFailed,
@@ -1147,6 +1148,32 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                 frames={multiFrame.frames}
                 theme={theme}
                 forceThreePerRow={multiFrame.grid3x3Enabled}
+              />
+            )}
+
+            {/*
+              Plan item 8, 2026-09-21: a small READ-ONLY preview strip for
+              mapped side cameras during a SEQUENTIAL session — deliberately
+              a separate block from the `hasMultiFrame` grid above, not a
+              second way to trigger it. `isMirrorMode` (`= !hasMultiFrame`)
+              also drives the whole "Bước 5 grid vs. Bước 6 mirror" layout
+              switch elsewhere in this file (`showMirrorChrome`, the right
+              sidebar's content, etc.) — showing this strip only while
+              `isMirrorMode` is true, and reusing `sidePreviewFrames`
+              (`FaceCaptureApp.tsx`'s own doc comment) rather than
+              `multiFrame`, keeps every one of those other switches
+              untouched: a sequential session still renders the exact mirror
+              layout it always has, with these tiles as a small addition,
+              never the full 4-cam grid layout simultaneous mode uses.
+              Capped at a narrower width (unlike the full-width grid above)
+              since this is meant to read as "a glance at what the side
+              camera sees", not the primary capture surface.
+            */}
+            {isMirrorMode && sidePreviewFrames && sidePreviewFrames.length > 0 && (
+              <MultiFrameGrid
+                className="w-full max-w-md shrink-0 px-1 pb-1"
+                frames={sidePreviewFrames}
+                theme={theme}
               />
             )}
           </div>
