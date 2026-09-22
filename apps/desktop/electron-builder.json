@@ -33,6 +33,18 @@
     "target": [
       { "target": "nsis", "arch": ["x64"] },
       { "target": "zip", "arch": ["x64"] }
+    ],
+    "extraResources": [
+      {
+        "from": "resources/gphoto2-win",
+        "to": "gphoto2",
+        "filter": ["**/*", "!**/*.dll.a", "!README.md", "!.gitignore"]
+      },
+      {
+        "from": "resources/zadig-win",
+        "to": "zadig",
+        "filter": ["**/*", "!README.md", "!.gitignore"]
+      }
     ]
   },
   "nsis": {

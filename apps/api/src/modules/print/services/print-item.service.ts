@@ -184,7 +184,7 @@ export class PrintItemService {
       `SELECT ${column} AS value,
               COUNT(*) AS total,
               COUNT(*) FILTER (WHERE status IN ('PENDING', 'REPRINT_REQUESTED')) AS pending,
-              COUNT(*) FILTER (WHERE status IN ('RENDERED', 'QUEUED')) AS rendered,
+              COUNT(*) FILTER (WHERE status IN ('RENDERED', 'QUEUED', 'EXPORTED')) AS rendered,
               COUNT(*) FILTER (WHERE status = 'PRINTING') AS printing,
               COUNT(*) FILTER (WHERE status = 'PRINTED') AS printed,
               COUNT(*) FILTER (WHERE status = 'FAILED') AS failed
@@ -405,6 +405,11 @@ export class PrintItemService {
     const item = await this.loadOrFail(id);
     if (item.status === 'CANCELLED') {
       throw new ConflictException('Item đã hủy, không thể render');
+    }
+    if (['EXPORTED', 'QUEUED', 'PRINTING', 'PRINTED'].includes(item.status)) {
+      throw new ConflictException(
+        `Item đang ở trạng thái ${item.status}, không thể render lại (sẽ làm mất trạng thái đã xuất/gửi/in)`,
+      );
     }
     const batch = item.batchId
       ? await this.batches.findOne({ where: { id: item.batchId } })

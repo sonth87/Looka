@@ -53,8 +53,28 @@ export type EligibilityRuleConfig = z.infer<typeof eligibilityRuleSchema>;
  * is a read-only annotation `CampaignService.sanitizeEligibilityCredential`
  * sets when returning a campaign to the CMS, stripping the ciphertext out.
  */
+/**
+ * `EligibilityHttpClient.assertUrlIsSafe` is the actual SSRF defense (it
+ * re-resolves the hostname on every call, since a hostname can round-robin
+ * or later repoint to an internal address — something a save-time schema
+ * check can never fully rule out). This is a cheap, early rejection of
+ * outright garbage/non-http(s) values (e.g. `file://`, `gopher://`, a bare
+ * host with no scheme) at config-save time, before it ever reaches a worker.
+ */
+function isHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 const eligibilityApiSchema = z.object({
-  baseUrl: z.string().min(1),
+  baseUrl: z
+    .string()
+    .min(1)
+    .refine(isHttpUrl, { message: 'baseUrl phải là URL http/https hợp lệ' }),
   requestMethod: z.enum(ELIGIBILITY_REQUEST_METHODS).default('POST'),
   requestPath: z.string().min(1),
   requestBodyTemplate: z.record(z.string(), z.unknown()).optional(),

@@ -1,4 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { isIP } from 'node:net';
+import { lookup as dnsLookup } from 'node:dns/promises';
 import {
   IntegrationOutcome,
   retryable,
@@ -6,6 +8,42 @@ import {
   terminal,
 } from '@app/shared/integrations/integration-outcome';
 import { decryptSecret } from '@app/shared/security/secret.codec';
+
+/** `a.b.c.d` → true if it falls in a loopback/private/link-local/reserved IPv4 range (RFC 1918, RFC 3927, RFC 6890) — includes `169.254.169.254`, the cloud-metadata address every major cloud provider serves unauthenticated instance credentials from. */
+function isPrivateOrReservedIPv4(ip: string): boolean {
+  const parts = ip.split('.').map((p) => Number(p));
+  if (parts.length !== 4 || parts.some((p) => !Number.isInteger(p))) {
+    return true; // malformed — treat as unsafe rather than risk a bypass
+  }
+  const [a, b] = parts;
+  if (a === 127) return true; // loopback
+  if (a === 10) return true; // private
+  if (a === 172 && b >= 16 && b <= 31) return true; // private
+  if (a === 192 && b === 168) return true; // private
+  if (a === 169 && b === 254) return true; // link-local, incl. cloud metadata
+  if (a === 0) return true; // "this" network
+  if (a >= 224) return true; // multicast/reserved
+  return false;
+}
+
+/** IPv6 equivalent — loopback (`::1`), unique-local (`fc00::/7`), link-local (`fe80::/10`), and IPv4-mapped addresses (checked against the IPv4 rule above). */
+function isPrivateOrReservedIPv6(ip: string): boolean {
+  const normalized = ip.toLowerCase();
+  if (normalized === '::1' || normalized === '::') return true;
+  const firstGroup = normalized.split(':')[0];
+  if (/^fe[89ab]/.test(firstGroup)) return true; // fe80::/10 link-local
+  if (/^f[cd]/.test(firstGroup)) return true; // fc00::/7 unique-local
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(normalized);
+  if (mapped) return isPrivateOrReservedIPv4(mapped[1]);
+  return false;
+}
+
+function isPrivateOrReservedIP(ip: string): boolean {
+  const family = isIP(ip);
+  if (family === 4) return isPrivateOrReservedIPv4(ip);
+  if (family === 6) return isPrivateOrReservedIPv6(ip);
+  return true; // not a recognizable IP literal — unsafe by default
+}
 
 export type EligibilityApiAuthType =
   'NONE' | 'API_KEY_HEADER' | 'BEARER_TOKEN' | 'QUERY_PARAM';
@@ -159,6 +197,57 @@ export class EligibilityHttpClient {
   private readonly logger = new Logger(EligibilityHttpClient.name);
 
   /**
+   * SSRF guard — `config.baseUrl` is caller-controlled campaign config
+   * (`eligibility-config.schema.ts` only validates it as a non-empty
+   * string), and `fetchAll()` in particular is reachable unattended by any
+   * `campaign:write` holder via a background cron worker, not just an
+   * interactive test-call. Rejects non-http(s) schemes outright, then
+   * resolves the hostname and rejects if ANY resolved address is
+   * loopback/private/link-local (incl. `169.254.169.254`, a real cloud
+   * metadata endpoint) — a hostname can round-robin or later repoint to an
+   * internal address, so this re-resolves on every call rather than
+   * trusting a first-seen address. Thrown here, caught by both call sites
+   * and turned into the same `terminal(...)` outcome every other
+   * unreachable/invalid-response case already uses.
+   */
+  private async assertUrlIsSafe(url: URL): Promise<void> {
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+      throw new Error(
+        `Chỉ hỗ trợ http/https, không hỗ trợ giao thức "${url.protocol}"`,
+      );
+    }
+    const hostname = url.hostname;
+    if (isIP(hostname)) {
+      if (isPrivateOrReservedIP(hostname)) {
+        throw new Error(
+          `Địa chỉ IP "${hostname}" là địa chỉ nội bộ/riêng tư — không được phép gọi`,
+        );
+      }
+      return;
+    }
+    if (hostname === 'localhost') {
+      throw new Error('Không được gọi "localhost"');
+    }
+    let addresses: Array<{ address: string }>;
+    try {
+      addresses = await dnsLookup(hostname, { all: true });
+    } catch {
+      // Unresolvable hostname is not itself a private-network risk (no
+      // internal address was reached) — let the normal fetch() failure path
+      // just below handle it (network error -> Retryable), same as any
+      // other DNS hiccup, rather than treating "can't resolve" as unsafe.
+      return;
+    }
+    for (const { address } of addresses) {
+      if (isPrivateOrReservedIP(address)) {
+        throw new Error(
+          `Tên miền "${hostname}" phân giải tới địa chỉ nội bộ/riêng tư (${address}) — không được phép`,
+        );
+      }
+    }
+  }
+
+  /**
    * `config.retryCount`/`timeoutMs` (2026-09-18, product feedback — "cần
    * retry bao lần, bao lâu là timeout") — credential resolution happens
    * ONCE here (decrypting/validating it again on every retry would be pure
@@ -215,6 +304,11 @@ export class EligibilityHttpClient {
     const url = new URL(
       `${config.baseUrl.replace(/\/$/, '')}${config.requestPath}`,
     );
+    try {
+      await this.assertUrlIsSafe(url);
+    } catch (error) {
+      return terminal((error as Error).message);
+    }
     const headers: Record<string, string> = { accept: 'application/json' };
     if (config.authType === 'API_KEY_HEADER' && credential) {
       headers[config.authParamName || 'x-api-key'] = credential;
@@ -347,6 +441,11 @@ export class EligibilityHttpClient {
     const url = new URL(
       `${config.baseUrl.replace(/\/$/, '')}${config.requestPath}`,
     );
+    try {
+      await this.assertUrlIsSafe(url);
+    } catch (error) {
+      return terminal((error as Error).message);
+    }
     const headers: Record<string, string> = { accept: 'application/json' };
     if (config.authType === 'API_KEY_HEADER' && credential) {
       headers[config.authParamName || 'x-api-key'] = credential;

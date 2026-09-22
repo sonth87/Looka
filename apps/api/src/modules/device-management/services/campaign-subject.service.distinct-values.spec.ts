@@ -27,6 +27,12 @@ function buildService(dataSource: { query: jest.Mock }) {
       {} as never, // fileStorage
       {} as never, // snapshotService
       undefined as never, // eligibilityHttpClient
+      {
+        withLock: jest.fn(async (_name: string, fn: () => Promise<void>) => {
+          await fn();
+          return true;
+        }),
+      } as never, // advisoryLock
     ),
     campaignService,
   };

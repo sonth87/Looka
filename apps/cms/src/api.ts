@@ -1563,6 +1563,7 @@ export type PrintBatchStatus = 'DRAFT' | 'READY' | 'PRINTING' | 'DONE' | 'CANCEL
 export type PrintItemStatus =
   | 'PENDING'
   | 'RENDERED'
+  | 'EXPORTED'
   | 'QUEUED'
   | 'PRINTING'
   | 'PRINTED'
@@ -1671,6 +1672,33 @@ export async function downloadPrintBatchPackage(id: string, itemIds?: string[]):
   const match = /filename="([^"]+)"/.exec(disposition);
   return { blob: await res.blob(), filename: match?.[1] ?? `${id}.zip` };
 }
+
+/**
+ * `POST /v1/print/batches/:id/package {itemIds?}` — the CENTRALIZED "Xuất
+ * gói" action (Giai đoạn 4): same zip download as `downloadPrintBatchPackage`
+ * above, but the `POST` twin that also stamps `exportedAt`/promotes
+ * RENDERED→EXPORTED server-side. Omit/empty `itemIds` exports the whole
+ * batch, sent as a JSON body (not query params) per the server's
+ * `ExportPrintBatchDto`.
+ */
+export async function exportPrintBatchPackage(id: string, itemIds?: string[]): Promise<{ blob: Blob; filename: string }> {
+  const res = await fetch(`${baseUrl()}${PRINT_BATCHES_PATH}/${id}/package`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(itemIds && itemIds.length > 0 ? { itemIds } : {}),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(text.slice(0, 300) || res.statusText, res.status);
+  }
+  const disposition = res.headers.get('Content-Disposition') ?? '';
+  const match = /filename="([^"]+)"/.exec(disposition);
+  return { blob: await res.blob(), filename: match?.[1] ?? `${id}.zip` };
+}
+
+/** `POST /v1/print/batches/:id/complete` — CENTRALIZED "Hoàn tất đợt" (Giai đoạn 4): moves the batch to DONE once at least one item is EXPORTED/PRINTED. */
+export const completePrintBatch = (id: string) =>
+  request<PrintBatch>(`${PRINT_BATCHES_PATH}/${id}/complete`, { method: 'POST' });
 
 /** `GET /v1/print/items` row (mirrors `PrintItemListItemDao`). */
 export interface PrintItem {

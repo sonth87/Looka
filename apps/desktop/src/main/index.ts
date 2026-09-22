@@ -72,6 +72,7 @@ import {
 } from './secrets.js';
 import { openCameraSetupWindow } from './cameraSetupWindow.js';
 import { openSsoLoginWindow } from './ssoLogin.js';
+import { detectTetheredCamera, captureTetheredPhoto, getTetheredLiveViewFrame, openZadig } from './tetheredCamera.js';
 import { openRecentStudentsWindow } from './recentStudentsWindow.js';
 import { fetchRecentCaptures, getDeviceAccessStatus, lookupCampaignSubject } from './deviceApi.js';
 import { startVideoStream, endVideoStream, discardSessionVideos } from './streams.js';
@@ -680,6 +681,45 @@ app.whenReady().then(async () => {
     openCameraSetupWindow();
     return true;
   });
+
+  /**
+   * Tethered Canon (gphoto2) — docs/plans/canon-tethered-capture-plan-2026-09-21.md
+   * Bước 1. Foundational connectivity only (detect/live-view-frame/capture);
+   * see that module's own top doc comment for why this stops short of the
+   * full capture-session round pipeline. `tetheredCamera:capture` returns
+   * the JPEG as base64 (not raw bytes) purely so it round-trips over IPC
+   * and into an `<img src="data:...">` preview the same way the Camera
+   * Setup test button expects — mirrors how a webcam snapshot already
+   * crosses the renderer/main boundary as a data URL elsewhere in this app.
+   */
+  ipcMain.handle('tetheredCamera:status', () => detectTetheredCamera());
+  ipcMain.handle('tetheredCamera:capture', async () => {
+    try {
+      const bytes = await captureTetheredPhoto();
+      // Bước 0's own "chụp và lưu lại" hardware check (2026-09-21) — written
+      // to a real, easy-to-find folder (Desktop) so the captured JPEG can
+      // be opened directly, not just eyeballed as a tiny inline preview.
+      // Still test-only scope: no session/outbox/student record involved,
+      // same as this whole test panel.
+      const dir = path.join(app.getPath('desktop'), 'Looka-tethered-test-captures');
+      fs.mkdirSync(dir, { recursive: true });
+      const savedPath = path.join(dir, `canon-test-${Date.now()}.jpg`);
+      fs.writeFileSync(savedPath, bytes);
+      return { ok: true as const, dataUrl: `data:image/jpeg;base64,${bytes.toString('base64')}`, savedPath };
+    } catch (err) {
+      return { ok: false as const, error: (err as Error).message };
+    }
+  });
+  ipcMain.handle('tetheredCamera:getLiveViewFrame', async () => {
+    try {
+      const bytes = await getTetheredLiveViewFrame();
+      return { ok: true as const, dataUrl: `data:image/jpeg;base64,${bytes.toString('base64')}` };
+    } catch (err) {
+      return { ok: false as const, error: (err as Error).message };
+    }
+  });
+  /** Opens the bundled Zadig for the one-time WinUSB driver step — see `openZadig()`'s own doc comment for why the app can only open it, not drive it. */
+  ipcMain.handle('tetheredCamera:openZadig', () => openZadig());
 
   /**
    * Real Microsoft 365 SSO login (see ssoLogin.ts's own doc comment) — the

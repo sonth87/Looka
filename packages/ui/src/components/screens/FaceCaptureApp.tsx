@@ -1851,6 +1851,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     lastCompletedSessionRef.current = null;
     setIsPostSaveReview(false);
     retookSinceReopenRef.current = false;
+    crossSittingRetakeRef.current = null;
 
     // Item 11 ("chụp lại ghi đè ảnh cũ", 2026-09-21) — this student may have
     // a prior LOCAL session from a completely different kiosk sitting (app
@@ -1870,7 +1871,12 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     try {
       const retakeContext = await (window as any).faceAPI?.getRetakeContext?.(result.code);
       if (retakeContext?.sessionId) {
-        runSessionRef.current.resume(retakeContext.sessionId, retakeContext.attemptOffsets ?? {});
+        const attemptOffsets = retakeContext.attemptOffsets ?? {};
+        runSessionRef.current.resume(retakeContext.sessionId, attemptOffsets);
+        crossSittingRetakeRef.current = {
+          sessionId: retakeContext.sessionId,
+          attemptOffsets,
+        };
       }
     } catch (err) {
       // Best-effort only — a failed lookup just means this capture proceeds
@@ -2198,6 +2204,22 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    * it, and `ElectronCaptureSink.approveUpload` throws on `approved: 0`.
    */
   const retookSinceReopenRef = useRef(false);
+
+  /**
+   * Set by `handleLookupResult`'s cross-sitting retake branch (item 11,
+   * "chụp lại ghi đè ảnh cũ") the instant `getRetakeContext` finds a prior
+   * LOCAL session for this student and calls `runSessionRef.current.resume()`
+   * with it — mirrors exactly what was just passed to `resume()`, so
+   * `handleRestart` can re-`resume()` with the SAME id/offsets after its own
+   * `reset()` instead of minting a brand-new session id and losing the
+   * "supersede the old approved photos" link. Cleared whenever a genuinely
+   * different student's session starts (same place `lastCompletedSessionRef`
+   * is cleared), so it never leaks into an unrelated run.
+   */
+  const crossSittingRetakeRef = useRef<{
+    sessionId: string;
+    attemptOffsets: Record<string, number>;
+  } | null>(null);
 
   /** True while `SessionReviewModal` is open for a post-save retake (mục 2/3 of the plan) rather than the normal pre-save review — see `handleStudentSubmit`'s matching branch and the modal's own `onRetake` prop below for what this changes. */
   const [isPostSaveReview, setIsPostSaveReview] = useState(false);
@@ -2986,6 +3008,19 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     // reset (a run that finished naturally clears it via finishSession) is a
     // harmless no-op here.
     runSessionRef.current.reset();
+    // Cross-sitting retake (item 11) fix: `reset()` just above unconditionally
+    // drops the session id/attemptOffsets `handleLookupResult` may have
+    // primed via `resume()` — without this, "Chụp lại toàn bộ" on a
+    // cross-sitting retake would silently mint a brand-new session id and
+    // the old approved photos would never get superseded/deleted. Re-`resume()`
+    // with the SAME id/offsets right after the reset so every subsequent
+    // capture in this restarted run still lands under the original session.
+    if (crossSittingRetakeRef.current) {
+      runSessionRef.current.resume(
+        crossSittingRetakeRef.current.sessionId,
+        crossSittingRetakeRef.current.attemptOffsets
+      );
+    }
     const activeEngine = liveWorkflowEngineRef.current;
     if (activeEngine) {
       const {
@@ -4696,6 +4731,10 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
             setStudentLookupError(null);
             setIsPostSaveReview(false);
             retookSinceReopenRef.current = false;
+            // This student's cross-sitting retake (if any) just got approved
+            // for real — clear it so a stale sessionId/attemptOffsets can
+            // never leak into the next walk-up student's own run.
+            crossSittingRetakeRef.current = null;
             // "Cảm ơn" overlay (2026-09-09 product request) — holds the
             // walk-up-kiosk loop's own reset above (everything except
             // `awaitingStudent`) for a fixed window before the screen falls

@@ -46,6 +46,20 @@ const DISCOVERY_CACHE_TTL_MS = 60_000;
 const MAX_GROUP_COMBINATIONS = 5000;
 
 /**
+ * Known-PII-shaped `extra` key names, matched case-insensitively as a
+ * substring — a hard denylist on top of `discoverExtraFields`'s own
+ * distinct-value-count heuristic. That heuristic alone is NOT sufficient:
+ * its upper bound is an ABSOLUTE count (500), so for any campaign whose
+ * VALID roster has ≤500 rows, a per-student unique field like
+ * `identity_number` (CCCD) has ≤500 distinct values and passes straight
+ * through, making it a legal `groupBy` that returns every student's raw
+ * CCCD/phone/email/address as a group value. These key names/substrings
+ * are excluded regardless of roster size or distinct-value count.
+ */
+const PII_FIELD_PATTERN =
+  /identity|cccd|citizen|passport|phone|mobile|email|address|dia_chi|date_of_birth|\bdob\b|birth_date|ngay_sinh|bank_account|tai_khoan/i;
+
+/**
  * `GET /v1/campaigns/:id/stats/roster-group-fields` /
  * `GET /v1/campaigns/:id/stats/roster-groups` (plan §3.3, feature 7) — lives
  * in `StatsModule`, not `device-management`, for the exact circular-
@@ -226,11 +240,17 @@ export class RosterGroupStatsService {
   /**
    * Samples up to `DISCOVERY_SAMPLE_LIMIT` rows (not a full table scan) and
    * keeps a jsonb key only if its distinct-value count within the sample
-   * falls in `[2, 500]` — the lower bound excludes constants (e.g. a
-   * `nationality_name` that is the same for every row), the upper bound
-   * excludes near-unique identifiers (`student_id`/`email`/`identity_number`)
-   * that would otherwise let a caller accidentally "group" into a
-   * 24,000-row response. Cached in-process per campaign for
+   * falls in `[2, 500]` AND is at most half the sampled row count for that
+   * key — the lower bound excludes constants (e.g. a `nationality_name`
+   * that is the same for every row), the two upper bounds together exclude
+   * near-unique identifiers (`student_id`/`email`/`identity_number`)
+   * regardless of roster size: the absolute 500 cap alone is NOT enough —
+   * for a campaign with ≤500 VALID rows, a per-student-unique field like
+   * `identity_number` has ≤500 distinct values and would otherwise pass
+   * straight through (confirmed real bug, not theoretical). `PII_FIELD_PATTERN`
+   * is then a hard denylist on top, in case a small/skewed sample still lets
+   * a known-sensitive key's ratio slip under 0.5 (e.g. many duplicate/blank
+   * values for that key). Cached in-process per campaign for
    * `DISCOVERY_CACHE_TTL_MS` — same reasoning/shape as
    * `PermissionsGuard`'s own per-user permission cache.
    */
@@ -249,10 +269,13 @@ export class RosterGroupStatsService {
          FROM sample, jsonb_each_text(sample.extra) AS kv(key, value)
         GROUP BY kv.key
        HAVING COUNT(DISTINCT kv.value) BETWEEN 2 AND 500
+          AND COUNT(DISTINCT kv.value) <= 0.5 * COUNT(*)
         ORDER BY kv.key`,
       [campaignId],
     );
-    const fields = rows.map((r) => r.key);
+    const fields = rows
+      .map((r) => r.key)
+      .filter((key) => !PII_FIELD_PATTERN.test(key));
     this.discoveryCache.set(campaignId, {
       fields,
       expiresAt: now + DISCOVERY_CACHE_TTL_MS,

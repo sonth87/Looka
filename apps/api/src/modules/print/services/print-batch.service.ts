@@ -309,8 +309,12 @@ export class PrintBatchService {
     const items = await this.items.find({
       where: { batchId: id },
     });
-    const toRender = items.filter(
-      (i) => i.status !== 'CANCELLED' && i.status !== 'RENDERED',
+    // Only items that have never been rendered (or need re-rendering after
+    // a failure/reprint) are eligible — an EXPORTED/QUEUED/PRINTING/PRINTED
+    // item must NOT be regressed back to RENDERED here, or a batch already
+    // exported/sent/printed would silently lose that state.
+    const toRender = items.filter((i) =>
+      ['PENDING', 'FAILED', 'REPRINT_REQUESTED'].includes(i.status),
     );
 
     let rendered = 0;
@@ -422,15 +426,26 @@ export class PrintBatchService {
     const scopedItems = await this.items.find({ where });
     // Same "not rendered yet" check `PrintPackageService.appendSide` uses
     // to skip a side — an item with neither PNG contributes nothing to the
-    // zip, so it must not get an `exportedAt` stamp either.
+    // zip, so it must not get an `exportedAt` stamp either. Also exclude
+    // anything not in an active print-flow status (CANCELLED,
+    // REPRINT_REQUESTED) even if a stale rendered PNG is still attached —
+    // those must never be zipped, stamped exported_at, or given a false
+    // "re-exported" event.
     const exportable = scopedItems.filter(
-      (i) => i.renderedFrontFsFileId || i.renderedBackFsFileId,
+      (i) =>
+        (i.renderedFrontFsFileId || i.renderedBackFsFileId) &&
+        ['RENDERED', 'EXPORTED', 'PRINTED'].includes(i.status),
     );
     if (exportable.length === 0) {
       throw new BadRequestException('Chưa có item nào được render để xuất gói');
     }
 
-    const zip = await this.packageService.buildPackage(batch, itemIds);
+    // Build the zip from exactly the same id set that gets stamped below —
+    // never the broader `itemIds`/batch scope, so a CANCELLED or
+    // REPRINT_REQUESTED item (which has a stale rendered PNG but was
+    // filtered out of `exportable` above) can never end up in the package.
+    const exportableIds = exportable.map((i) => i.id);
+    const zip = await this.packageService.buildPackage(batch, exportableIds);
 
     const now = new Date();
     await this.dataSource.transaction(async (manager) => {

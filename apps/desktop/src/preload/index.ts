@@ -571,6 +571,21 @@ export interface FaceAPIBridge {
    */
   openCameraSetup: () => Promise<boolean>;
 
+  /**
+   * Tethered Canon (gphoto2) — docs/plans/canon-tethered-capture-plan-2026-09-21.md
+   * Bước 1/4. `getTetheredCameraStatus` detects whether a camera is
+   * connected/reachable; `captureTetheredPhoto`/`getTetheredLiveViewFrame`
+   * return a `data:image/jpeg;base64,...` URL on success (usable directly
+   * as an `<img src>`), matching how a webcam snapshot already crosses this
+   * same boundary elsewhere in this app.
+   */
+  getTetheredCameraStatus: () => Promise<{ connected: boolean; model?: string; error?: string }>;
+  /** `savedPath` — Bước 0's own "chụp và lưu lại" hardware check: the real captured JPEG is also written to disk (not just shown inline) so it can be opened/inspected directly, same "not saved anywhere" test-only scope otherwise. */
+  captureTetheredPhoto: () => Promise<{ ok: true; dataUrl: string; savedPath: string } | { ok: false; error: string }>;
+  getTetheredLiveViewFrame: () => Promise<{ ok: true; dataUrl: string } | { ok: false; error: string }>;
+  /** Opens the bundled Zadig for the one-time WinUSB driver step — no scriptable Zadig interface exists, this can only open it (2026-09-22). */
+  openTetheredCameraZadig: () => Promise<{ ok: boolean; error?: string }>;
+
   /** "Cách chụp" — Tuần tự/Đồng thời, a kiosk-local setting (§3.9). */
   getCaptureSequencing: () => Promise<'sequential' | 'simultaneous'>;
   setCaptureSequencing: (value: 'sequential' | 'simultaneous') => Promise<boolean>;
@@ -729,6 +744,10 @@ const faceAPI: FaceAPIBridge = {
   getCameraPhysicalAngles: () => ipcRenderer.invoke('camera:getPhysicalAngles'),
   setCameraPhysicalAngles: (angles) => ipcRenderer.invoke('camera:setPhysicalAngles', angles),
   openCameraSetup: () => ipcRenderer.invoke('camera:openSetup'),
+  getTetheredCameraStatus: () => ipcRenderer.invoke('tetheredCamera:status'),
+  captureTetheredPhoto: () => ipcRenderer.invoke('tetheredCamera:capture'),
+  getTetheredLiveViewFrame: () => ipcRenderer.invoke('tetheredCamera:getLiveViewFrame'),
+  openTetheredCameraZadig: () => ipcRenderer.invoke('tetheredCamera:openZadig'),
   getCaptureSequencing: () => ipcRenderer.invoke('capture:getSequencing'),
   setCaptureSequencing: (value) => ipcRenderer.invoke('capture:setSequencing', value),
   getCbHelpVisibility: () => ipcRenderer.invoke('camera:getCbHelpVisibility'),

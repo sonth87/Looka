@@ -191,6 +191,24 @@ export class CampaignSubjectPullFetchWorker {
       const records = outcome.value.records;
       const { rows, discoveredFields } = this.parseAndValidate(records);
 
+      // ERROR/DUPLICATE `campaign_subjects` rows from a PRIOR pull of this
+      // campaign are pruned right before this pull writes its own — unlike
+      // VALID rows (upserted by `campaign_id, subject_code`), those never
+      // had a conflict target, so without this every re-pull would keep
+      // appending the same stale error/duplicate rows on top of the old
+      // ones forever. Only run once we actually have a fresh result to
+      // replace them with (never on a failed fetch, handled above).
+      await this.dataSource.query(
+        `DELETE FROM campaign_subjects cs
+           USING campaign_subject_imports ci
+          WHERE cs.import_id = ci.id
+            AND cs.campaign_id = $1
+            AND ci.source = 'EXTERNAL_API'
+            AND ci.id <> $2
+            AND cs.status IN ('ERROR', 'DUPLICATE')`,
+        [campaignId, importId],
+      );
+
       let chunkNo = 0;
       for (let start = 0; start < rows.length; start += CHUNK_SIZE) {
         const batch = rows.slice(start, start + CHUNK_SIZE);
@@ -208,10 +226,18 @@ export class CampaignSubjectPullFetchWorker {
         );
       }
 
+      // `AND status = 'FETCHING'` — this import must still be the one WE
+      // claimed; if the stuck-job recovery sweep reset it back to
+      // `PENDING_FETCH` from under us (e.g. this same process stalled long
+      // enough to look abandoned) this flip must not resurrect it, since a
+      // fresh claim/fetch cycle for the same import id is already/about to
+      // be underway elsewhere. Tầng 2's `claimNext`/`finalizeIfComplete`
+      // both require `status = 'IMPORTING'` before touching a chunk, so
+      // chunks committed above are never processed until this flip lands.
       await this.dataSource.query(
         `UPDATE campaign_subject_imports
             SET status = 'IMPORTING', total_rows = $2, source_detail = $3::jsonb, updated_at = now()
-          WHERE id = $1`,
+          WHERE id = $1 AND status = 'FETCHING'`,
         [importId, records.length, JSON.stringify({ discoveredFields })],
       );
 
@@ -224,7 +250,7 @@ export class CampaignSubjectPullFetchWorker {
         await this.dataSource.query(
           `UPDATE campaign_subject_imports
               SET status = 'DONE', finished_at = now()
-            WHERE id = $1`,
+            WHERE id = $1 AND status = 'IMPORTING'`,
           [importId],
         );
       }

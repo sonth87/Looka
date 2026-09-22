@@ -1,0 +1,6 @@
+# Xem README.md trong thư mục này — zadig.exe đặt ở đây là bản binary
+# chính thức tải từ github.com/pbatard/libwdi/releases, KHÔNG commit vào
+# repo (binary lớn, không phải mã nguồn Looka).
+*
+!.gitignore
+!README.md
