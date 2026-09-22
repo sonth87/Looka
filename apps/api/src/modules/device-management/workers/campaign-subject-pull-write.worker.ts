@@ -64,15 +64,27 @@ export class CampaignSubjectPullWriteWorker {
    */
   /** `[rows]: [T[], number]` destructure — see `CampaignSubjectPullFetchWorker.claimNext`'s own doc comment for why a bare `DataSource.query()` for `UPDATE ... RETURNING` returns a tuple, confirmed empirically. */
   private async claimNext(): Promise<ClaimedChunk | null> {
+    // `EXISTS (... i.status = 'IMPORTING')` — a chunk row commits (autocommit
+    // INSERT, see `CampaignSubjectPullFetchWorker.processImport`) BEFORE its
+    // import flips to `IMPORTING`, so without this guard a chunk could be
+    // claimed and drained while its import is still `FETCHING` (mid-insert
+    // loop, or crashed before the flip) — `finalizeIfComplete` would then
+    // see zero remaining chunks and close out an import that never actually
+    // finished fetching, silently losing whatever the fetch worker hadn't
+    // inserted yet.
     const [rows]: [ClaimedChunk[], number] = await this.dataSource.query(
       `UPDATE campaign_subject_import_chunks
           SET status = 'PROCESSING',
               attempts = attempts + 1,
               next_retry_at = now() + interval '${CLAIM_STALE_MINUTES} minutes'
         WHERE id = (
-          SELECT id FROM campaign_subject_import_chunks
-           WHERE status = 'PENDING' AND next_retry_at <= now()
-           ORDER BY id
+          SELECT c.id FROM campaign_subject_import_chunks c
+           WHERE c.status = 'PENDING' AND c.next_retry_at <= now()
+             AND EXISTS (
+               SELECT 1 FROM campaign_subject_imports i
+                WHERE i.id = c.import_id AND i.status = 'IMPORTING'
+             )
+           ORDER BY c.id
            FOR UPDATE SKIP LOCKED
            LIMIT 1
         )
@@ -241,6 +253,19 @@ export class CampaignSubjectPullWriteWorker {
     importId: string,
     campaignId: string,
   ): Promise<void> {
+    // Lock + check the import's own status first. This both (a) stops a
+    // FETCHING/already-FAILED import from ever being finalized here — only
+    // an IMPORTING import has actually finished handing every chunk to
+    // Tầng 2 — and (b) serializes two finalizers racing on the same
+    // import's last two chunks: the second one's row lock waits for the
+    // first to commit, so it re-reads a status the first finalizer may
+    // have already changed instead of acting on a stale snapshot.
+    const [importRow]: Array<{ status: string }> = await manager.query(
+      `SELECT status FROM campaign_subject_imports WHERE id = $1 FOR UPDATE`,
+      [importId],
+    );
+    if (!importRow || importRow.status !== 'IMPORTING') return;
+
     const [{ remaining }]: Array<{ remaining: number }> = await manager.query(
       `SELECT COUNT(*)::int AS remaining
            FROM campaign_subject_import_chunks
@@ -264,13 +289,17 @@ export class CampaignSubjectPullWriteWorker {
     await manager.query(
       `UPDATE campaign_subject_imports
           SET status = 'DONE', finished_at = now(), error_rows = error_rows + $2
-        WHERE id = $1`,
+        WHERE id = $1 AND status = 'IMPORTING'`,
       [importId, missingCount],
     );
-    // Payload has done its job — dropping it keeps this table from growing
-    // unbounded across repeated pulls (plan's own "phình bảng" concern).
+    // Only DONE chunks are dropped — a permanently FAILED chunk (exhausted
+    // MAX_CHUNK_ATTEMPTS) keeps its `payload`/`last_error` in the table for
+    // manual review/replay (plan §3.1: a FAILED chunk's rows must "never
+    // silently lose" their only copy). This does mean FAILED chunks are
+    // never cleaned up automatically — an accepted, deliberate trade-off
+    // over deleting the one record of what actually went wrong.
     await manager.query(
-      `DELETE FROM campaign_subject_import_chunks WHERE import_id = $1`,
+      `DELETE FROM campaign_subject_import_chunks WHERE import_id = $1 AND status = 'DONE'`,
       [importId],
     );
 

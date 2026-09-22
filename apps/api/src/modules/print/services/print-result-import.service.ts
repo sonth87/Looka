@@ -8,12 +8,13 @@ import {
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
 import ExcelJS from 'exceljs';
-import { DataSource, Not, Repository } from 'typeorm';
+import { DataSource, In, Not, Repository } from 'typeorm';
 import { PrintResultImportDao } from '../dao';
 import { PrintBatch } from '../entities/print-batch.entity';
 import { PrintItem } from '../entities/print-item.entity';
 import { PrintItemEvent } from '../entities/print-item-event.entity';
 import { PrintResultImport } from '../entities/print-result-import.entity';
+import { PRINT_ITEM_INACTIVE_STATUSES } from '../print.constants';
 import { PrinterService } from './printer.service';
 import { PrintStatsService } from '@app/modules/stats/services/print-stats.service';
 
@@ -152,13 +153,25 @@ export class PrintResultImportService {
       );
     }
 
-    // CANCELLED items are excluded from matching on purpose — a cancelled
-    // card should not be silently revived by an upload that never knew it
-    // was cancelled.
+    // CANCELLED/FAILED/REPRINT_REQUESTED items are excluded from matching
+    // on purpose — a cancelled or superseded card should not be silently
+    // revived by an upload that never knew about it, and (crucially for a
+    // reprinted card) the superseded REPRINT_REQUESTED original must never
+    // win a subjectCode collision against its own active reprint item.
     const batchItems = await this.items.find({
-      where: { batchId, status: Not('CANCELLED') },
+      where: { batchId, status: Not(In(PRINT_ITEM_INACTIVE_STATUSES)) },
     });
-    const itemsByCode = new Map(batchItems.map((i) => [i.subjectCode, i]));
+    // Grouped by subjectCode (not a straight last-wins Map) so a genuine
+    // collision — more than one active item sharing a subjectCode, e.g. an
+    // in-flight reprint pair that briefly shares a batch — is detected and
+    // reported instead of silently applying the result to whichever row
+    // `find()` happened to return last.
+    const itemsByCode = new Map<string, PrintItem[]>();
+    for (const item of batchItems) {
+      const list = itemsByCode.get(item.subjectCode) ?? [];
+      list.push(item);
+      itemsByCode.set(item.subjectCode, list);
+    }
 
     let matched = 0;
     let printedCount = 0;
@@ -174,8 +187,8 @@ export class PrintResultImportService {
 
     for (const row of rows) {
       const code = row.subjectCode?.trim() || null;
-      const item = code ? itemsByCode.get(code) : undefined;
-      if (!item) {
+      const candidates = code ? itemsByCode.get(code) : undefined;
+      if (!candidates || candidates.length === 0) {
         unmatched++;
         reportRows.push({
           rowNo: row.rowNo,
@@ -184,6 +197,16 @@ export class PrintResultImportService {
         });
         continue;
       }
+      if (candidates.length > 1) {
+        unmatched++;
+        reportRows.push({
+          rowNo: row.rowNo,
+          subjectCode: row.subjectCode,
+          reason: `Mã SV trùng ${candidates.length} item trong đợt in — không thể xác định item nào, cần xử lý tay`,
+        });
+        continue;
+      }
+      const item = candidates[0];
       matched++;
       const outcome = classifyStatus(row.printStatus);
       if (outcome === 'PRINTED') {
@@ -210,104 +233,158 @@ export class PrintResultImportService {
 
       if (printedItems.length) {
         const ids = printedItems.map((i) => i.id);
-        await manager.query(
-          `UPDATE print_items
-              SET status = 'PRINTED', printed_at = $2, error_message = NULL, updated_at = now()
-            WHERE id = ANY($1)`,
-          [ids, now],
-        );
-        await manager.save(
-          PrintItemEvent,
-          printedItems.map((item) =>
-            this.events.create({
-              itemId: item.id,
-              fromStatus: item.status,
-              toStatus: 'PRINTED',
-              source: 'RESULT_UPLOAD',
-              actorUserId: uploadedByUserId,
-              message: 'Xác nhận đã in (upload file kết quả)',
-            }),
-          ),
-        );
-
-        // Feature 6 wiring (Giai đoạn 3 deferred this exact write to here —
-        // see `campaign_subjects.printedAt`'s own doc comment). Grouped by
-        // campaign since one print batch's items can span more than one.
-        const codesByCampaign = new Map<string, string[]>();
-        for (const item of printedItems) {
-          const list = codesByCampaign.get(item.campaignId) ?? [];
-          list.push(item.subjectCode);
-          codesByCampaign.set(item.campaignId, list);
-        }
-        for (const [campaignId, codes] of codesByCampaign) {
+        // `WHERE ... AND status <> 'PRINTED'` + `RETURNING id`, then only
+        // bookkeep the rows actually returned — a re-uploaded/duplicate
+        // result file (same file twice, or a cumulative sheet repeating
+        // already-PRINTED rows) must not re-decrement stock, re-count
+        // stats, append a duplicate PRINTED->PRINTED event, or overwrite
+        // the real first-print `printed_at`. `UPDATE ... RETURNING` here
+        // returns a `[rows, affectedCount]` tuple, same rule
+        // `PrintItemService.bulkUpdateTemplate` documents.
+        const [updatedRows]: [Array<{ id: string }>, number] =
           await manager.query(
-            `UPDATE campaign_subjects
-                SET printed_at = now(), printed_batch_id = $3, updated_at = now()
-              WHERE campaign_id = $1 AND subject_code = ANY($2) AND status = 'VALID'`,
-            [campaignId, codes, batchId],
+            `UPDATE print_items
+                SET status = 'PRINTED', printed_at = COALESCE(printed_at, $2), error_message = NULL, updated_at = now()
+              WHERE id = ANY($1) AND status <> 'PRINTED'
+              RETURNING id`,
+            [ids, now],
           );
-        }
+        const newlyPrintedIds = new Set(updatedRows.map((r) => r.id));
+        const newlyPrintedItems = printedItems.filter((i) =>
+          newlyPrintedIds.has(i.id),
+        );
 
-        // Stock/stats bookkeeping — same "thao tác tay" path
-        // `PrintItemService.markPrintedManually` already follows, just
-        // looped per matched row; a printer that can't be resolved (common
-        // for a CENTRALIZED batch with no `printerId`) simply skips the
-        // stock decrement, same tolerant fallback that method documents.
-        for (const item of printedItems) {
-          const printerId = item.printerId ?? batch.printerId ?? null;
-          if (printerId) {
-            await this.printerService.applyStockDelta(
-              manager,
-              printerId,
-              -1,
-              'PRINT',
-              uploadedByUserId,
-              'Xác nhận đã in (upload file kết quả)',
+        if (newlyPrintedItems.length) {
+          await manager.save(
+            PrintItemEvent,
+            newlyPrintedItems.map((item) =>
+              this.events.create({
+                itemId: item.id,
+                fromStatus: item.status,
+                toStatus: 'PRINTED',
+                source: 'RESULT_UPLOAD',
+                actorUserId: uploadedByUserId,
+                message: 'Xác nhận đã in (upload file kết quả)',
+              }),
+            ),
+          );
+
+          // Feature 6 wiring (Giai đoạn 3 deferred this exact write to here
+          // — see `campaign_subjects.printedAt`'s own doc comment). Grouped
+          // by campaign since one print batch's items can span more than
+          // one. `COALESCE` for the same double-upload reason as above.
+          const codesByCampaign = new Map<string, string[]>();
+          for (const item of newlyPrintedItems) {
+            const list = codesByCampaign.get(item.campaignId) ?? [];
+            list.push(item.subjectCode);
+            codesByCampaign.set(item.campaignId, list);
+          }
+          for (const [campaignId, codes] of codesByCampaign) {
+            await manager.query(
+              `UPDATE campaign_subjects
+                  SET printed_at = COALESCE(printed_at, now()), printed_batch_id = $3, updated_at = now()
+                WHERE campaign_id = $1 AND subject_code = ANY($2) AND status = 'VALID'`,
+              [campaignId, codes, batchId],
             );
           }
-          await this.printStats.recordPrinted(
-            manager,
-            item.campaignId,
-            printerId,
-            now,
-          );
+
+          // Stock/stats bookkeeping — same "thao tác tay" path
+          // `PrintItemService.markPrintedManually` already follows, just
+          // looped per matched row; a printer that can't be resolved
+          // (common for a CENTRALIZED batch with no `printerId`) simply
+          // skips the stock decrement, same tolerant fallback that method
+          // documents. Only rows that just transitioned to PRINTED reach
+          // here, so a duplicate upload can never double-decrement stock or
+          // double-count the daily stats.
+          for (const item of newlyPrintedItems) {
+            const printerId = item.printerId ?? batch.printerId ?? null;
+            if (printerId) {
+              await this.printerService.applyStockDelta(
+                manager,
+                printerId,
+                -1,
+                'PRINT',
+                uploadedByUserId,
+                'Xác nhận đã in (upload file kết quả)',
+              );
+            }
+            await this.printStats.recordPrinted(
+              manager,
+              item.campaignId,
+              printerId,
+              now,
+            );
+          }
         }
       }
 
       if (failedItems.length) {
         // Per-row error message → `UPDATE ... FROM (VALUES ...)`, not a
         // single `ANY($1)` update (every row needs its OWN message).
+        // `AND pi.status <> 'RENDERED'` + `RETURNING` so a duplicate
+        // upload repeating the same "Lỗi" row is a no-op instead of
+        // re-appending a RENDERED->RENDERED event/recordFailed() count;
+        // it also means an item this same upload just regressed from
+        // PRINTED gets `printed_at` (and the roster's mirrored
+        // `campaign_subjects.printed_at`/`printed_batch_id`) cleared,
+        // instead of silently keeping a stale "printed" record for a card
+        // that no longer has PRINTED status.
         const valuesSql = failedItems
           .map((_, idx) => `($${idx * 2 + 1}::uuid, $${idx * 2 + 2}::text)`)
           .join(', ');
         const params = failedItems.flatMap((f) => [f.item.id, f.message]);
-        await manager.query(
-          `UPDATE print_items AS pi
-              SET status = 'RENDERED', error_message = v.msg, updated_at = now()
-             FROM (VALUES ${valuesSql}) AS v(id, msg)
-            WHERE pi.id = v.id`,
-          params,
-        );
-        await manager.save(
-          PrintItemEvent,
-          failedItems.map(({ item, message }) =>
-            this.events.create({
-              itemId: item.id,
-              fromStatus: item.status,
-              toStatus: 'RENDERED',
-              source: 'RESULT_UPLOAD',
-              actorUserId: uploadedByUserId,
-              message,
-            }),
-          ),
-        );
-        for (const { item } of failedItems) {
-          await this.printStats.recordFailed(
-            manager,
-            item.campaignId,
-            item.printerId ?? batch.printerId ?? null,
-            now,
+        const [regressedRows]: [Array<{ id: string }>, number] =
+          await manager.query(
+            `UPDATE print_items AS pi
+                SET status = 'RENDERED', error_message = v.msg, printed_at = NULL, updated_at = now()
+               FROM (VALUES ${valuesSql}) AS v(id, msg)
+              WHERE pi.id = v.id AND pi.status <> 'RENDERED'
+              RETURNING pi.id`,
+            params,
           );
+        const regressedIds = new Set(regressedRows.map((r) => r.id));
+        const regressedItems = failedItems.filter(({ item }) =>
+          regressedIds.has(item.id),
+        );
+
+        if (regressedItems.length) {
+          await manager.save(
+            PrintItemEvent,
+            regressedItems.map(({ item, message }) =>
+              this.events.create({
+                itemId: item.id,
+                fromStatus: item.status,
+                toStatus: 'RENDERED',
+                source: 'RESULT_UPLOAD',
+                actorUserId: uploadedByUserId,
+                message,
+              }),
+            ),
+          );
+
+          const codesByCampaign = new Map<string, string[]>();
+          for (const { item } of regressedItems) {
+            const list = codesByCampaign.get(item.campaignId) ?? [];
+            list.push(item.subjectCode);
+            codesByCampaign.set(item.campaignId, list);
+          }
+          for (const [campaignId, codes] of codesByCampaign) {
+            await manager.query(
+              `UPDATE campaign_subjects
+                  SET printed_at = NULL, printed_batch_id = NULL, updated_at = now()
+                WHERE campaign_id = $1 AND subject_code = ANY($2) AND status = 'VALID'`,
+              [campaignId, codes],
+            );
+          }
+
+          for (const { item } of regressedItems) {
+            await this.printStats.recordFailed(
+              manager,
+              item.campaignId,
+              item.printerId ?? batch.printerId ?? null,
+              now,
+            );
+          }
         }
       }
 

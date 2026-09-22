@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useMemo } from 'react';
 import {
   ApiError,
@@ -38,12 +38,24 @@ export function ReviewAssignmentsPage() {
   const [error, setError] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  // Bumped on every `reload()` call; a response only gets applied if it's
+  // still the latest one requested — two rapid `reload()`s (e.g. deleting
+  // two chips back to back) can otherwise resolve out of order and let a
+  // stale, already-superseded list overwrite the current one.
+  const reloadSeqRef = useRef(0);
 
   const reload = () => {
+    const seq = ++reloadSeqRef.current;
     setError(null);
     listReviewAssignments()
-      .then(setAssignments)
-      .catch((err) => setError(err instanceof ApiError ? err.message : String(err)));
+      .then((data) => {
+        if (seq !== reloadSeqRef.current) return;
+        setAssignments(data);
+      })
+      .catch((err) => {
+        if (seq !== reloadSeqRef.current) return;
+        setError(err instanceof ApiError ? err.message : String(err));
+      });
   };
 
   useEffect(reload, []);
@@ -153,20 +165,46 @@ function AddAssignmentModal({ onClose, onAdded }: { onClose: () => void; onAdded
   const [saveError, setSaveError] = useState<string | null>(null);
 
   useEffect(() => {
+    // `cancelled` is captured by the timeout callback's closures below, and
+    // flipped by this effect's cleanup — covers BOTH cases: the timer
+    // hasn't fired yet (cleared outright) and the timer already fired and
+    // `listUsers()` is in flight (its resolution is just ignored), so a
+    // slower earlier keystroke's response can never overwrite a faster
+    // later one.
+    let cancelled = false;
     const handle = setTimeout(() => {
       setSearchError(null);
       listUsers({ q: q.trim() || undefined, limit: 20 })
-        .then((res) => setResults(res.items))
-        .catch((err) => setSearchError(err instanceof ApiError ? err.message : String(err)));
+        .then((res) => {
+          if (cancelled) return;
+          setResults(res.items);
+        })
+        .catch((err) => {
+          if (cancelled) return;
+          setSearchError(err instanceof ApiError ? err.message : String(err));
+        });
     }, 300);
-    return () => clearTimeout(handle);
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+    };
   }, [q]);
 
   useEffect(() => {
+    let cancelled = false;
     setGroupValue('');
     listReviewAssignmentGroupValues(groupField)
-      .then(setValueOptions)
-      .catch(() => setValueOptions([]));
+      .then((values) => {
+        if (cancelled) return;
+        setValueOptions(values);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setValueOptions([]);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [groupField]);
 
   const submit = async () => {

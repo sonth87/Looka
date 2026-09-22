@@ -46,6 +46,23 @@ interface DeviceEntry {
 }
 
 /**
+ * Tethered Canon (gphoto2) — docs/plans/canon-tethered-capture-plan-2026-09-21.md
+ * Bước 4. A synthetic device id, same `CameraRoleMapping` string shape a
+ * real webcam `deviceId` already uses, so no data-shape change was needed
+ * to make it assignable to a role. Only ever added to `devices` once a
+ * "Kiểm tra kết nối" check confirms it's actually reachable (not polled
+ * automatically — each check spawns a real `gphoto2` subprocess, so this
+ * stays on-demand rather than a background timer).
+ */
+const TETHERED_DEVICE_ID = 'tethered:gphoto2';
+
+interface TetheredCameraStatus {
+  connected: boolean;
+  model?: string;
+  error?: string;
+}
+
+/**
  * One role the active campaign actually needs a frame for, plus which step
  * type(s) drove that need (e.g. `['FRONT']`) — shown next to the role's
  * label so CB Help can tell "Giữa" apart from "Giữa (FRONT)" at a glance.
@@ -197,6 +214,21 @@ export default function CameraSetupScreen() {
   const [grid3x3, setGrid3x3] = useState(false);
   /** Audio-calibration volumes — new (ui-redesign-plan.md), persisted via `faceAPI.getAudioVolume/setAudioVolume`, independent of the camera settings' "Lưu" button (saved on slider release instead, see `commitAudioVolume`). */
   const [audioVolume, setAudioVolume] = useState<AudioVolumeSettings>({ ...DEFAULT_AUDIO_VOLUME });
+  /** Tethered Canon (gphoto2) test panel state — Bước 0/4, all on-demand (button-triggered), no background polling. `null` = not checked yet this session. */
+  const [tetheredChecking, setTetheredChecking] = useState(false);
+  const [tetheredStatus, setTetheredStatus] = useState<TetheredCameraStatus | null>(null);
+  const [tetheredCapturing, setTetheredCapturing] = useState(false);
+  const [tetheredCaptureResult, setTetheredCaptureResult] = useState<{
+    dataUrl?: string;
+    savedPath?: string;
+    error?: string;
+  } | null>(
+    null
+  );
+  const [tetheredLiveViewOn, setTetheredLiveViewOn] = useState(false);
+  const [tetheredLiveViewFrame, setTetheredLiveViewFrame] = useState<string | null>(null);
+  const [tetheredLiveViewError, setTetheredLiveViewError] = useState<string | null>(null);
+  const tetheredLiveViewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const streamsRef = useRef<Map<string, MediaStream>>(new Map());
   const videoRefs = useRef<Map<CameraRole, HTMLVideoElement | null>>(new Map());
   const cancelledRef = useRef(false);
@@ -475,7 +507,111 @@ export default function CameraSetupScreen() {
     (window as any).faceAPI?.setAudioVolume?.(audioVolumeRef.current);
   };
 
+  /**
+   * Bước 0/4 — "Kiểm tra kết nối" button. Spawns a real `gphoto2
+   * --auto-detect` in the main process; deliberately on-demand (not a
+   * background poll) since each check costs a real subprocess spawn. Adds
+   * `TETHERED_DEVICE_ID` to the assignable device list only while a check
+   * has confirmed it's actually reachable — an unplugged/undetected camera
+   * is simply not offered as a role option, same as a webcam that never
+   * granted permission never appears either.
+   */
+  const checkTetheredCamera = async () => {
+    setTetheredChecking(true);
+    setTetheredCaptureResult(null);
+    try {
+      const status = await (window as any).faceAPI?.getTetheredCameraStatus?.();
+      setTetheredStatus(status ?? { connected: false, error: 'Không gọi được faceAPI.getTetheredCameraStatus' });
+    } catch (err) {
+      setTetheredStatus({ connected: false, error: (err as Error).message });
+    } finally {
+      setTetheredChecking(false);
+    }
+  };
+
+  /**
+   * "Cài driver WinUSB" button (2026-09-22) — opens the Zadig bundled with
+   * the app itself, so the whole thing works from the downloaded app
+   * folder alone, no separate online download needed on a fresh kiosk PC.
+   * Can only OPEN Zadig, not drive it — see `openZadig()`'s own doc
+   * comment for why (Zadig has no scriptable interface at all).
+   */
+  const [zadigOpenError, setZadigOpenError] = useState<string | null>(null);
+  const openZadigForDriverInstall = async () => {
+    setZadigOpenError(null);
+    try {
+      const result = await (window as any).faceAPI?.openTetheredCameraZadig?.();
+      if (!result?.ok) setZadigOpenError(result?.error ?? 'Không mở được Zadig');
+    } catch (err) {
+      setZadigOpenError((err as Error).message);
+    }
+  };
+
+  /** Bước 0/3 — "Chụp thử" button: real shutter trigger + download, shown inline, NOT saved anywhere (pure connectivity test, no session/outbox involved). */
+  const captureTetheredTest = async () => {
+    setTetheredCapturing(true);
+    setTetheredCaptureResult(null);
+    try {
+      const result = await (window as any).faceAPI?.captureTetheredPhoto?.();
+      if (result?.ok) setTetheredCaptureResult({ dataUrl: result.dataUrl, savedPath: result.savedPath });
+      else setTetheredCaptureResult({ error: result?.error ?? 'Không gọi được faceAPI.captureTetheredPhoto' });
+    } catch (err) {
+      setTetheredCaptureResult({ error: (err as Error).message });
+    } finally {
+      setTetheredCapturing(false);
+    }
+  };
+
+  /**
+   * Bước 0/2 — "Xem live view" toggle: polls one JPEG frame at a time via
+   * `setTimeout` chaining (not `setInterval`), so a slow/hung gphoto2 call
+   * can never stack up overlapping requests — the next poll is only
+   * scheduled after the previous one actually resolves. 1000ms between
+   * frames is a deliberately conservative starting point, NOT a tuned
+   * value — the plan's own live-view section documents gphoto2's real,
+   * structural fps/latency ceiling (community reports <10fps, some
+   * multi-second lag); this is a manual connectivity/quality check for
+   * Bước 0, not a claim about achievable smoothness.
+   */
+  const toggleTetheredLiveView = () => {
+    if (tetheredLiveViewOn) {
+      setTetheredLiveViewOn(false);
+      if (tetheredLiveViewTimerRef.current) clearTimeout(tetheredLiveViewTimerRef.current);
+      tetheredLiveViewTimerRef.current = null;
+      return;
+    }
+    setTetheredLiveViewOn(true);
+    setTetheredLiveViewError(null);
+
+    const poll = async () => {
+      try {
+        const result = await (window as any).faceAPI?.getTetheredLiveViewFrame?.();
+        if (result?.ok) {
+          setTetheredLiveViewFrame(result.dataUrl);
+          setTetheredLiveViewError(null);
+        } else {
+          setTetheredLiveViewError(result?.error ?? 'Không gọi được faceAPI.getTetheredLiveViewFrame');
+        }
+      } catch (err) {
+        setTetheredLiveViewError((err as Error).message);
+      }
+      tetheredLiveViewTimerRef.current = setTimeout(poll, 1000);
+    };
+    void poll();
+  };
+
+  useEffect(() => {
+    return () => {
+      if (tetheredLiveViewTimerRef.current) clearTimeout(tetheredLiveViewTimerRef.current);
+    };
+  }, []);
+
   const otherRoles = ROLES.filter((r) => !neededRoles.some((n) => n.role === r));
+
+  /** Role-assignment device list, with the tethered Canon appended once a "Kiểm tra kết nối" check has confirmed it's reachable — see `TETHERED_DEVICE_ID`'s own doc comment. */
+  const assignableDevices: DeviceEntry[] = tetheredStatus?.connected
+    ? [...devices, { id: TETHERED_DEVICE_ID, label: `Canon (dây) — ${tetheredStatus.model ?? 'gphoto2'}` }]
+    : devices;
 
   // Warning banner: a needed role still has no connected camera, or two
   // needed roles resolve to the same physical device — exactly what
@@ -550,7 +686,7 @@ export default function CameraSetupScreen() {
         <h2 className="text-sm font-semibold tracking-wide text-kiosk-text-muted mb-3">
           CẤU HÌNH CỤM CAMERA ĐỒNG BỘ ({neededRoles.length} KÊNH GÓC ĐỘ)
         </h2>
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="grid grid-cols-2 gap-4">
           {neededRoles.map((need, idx) => (
             <RoleCard
               key={need.role}
@@ -558,7 +694,7 @@ export default function CameraSetupScreen() {
               role={need.role}
               need={need}
               mapping={mapping}
-              devices={devices}
+              devices={assignableDevices}
               videoRefs={videoRefs}
               streamsRef={streamsRef}
               onAssign={assignRole}
@@ -579,14 +715,14 @@ export default function CameraSetupScreen() {
               {otherOpen ? '▾' : '▸'} Góc khác ({otherRoles.length})
             </button>
             {otherOpen && (
-              <div className="mt-3 grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <div className="mt-3 grid grid-cols-2 gap-4">
                 {otherRoles.map((role, idx) => (
                   <RoleCard
                     key={role}
                     index={neededRoles.length + idx + 1}
                     role={role}
                     mapping={mapping}
-                    devices={devices}
+                    devices={assignableDevices}
                     videoRefs={videoRefs}
                     streamsRef={streamsRef}
                     onAssign={assignRole}
@@ -600,6 +736,86 @@ export default function CameraSetupScreen() {
             )}
           </div>
         )}
+      </section>
+
+      <section className="mb-8">
+        <h2 className="text-sm font-semibold tracking-wide text-kiosk-text-muted mb-3">
+          MÁY ẢNH CANON QUA DÂY (GPHOTO2)
+        </h2>
+        <Card className="p-4 space-y-3">
+          <p className="text-xs text-kiosk-text-muted">
+            Bảng kiểm tra thủ công cho Bước 0 của kế hoạch tethered-capture — không lưu gì vào phiên chụp thật, chỉ
+            để xác nhận gphoto2 nói chuyện được với máy ảnh trước khi gán nó cho một vai trò ở trên.
+          </p>
+          <div className="flex flex-wrap items-center gap-3">
+            <Button type="button" variant="outline" size="sm" onClick={() => void checkTetheredCamera()} disabled={tetheredChecking}>
+              {tetheredChecking ? 'Đang kiểm tra...' : 'Kiểm tra kết nối'}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => void captureTetheredTest()}
+              disabled={tetheredCapturing || !tetheredStatus?.connected}
+            >
+              {tetheredCapturing ? 'Đang chụp...' : 'Chụp thử'}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={toggleTetheredLiveView}
+              disabled={!tetheredStatus?.connected && !tetheredLiveViewOn}
+            >
+              {tetheredLiveViewOn ? 'Tắt live view' : 'Xem live view'}
+            </Button>
+            {tetheredStatus && !tetheredStatus.connected && (
+              <Button type="button" variant="outline" size="sm" onClick={() => void openZadigForDriverInstall()}>
+                Cài driver WinUSB (mở Zadig)
+              </Button>
+            )}
+            {tetheredStatus && (
+              <Badge variant={tetheredStatus.connected ? 'success' : 'warning'}>
+                {tetheredStatus.connected ? `Đã kết nối${tetheredStatus.model ? ` — ${tetheredStatus.model}` : ''}` : 'Chưa kết nối'}
+              </Badge>
+            )}
+          </div>
+
+          {tetheredStatus && !tetheredStatus.connected && tetheredStatus.error && (
+            <p className="text-xs text-kiosk-danger">{tetheredStatus.error}</p>
+          )}
+          {tetheredStatus && !tetheredStatus.connected && (
+            <p className="text-xs text-kiosk-text-muted">
+              Chưa nhận máy? Bấm "Cài driver WinUSB" ở trên — trong Zadig, bật <strong>Options → List All Devices</strong>
+              , chọn đúng camera Canon (có thể cần cài cho cả 2 interface nếu máy hiện ra 2 dòng), driver đích để{' '}
+              <strong>WinUSB</strong>, rồi bấm Install/Replace Driver. Sau đó bấm lại "Kiểm tra kết nối".
+            </p>
+          )}
+          {zadigOpenError && <p className="text-xs text-kiosk-danger">Mở Zadig lỗi: {zadigOpenError}</p>}
+
+          {tetheredCaptureResult?.error && <p className="text-xs text-kiosk-danger">Chụp thử lỗi: {tetheredCaptureResult.error}</p>}
+          {tetheredLiveViewError && <p className="text-xs text-kiosk-danger">Live view lỗi: {tetheredLiveViewError}</p>}
+
+          {(tetheredCaptureResult?.dataUrl || tetheredLiveViewFrame) && (
+            <div className="grid grid-cols-2 gap-3 max-w-md">
+              {tetheredCaptureResult?.dataUrl && (
+                <div>
+                  <p className="text-xs text-kiosk-text-muted mb-1">Ảnh chụp thử</p>
+                  <img src={tetheredCaptureResult.dataUrl} alt="Ảnh chụp thử từ Canon" className="w-full rounded-lg border border-kiosk-border" />
+                  {tetheredCaptureResult.savedPath && (
+                    <p className="text-xs text-kiosk-text-muted mt-1 break-all">Đã lưu: {tetheredCaptureResult.savedPath}</p>
+                  )}
+                </div>
+              )}
+              {tetheredLiveViewFrame && (
+                <div>
+                  <p className="text-xs text-kiosk-text-muted mb-1">Live view (khung mới nhất)</p>
+                  <img src={tetheredLiveViewFrame} alt="Khung live view từ Canon" className="w-full rounded-lg border border-kiosk-border" />
+                </div>
+              )}
+            </div>
+          )}
+        </Card>
       </section>
 
       <section className="mb-8">
@@ -767,7 +983,17 @@ function RoleCard({
           playsInline
           className={`w-full h-full object-cover${CAPTURE_MIRRORED ? ' scale-x-[-1]' : ''}`}
         />
-        {role === 'CENTER' && <CompositionGridOverlay />}
+        {role === 'CENTER' && deviceId !== TETHERED_DEVICE_ID && <CompositionGridOverlay />}
+        {deviceId === TETHERED_DEVICE_ID && (
+          // No `MediaStream` for a tethered camera (Bước 0/4), so no live
+          // preview here — the ref callback above already correctly leaves
+          // `srcObject` cleared for this id. Live-view/test-capture for this
+          // camera lives in the standalone "Máy ảnh Canon qua dây" panel
+          // further down this screen, not per-role like a webcam.
+          <div className="absolute inset-0 flex items-center justify-center text-center text-xs text-kiosk-text-muted px-3">
+            Canon qua dây (gphoto2) — xem live view/chụp thử ở mục "Máy ảnh Canon qua dây" bên dưới
+          </div>
+        )}
         <Badge variant={statusVariant} className="absolute top-2 right-2">
           {statusLabel}
         </Badge>

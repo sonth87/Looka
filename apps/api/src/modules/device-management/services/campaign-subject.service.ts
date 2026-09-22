@@ -40,12 +40,27 @@ import {
 import { TestRosterLookupResultDao } from '../dao/test-roster-lookup-result.dao';
 import { CampaignService } from './campaign.service';
 import { CampaignSnapshotService } from '@app/modules/stats/services/campaign-snapshot.service';
+import { AdvisoryLockService } from '@app/shared/database/advisory-lock.service';
 
 interface UploadedMulterFile {
   buffer: Buffer;
   mimetype: string;
   size: number;
   originalname: string;
+}
+
+/**
+ * `AdvisoryLockService` key format matched (by convention, not import —
+ * `CampaignService` already imports FROM this file, so the reverse import
+ * would be circular) by an identical helper in
+ * `CampaignService.maybeEnqueuePull`: the two independent places that can
+ * each insert a `campaign_subject_imports` row for the same campaign
+ * (manual `POST .../subjects/pulls` vs. the fire-and-forget auto-enqueue on
+ * campaign create/update). Serializing both under the same lock name closes
+ * the check-then-insert race between them without a new DB migration.
+ */
+function campaignSubjectPullLockName(campaignId: string): string {
+  return `campaign-subject-pull:${campaignId}`;
 }
 
 /** Column order for the template DOWNLOAD only as of 2026-09-18 (see `HEADER_ALIASES` below for the upload side) — kept in one place so the template and the `required` flags used to validate an upload never drift apart. */
@@ -178,6 +193,7 @@ export class CampaignSubjectService extends CommonService<CampaignSubject> {
     private readonly fileStorage: FileStorageService,
     private readonly snapshotService: CampaignSnapshotService,
     private readonly eligibilityHttpClient: EligibilityHttpClient,
+    private readonly advisoryLock: AdvisoryLockService,
   ) {
     super(repository);
   }
@@ -494,33 +510,57 @@ export class CampaignSubjectService extends CommonService<CampaignSubject> {
       );
     }
 
-    if (!dto.force) {
-      const recent = await this.importRepository.findOne({
-        where: { campaignId, source: 'EXTERNAL_API' },
-        order: { createdAt: 'DESC' },
-      });
-      const stillRunning =
-        recent &&
-        ['PENDING_FETCH', 'FETCHING', 'IMPORTING'].includes(recent.status) &&
-        Date.now() - recent.createdAt.getTime() < 5 * 60_000;
-      if (stillRunning) {
-        throw new CustomException(
-          'Đã có một lần kéo dữ liệu đang chạy trong 5 phút gần đây — dùng force=true để kéo lại ngay',
-          ERROR_CODE.CAMPAIGN_SUBJECT_SYNC_NO_API_CONFIG,
-          HttpStatus.CONFLICT,
-        );
-      }
-    }
+    // The "already running" check + the INSERT below are a check-then-act
+    // pair — without serializing them, two near-simultaneous calls (a
+    // double-clicked button, or this racing `CampaignService`'s own
+    // fire-and-forget auto-enqueue right after campaign create/update) can
+    // both pass the check and each insert their own PENDING_FETCH row,
+    // which the fetch/write workers would then process concurrently and
+    // interleave against the same campaign's rows. `withLock` is a
+    // Postgres session-level advisory lock, so this serializes across
+    // replicas too, not just within this process.
+    let importRow: CampaignSubjectImport | undefined;
+    const acquired = await this.advisoryLock.withLock(
+      campaignSubjectPullLockName(campaignId),
+      async () => {
+        if (!dto.force) {
+          const recent = await this.importRepository.findOne({
+            where: { campaignId, source: 'EXTERNAL_API' },
+            order: { createdAt: 'DESC' },
+          });
+          const stillRunning =
+            recent &&
+            ['PENDING_FETCH', 'FETCHING', 'IMPORTING'].includes(
+              recent.status,
+            ) &&
+            Date.now() - recent.createdAt.getTime() < 5 * 60_000;
+          if (stillRunning) {
+            throw new CustomException(
+              'Đã có một lần kéo dữ liệu đang chạy trong 5 phút gần đây — dùng force=true để kéo lại ngay',
+              ERROR_CODE.CAMPAIGN_SUBJECT_SYNC_NO_API_CONFIG,
+              HttpStatus.CONFLICT,
+            );
+          }
+        }
 
-    const importRow = await this.importRepository.save(
-      this.importRepository.create({
-        campaignId,
-        source: 'EXTERNAL_API',
-        fileName: `external-api-${new Date().toISOString()}.json`,
-        uploadedByUserId: triggeredByUserId,
-        status: 'PENDING_FETCH',
-      }),
+        importRow = await this.importRepository.save(
+          this.importRepository.create({
+            campaignId,
+            source: 'EXTERNAL_API',
+            fileName: `external-api-${new Date().toISOString()}.json`,
+            uploadedByUserId: triggeredByUserId,
+            status: 'PENDING_FETCH',
+          }),
+        );
+      },
     );
+    if (!acquired || !importRow) {
+      throw new CustomException(
+        'Một lần kéo dữ liệu khác đang được khởi tạo cho campaign này — thử lại sau giây lát',
+        ERROR_CODE.CAMPAIGN_SUBJECT_SYNC_NO_API_CONFIG,
+        HttpStatus.CONFLICT,
+      );
+    }
     return this.toImportDao(importRow);
   }
 

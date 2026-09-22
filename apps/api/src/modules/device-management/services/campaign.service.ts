@@ -35,6 +35,7 @@ import {
   computeRequiredCameraCount,
   validateCaptureAngles,
 } from '../validation/capture-angles.validator';
+import { AdvisoryLockService } from '@app/shared/database/advisory-lock.service';
 
 /** Postgres unique_violation SQLSTATE — used to turn a raw duplicate-`code` insert/update failure into a clear 409. */
 const UNIQUE_VIOLATION = '23505';
@@ -53,6 +54,7 @@ export class CampaignService extends CommonService<Campaign> {
     private readonly sessionService: SessionService,
     private readonly workflowCatalog: WorkflowCatalogReadRepository,
     private readonly fileStorage: FileStorageService,
+    private readonly advisoryLock: AdvisoryLockService,
   ) {
     super(repository);
   }
@@ -419,16 +421,31 @@ export class CampaignService extends CommonService<Campaign> {
       previousMode !== 'ROSTER_AND_API';
     if (!becameEligible || !campaign.eligibilityConfig?.api) return;
 
-    const [{ count }] = await this.dataSource.query<Array<{ count: number }>>(
-      `SELECT COUNT(*)::int AS count FROM campaign_subjects WHERE campaign_id = $1 AND status = 'VALID'`,
-      [campaign.id],
-    );
-    if (count > 0) return;
+    // Same advisory-lock key `CampaignSubjectService.requestPull` uses
+    // (helper duplicated there, see its own doc comment) — without it, this
+    // fire-and-forget auto-enqueue can race a manual `POST
+    // .../subjects/pulls` fired right after this same create/update (both
+    // read zero VALID rows, both insert their own PENDING_FETCH row for the
+    // same campaign). If the lock is already held, a pull is already being
+    // set up for this campaign, so this auto-enqueue simply no-ops instead
+    // of inserting a second one.
+    await this.advisoryLock.withLock(
+      `campaign-subject-pull:${campaign.id}`,
+      async () => {
+        const [{ count }] = await this.dataSource.query<
+          Array<{ count: number }>
+        >(
+          `SELECT COUNT(*)::int AS count FROM campaign_subjects WHERE campaign_id = $1 AND status = 'VALID'`,
+          [campaign.id],
+        );
+        if (count > 0) return;
 
-    await this.dataSource.query(
-      `INSERT INTO campaign_subject_imports (campaign_id, source, file_name, status)
-       VALUES ($1, 'EXTERNAL_API', $2, 'PENDING_FETCH')`,
-      [campaign.id, `external-api-${new Date().toISOString()}.json`],
+        await this.dataSource.query(
+          `INSERT INTO campaign_subject_imports (campaign_id, source, file_name, status)
+           VALUES ($1, 'EXTERNAL_API', $2, 'PENDING_FETCH')`,
+          [campaign.id, `external-api-${new Date().toISOString()}.json`],
+        );
+      },
     );
   }
 

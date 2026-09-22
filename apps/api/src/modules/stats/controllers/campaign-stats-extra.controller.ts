@@ -3,7 +3,16 @@ import {
   ApiResponseDecorator,
 } from '@app/shared/http/api-response.decorator';
 import { SsoAuthGuard } from '@app/shared/auth/index';
-import { Controller, Get, Param, Query, UseGuards } from '@nestjs/common';
+import { PermissionsGuard } from '@app/modules/identity/presentation/guards/permissions.guard';
+import { RequirePermission } from '@app/modules/identity/presentation/guards/require-permission.decorator';
+import {
+  Controller,
+  Get,
+  Param,
+  ParseUUIDPipe,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import {
   CampaignTimingRowDao,
@@ -78,25 +87,29 @@ export class CampaignStatsExtraController {
   }
 
   @Get(':id/stats/roster-group-fields')
+  @UseGuards(PermissionsGuard)
+  @RequirePermission('campaign:read', 'Xem field nhóm thống kê roster')
   @ApiOperation({
     summary:
       'Các field nhóm được cho thống kê động (cột thật + khoá phát hiện từ API pull)',
   })
   @ApiResponseArrayDecorator(RosterGroupFieldDao)
   rosterGroupFields(
-    @Param('id') campaignId: string,
+    @Param('id', new ParseUUIDPipe()) campaignId: string,
   ): Promise<RosterGroupFieldDao[]> {
     return this.rosterGroupStats.groupFields(campaignId);
   }
 
   @Get(':id/stats/roster-groups')
+  @UseGuards(PermissionsGuard)
+  @RequirePermission('campaign:read', 'Xem thống kê nhóm roster')
   @ApiOperation({
     summary:
       'Thống kê nhóm động theo 1-2 tầng field (lớp/khoa/ngành/khoá jsonb phát hiện từ API)',
   })
   @ApiResponseArrayDecorator(RosterGroupStatDao)
   rosterGroups(
-    @Param('id') campaignId: string,
+    @Param('id', new ParseUUIDPipe()) campaignId: string,
     @Query() query: RosterGroupsQueryDto,
   ): Promise<RosterGroupStatDao[]> {
     return this.rosterGroupStats.groupStats(

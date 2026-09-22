@@ -9,7 +9,10 @@ export class PrintResultImportDao {
   @ApiProperty({ enum: ['PROCESSING', 'DONE', 'FAILED'] })
   status: PrintResultImportStatus;
   @ApiProperty() totalRows: number;
-  @ApiProperty({ description: 'Số dòng khớp được mã SV trong đợt (dù trạng thái có đọc được hay không)' })
+  @ApiProperty({
+    description:
+      'Số dòng khớp được mã SV trong đợt (dù trạng thái có đọc được hay không)',
+  })
   matchedRows: number;
   @ApiProperty() printedRows: number;
   @ApiProperty() failedRows: number;

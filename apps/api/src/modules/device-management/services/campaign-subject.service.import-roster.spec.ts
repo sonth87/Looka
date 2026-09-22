@@ -70,6 +70,7 @@ function buildService(
     fileStorage as never,
     snapshotService as never,
     undefined as never,
+    undefined as never,
   );
 }
 

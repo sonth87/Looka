@@ -172,6 +172,12 @@ describe('CampaignService.exportApprovedPhotos', () => {
       sessionService,
       workflowCatalog,
       fileStorage,
+      {
+        withLock: jest.fn(async (_name: string, fn: () => Promise<void>) => {
+          await fn();
+          return true;
+        }),
+      } as never,
     );
     return { service, dataSource, fileStorage };
   }

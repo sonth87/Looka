@@ -32,6 +32,7 @@ function buildService(campaignService: {
       undefined as never,
       undefined as never,
       undefined as never,
+      undefined as never,
     ),
     repository,
   };

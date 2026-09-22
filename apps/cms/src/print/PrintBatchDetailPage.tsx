@@ -14,7 +14,9 @@ import {
   bulkApplyPrintTemplate,
   bulkCreatePrintItems,
   cancelPrintBatch,
+  completePrintBatch,
   downloadPrintBatchPackage,
+  exportPrintBatchPackage,
   getPrintBatch,
   listCampaigns,
   listCampaignSubjectDistinctValues,
@@ -275,7 +277,7 @@ export function PrintBatchDetailPage() {
         >
           Render cả đợt
         </button>
-        {canEdit && (
+        {canEdit && batch.mode === 'DIRECT' && (
           <button
             type="button"
             disabled={busy || totalItemCount === 0}
@@ -287,8 +289,45 @@ export function PrintBatchDetailPage() {
             }
             className="px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold disabled:opacity-50"
           >
-            {batch.mode === 'DIRECT' ? 'Gửi in' : 'Hoàn tất, xuất gói'}
+            Gửi in
             {selected.size > 0 ? ` (${selected.size} mục đã chọn)` : ''}
+          </button>
+        )}
+        {canEdit && batch.mode === 'CENTRALIZED' && (
+          <button
+            type="button"
+            disabled={busy || totalItemCount === 0}
+            onClick={() =>
+              void withBusy(async () => {
+                const { blob, filename } = await exportPrintBatchPackage(batch.id, selectedIds);
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = filename;
+                a.click();
+                URL.revokeObjectURL(url);
+                reload();
+              })
+            }
+            className="px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold disabled:opacity-50"
+          >
+            Xuất gói
+            {selected.size > 0 ? ` (${selected.size} mục đã chọn)` : ''}
+          </button>
+        )}
+        {canEdit && batch.mode === 'CENTRALIZED' && (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() =>
+              void withBusy(async () => {
+                setBatch(await completePrintBatch(batch.id));
+                reload();
+              })
+            }
+            className="px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold disabled:opacity-50"
+          >
+            Hoàn tất đợt
           </button>
         )}
         {batch.mode === 'CENTRALIZED' && batch.status !== 'DRAFT' && (

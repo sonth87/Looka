@@ -19,6 +19,7 @@ export const PRINT_BATCH_STATUS_BADGE_CLASS: Record<PrintBatchStatus, string> = 
 export const PRINT_ITEM_STATUS_LABEL: Record<PrintItemStatus, string> = {
   PENDING: 'Chờ render',
   RENDERED: 'Đã render',
+  EXPORTED: 'Đã xuất, chờ in',
   QUEUED: 'Đã xếp hàng',
   PRINTING: 'Đang in',
   PRINTED: 'Đã in',
@@ -30,6 +31,7 @@ export const PRINT_ITEM_STATUS_LABEL: Record<PrintItemStatus, string> = {
 export const PRINT_ITEM_STATUS_BADGE_CLASS: Record<PrintItemStatus, string> = {
   PENDING: 'bg-gray-50 border-gray-200 text-gray-600',
   RENDERED: 'bg-blue-50 border-blue-200 text-blue-700',
+  EXPORTED: 'bg-violet-50 border-violet-200 text-violet-700',
   QUEUED: 'bg-violet-50 border-violet-200 text-violet-700',
   PRINTING: 'bg-amber-50 border-amber-200 text-amber-700',
   PRINTED: 'bg-emerald-50 border-emerald-200 text-emerald-700',

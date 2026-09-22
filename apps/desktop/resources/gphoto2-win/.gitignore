@@ -1,0 +1,6 @@
+# Xem README.md trong thư mục này — file nhị phân đặt ở đây (gphoto2.exe,
+# DLL, thư mục plugin libgphoto2/libgphoto2_port) là thứ người triển khai
+# tự tải/copy về máy mình theo Bước 0 của plan, KHÔNG commit vào repo.
+*
+!.gitignore
+!README.md
