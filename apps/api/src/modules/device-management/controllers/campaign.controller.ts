@@ -11,12 +11,10 @@ import {
   Controller,
   Delete,
   Get,
-  Header,
   Param,
   Patch,
   Post,
   Query,
-  StreamableFile,
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
@@ -198,29 +196,5 @@ export class CampaignController {
   async getCampaignStats(@Param('id') id: string): Promise<CampaignStatsDao> {
     await this.campaignService.findCampaignEntityOrFail(id);
     return this.deviceEventService.campaignStats(id);
-  }
-
-  /**
-   * Zip export scoped to one campaign (Phase F.4,
-   * docs/plans/card-photo-export-and-filters-plan-2026-09-17.md) — full
-   * roster CSV (`campaign_subjects`, every row regardless of status),
-   * approved-only photo-list CSV (`subject_photo_sets` where
-   * `status = 'APPROVED'`), and one `${subjectCode}.jpg` per approved set.
-   * Read-only, so left as `SsoAuthGuard`-only like every other GET route on
-   * this controller (see this controller's own top doc comment on why
-   * create/update/delete gained `PermissionsGuard` but reads did not).
-   */
-  @Get(':id/export-approved-photos')
-  @Header('Content-Type', 'application/zip')
-  @ApiOperation({
-    summary:
-      'Download a zip: full roster CSV + approved-photos CSV + one {subjectCode}.jpg per approved set',
-  })
-  async exportApprovedPhotos(@Param('id') id: string): Promise<StreamableFile> {
-    const { zip, filename } =
-      await this.campaignService.exportApprovedPhotos(id);
-    return new StreamableFile(zip, {
-      disposition: `attachment; filename="${filename}"`,
-    });
   }
 }

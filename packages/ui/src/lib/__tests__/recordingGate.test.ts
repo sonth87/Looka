@@ -24,6 +24,22 @@ test('shouldRecordMultiChannel requires recordVideo, a real session key, and >=2
   assert.equal(shouldRecordMultiChannel({ ...base, multiChannelDeviceCount: 1 }), false);
 });
 
+test('shouldRecordMultiChannel also fires for exactly 1 mapped device when it is the tethered Canon', () => {
+  const base = {
+    recordVideo: true,
+    recordingSessionKey: 'session_1',
+    multiChannelDeviceCount: 1,
+    hasTetheredChannel: true,
+  };
+  assert.equal(shouldRecordMultiChannel(base), true);
+  // A single real webcam (not tethered) still must not go through the
+  // multi-channel path on its own — that stays the single-stream effect's job.
+  assert.equal(shouldRecordMultiChannel({ ...base, hasTetheredChannel: false }), false);
+  assert.equal(shouldRecordMultiChannel({ recordVideo: true, recordingSessionKey: 'session_1', multiChannelDeviceCount: 1 }), false);
+  assert.equal(shouldRecordMultiChannel({ ...base, recordVideo: false }), false);
+  assert.equal(shouldRecordMultiChannel({ ...base, recordingSessionKey: null }), false);
+});
+
 test('a brand-new session key re-arms recording even if the previous session never reset the flag (the 2026-09-05 field bug)', () => {
   // Simulates: abandoned session's key never got cleared to null (no cancel/
   // complete ever fired), yet the NEXT real session starts with a genuinely

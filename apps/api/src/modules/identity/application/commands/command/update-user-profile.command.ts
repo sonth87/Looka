@@ -7,5 +7,7 @@ export class UpdateUserProfileCommand implements ICommand {
     public readonly title: string | undefined,
     public readonly code: string | undefined,
     public readonly phone: string | undefined,
+    public readonly department: string | undefined,
+    public readonly faculty: string | undefined,
   ) {}
 }

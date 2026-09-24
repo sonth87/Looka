@@ -673,15 +673,28 @@ export class PhotoReviewService {
    */
   private buildVirtualPath(
     sessionId: string,
+    setId: string,
     year: number,
     prefix: string,
     version: number,
     ext: string,
     identityNumber?: string,
   ): string {
+    // `setId` scopes the identity-based path per photo set (2026-09-24 fix).
+    // Without it, a student with the same CCCD captured under a SECOND set
+    // (a different campaign, or a different card kind) collided on this
+    // exact path: nextVersion() counts per set_id, so the first auto/ai/
+    // upload variant of every set starts back at version 1, producing the
+    // identical students/<CCCD>/final_card/auto-v1.png for both sets.
+    // fs-core rejects the second set's upload with 409 ALREADY_REGISTERED
+    // (a fresh Idempotency-Key against an already-registered path), and
+    // VariantUploadWorkerService has no conflict handling for that (unlike
+    // UploadWorkerService.resolvePathConflict for photos), so the second
+    // set's variant was permanently FAILED. The session-id fallback branch
+    // doesn't need this: it is already unique per capture session.
     const safeIdentity = identityNumber?.replace(/[^\w-]/g, '');
     if (safeIdentity) {
-      return `students/${safeIdentity}/final_card/${prefix}-v${version}.${ext}`;
+      return `students/${safeIdentity}/final_card/${setId}/${prefix}-v${version}.${ext}`;
     }
     return `card/${year}/${sessionId}/${prefix}-v${version}.${ext}`;
   }
@@ -977,6 +990,8 @@ export class PhotoReviewService {
       "due_at IS NOT NULL AND due_at < now() AND status NOT IN ('APPROVED', 'REJECTED')";
     if (query.overdue === true) outerConditions.push(overdueExpr);
     if (query.overdue === false) outerConditions.push(`NOT (${overdueExpr})`);
+    if (query.approved === true) outerConditions.push("status = 'APPROVED'");
+    if (query.approved === false) outerConditions.push("status <> 'APPROVED'");
     const outerWhere = outerConditions.length
       ? `WHERE ${outerConditions.join(' AND ')}`
       : '';
@@ -1012,8 +1027,13 @@ export class PhotoReviewService {
     );
     const totalItems = countRows[0]?.count ?? 0;
 
+    // 2026-09-22 product ask: APPROVED sets sink to the bottom, everything
+    // still actionable floats to the top — `(status = 'APPROVED')` is
+    // `false` (sorts first) for every non-approved status, `true` (sorts
+    // last) only for APPROVED; `updated_at DESC` is the secondary/original
+    // order within each of those two groups.
     const rows: Array<Record<string, unknown>> = await this.dataSource.query(
-      `${cte} ORDER BY updated_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      `${cte} ORDER BY (status = 'APPROVED') ASC, updated_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
       [...params, limit, offset],
     );
 
@@ -1332,6 +1352,7 @@ export class PhotoReviewService {
       const ext = this.extForMime(result.mimeType);
       const virtualPath = this.buildVirtualPath(
         set.sourceSessionId,
+        setId,
         sessionContext.year,
         'auto',
         variant.version,
@@ -1593,6 +1614,7 @@ export class PhotoReviewService {
       const ext = this.extForMime(result.mimeType);
       const virtualPath = this.buildVirtualPath(
         set.sourceSessionId,
+        setId,
         sessionContext.year,
         'ai',
         variant.version,
@@ -1933,6 +1955,7 @@ export class PhotoReviewService {
       const ext = this.extForMime(cardResult.mimeType);
       const virtualPath = this.buildVirtualPath(
         set.sourceSessionId,
+        setId,
         sessionContext.year,
         'upload',
         version,
@@ -1991,6 +2014,7 @@ export class PhotoReviewService {
         tenantName: sessionContext.tenantName,
         virtualPath: this.buildVirtualPath(
           set.sourceSessionId,
+          setId,
           sessionContext.year,
           'upload',
           version,

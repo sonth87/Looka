@@ -184,6 +184,56 @@ describe('UploadWorkerService — ALREADY_REGISTERED conflict resolution', () =>
     ).toBe(false);
   });
 
+  test("purge recovery: overwrites using the job's OWN prior fs_file_id/etag when no OTHER occupant is on file", async () => {
+    // Regression coverage for the 2026-09-24 fix: retryPurgedUploads()
+    // deliberately leaves photos.fs_file_id/fs_etag in place across a purge
+    // (see that method's own doc comment) specifically so this path can
+    // recover by overwriting the same file — but the original query here
+    // excluded the job's own photo_id, so it could never actually find them.
+    const uploadRaw = jest.fn().mockRejectedValue(alreadyRegistered());
+    const updateContent = jest.fn().mockResolvedValue({
+      fileId: 'fs-file-own-photo',
+      version: 2,
+      etag: 'etag-v2',
+      size: job.content.byteLength,
+      dedupHit: false,
+      snapshot: true,
+      unchanged: false,
+    });
+    const cancelUpload = jest.fn().mockResolvedValue(undefined);
+
+    const dataSource = new FakeDataSource([
+      // No OTHER photo's outbox row occupies this path.
+      { when: 'SELECT p.fs_file_id, p.fs_etag', respond: () => [] },
+      // But the job's OWN photo still carries the pre-purge fs_file_id/etag.
+      {
+        when: 'SELECT fs_file_id, fs_etag FROM photos',
+        respond: () => [
+          { fs_file_id: 'fs-file-own-photo', fs_etag: 'etag-pre-purge' },
+        ],
+      },
+    ]);
+
+    const service = new UploadWorkerService(
+      dataSource as never,
+      { uploadRaw, updateContent, cancelUpload } as never,
+    );
+
+    await (service as unknown as { send(job: unknown): Promise<void> }).send(
+      job,
+    );
+
+    expect(updateContent).toHaveBeenCalledWith('fs-file-own-photo', {
+      etag: 'etag-pre-purge',
+      data: new Uint8Array(job.content),
+      mimeType: job.mime_type,
+    });
+    expect(cancelUpload).not.toHaveBeenCalled();
+    expect(
+      dataSource.calls.some((c) => c.sql.includes("status = 'FAILED'")),
+    ).toBe(false);
+  });
+
   test('falls through to the normal terminal failure when no prior occupant is on file', async () => {
     const err = alreadyRegistered();
     const uploadRaw = jest.fn().mockRejectedValue(err);
@@ -192,6 +242,10 @@ describe('UploadWorkerService — ALREADY_REGISTERED conflict resolution', () =>
 
     const dataSource = new FakeDataSource([
       { when: 'SELECT p.fs_file_id, p.fs_etag', respond: () => [] },
+      // resolvePathConflict()'s purge-recovery fallback (2026-09-24 fix) -
+      // the job's own photo row also has nothing on file, so this case
+      // still falls all the way through to the original terminal failure.
+      { when: 'SELECT fs_file_id, fs_etag FROM photos', respond: () => [] },
     ]);
 
     const service = new UploadWorkerService(

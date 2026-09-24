@@ -42,6 +42,18 @@ export interface CbHelpFrame {
   status: CbHelpFrameStatus;
   capturedDataUrl?: string;
   attempt: number;
+  /**
+   * A not-yet-COMPLETED non-CENTER frame's live still (2026-09-24 fix,
+   * confirmed audit finding) — `FaceCaptureApp.tsx`'s `publishCbHelpState`
+   * already sends this (its own renderer-side `CbHelpFrame` type has always
+   * had it), but this main-process copy of the type never did, so
+   * `sanitizeCbHelpState`'s field-by-field rebuild below silently dropped it
+   * before every `cbhelp:update` broadcast. Every side-camera tile on the CB
+   * Help extended display therefore stayed blank/"not connected" for the
+   * whole session — see `CbHelpFrames.tsx`'s `sideLiveImage`, the only place
+   * that reads this field client-side.
+   */
+  livePreviewDataUrl?: string | null;
 }
 
 /**
@@ -164,6 +176,11 @@ export function sanitizeCbHelpState(raw: unknown): CbHelpPublishState {
         status: validStatuses.includes(f.status as CbHelpFrameStatus) ? (f.status as CbHelpFrameStatus) : 'PENDING',
         capturedDataUrl: typeof f.capturedDataUrl === 'string' ? f.capturedDataUrl : undefined,
         attempt: Number.isFinite(f.attempt) ? Number(f.attempt) : 0,
+        livePreviewDataUrl:
+          typeof (f as any).livePreviewDataUrl === 'string' &&
+          (f as any).livePreviewDataUrl.startsWith('data:image/')
+            ? (f as any).livePreviewDataUrl
+            : null,
       })),
     greeting: sanitizeGreeting(payload?.greeting),
     centerPreviewDataUrl: typeof payload?.centerPreviewDataUrl === 'string' ? payload.centerPreviewDataUrl : null,

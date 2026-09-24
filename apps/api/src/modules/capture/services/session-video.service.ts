@@ -203,6 +203,30 @@ export class SessionVideoService extends CommonService<SessionVideo> {
     const idemKey = dto.videoId;
 
     await this.dataSource.transaction(async (manager) => {
+      // 2026-09-24 fix (confirmed audit finding — cross-device session
+      // hijack): same missing ownership check as
+      // `PhotoService.addDevicePhoto`, and the same real exposure — a
+      // `videoId` a caller does not own can still overwrite an existing
+      // `session_videos` row's bytes/sha256/virtual_path via the
+      // `ON CONFLICT (id) DO UPDATE` below. See that method's own doc
+      // comment for the full reasoning.
+      const existingSession: Array<{ device_id: string; campaign_id: string }> =
+        await manager.query(
+          `SELECT device_id, campaign_id FROM sessions WHERE id = $1`,
+          [dto.sessionId],
+        );
+      if (
+        existingSession.length > 0 &&
+        (existingSession[0].device_id !== deviceId ||
+          existingSession[0].campaign_id !== campaignId)
+      ) {
+        throw new CustomException(
+          'Session belongs to a different device/campaign',
+          ERROR_CODE.SESSION_DEVICE_MISMATCH,
+          HttpStatus.FORBIDDEN,
+        );
+      }
+
       await manager.query(
         `INSERT INTO sessions (id, source, device_id, campaign_id, status)
          VALUES ($1, 'KIOSK', $2, $3, 'IN_PROGRESS')

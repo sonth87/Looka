@@ -747,6 +747,17 @@ export class WorkflowEngine implements IWorkflowEngine {
         stepType: nextStep.type,
       };
     }
+
+    // 2026-09-24 fix (confirmed audit finding): this function used to change
+    // `_currentState`/`_currentSession` without ever telling listeners. A
+    // normal webcam session only looked correct because the CV pipeline's
+    // own `processFrame` emits `state-change` on its very next tick (line
+    // ~288 above) — with CENTER tethered (no live frames, so `processFrame`
+    // never runs), nothing ever fired this event after a
+    // `recordExternalCapture`-driven advance, so FaceCaptureApp's guidance
+    // text, its sequential role-switch effect, and its round-transition
+    // stream handling all stayed frozen on the step that just completed.
+    this.emit('state-change', this._currentState);
   }
 
   private updateStepStatus(

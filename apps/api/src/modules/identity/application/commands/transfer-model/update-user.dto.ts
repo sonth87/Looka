@@ -25,4 +25,16 @@ export class UpdateUserDto {
   @IsString()
   @MaxLength(20)
   phone?: string;
+
+  @ApiPropertyOptional({ description: 'Phòng ban' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  department?: string;
+
+  @ApiPropertyOptional({ description: 'Khoa' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  faculty?: string;
 }

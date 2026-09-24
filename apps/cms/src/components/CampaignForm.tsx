@@ -22,6 +22,7 @@ import {
   computeEffectiveStatus,
 } from '../campaignFormat';
 import { EligibilityConfigEditor } from './EligibilityConfigEditor';
+import { slugifyCode } from '../slug';
 
 const DEFAULT_ELIGIBILITY_CONFIG: EligibilityConfig = { mode: 'NONE' };
 
@@ -130,9 +131,8 @@ export function CampaignForm({
   onSaved: (campaign: Campaign) => void;
   onCancel: () => void;
 }) {
-  const [code, setCode] = useState(campaign?.code ?? '');
   const [name, setName] = useState(campaign?.name ?? '');
-  const [cohort, setCohort] = useState(campaign?.cohort ?? '');
+  const code = mode === 'edit' ? (campaign?.code ?? '') : slugifyCode(name, 20);
   const [description, setDescription] = useState(campaign?.description ?? '');
   const [purpose, setPurpose] = useState<CampaignPurpose>(campaign?.purpose ?? 'STUDENT_CARD');
   const [startsAt, setStartsAt] = useState(toDatetimeLocal(campaign?.startsAt));
@@ -231,11 +231,10 @@ export function CampaignForm({
     try {
       if (mode === 'create') {
         const input: CreateCampaignInput = {
-          code: code.trim() || undefined,
+          code,
           name: name.trim(),
           description: description.trim() || undefined,
           purpose,
-          cohort: cohort.trim() || undefined,
           startsAt: fromDatetimeLocal(startsAt),
           expiresAt: fromDatetimeLocal(expiresAt),
           quotaPlanned: parsedQuota,
@@ -251,10 +250,8 @@ export function CampaignForm({
         onSaved(created);
       } else if (campaign) {
         const input: UpdateCampaignInput = {
-          code: code.trim() || undefined,
           name: name.trim() || undefined,
           description: description.trim() || undefined,
-          cohort: cohort.trim() || undefined,
           startsAt: fromDatetimeLocal(startsAt) ?? null,
           expiresAt: fromDatetimeLocal(expiresAt) ?? null,
           quotaPlanned: parsedQuota,
@@ -294,33 +291,25 @@ export function CampaignForm({
         <Section id="section-info" title="1. Thông tin" subtitle="Mã, tên, thời gian và trạng thái campaign">
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-sm text-gray-500 mb-1">Mã campaign</label>
+              <label className="block text-sm text-gray-500 mb-1">Tên campaign</label>
               <input
-                value={code}
-                onChange={(e) => setCode(e.target.value)}
-                placeholder="2026DOT01"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                required
+                autoFocus={mode === 'create'}
                 className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
               />
             </div>
             <div>
-              <label className="block text-sm text-gray-500 mb-1">Khóa</label>
+              <label className="block text-sm text-gray-500 mb-1">
+                Mã campaign {mode === 'edit' ? '(không đổi được)' : '(tự sinh từ tên)'}
+              </label>
               <input
-                value={cohort}
-                onChange={(e) => setCohort(e.target.value)}
-                placeholder="K20"
-                className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
+                value={code || 'Nhập tên để tự sinh mã'}
+                disabled
+                className="w-full bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 text-gray-500 font-mono text-sm cursor-not-allowed"
               />
             </div>
-          </div>
-
-          <div>
-            <label className="block text-sm text-gray-500 mb-1">Tên campaign</label>
-            <input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              required
-              className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
-            />
           </div>
 
           <div>

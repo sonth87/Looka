@@ -38,6 +38,18 @@ export class CreateUserDto {
   @MaxLength(20)
   phone?: string;
 
+  @ApiPropertyOptional({ description: 'Phòng ban' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  department?: string;
+
+  @ApiPropertyOptional({ description: 'Khoa' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  faculty?: string;
+
   @ApiPropertyOptional({
     type: [String],
     description: 'Phân quyền ngay khi tạo, hoặc để trống để phân quyền sau',

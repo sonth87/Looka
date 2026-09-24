@@ -22,6 +22,19 @@ import { SsoAuthClient } from './ssoAuthClient';
 /** Stable role display order for the `KioskShell` footer's camera chips — mirrors `CAMERA_ROLE_LABELS_VI`'s own key order (CENTER/LEFT/RIGHT/UP/DOWN). */
 const CAMERA_ROLE_ORDER = Object.keys(CAMERA_ROLE_LABELS_VI) as Array<keyof typeof CAMERA_ROLE_LABELS_VI>;
 
+/**
+ * 2026-09-23 ("thiết bị này" panel showing "THIẾU CAMERA" for a role mapped
+ * to the tethered Canon, even though that exact same role shows a live feed
+ * one screen over in Camera Setup) — same literal as
+ * `apps/desktop/src/renderer/CameraSetupScreen.tsx` (search that file for
+ * this constant's own doc comment) and
+ * `packages/ui/src/components/screens/FaceCaptureApp.tsx`. Duplicated here
+ * rather than imported: this app's main-process/renderer/packages
+ * boundaries make sharing one TS constant across all three awkward, so the
+ * established convention is to just repeat the literal.
+ */
+const TETHERED_DEVICE_ID = 'tethered:gphoto2';
+
 // Exported so `App.tsx` can read `getOperatorUserId()` directly when
 // constructing `FaceCaptureApp`'s props — see that method's own doc comment.
 // Unlike `campaignConfig`, the operator identity doesn't change per campaign
@@ -117,8 +130,30 @@ export function CampaignGate({
    * treating a camera as busy.
    */
   const [previewStreams, setPreviewStreams] = useState<Record<string, MediaStream>>({});
+  /**
+   * 2026-09-23 ("camera được kết nối đang không hiển thị", traced to a real
+   * cross-window `NotReadableError: Device in use`) — true while the Camera
+   * Setup popup is open, so this gate releases its own preview streams for
+   * that whole time instead of holding the same physical camera(s) open and
+   * starving that popup's own preview of the one reader most UVC webcam
+   * drivers allow. See `onCameraPauseForSetup`'s own doc comment (preload).
+   */
+  const [pausedForSetup, setPausedForSetup] = useState(false);
   /** `{deviceId: stream}` for whatever's currently open — one entry per PHYSICAL device (not per role, so two roles sharing one camera share one open session too), kept in a ref so the sync effect can diff against "what's actually open" without depending on its own previous state (which would need to be a dependency, causing an infinite loop). `previewStreams` (role-keyed, what `DeviceInitScreen` actually consumes) is derived from this each run. */
   const openPreviewStreamsRef = useRef<Record<string, MediaStream>>({});
+  /**
+   * Periodic still preview for whichever role(s) resolve to the tethered
+   * Canon (`TETHERED_DEVICE_ID`) — 2026-09-23 fix for `DeviceInitScreen`'s
+   * "Thiết bị này" panel showing "THIẾU CAMERA" forever for that role. One
+   * shared value, not per-role: there is realistically only ever one
+   * physical tethered camera per kiosk, same single-preview design
+   * `TetheredCameraPanel.tsx` and `FaceCaptureApp.tsx`'s own `tetheredPreview`
+   * state already use. See the poll effect below (search for
+   * `tetheredAnyRoleAssigned`) for how this gets populated.
+   */
+  const [tetheredPreviewFrame, setTetheredPreviewFrame] = useState<string | null>(null);
+  /** docs/plans/canon-auto-detect-polling-plan-2026-09-24.md — the background watcher's own connect/disconnect signal, arrives independently of (and usually earlier than) this screen's own live-view poll above. Starts `null` (unknown) until the first push arrives. */
+  const [tetheredWatcherConnected, setTetheredWatcherConnected] = useState<boolean | null>(null);
 
   /**
    * Assigned-campaign list + browsing selection for the merged
@@ -280,6 +315,19 @@ export function CampaignGate({
     return () => unsubscribe?.();
   }, [refreshDeviceState]);
 
+  // See `pausedForSetup`'s own doc comment — releases this gate's camera
+  // streams for the Camera Setup popup's exclusive use, then reopens them
+  // once it closes.
+  useEffect(() => {
+    const faceAPI = (window as any).faceAPI;
+    const unsubPause = faceAPI?.onCameraPauseForSetup?.(() => setPausedForSetup(true));
+    const unsubResume = faceAPI?.onCameraResumeAfterSetup?.(() => setPausedForSetup(false));
+    return () => {
+      unsubPause?.();
+      unsubResume?.();
+    };
+  }, []);
+
   // Live camera presence for the footer's "ready" dots — separate from
   // `refreshDeviceState` above, which only reads saved config. Refreshes on
   // mount and whenever a camera is plugged/unplugged.
@@ -312,7 +360,7 @@ export function CampaignGate({
     let cancelled = false;
 
     void (async () => {
-      const wanted: Record<string, string> = started
+      const wanted: Record<string, string> = started || pausedForSetup
         ? {}
         : Object.fromEntries(
             Object.entries(cameraRoleMapping).filter(([, deviceId]) => deviceId && connectedDeviceIds.has(deviceId))
@@ -369,7 +417,7 @@ export function CampaignGate({
     return () => {
       cancelled = true;
     };
-  }, [cameraRoleMapping, connectedDeviceIds, started]);
+  }, [cameraRoleMapping, connectedDeviceIds, started, pausedForSetup]);
 
   // Stops every still-open preview stream on unmount only (the effect above
   // already handles closing individual ones as roles/devices change or
@@ -379,6 +427,125 @@ export function CampaignGate({
       Object.values(openPreviewStreamsRef.current).forEach((stream) => stream.getTracks().forEach((t) => t.stop()));
       openPreviewStreamsRef.current = {};
     };
+  }, []);
+
+  /**
+   * 2026-09-23 tethered-camera fix for `DeviceInitScreen`'s "Thiết bị này"
+   * panel — root cause of the "THIẾU CAMERA" bug: the `getUserMedia` effect
+   * above only ever opens streams for roles whose deviceId shows up in
+   * `connectedDeviceIds`, which comes from real
+   * `navigator.mediaDevices.enumerateDevices()` output and can NEVER contain
+   * `TETHERED_DEVICE_ID` (a synthetic id this app invented, not a real
+   * OS/browser device). The tethered Canon has no `MediaStream` at all —
+   * `TetheredCameraPanel.tsx` and `FaceCaptureApp.tsx`'s own `tetheredPreview`
+   * effect both solve this by polling `getTetheredLiveViewFrame()` directly
+   * and feeding the resulting still image into `FrameTile`'s existing
+   * `imagePath` fallback instead of a `<video>` stream — this effect is that
+   * exact same pattern, applied to the one surface it was never wired into.
+   * Same `BASE_INTERVAL_MS`/`MAX_INTERVAL_MS` backoff cadence as those two
+   * (200ms/8000ms — retuned three times: 1000ms→200ms, then 200ms→60ms on
+   * 2026-09-23 once live view moved to a continuous `gphoto2 --capture-
+   * movie` stream, then back to 200ms on 2026-09-24 — "giật các khung hình
+   * khác khi kết nối camera Canon": 60ms was fast enough to measurably
+   * compete with the real webcams' own idle-preview streams for this same
+   * renderer thread's time), so this screen polls no faster or slower than
+   * either of the other two.
+   *
+   * Deliberately does NOT call `getTetheredCameraStatus()` — that spawns a
+   * real `gphoto2 --auto-detect` subprocess and both `CameraSetupScreen.tsx`
+   * and `TetheredCameraPanel.tsx` document it as on-demand only, not
+   * something to poll in the background. A successfully arrived live-view
+   * frame is itself proof the camera is connected and streaming — the same
+   * standard `FaceCaptureApp.tsx`'s `centerIsTethered` path already treats
+   * as sufficient to run a real capture session.
+   *
+   * Gated by the same `started`/`pausedForSetup` conditions as the
+   * real-webcam preview effect above: stops once a capture session actually
+   * starts (this panel isn't shown then), and stops while the Camera Setup
+   * popup is open, since that popup already runs its own live-view poll —
+   * running a second one concurrently would double the load on the same
+   * physical gphoto2/USB session for no benefit.
+   */
+  const tetheredAnyRoleAssigned = Object.values(cameraRoleMapping).includes(TETHERED_DEVICE_ID);
+  useEffect(() => {
+    if (!tetheredAnyRoleAssigned) {
+      setTetheredPreviewFrame(null);
+      return;
+    }
+    if (started || pausedForSetup) {
+      // 2026-09-24 fix (confirmed audit finding): this used to also null
+      // `tetheredPreviewFrame` here, which made `cameraFooterStatus`'s
+      // `ready` check read the Canon chip as "not connected" for the WHOLE
+      // capture session — even while the Canon stayed connected and
+      // `FaceCaptureApp.tsx`'s own independent tethered-preview poll kept
+      // streaming its live view right there on the capture screen. This
+      // branch only needs to stop THIS effect's own poll (to avoid
+      // contending with that other poll, or with the Camera Setup popup's,
+      // for the same USB/PTP session) — it was never meant to claim the
+      // camera went away, so the last-known frame (and therefore the
+      // footer's ready state) is left as-is instead of being reset.
+      return;
+    }
+    const BASE_INTERVAL_MS = 200;
+    const MAX_INTERVAL_MS = 8000;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let consecutiveFailures = 0;
+    const poll = async () => {
+      if (cancelled) return;
+      try {
+        const faceAPI = (window as any).faceAPI;
+        const result = await faceAPI?.getTetheredLiveViewFrame?.();
+        if (cancelled) return;
+        if (result?.ok) {
+          setTetheredPreviewFrame(result.dataUrl);
+          consecutiveFailures = 0;
+        } else {
+          consecutiveFailures += 1;
+        }
+      } catch {
+        consecutiveFailures += 1;
+      }
+      if (cancelled) return;
+      const delay = Math.min(BASE_INTERVAL_MS * 2 ** consecutiveFailures, MAX_INTERVAL_MS);
+      timer = setTimeout(poll, delay);
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [tetheredAnyRoleAssigned, started, pausedForSetup]);
+
+  /**
+   * docs/plans/canon-auto-detect-polling-plan-2026-09-24.md Bước 3 — tells
+   * the main process's background auto-detect watcher to pause its own
+   * `detectTetheredCamera()` polling while a real capture session is
+   * running, so it doesn't compete with `withCameraLock` for the shared
+   * gphoto2/PTP session a capture is actively using. Independent of
+   * `tetheredAnyRoleAssigned`/`pausedForSetup` above — the watcher itself
+   * already no-ops when no role is mapped to the Canon, and the Setup
+   * popup's own quick "Kiểm tra kết nối" calls already share the same
+   * `withCameraLock` queue safely.
+   */
+  useEffect(() => {
+    void (window as any).faceAPI?.setTetheredCameraSessionActive?.(started);
+  }, [started]);
+
+  /**
+   * docs/plans/canon-auto-detect-polling-plan-2026-09-24.md Bước 3 —
+   * background watcher push, independent of this screen's own live-view
+   * poll. Registered once; `cameraFooterStatus` below ORs it with
+   * `tetheredPreviewFrame !== null` so the footer chip can go green as soon
+   * as EITHER signal confirms a connection (whichever arrives first), while
+   * a stale/negative watcher tick never overrides an already-streaming live
+   * view (see the OR below, not a replace).
+   */
+  useEffect(() => {
+    const unsubscribe = (window as any).faceAPI?.onTetheredConnectionChanged?.(
+      (status: { connected: boolean }) => setTetheredWatcherConnected(status.connected)
+    );
+    return () => unsubscribe?.();
   }, []);
 
   /**
@@ -467,9 +634,34 @@ export function CampaignGate({
     (role) => ({
       id: role,
       label: CAMERA_ROLE_LABELS_VI[role],
-      ready: connectedDeviceIds.has(cameraRoleMapping[role]),
+      // 2026-09-23: a role mapped to the tethered Canon (`TETHERED_DEVICE_ID`)
+      // can never appear in `connectedDeviceIds` (real-webcam-only, see that
+      // state's own doc comment) — "ready" for that one role instead means a
+      // live-view frame has actually arrived (`tetheredPreviewFrame`, see the
+      // poll effect above). Every other role's check is completely unchanged.
+      ready:
+        cameraRoleMapping[role] === TETHERED_DEVICE_ID
+          ? tetheredPreviewFrame !== null || tetheredWatcherConnected === true
+          : connectedDeviceIds.has(cameraRoleMapping[role]),
     })
   );
+
+  /**
+   * Role → latest tethered live-view still, for `DeviceInitScreen`'s
+   * `previewImages` prop (2026-09-23, see the poll effect above). Empty
+   * object until the first frame arrives, and only ever contains roles
+   * actually mapped to `TETHERED_DEVICE_ID` — a real-webcam role never gets
+   * an entry here, so `DeviceInitScreen` falls back to its existing
+   * `previewStreams`-only behavior for those exactly as before.
+   */
+  const tetheredPreviewImages: Record<string, string> =
+    tetheredPreviewFrame === null
+      ? {}
+      : Object.fromEntries(
+          Object.entries(cameraRoleMapping)
+            .filter(([, deviceId]) => deviceId === TETHERED_DEVICE_ID)
+            .map(([role]) => [role, tetheredPreviewFrame])
+        );
 
   if (started && campaign) {
     return (
@@ -526,6 +718,7 @@ export function CampaignGate({
         authClient={authClient}
         isAdmin={isAdmin}
         previewStreams={previewStreams}
+        previewImages={tetheredPreviewImages}
         cameraStatuses={cameraFooterStatus}
         campaigns={campaigns}
         campaignsError={campaignsError}

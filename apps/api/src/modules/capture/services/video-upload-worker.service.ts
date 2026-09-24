@@ -57,8 +57,13 @@ export class VideoUploadWorkerService implements OnModuleInit {
   ) {}
 
   async onModuleInit(): Promise<void> {
-    // Same interrupted-job recovery as UploadWorkerService.onModuleInit —
-    // see that method's own doc comment.
+    // Same interrupted-job recovery as UploadWorkerService.onModuleInit, and
+    // the same 2026-09-24 command/query guard — see that method's own doc
+    // comment for why this can't just run unconditionally on every host.
+    const serviceType = process.env.SERVICE_TYPE;
+    if (serviceType === 'command' || serviceType === 'query') {
+      return;
+    }
     await this.dataSource
       .query(
         `UPDATE video_upload_outbox SET status = 'PENDING' WHERE status = 'SENDING'`,

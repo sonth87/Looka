@@ -35,6 +35,21 @@ export class PrintPackageService {
       order: { subjectCode: 'ASC' },
     });
 
+    // `cohort` ("khóa") is a `campaigns` column, not denormalized onto
+    // `print_items` the way `className`/`faculty` are — items span at most
+    // a handful of distinct campaigns per batch in practice, so one batched
+    // lookup here is simpler than a migration to add the column.
+    const campaignIds = [...new Set(items.map((i) => i.campaignId))];
+    const cohortByCampaignId = new Map<string, string | null>();
+    if (campaignIds.length > 0) {
+      const rows: Array<{ id: string; cohort: string | null }> =
+        await this.items.manager.query(
+          `SELECT id, cohort FROM campaigns WHERE id = ANY($1)`,
+          [campaignIds],
+        );
+      for (const row of rows) cohortByCampaignId.set(row.id, row.cohort);
+    }
+
     const archive = archiver('zip', { zlib: { level: 9 } });
     const output = new PassThrough();
     const chunks: Buffer[] = [];
@@ -45,7 +60,9 @@ export class PrintPackageService {
     });
     archive.pipe(output);
 
-    const manifestLines = ['subject_code,full_name,class_name,status'];
+    const manifestLines = [
+      'subject_code,full_name,class_name,faculty,cohort,status',
+    ];
     const csvField = (value: string) => `"${value.replace(/"/g, '""')}"`;
 
     for (const item of items) {
@@ -56,12 +73,19 @@ export class PrintPackageService {
           csvField(item.subjectCode),
           csvField(item.fullName ?? ''),
           csvField(item.className ?? ''),
+          csvField(item.faculty ?? ''),
+          csvField(cohortByCampaignId.get(item.campaignId) ?? ''),
           item.status,
         ].join(','),
       );
     }
 
-    archive.append(manifestLines.join('\n'), { name: 'manifest.csv' });
+    // UTF-8 BOM — without it, Excel on Windows (the CMS's actual audience)
+    // misreads non-ASCII bytes and Vietnamese diacritics in `full_name`
+    // render as mojibake even though the file itself is valid UTF-8.
+    archive.append('﻿' + manifestLines.join('\n'), {
+      name: 'manifest.csv',
+    });
     await archive.finalize();
     return done;
   }

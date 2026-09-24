@@ -156,6 +156,17 @@ export class PhotoService extends CommonService<Photo> {
       // X-Owner-User-Id (which has no stable per-file value to send: every
       // consumer of this photo — students-gallery, photo-review, card
       // rendering, print — reads it back under its own distinct viewerId).
+      //
+      // Caveat (2026-09-24): "can never work" holds only as long as Looka's
+      // fs-core app has no `service_user_id` registered. If one ever is,
+      // fs-core stops treating this API key's uploads as owner-less — the
+      // key's own principal becomes the owner, and its own future requests
+      // are allowed to read/write files it uploaded that way regardless of
+      // this flag. Switching back to 'private' for these photos would then
+      // need to happen together with that registration, never ahead of it —
+      // an owner-less 'private' upload is now rejected outright at upload
+      // time by fs-core, not silently accepted and left unreadable as
+      // before. Keep 'public' until that registration decision is made.
       const visibility: Visibility = 'public';
 
       await manager.query(
@@ -342,6 +353,39 @@ export class PhotoService extends CommonService<Photo> {
       : `sessions/${dto.sessionId}/${dto.stepId}-${dto.attempt}.${ext}`;
 
     await this.dataSource.transaction(async (manager) => {
+      // 2026-09-24 fix (confirmed audit finding — cross-device session
+      // hijack): nothing below this point ever checked that `dto.sessionId`
+      // actually belongs to the calling device/campaign — a session id is
+      // just a client-supplied UUID, and `GET /v1/devices/recent-captures`
+      // already hands every kiosk in a campaign a list of OTHER kiosks' real
+      // session ids. Without this check, a second device (any device with
+      // valid device credentials, even from a different campaign) could POST
+      // a photo for a session it does not own: the `sessions` upsert below
+      // would silently accept it (`ON CONFLICT (id) DO UPDATE` never
+      // compares device_id/campaign_id), and the `photos` upsert would then
+      // overwrite that (session_id, step_id, attempt)'s sha256/bytes/
+      // virtual_path/camera_role with the attacker's own image while
+      // `upload_outbox`'s `ON CONFLICT (idem_key) DO NOTHING` kept the
+      // original bytes queued for upload — the DB metadata and the actual
+      // uploaded file would then permanently disagree, and content could be
+      // silently planted onto another student's session.
+      const existingSession: Array<{ device_id: string; campaign_id: string }> =
+        await manager.query(
+          `SELECT device_id, campaign_id FROM sessions WHERE id = $1`,
+          [dto.sessionId],
+        );
+      if (
+        existingSession.length > 0 &&
+        (existingSession[0].device_id !== deviceId ||
+          existingSession[0].campaign_id !== campaignId)
+      ) {
+        throw new CustomException(
+          'Session belongs to a different device/campaign',
+          ERROR_CODE.SESSION_DEVICE_MISMATCH,
+          HttpStatus.FORBIDDEN,
+        );
+      }
+
       // 2026-09-17 ("theo dõi ai chụp/ai upload"): a photo already reaches
       // this method — and thus Postgres — well before this session's own
       // SESSION_REPORT device-event (sent only after the operator approves

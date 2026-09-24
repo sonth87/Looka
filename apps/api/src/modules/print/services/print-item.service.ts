@@ -440,12 +440,16 @@ export class PrintItemService {
         mimeType: 'image/png',
         data: new Uint8Array(frontPng),
         idempotencyKey: `${idempotencyKey}-front`,
+        // Explicit, not left to the server default — same convention every
+        // other uploadRaw call site in this codebase already follows.
+        visibility: 'public',
       }),
       this.fileStorage.uploadRaw({
         virtualPath: `print-items/${item.id}/back-${idempotencyKey}.png`,
         mimeType: 'image/png',
         data: new Uint8Array(backPng),
         idempotencyKey: `${idempotencyKey}-back`,
+        visibility: 'public',
       }),
     ]);
 

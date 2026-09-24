@@ -99,7 +99,15 @@ export class VariantUploadWorkerService implements OnModuleInit {
   async onModuleInit(): Promise<void> {
     // Same "a process died mid-send" recovery as UploadWorkerService's own
     // onModuleInit — the upload is idempotent, so re-sending is safe and
-    // leaving a row stuck in SENDING forever is not.
+    // leaving a row stuck in SENDING forever is not. Same 2026-09-24
+    // command/query guard as that method too: PhotoReviewModule is imported
+    // into every root module for its controllers, so this service is
+    // instantiated (and this hook runs) on command/query hosts as well,
+    // even though only the worker host's @Cron actually drains the queue.
+    const serviceType = process.env.SERVICE_TYPE;
+    if (serviceType === 'command' || serviceType === 'query') {
+      return;
+    }
     await this.dataSource
       .query(
         `UPDATE variant_upload_outbox SET status = 'PENDING' WHERE status = 'SENDING'`,

@@ -80,6 +80,14 @@ export class User extends BaseEntity {
   @ApiPropertyOptional({ description: 'Số điện thoại' })
   phone?: string | null;
 
+  @Column('varchar', { length: 255, nullable: true })
+  @ApiPropertyOptional({ description: 'Phòng ban' })
+  department?: string | null;
+
+  @Column('varchar', { length: 255, nullable: true })
+  @ApiPropertyOptional({ description: 'Khoa' })
+  faculty?: string | null;
+
   @Column('uuid', { nullable: true, name: 'avatar_fs_file_id' })
   @ApiPropertyOptional({ description: 'Id ảnh thẻ trên file-service, nếu có' })
   avatarFsFileId?: string | null;

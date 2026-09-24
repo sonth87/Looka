@@ -80,6 +80,8 @@ export class UserCommandController {
         dto.title,
         dto.code,
         dto.phone,
+        dto.department,
+        dto.faculty,
         dto.roleIds,
         req.user?.id ?? null,
       ),
@@ -129,6 +131,8 @@ export class UserCommandController {
         dto.title,
         dto.code,
         dto.phone,
+        dto.department,
+        dto.faculty,
       ),
     );
   }

@@ -22,6 +22,113 @@ export interface ExportResult {
   error?: string;
 }
 
+/**
+ * Tethered Canon mirroring (2026-09-24 — "lỗi lật khung hình camera
+ * Canon"). Real webcam stills are pixel-mirrored at their own source
+ * before ever reaching a display/save path (`BrowserCameraService.
+ * setMirrorStills(true)`, extended everywhere by the 2026-09-17/18 product
+ * decision — see `FrameTile.tsx`'s own doc comment on why the display
+ * layer deliberately never re-mirrors via CSS, to avoid double-flipping an
+ * already-mirrored still). The tethered Canon's raw gphoto2 bytes never
+ * went through an equivalent step, so its preview/captured stills showed
+ * true sensor orientation while every other camera in the same UI showed
+ * mirrored — visually inconsistent and disorienting for a subject
+ * positioning themselves from the preview.
+ *
+ * Fixed HERE, once, in preload — not in `tetheredCamera.ts` (main process,
+ * no DOM/Canvas access, would need a new native image-processing
+ * dependency like `sharp` with real Electron-ABI packaging risk this
+ * avoids entirely) and not duplicated across the 4+ renderer call sites
+ * that poll `getTetheredLiveViewFrame`/call `captureTetheredPhoto`
+ * (`TetheredCameraPanel.tsx`, `FaceCaptureApp.tsx`, `CameraSetupScreen.tsx`,
+ * `CbHelpFrames.tsx`) — wrapping the two bridge methods here means every
+ * caller gets a mirrored `dataUrl` automatically, with zero changes
+ * anywhere else. Critically, this also fixes the REAL saved/uploaded
+ * photo, not just the live preview: `captureTetheredPhoto()`'s mirrored
+ * `dataUrl` is exactly what `FaceCaptureApp.tsx`'s `captureTetheredFrame()`
+ * hands to `WorkflowEngine.recordExternalCapture()`, the same value that
+ * eventually gets uploaded — there is no separate "raw" path for the real
+ * capture that this could miss. (`captureTetheredPhoto()`'s `savedPath` —
+ * the main process's own debug copy written straight to Desktop for the
+ * "Chụp thử" test button — is written BEFORE this wrapper runs and stays
+ * unmirrored. As of the 2026-09-24 fix it is genuinely test-only: it is
+ * only written when the caller passes `{ saveDebugCopy: true }`, which only
+ * `TetheredCameraPanel.tsx`'s test button does — a real session capture no
+ * longer leaves this copy on the Desktop.)
+ *
+ * Preload scripts run in the page's own DOM/JS realm even when sandboxed
+ * (`sandbox: true` only restricts Node.js API access, not standard Web
+ * APIs), so `Image`/`document.createElement('canvas')` are available here
+ * exactly as they would be in any renderer file. Not verified against real
+ * hardware — the Canon was not physically available at the time of this
+ * fix (see chat) — verified instead via the SIMULATE-mode fixture image, by
+ * eye, using the same code path.
+ */
+/**
+ * 2026-09-24 fix (confirmed audit finding — Canon still can exceed the
+ * server's photo size limit): the full-sensor Canon still (6000x4000 on the
+ * R6 Mark II, per `tetheredCamera.ts`'s own doc comment) was re-encoded here
+ * at its FULL resolution with no upper bound, while
+ * `apps/api/.../capture.constants.ts`'s `MAX_PHOTO_BYTES` (12 MiB, sized for
+ * ~1080p webcam stills) rejects anything larger with a permanent (non-
+ * retried) upload failure — a detailed or high-ISO frame can plausibly cross
+ * that line. Capping the long edge here bounds the re-encoded JPEG's size
+ * deterministically regardless of the camera's real sensor resolution,
+ * without needing real hardware measurements to pick a safe
+ * `MAX_PHOTO_BYTES` value, and without touching that server constant (other
+ * consumers of the same limit are out of scope for this fix). Applied ONLY
+ * to the still-capture path (`captureTetheredPhoto`, via
+ * `STILL_MAX_DIMENSION_PX` below) — the live-view poll
+ * (`getTetheredLiveViewFrame`, also used by the tethered recording canvas)
+ * is left at full resolution, since that path was not implicated in this
+ * finding and downscaling it is unrelated to fixing the upload rejection.
+ */
+const STILL_MAX_DIMENSION_PX = 3000;
+
+function mirrorDataUrlHorizontally(dataUrl: string, maxDimension?: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const naturalWidth = img.naturalWidth;
+        const naturalHeight = img.naturalHeight;
+        const longEdge = Math.max(naturalWidth, naturalHeight);
+        const scale = maxDimension && longEdge > maxDimension ? maxDimension / longEdge : 1;
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(naturalWidth * scale);
+        canvas.height = Math.round(naturalHeight * scale);
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          reject(new Error('mirrorDataUrlHorizontally: no 2d canvas context'));
+          return;
+        }
+        ctx.translate(canvas.width, 0);
+        ctx.scale(-1, 1);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL('image/jpeg', 0.92));
+      } catch (err) {
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    };
+    img.onerror = () => reject(new Error('mirrorDataUrlHorizontally: failed to decode image'));
+    img.src = dataUrl;
+  });
+}
+
+/** Applies `mirrorDataUrlHorizontally` to a `{ok, dataUrl, ...}` bridge result, falling back to the original (unmirrored) result on any mirroring failure — a display/orientation bug must never turn into "the camera stopped working" for the operator. */
+async function withMirroredDataUrl<T extends { ok: true; dataUrl: string }>(
+  result: T | { ok: false; error: string },
+  maxDimension?: number
+): Promise<T | { ok: false; error: string }> {
+  if (!result.ok) return result;
+  try {
+    return { ...result, dataUrl: await mirrorDataUrlHorizontally(result.dataUrl, maxDimension) };
+  } catch (err) {
+    console.error('[preload] tethered frame mirroring failed, using unmirrored frame:', err);
+    return result;
+  }
+}
+
 export interface UploadStatus {
   /** False when no file-service is configured; captures still queue locally. */
   configured: boolean;
@@ -558,6 +665,22 @@ export interface FaceAPIBridge {
    */
   onCameraRoleMappingChanged: (callback: (mapping: CameraRoleMapping) => void) => () => void;
 
+  /**
+   * 2026-09-23 real-hardware feedback ("camera được kết nối đang không
+   * hiển thị") — root cause found in the renderer console log: the Camera
+   * Setup popup's own preview `getUserMedia` call was failing with
+   * `NotReadableError: Device in use`, because the MAIN window's own
+   * `CampaignGate` device-init preview was ALREADY holding that exact
+   * physical camera open (most UVC webcam drivers allow only one reader at
+   * a time — the same limitation `CampaignGate.tsx`'s own per-device-not-
+   * per-role dedup comment documents). Fired by `cameraSetupWindow.ts`
+   * right before/after that popup opens/closes, so the main window can
+   * release its own preview streams while the popup needs exclusive access,
+   * then reopen them afterward.
+   */
+  onCameraPauseForSetup: (callback: () => void) => () => void;
+  onCameraResumeAfterSetup: (callback: () => void) => () => void;
+
   /** Per-role physical camera mounting angle (§3.9) — set from the camera setup screen, read by round planning. */
   getCameraPhysicalAngles: () => Promise<CameraPhysicalAngleMap>;
   setCameraPhysicalAngles: (angles: CameraPhysicalAngleMap) => Promise<boolean>;
@@ -580,11 +703,51 @@ export interface FaceAPIBridge {
    * same boundary elsewhere in this app.
    */
   getTetheredCameraStatus: () => Promise<{ connected: boolean; model?: string; error?: string }>;
-  /** `savedPath` — Bước 0's own "chụp và lưu lại" hardware check: the real captured JPEG is also written to disk (not just shown inline) so it can be opened/inspected directly, same "not saved anywhere" test-only scope otherwise. */
-  captureTetheredPhoto: () => Promise<{ ok: true; dataUrl: string; savedPath: string } | { ok: false; error: string }>;
+  /**
+   * `saveDebugCopy` (2026-09-24 fix, confirmed audit finding): this same
+   * bridge method is called both by the Camera Setup "Chụp thử" test button
+   * (`TetheredCameraPanel.tsx`) AND by every REAL session capture
+   * (`FaceCaptureApp.tsx`'s `captureTetheredFrame()`) — the main process used
+   * to write Bước 0's "chụp và lưu lại" Desktop debug copy unconditionally,
+   * so every real student's Canon photo was ALSO left, full-resolution and
+   * unencrypted, in `~/Desktop/Looka-tethered-test-captures/`, forever (never
+   * cleaned up), despite being commented "test-only scope". Only the test
+   * panel now opts into that debug copy; `savedPath` is only present when it
+   * did.
+   */
+  captureTetheredPhoto: (
+    opts?: { saveDebugCopy?: boolean }
+  ) => Promise<{ ok: true; dataUrl: string; savedPath?: string } | { ok: false; error: string }>;
   getTetheredLiveViewFrame: () => Promise<{ ok: true; dataUrl: string } | { ok: false; error: string }>;
   /** Opens the bundled Zadig for the one-time WinUSB driver step — no scriptable Zadig interface exists, this can only open it (2026-09-22). */
   openTetheredCameraZadig: () => Promise<{ ok: boolean; error?: string }>;
+
+  /**
+   * Config discovery + thermal-warning polling (2026-09-23 — "có thể lấy
+   * được nhiệt độ cam để cảnh báo lên màn hình khi cam quá tải không?").
+   * `listTetheredCameraConfig`/`getTetheredCameraConfigValue` are generic
+   * `gphoto2 --list-config`/`--get-config` wrappers for finding whatever
+   * this camera actually exposes; `getTetheredThermalWarning` is a no-op
+   * (`enabled: false`) until `TETHERED_TEMP_CONFIG_PATH` is set to a real
+   * discovered path — see `tetheredCamera.ts`'s own doc comments.
+   */
+  listTetheredCameraConfig: () => Promise<{ ok: true; paths: string[] } | { ok: false; error: string }>;
+  getTetheredCameraConfigValue: (configPath: string) => Promise<{ ok: true; value: string } | { ok: false; error: string }>;
+  getTetheredThermalWarning: () => Promise<{ enabled: boolean; warning: boolean; raw?: string; error?: string }>;
+
+  /**
+   * Auto-detect watcher (docs/plans/canon-auto-detect-polling-plan-2026-09-24.md)
+   * — `onTetheredConnectionChanged` fires only when the connected/model
+   * state actually changes (not on every background poll tick), same shape
+   * as `onCameraRoleMappingChanged` below. `setTetheredCameraSessionActive`
+   * lets the renderer tell the watcher to pause while a real capture
+   * session is running, so its background `detectTetheredCamera()` polling
+   * doesn't compete with `withCameraLock` for the shared gphoto2 session.
+   */
+  onTetheredConnectionChanged: (
+    callback: (status: { connected: boolean; model?: string; error?: string }) => void
+  ) => () => void;
+  setTetheredCameraSessionActive: (active: boolean) => Promise<boolean>;
 
   /** "Cách chụp" — Tuần tự/Đồng thời, a kiosk-local setting (§3.9). */
   getCaptureSequencing: () => Promise<'sequential' | 'simultaneous'>;
@@ -741,13 +904,33 @@ const faceAPI: FaceAPIBridge = {
     ipcRenderer.on('camera:roleMappingChanged', listener);
     return () => ipcRenderer.removeListener('camera:roleMappingChanged', listener);
   },
+  onCameraPauseForSetup: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on('camera:pauseForSetup', listener);
+    return () => ipcRenderer.removeListener('camera:pauseForSetup', listener);
+  },
+  onCameraResumeAfterSetup: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on('camera:resumeAfterSetup', listener);
+    return () => ipcRenderer.removeListener('camera:resumeAfterSetup', listener);
+  },
   getCameraPhysicalAngles: () => ipcRenderer.invoke('camera:getPhysicalAngles'),
   setCameraPhysicalAngles: (angles) => ipcRenderer.invoke('camera:setPhysicalAngles', angles),
   openCameraSetup: () => ipcRenderer.invoke('camera:openSetup'),
   getTetheredCameraStatus: () => ipcRenderer.invoke('tetheredCamera:status'),
-  captureTetheredPhoto: () => ipcRenderer.invoke('tetheredCamera:capture'),
-  getTetheredLiveViewFrame: () => ipcRenderer.invoke('tetheredCamera:getLiveViewFrame'),
+  captureTetheredPhoto: async (opts) =>
+    withMirroredDataUrl(await ipcRenderer.invoke('tetheredCamera:capture', opts), STILL_MAX_DIMENSION_PX),
+  getTetheredLiveViewFrame: async () => withMirroredDataUrl(await ipcRenderer.invoke('tetheredCamera:getLiveViewFrame')),
   openTetheredCameraZadig: () => ipcRenderer.invoke('tetheredCamera:openZadig'),
+  listTetheredCameraConfig: () => ipcRenderer.invoke('tetheredCamera:listConfig'),
+  getTetheredCameraConfigValue: (configPath: string) => ipcRenderer.invoke('tetheredCamera:getConfigValue', configPath),
+  getTetheredThermalWarning: () => ipcRenderer.invoke('tetheredCamera:getThermalWarning'),
+  onTetheredConnectionChanged: (callback) => {
+    const listener = (_: unknown, status: { connected: boolean; model?: string; error?: string }) => callback(status);
+    ipcRenderer.on('tetheredCamera:connectionChanged', listener);
+    return () => ipcRenderer.removeListener('tetheredCamera:connectionChanged', listener);
+  },
+  setTetheredCameraSessionActive: (active) => ipcRenderer.invoke('tetheredCameraWatcher:setSessionActive', active),
   getCaptureSequencing: () => ipcRenderer.invoke('capture:getSequencing'),
   setCaptureSequencing: (value) => ipcRenderer.invoke('capture:setSequencing', value),
   getCbHelpVisibility: () => ipcRenderer.invoke('camera:getCbHelpVisibility'),

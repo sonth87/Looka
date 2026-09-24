@@ -66,6 +66,8 @@ export class CreateUserHandler
     user.title = command.title ?? null;
     user.code = command.code ?? null;
     user.phone = command.phone ?? null;
+    user.department = command.department ?? null;
+    user.faculty = command.faculty ?? null;
     user.isAdmin = false;
     user.roles = [];
     user.status = 'ACTIVE';

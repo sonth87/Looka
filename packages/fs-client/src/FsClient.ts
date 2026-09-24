@@ -700,6 +700,15 @@ function toUploadResult(body: unknown): UploadResult {
     etag: String(b.etag ?? ''),
     version: Number(b.version ?? 1),
     dedupHit: Boolean(b.dedup_hit),
+    // Known gap (2026-09-24, low impact — nothing in this codebase reads
+    // UploadResult.visibility today): fs-core can also return 'department'
+    // for a file whose file_type_rule sets force_visibility, or one
+    // uploaded with X-Visibility: department + an org unit. The shared
+    // `Visibility` type (@face/core) is only 'public' | 'private', so a
+    // 'department' response is reported here as 'public' rather than
+    // widening that type across the whole monorepo for a value nothing
+    // consumes yet. Revisit together with adding a real 'department'
+    // consumer, not in isolation.
     visibility: b.visibility === 'private' ? 'private' : 'public',
   };
 }

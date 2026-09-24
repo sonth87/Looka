@@ -129,6 +129,35 @@ describe('buildSessionReportPayload', () => {
     assert.equal(payload.startedAt, '2026-09-06T10:00:00.000Z');
   });
 
+  test('strips a local:-prefixed fsFileId placeholder rather than forwarding it (2026-09-23 — real prod incident: "invalid input syntax for type uuid: \"local:acd0d9c1-5cbe-41ed-a38e-606c4088ac19\"" from POST /v1/devices/events)', () => {
+    // Reproduces the post-save-retake scenario: a SECOND approveSessionUpload()
+    // call for the same session sees an EARLIER photo that has, in the
+    // meantime, actually uploaded — so its local outbox row's fsFileId now
+    // holds ApiPhotoUploadClient's own placeholder (see LOCAL_FILE_ID_PREFIX's
+    // own doc comment), never a real fs-core id. That must never reach the
+    // SESSION_REPORT payload's photos[].fsFileId, which apps/api's
+    // CaptureReportService.applySessionReport() writes straight into
+    // photos.fs_file_id — a Postgres uuid column.
+    const rows = [makeRow({ fsFileId: 'local:acd0d9c1-5cbe-41ed-a38e-606c4088ac19', fsStatus: 'READY' })];
+    const payload = buildSessionReportPayload(rows, undefined, {
+      sessionId: 'sess-1',
+      approvedAt: '2026-09-06T10:00:00.000Z',
+    });
+    assert.equal(payload.photos[0].fsFileId, null);
+    // fsStatus itself is not uuid-typed server-side and carries no such
+    // constraint — only the placeholder id is stripped.
+    assert.equal(payload.photos[0].fsStatus, 'READY');
+  });
+
+  test('a real (non-placeholder) fsFileId passes through unchanged', () => {
+    const rows = [makeRow({ fsFileId: '11111111-2222-3333-4444-555555555555' })];
+    const payload = buildSessionReportPayload(rows, undefined, {
+      sessionId: 'sess-1',
+      approvedAt: '2026-09-06T10:00:00.000Z',
+    });
+    assert.equal(payload.photos[0].fsFileId, '11111111-2222-3333-4444-555555555555');
+  });
+
   test('a row with no recoverable stepId reports an empty stepId and a zero attempt rather than throwing', () => {
     // Only reachable in practice for a row whose idem_key does not match the
     // expected shape at all — see UploadOutboxRepository.toItem()'s own doc
