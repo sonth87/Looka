@@ -20,6 +20,22 @@ interface CbHelpFrame {
   deviceId: string | null;
   status: CbHelpFrameStatus;
   capturedDataUrl?: string;
+  /**
+   * Periodic still of THIS frame's own live camera, relayed from the main
+   * kiosk window's ALREADY-open stream (2026-09-23 fix, live field report,
+   * quoted verbatim: "màn extend khi mở chọn cam giữa thì hiển thị cả 3 góc
+   * cam nhưng ảnh chỉ của cam giữa" — see the `neededDeviceIdsKey`
+   * computation's own doc comment further down for the confirmed root
+   * cause: a non-CENTER role must never try to open a second, competing
+   * `getUserMedia` for a physical device the main window already holds
+   * exclusively during an active session). Mirrors how CENTER's own
+   * `centerPreviewDataUrl` (on `CbHelpPublishState`) already works, just
+   * scoped per-frame here since every non-CENTER role has its own distinct
+   * device/stream. `undefined`/`null` once COMPLETED (the real
+   * `capturedDataUrl` already covers it) or while the main window hasn't
+   * published a still for this device yet.
+   */
+  livePreviewDataUrl?: string | null;
   attempt: number;
 }
 
@@ -31,8 +47,9 @@ interface CbHelpPublishState {
    * the placeholder message below. `'live'`: normal in-progress capture,
    * same rendering as always. `'review'`/`'done'`: the run finished — every
    * frame in `frames` is already COMPLETED with its photo, so this renders
-   * the same frame grid as `'live'`, just with no live stream needed (see
-   * `isFrameLive`) and a different header (see the render below).
+   * the same frame grid as `'live'`, just with every frame's own
+   * `capturedDataUrl` already covering it (no live stream or relayed still
+   * needed) and a different header (see the render below).
    */
   phase: 'idle' | 'live' | 'review' | 'done';
   simultaneous: boolean;
@@ -52,8 +69,9 @@ interface CbHelpPublishState {
    * `FaceCaptureApp.tsx`'s `publishCbHelpState`/`centerPreviewDataUrl` doc
    * comment for the field bug this replaces: this window used to open its
    * own competing `getUserMedia` for the same physical device). Rendered for
-   * the CENTER tile below instead of a live `<video>` stream — see
-   * `isFrameLive`, which now excludes CENTER entirely.
+   * the CENTER tile below instead of a live `<video>` stream, whenever
+   * `centerLiveDeviceId`'s own separate attempt (see that computation's doc
+   * comment) hasn't opened one.
    */
   centerPreviewDataUrl?: string | null;
   /**
@@ -122,40 +140,38 @@ const EMPTY_STATE: CbHelpPublishState = {
 const GREETING_DURATION_MS = 2000;
 
 /**
- * Whether `frame` should have its OWN, independently-opened live camera
- * stream in this window right now. Simultaneous mode: every not-yet-
- * COMPLETED frame goes live at once, same as the main kiosk window's own
- * multi-frame grid. Sequential mode: only the CURRENT frame — the others are
- * either not reached yet (PENDING) or already have their captured photo to
- * show (COMPLETED) instead.
+ * REMOVED 2026-09-23 — this used to be `isFrameLive(frame, simultaneous,
+ * centerDeviceId)`, deciding whether a non-CENTER frame should get its OWN,
+ * independently-opened `getUserMedia` stream in this window (simultaneous
+ * mode: every not-yet-COMPLETED frame; sequential mode: only CURRENT).
  *
- * CENTER is excluded here unconditionally, but is NOT excluded from having a
- * live stream overall — its own attempt is handled separately by
- * `centerLiveDeviceId`/`centerLiveStream` (2026-09-15, "muốn mượt như ở màn
- * action" field request, reopening item 12b — see that computation's own
- * doc comment for the full history and the automatic per-device fallback
- * this now has that the original item-12b removal didn't). This function
- * only governs the OTHER frames' own `getUserMedia` attempts.
+ * Live field report, quoted verbatim: "màn extend khi mở chọn cam giữa thì
+ * hiển thị cả 3 góc cam nhưng ảnh chỉ của cam giữa" — CB Help shows all 3
+ * camera-angle tiles during an active session, but only CENTER ever has a
+ * real image. Confirmed root cause by reading `FaceCaptureApp.tsx`'s own
+ * `frameStreamsRef`/`openRoundStreams`/`openFrameStreams`: the MAIN kiosk
+ * window already holds an EXCLUSIVE `getUserMedia` open for every non-CENTER
+ * frame's physical device for the entire active-session lifetime (not just
+ * while that frame is the CURRENT shot) — the identical "one UVC reader at a
+ * time" driver contention `centerLiveDeviceId` below already documents for
+ * CENTER, and `CampaignGate.tsx`'s `pausedForSetup` documents for the Camera
+ * Setup popup, just contended against the active session's OWN streams this
+ * time. This window's second `getUserMedia` for that same deviceId always
+ * lost that race and failed silently (`NotReadableError: Device in use`),
+ * leaving every non-CENTER tile blank — exactly the reported symptom.
  *
- * `centerDeviceId` (2026-09-09 fix, live-hardware-confirmed: `[cb-help]
- * failed to open camera <id>: NotReadableError`/`[object DOMException]` on a
- * kiosk with exactly one real camera): a non-CENTER role (LEFT/RIGHT/CUSTOM)
- * can resolve to the *exact same* physical device id as CENTER's own
- * (`planCaptureRounds`'s "1 camera covers multiple roles" fallback,
- * lib/multiFrame.ts) on a kiosk without a distinct camera per role. Such a
- * frame must not ALSO try to open its own second, redundant reader of that
- * device — it is excluded here, but (unlike before `centerLiveDeviceId`
- * existed) is not left with nothing: `streamsRef` is keyed by device id, so
- * if CENTER's own attempt for that same id succeeds, this frame's render
- * (`stream={... streamsRef.current.get(frame.deviceId) ...}`) picks up that
- * exact same already-open stream for free — no separate open, no separate
- * fallback needed.
+ * See the `neededDeviceIdsKey` computation further down for what replaced
+ * this: non-CENTER frames no longer attempt their own stream at all during
+ * an active session, and instead render a relayed still
+ * (`frame.livePreviewDataUrl`, pushed by `FaceCaptureApp.tsx`'s
+ * `publishCbHelpState` from ITS OWN already-open stream) — see
+ * `sideLiveImage` in the render below. The old `centerDeviceId`-sharing
+ * exclusion this function also did (two roles resolving to the same
+ * physical device as CENTER) needs no replacement: that case was never an
+ * "opens its own stream" case in the first place, and still picks up
+ * `centerLiveStream` for free via `neededDeviceIdsKey`'s own
+ * `centerLiveDeviceId` term.
  */
-function isFrameLive(frame: CbHelpFrame, simultaneous: boolean, centerDeviceId: string | null): boolean {
-  if (!frame.deviceId || frame.status === 'COMPLETED' || frame.role === 'CENTER') return false;
-  if (centerDeviceId && frame.deviceId === centerDeviceId) return false;
-  return simultaneous || frame.status === 'CURRENT';
-}
 
 /**
  * Gap (px) between columns — kept small since tiles should be as large as
@@ -192,6 +208,16 @@ const TILE_GAP_PX = 10;
  * fix (computed `gridTemplateColumns` was a single `84px` track, not 5).
  */
 const MAX_TILE_WIDTH_VW = 32;
+
+/**
+ * Same literal as `CameraSetupScreen.tsx`/`FaceCaptureApp.tsx`/`CampaignGate.tsx`
+ * — see any of their own doc comments for why this is duplicated rather than
+ * imported (main-process/renderer/packages boundaries). 2026-09-23 addition —
+ * see the local `tetheredCenterPreview` poll effect further down for why this
+ * window now needs to know it directly instead of only reading it off
+ * `state.cameraRoleMapping.CENTER` inline.
+ */
+const TETHERED_DEVICE_ID = 'tethered:gphoto2';
 
 /**
  * Which camera roles show on CB Help and in what order — mirrors
@@ -398,19 +424,25 @@ function CbHelpVisibilitySettings({ onClose }: { onClose: () => void }) {
  * comment for the full data flow).
  *
  * Live video: this window opens its own
- * `getUserMedia({ video: { deviceId: { exact } } })` per frame's device,
- * CENTER included as of 2026-09-15 (see `centerLiveDeviceId`'s own doc
- * comment for why CENTER's own attempt is handled separately from
- * `isFrameLive`, and the automatic per-device fallback to
- * `centerPreviewDataUrl` if it fails to open — this reopens, but does not
- * blindly repeat, item 12b/2026-09-09's original "CENTER stayed blank on
- * common Windows UVC drivers" field bug). Streams are keyed by `deviceId`
- * (not by step/role, so two frames sharing one physical device reuse a
- * single open stream instead of each trying their own) and reused across
- * pushes — the reconciliation effect below only opens a device it does not
- * already hold a stream for, and only stops one no frame needs live anymore
- * (a step that just got COMPLETED, a visibility toggle, or a mode/session
- * change).
+ * `getUserMedia({ video: { deviceId: { exact } } })`, but — as of
+ * 2026-09-23 — only for CENTER (see `centerLiveDeviceId`'s own doc comment
+ * for the automatic per-device fallback to `centerPreviewDataUrl` if it
+ * fails to open — this reopens, but does not blindly repeat, item
+ * 12b/2026-09-09's original "CENTER stayed blank on common Windows UVC
+ * drivers" field bug) and for idle-phase preview roles (`idlePreviewDeviceIds`,
+ * 2026-09-15). Non-CENTER frames during an ACTIVE SESSION deliberately do
+ * NOT open their own stream anymore — see the `neededDeviceIdsKey`
+ * computation's own doc comment further down for the live field report and
+ * confirmed root cause (this window's own attempt always lost the "one UVC
+ * reader at a time" race against the main kiosk window's already-open
+ * stream for the identical physical device); they render a relayed still
+ * (`frame.livePreviewDataUrl`) instead, the same item-12b-style mechanism
+ * CENTER's own `centerPreviewDataUrl` already used. Streams are keyed by
+ * `deviceId` (not by step/role, so two roles sharing one physical device
+ * reuse a single open stream instead of each trying their own) and reused
+ * across pushes — the reconciliation effect below only opens a device it
+ * does not already hold a stream for, and only stops one nothing needs live
+ * anymore (a visibility toggle, hot-unplug, or phase change).
  */
 export default function CbHelpFrames() {
   const [state, setState] = useState<CbHelpPublishState>(EMPTY_STATE);
@@ -467,8 +499,9 @@ export default function CbHelpFrames() {
     // mapped at all) has nothing to duplicate, so it always keeps its own
     // placeholder tile regardless of this dedup. CENTER's own device
     // (already covered by `centerPreviewDataUrl`, never opened as a second
-    // stream here) claims its slot first, same as `isFrameLive`'s own
-    // `centerDeviceId` check during an active session.
+    // stream here) claims its slot first, same reasoning the
+    // `neededDeviceIdsKey` computation's own `centerLiveDeviceId` term
+    // applies for the active-session case further down.
     const claimedDeviceIds = new Set<string>();
     const centerDeviceId = state.cameraRoleMapping?.CENTER;
     if (centerDeviceId) claimedDeviceIds.add(centerDeviceId);
@@ -580,6 +613,73 @@ export default function CbHelpFrames() {
     };
   }, []);
 
+  /**
+   * Direct tethered live-view poll (2026-09-23 — "vẫn khá lag, cần mượt như
+   * màn action chụp"). Diagnostic logging (now removed) proved the actual
+   * bottleneck: `centerPreviewDataUrl` was relayed through the MAIN kiosk
+   * window's own `publishCbHelpState`/`tetheredPreview` poll, and that
+   * window's JS thread is busy running real-time face-detection ML
+   * inference continuously — measured gaps between consecutive
+   * `cbhelp:update` pushes averaged ~350ms (up to ~900ms). This window's own
+   * JS thread has no such competing workload, so it now polls
+   * `getTetheredLiveViewFrame()` directly, the same call and the same
+   * backoff shape `TetheredCameraPanel.tsx`/`FaceCaptureApp.tsx` already
+   * use, completely bypassing the busy relay for this one field. Falls
+   * back to the relayed `state.centerPreviewDataUrl` (see the 3 read sites
+   * below) only for the brief window before this poll's own first frame
+   * lands, so there's still something to show immediately on open.
+   *
+   * `BASE_INTERVAL_MS` (2026-09-24 fix, confirmed audit finding): this was
+   * left at 60ms — a leftover from the same 2026-09-23 experiment
+   * `TetheredCameraPanel.tsx`/`FaceCaptureApp.tsx`/`CampaignGate.tsx` were
+   * all reverted back to 200ms from, the same day, once it turned out 60ms
+   * was fast enough to measurably compete with real webcams' own idle
+   * preview streams. This poll runs in its own separate `BrowserWindow`, so
+   * it does not hit that exact contention itself, but a 60ms cadence here
+   * still made `tetheredCamera.ts`'s unrelated capture/live-view race (this
+   * poll racing a real multi-second Canon shutter release for the same
+   * USB/PTP session) far more likely to actually land. Matched back to
+   * 200ms, same as the other three pollers, per this file's own doc comment
+   * a few lines up ("the same backoff shape ... already use").
+   */
+  const [tetheredCenterPreview, setTetheredCenterPreview] = useState<string | null>(null);
+  const centerIsTethered = state.cameraRoleMapping?.CENTER === TETHERED_DEVICE_ID;
+  useEffect(() => {
+    const faceAPI = (window as any).faceAPI;
+    if (!centerIsTethered || !faceAPI?.getTetheredLiveViewFrame) {
+      setTetheredCenterPreview(null);
+      return;
+    }
+    const BASE_INTERVAL_MS = 200;
+    const MAX_INTERVAL_MS = 8000;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let consecutiveFailures = 0;
+    const poll = async () => {
+      if (cancelled) return;
+      try {
+        const result = await faceAPI.getTetheredLiveViewFrame();
+        if (cancelled) return;
+        if (result?.ok) {
+          setTetheredCenterPreview(result.dataUrl);
+          consecutiveFailures = 0;
+        } else {
+          consecutiveFailures += 1;
+        }
+      } catch {
+        consecutiveFailures += 1;
+      }
+      if (cancelled) return;
+      const delay = Math.min(BASE_INTERVAL_MS * 2 ** consecutiveFailures, MAX_INTERVAL_MS);
+      timer = setTimeout(poll, delay);
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [centerIsTethered]);
+
   // Stable, content-based key for "which device ids does this window need a
   // stream for right now" — 2026-09-09 fix. `state` is a brand-new object on
   // EVERY `cbhelp:update` push, including the main window's item-12b
@@ -596,44 +696,69 @@ export default function CbHelpFrames() {
   // reject. Sorting+joining into one string means the effect's dependency
   // array only actually changes when the SET of needed device ids changes —
   // a real hot-plug/step change — not on every content-identical republish.
-  const centerFrameDeviceId = state.frames.find((f) => f.role === 'CENTER')?.deviceId ?? null;
   // Idle-preview device ids (2026-09-15) — only relevant in `idle` phase;
-  // once a real session starts, `state.frames` itself covers every visible
-  // non-CENTER role (via `isFrameLive` below) and this list is naturally
-  // empty (`idlePreviewRoles` requires `state.frames`-independent mapping
-  // data, but there's no reason to open a SECOND, redundant stream for a
-  // role `state.frames` is already live-streaming). Filtered to `isRoleLive`
-  // (2026-09-16) — `idlePreviewRoles` now also includes roles with no
-  // connected device at all (see its own doc comment), and there is nothing
-  // to open a stream FOR those; they render a MISSING/UNASSIGNED placeholder
-  // below instead.
+  // once a real session starts, non-CENTER frames no longer open their own
+  // stream at all (2026-09-23 fix, see this const's sibling comment below
+  // on `neededDeviceIdsKey` for why), so this stays scoped to `idle` phase
+  // alone regardless — there is no "already live-streaming" case to avoid
+  // duplicating anymore. Filtered to `isRoleLive` (2026-09-16) —
+  // `idlePreviewRoles` now also includes roles with no connected device at
+  // all (see its own doc comment), and there is nothing to open a stream
+  // FOR those; they render a MISSING/UNASSIGNED placeholder below instead.
   const idlePreviewDeviceIds =
     state.phase === 'idle'
       ? idlePreviewRoles.filter(isRoleLive).map((role) => state.cameraRoleMapping![role] as string)
       : [];
   // CENTER's own live stream attempt (2026-09-15, "muốn mượt như ở màn
-  // action" field request) — see `isFrameLive`'s own doc comment for the
-  // full item-12b history this reopens: a live `getUserMedia` for CENTER
-  // was removed because a second concurrent reader of the SAME physical
-  // device commonly fails on Windows UVC webcam drivers, leaving the tile
-  // fully blank with no fallback. This attempts it again, but — unlike the
-  // original item-12b code — with an automatic, per-device fallback: if
-  // `getUserMedia` for this id rejects (logged once by the reconciliation
-  // effect below, same as any other device), it simply never lands in
-  // `streamsRef`, and every CENTER render below already passes BOTH
-  // `stream` and `imagePath` — `FrameTile` itself prefers `stream` when
-  // present and only falls back to `imagePath` when `!stream` (see its own
-  // doc comment on that prop combination), so a failed open here silently
-  // degrades back to the existing `centerPreviewDataUrl` snapshot instead
-  // of a blank tile. Best case (the driver tolerates it): real smooth video,
-  // same as the main window. Worst case: exactly today's snapshot behavior,
-  // never worse.
+  // action" field request) — see `centerLiveStream`'s own read site below
+  // for the full item-12b history this reopens: a live `getUserMedia` for
+  // CENTER was removed because a second concurrent reader of the SAME
+  // physical device commonly fails on Windows UVC webcam drivers, leaving
+  // the tile fully blank with no fallback. This attempts it again, but —
+  // unlike the original item-12b code — with an automatic, per-device
+  // fallback: if `getUserMedia` for this id rejects (logged once by the
+  // reconciliation effect below, same as any other device), it simply
+  // never lands in `streamsRef`, and every CENTER render below already
+  // passes BOTH `stream` and `imagePath` — `FrameTile` itself prefers
+  // `stream` when present and only falls back to `imagePath` when
+  // `!stream` (see its own doc comment on that prop combination), so a
+  // failed open here silently degrades back to the existing
+  // `centerPreviewDataUrl` snapshot instead of a blank tile. Best case (the
+  // driver tolerates it): real smooth video, same as the main window.
+  // Worst case: exactly today's snapshot behavior, never worse.
   const centerLiveDeviceId = (() => {
     const id = state.cameraRoleMapping?.CENTER;
     return id && (state.connectedDeviceIds ?? []).includes(id) ? id : null;
   })();
+  // Non-CENTER active-session frames deliberately do NOT contribute their
+  // deviceId here anymore (2026-09-23 fix, live field report, quoted
+  // verbatim: "màn extend khi mở chọn cam giữa thì hiển thị cả 3 góc cam
+  // nhưng ảnh chỉ của cam giữa" — all 3 tiles show during an active
+  // session, but only CENTER ever has a real image). Confirmed root cause
+  // by reading `FaceCaptureApp.tsx`'s own `frameStreamsRef`/
+  // `openRoundStreams`/`openFrameStreams`: the MAIN kiosk window already
+  // holds an EXCLUSIVE `getUserMedia` open for every non-CENTER frame's
+  // physical device for the entire active-session lifetime (not just while
+  // that frame is the CURRENT shot) — the identical "one UVC reader at a
+  // time" driver contention `centerLiveDeviceId` above already documents
+  // for CENTER, and `CampaignGate.tsx`'s `pausedForSetup` documents for the
+  // Camera Setup popup, just contended against the active session's OWN
+  // streams this time. This window's second `getUserMedia` for that same
+  // deviceId always lost that race and failed silently (`NotReadableError:
+  // Device in use`, logged by the reconciliation effect below), leaving
+  // every non-CENTER tile blank — exactly the reported symptom. Removed the
+  // attempt entirely rather than adding yet another pause/resume IPC
+  // coordination pair (the pattern `pausedForSetup` uses): unlike the
+  // Camera Setup popup, there is no natural point where the active session
+  // would ever release these devices, so "pause the session's own streams
+  // while CB Help needs them" is not an option here. Instead each frame now
+  // carries its own `livePreviewDataUrl` (see `CbHelpFrame`'s own doc
+  // comment) — a periodic still relayed from the main window's ALREADY-open
+  // stream, the exact same mechanism item 12b already uses for CENTER's own
+  // `centerPreviewDataUrl` (see `FaceCaptureApp.tsx`'s `publishCbHelpState`)
+  // — rendered below instead of a live `<video>` (see the `sideLiveImage`
+  // computation further down).
   const neededDeviceIdsKey = [
-    ...state.frames.filter((f) => isFrameLive(f, state.simultaneous, centerFrameDeviceId)).map((f) => f.deviceId as string),
     ...idlePreviewDeviceIds,
     ...(centerLiveDeviceId ? [centerLiveDeviceId] : []),
   ]
@@ -828,7 +953,7 @@ export default function CbHelpFrames() {
                     deviceLabel={centerLiveDeviceId ? deviceLabelsRef.current.get(centerLiveDeviceId) ?? null : null}
                     stream={centerLiveStream}
                     status="READY"
-                    imagePath={state.centerPreviewDataUrl}
+                    imagePath={tetheredCenterPreview ?? state.centerPreviewDataUrl}
                     mirrored={CAPTURE_MIRRORED}
                     showCompositionGrid
                   />
@@ -891,7 +1016,7 @@ export default function CbHelpFrames() {
               deviceLabel={centerLiveDeviceId ? deviceLabelsRef.current.get(centerLiveDeviceId) ?? null : null}
               stream={centerLiveStream}
               status="READY"
-              imagePath={state.centerPreviewDataUrl}
+              imagePath={tetheredCenterPreview ?? state.centerPreviewDataUrl}
               mirrored={CAPTURE_MIRRORED}
               showCompositionGrid
             />
@@ -989,7 +1114,24 @@ export default function CbHelpFrames() {
           // captured photo takes over regardless, exactly like every other
           // frame (same `FrameTile` rule: `status === 'COMPLETED'` wins).
           const isCenter = frame.role === 'CENTER';
-          const centerLiveImage = isCenter && frame.status !== 'COMPLETED' ? state.centerPreviewDataUrl : null;
+          const centerLiveImage =
+            isCenter && frame.status !== 'COMPLETED' ? tetheredCenterPreview ?? state.centerPreviewDataUrl : null;
+          // Non-CENTER (2026-09-23 fix — see the `neededDeviceIdsKey`
+          // computation's own doc comment above for the full root-cause
+          // story). This window no longer opens its own competing stream
+          // for a non-CENTER frame during an active session, so `stream`
+          // below is always `null` for one UNLESS it happens to share
+          // CENTER's exact physical device (the
+          // `streamsRef.current.get(frame.deviceId)` fallback below still
+          // picks that up for free — see `centerLiveDeviceId`'s own doc
+          // comment). The relayed `frame.livePreviewDataUrl` — a periodic
+          // still of the main window's ALREADY-open stream for this exact
+          // device, pushed by `FaceCaptureApp.tsx`'s `publishCbHelpState` —
+          // fills the gap `imagePath` needs for every other case, same
+          // "prefers stream, falls back to imagePath" `FrameTile` rule
+          // CENTER already relies on above.
+          const sideLiveImage =
+            !isCenter && frame.status !== 'COMPLETED' ? frame.livePreviewDataUrl ?? null : null;
           return (
             <FrameTile
               key={frame.stepId}
@@ -1000,7 +1142,7 @@ export default function CbHelpFrames() {
               deviceLabel={frame.deviceId ? deviceLabelsRef.current.get(frame.deviceId) ?? null : null}
               stream={isCenter ? centerLiveStream : frame.deviceId ? streamsRef.current.get(frame.deviceId) ?? null : null}
               status={frame.status}
-              imagePath={centerLiveImage ?? frame.capturedDataUrl}
+              imagePath={centerLiveImage ?? sideLiveImage ?? frame.capturedDataUrl}
               mirrored={CAPTURE_MIRRORED}
               // 2026-09-15 field request: the extended display's CENTER tile
               // (the printed/matched photo — always shown by default, see

@@ -66,12 +66,27 @@ export function shouldRecordSingleStream(
 /**
  * Gate for the true simultaneous multi-channel recording effect — active
  * once at least 2 distinct physical cameras are mapped to roles.
+ *
+ * `hasTetheredChannel` (2026-09-24, tethered-camera recording via a canvas-
+ * captured live-view feed — see `tetheredCanvasStream.ts`): the tethered
+ * Canon has no `getUserMedia` stream, so `shouldRecordSingleStream`'s
+ * `hasStream` check can never be true for a role mapped to it — a kiosk with
+ * ONLY the Canon assigned (no other physical camera) would otherwise never
+ * record at all, falling through both gates. The multi-channel effect is the
+ * only one that can build a stream for a synthetic device id, so it also
+ * fires for exactly 1 mapped device when that device is the tethered one.
+ * `multiChannelDeviceCount >= 2` keeps firing on its own regardless of this
+ * flag — a webcam + the Canon together already satisfy it without needing
+ * this branch.
  */
-export function shouldRecordMultiChannel(inputs: RecordingGateInputs): boolean {
+export function shouldRecordMultiChannel(
+  inputs: RecordingGateInputs & { hasTetheredChannel?: boolean }
+): boolean {
   return (
     inputs.recordVideo &&
     inputs.recordingSessionKey !== null &&
-    inputs.multiChannelDeviceCount >= 2
+    (inputs.multiChannelDeviceCount >= 2 ||
+      (inputs.multiChannelDeviceCount >= 1 && !!inputs.hasTetheredChannel))
   );
 }
 

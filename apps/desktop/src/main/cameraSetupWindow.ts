@@ -1,6 +1,7 @@
 import { BrowserWindow } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
+import { setTetheredCameraWatcherPausedForSetup } from './tetheredCameraWatcher.js';
 
 /**
  * The camera role-assignment screen for CB Help — see
@@ -24,12 +25,32 @@ function rendererEntryDir(): string {
   return candidates.find((p) => fs.existsSync(p)) ?? candidates[0];
 }
 
-/** Opens the camera setup screen, or focuses it if already open. */
-export function openCameraSetupWindow(): void {
+/**
+ * Opens the camera setup screen, or focuses it if already open.
+ *
+ * `mainWindow` (2026-09-23 — "camera được kết nối đang không hiển thị",
+ * traced to `NotReadableError: Device in use`): passed in rather than
+ * imported from `index.ts` to avoid the same circular-import problem
+ * `rendererEntryDir()`'s own doc comment already routes around. Signalled
+ * BEFORE creating this window (not after) so the main window has as much
+ * of a head start as possible releasing its own camera streams before this
+ * popup's `CameraSetupScreen` mounts and tries to open the same devices.
+ */
+export function openCameraSetupWindow(mainWindow: BrowserWindow | null): void {
   if (cameraSetupWindow) {
     cameraSetupWindow.focus();
     return;
   }
+
+  mainWindow?.webContents.send('camera:pauseForSetup');
+  // 2026-09-24 fix (audit): pause the background auto-detect watcher too —
+  // it previously kept polling `detectTetheredCamera()` every
+  // `CONNECTED_POLL_MS` while this popup was open, and each of those ticks
+  // killed the movie stream this popup's own live-view poll relies on (both
+  // go through `withCameraLock`), causing periodic Canon-preview
+  // freeze/restarts on this screen only. See `pausedForSetup`'s own doc
+  // comment in tetheredCameraWatcher.ts.
+  setTetheredCameraWatcherPausedForSetup(true);
 
   cameraSetupWindow = new BrowserWindow({
     width: 1000,
@@ -64,5 +85,12 @@ export function openCameraSetupWindow(): void {
 
   cameraSetupWindow.on('closed', () => {
     cameraSetupWindow = null;
+    mainWindow?.webContents.send('camera:resumeAfterSetup');
+    setTetheredCameraWatcherPausedForSetup(false);
   });
+}
+
+/** Same shape as `cbHelpWindow.ts`'s `sendToCbHelpWindow` — a no-op when this window isn't currently open. Used by `tetheredCameraWatcher.ts`'s push so a Camera Setup popup open at the time also gets the update, not just `mainWindow`. */
+export function sendToCameraSetupWindow(channel: string, payload: unknown): void {
+  cameraSetupWindow?.webContents.send(channel, payload);
 }

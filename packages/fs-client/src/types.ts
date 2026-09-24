@@ -153,6 +153,18 @@ export class FsError extends FacePlatformError {
    * at which a human notices.
    */
   public get retryable(): boolean {
+    // STATE_CHANGED (409) is a second exception alongside 429: the server's
+    // own message for it is "another request with this Idempotency-Key is
+    // still being processed, retry later" (BeginIdempotent returning
+    // ErrIdempotencyInFlight while a record is still in_progress) — a
+    // transient race between an aborted/timed-out attempt and its own retry
+    // reusing the same key, not a rejected request. Lumping it in with the
+    // rest of the 4xx family below made a retry that overlapped its own
+    // earlier in-flight attempt permanently FAILED, even though the server
+    // was explicitly asking for a later retry.
+    if (this.httpStatus === 409 && this.code === FS_SERVER_CODES.STATE_CHANGED) {
+      return true;
+    }
     // The integration guide is explicit: repeat only transport failures and
     // server faults. A 4xx is the caller's mistake and will be rejected
     // identically forever — 429 is the one exception, where the server is

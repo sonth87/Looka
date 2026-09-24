@@ -43,6 +43,8 @@ export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
     gestureState = null,
     gestureProgress,
     onShutterCapture,
+    centerIsTethered = false,
+    tetheredCenterPreview = null,
     viewportRef,
     overlayVisible,
     overlayOpacity,
@@ -118,7 +120,14 @@ export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
         </div>
 
         <div className="flex items-center gap-1.5 shrink-0">
-          {devices && devices.length > 1 && (
+          {/*
+            2026-09-24 fix (confirmed audit finding, same as
+            DesktopCaptureView's own copy of this comment): the tethered
+            Canon never appears in `devices`, so this picker shows/lets the
+            operator pick a webcam as CENTER's active stream even while the
+            role mapping still says Canon — hide it while CENTER is tethered.
+          */}
+          {!centerIsTethered && devices && devices.length > 1 && (
             <CameraSelector
               devices={devices}
               selectedDeviceId={selectedDeviceId}
@@ -221,16 +230,35 @@ export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
               }
             />
 
-            {!stream && (
+            {!stream && centerIsTethered && tetheredCenterPreview && (
+              // Same 2026-09-24 fix as DesktopCaptureView.tsx — see that
+              // file's own doc comment on `tetheredCenterPreview` for why
+              // `!stream` alone (the pre-existing gate below) is not enough
+              // once CENTER is tethered: `stream` stays null for the whole
+              // tethered lifetime, not just an initial instant.
+              <img
+                src={tetheredCenterPreview}
+                alt="Canon (dây)"
+                className="absolute inset-0 w-full h-full object-cover z-10"
+              />
+            )}
+
+            {!stream && !(centerIsTethered && tetheredCenterPreview) && (
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-kiosk-bg/90 p-4 z-20 pointer-events-auto">
                 <div className="w-12 h-12 rounded-full bg-kiosk-accent/15 border border-kiosk-accent/40 text-kiosk-accent flex items-center justify-center shadow-lg">
                   <Camera className="w-6 h-6 animate-pulse" />
                 </div>
                 <div className="text-center space-y-0.5 max-w-xs">
-                  <h3 className="text-xs font-bold text-kiosk-text">Live Camera</h3>
-                  <p className="text-[11px] font-medium text-kiosk-text-muted">Bấm nút bên dưới để khởi động camera</p>
+                  <h3 className="text-xs font-bold text-kiosk-text">
+                    {centerIsTethered ? "Canon (dây)" : "Live Camera"}
+                  </h3>
+                  <p className="text-[11px] font-medium text-kiosk-text-muted">
+                    {centerIsTethered
+                      ? "Đang chờ khung hình đầu tiên từ máy ảnh..."
+                      : "Bấm nút bên dưới để khởi động camera"}
+                  </p>
                 </div>
-                {onStartLive && (
+                {!centerIsTethered && onStartLive && (
                   <button
                     onClick={onStartLive}
                     className="mt-1 px-4 py-2 rounded-full bg-kiosk-accent hover:brightness-110 text-kiosk-bg font-bold text-xs shadow-lg shadow-kiosk-accent/30 transition-all active:scale-95 flex items-center gap-1.5 cursor-pointer"
@@ -247,9 +275,10 @@ export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                 gestureState={gestureState}
                 gestureProgress={gestureProgress}
                 faceReady={
-                  faceState?.detected === true &&
-                  faceState?.presence === "SINGLE_FACE" &&
-                  faceState?.quality?.accepted === true
+                  centerIsTethered ||
+                  (faceState?.detected === true &&
+                    faceState?.presence === "SINGLE_FACE" &&
+                    faceState?.quality?.accepted === true)
                 }
               />
             )}
@@ -257,11 +286,13 @@ export const MobileCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
             {captureMode === "OFF" && onShutterCapture && (
               <ShutterButton
                 enabled={
-                  faceState?.detected === true &&
-                  faceState?.presence === "SINGLE_FACE" &&
-                  faceState?.quality?.accepted === true &&
+                  (centerIsTethered ||
+                    (faceState?.detected === true &&
+                      faceState?.presence === "SINGLE_FACE" &&
+                      faceState?.quality?.accepted === true)) &&
                   // 2026-09-05 black-frame fix — see the identical gate in
-                  // DesktopCaptureView for the full reasoning.
+                  // DesktopCaptureView for the full reasoning. `centerIsTethered`
+                  // (2026-09-22) — see that prop's own doc comment in types.ts.
                   (!multiFrame || multiFrame.allSideFramesReady)
                 }
                 disabledHint={

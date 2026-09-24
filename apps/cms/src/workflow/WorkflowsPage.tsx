@@ -4,6 +4,7 @@ import {
   ApiError,
   IdentificationMethod,
   Paginated,
+  PhotoKind,
   WorkflowConfig,
   WorkflowDetail,
   WorkflowStatus,
@@ -12,6 +13,7 @@ import {
   createWorkflow,
   createWorkflowDraftVersion,
   listIdentificationMethods,
+  listPhotoKinds,
   listWorkflowVersions,
   listWorkflows,
   publishWorkflow,
@@ -20,6 +22,7 @@ import {
   validateWorkflowConfig,
 } from '../api';
 import { DEFAULT_PAGE_SIZE, Pager } from '../components/Pager';
+import { slugifyCode } from '../slug';
 import { WorkflowConfigEditor } from './WorkflowConfigEditor';
 
 const WORKFLOW_STATUS_LABEL: Record<WorkflowStatus, string> = {
@@ -28,7 +31,7 @@ const WORKFLOW_STATUS_LABEL: Record<WorkflowStatus, string> = {
   ARCHIVED: 'Lưu trữ',
 };
 
-/** A minimal-but-schema-valid starting config for a brand new workflow — every group needs at least this much to pass `POST /v1/workflows`' server-side zod validation (see workflow-config.schema.ts); an admin fills in the real angles/card-spec/etc. afterward via `WorkflowConfigEditor.tsx`'s `CaptureAnglesTable`/`CardSpecFields`. */
+/** A minimal-but-schema-valid starting config for a brand new workflow — every group needs at least this much to pass `POST /v1/workflows`' server-side zod validation (see workflow-config.schema.ts); an admin fills in the real angles/photo kind/etc. afterward via `WorkflowConfigEditor.tsx`'s `CaptureAnglesTable`/photo-kind picker. */
 const DEFAULT_NEW_WORKFLOW_CONFIG: WorkflowConfig = {
   capture: { angles: [], clickMode: { default: 'MANUAL_SEQUENTIAL', allowed: ['MANUAL_SEQUENTIAL'] } },
   identification: { methods: ['MANUAL_LOOKUP'], lookupKeyField: 'studentCode' },
@@ -65,9 +68,11 @@ export function WorkflowsPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [identificationMethods, setIdentificationMethods] = useState<IdentificationMethod[]>([]);
+  const [photoKinds, setPhotoKinds] = useState<PhotoKind[]>([]);
 
   useEffect(() => {
     listIdentificationMethods().then(setIdentificationMethods).catch(() => {});
+    listPhotoKinds().then(setPhotoKinds).catch(() => {});
   }, []);
 
   function reload() {
@@ -185,6 +190,7 @@ export function WorkflowsPage() {
       {createOpen && (
         <CreateWorkflowModal
           identificationMethods={identificationMethods}
+          photoKinds={photoKinds}
           onClose={() => setCreateOpen(false)}
           onCreated={() => {
             setCreateOpen(false);
@@ -197,6 +203,7 @@ export function WorkflowsPage() {
         <WorkflowDetailModal
           workflow={selected}
           identificationMethods={identificationMethods}
+          photoKinds={photoKinds}
           onClose={() => setSelectedId(null)}
           onChanged={reload}
         />
@@ -217,15 +224,17 @@ export function WorkflowsPage() {
  */
 function CreateWorkflowModal({
   identificationMethods,
+  photoKinds,
   onClose,
   onCreated,
 }: {
   identificationMethods: IdentificationMethod[];
+  photoKinds: PhotoKind[];
   onClose: () => void;
   onCreated: () => void;
 }) {
-  const [code, setCode] = useState('');
   const [name, setName] = useState('');
+  const code = slugifyCode(name, 50);
   const [description, setDescription] = useState('');
   const [config, setConfig] = useState<WorkflowConfig>(DEFAULT_NEW_WORKFLOW_CONFIG);
   const [saving, setSaving] = useState(false);
@@ -236,7 +245,7 @@ function CreateWorkflowModal({
     setSaving(true);
     setError(null);
     try {
-      await createWorkflow({ code: code.trim(), name: name.trim(), description: description.trim() || undefined, config });
+      await createWorkflow({ code, name: name.trim(), description: description.trim() || undefined, config });
       onCreated();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : String(err));
@@ -256,21 +265,21 @@ function CreateWorkflowModal({
         </p>
         <div className="grid grid-cols-2 gap-3">
           <div>
-            <label className="block text-sm text-gray-500 mb-1">Mã (không đổi được sau khi tạo)</label>
-            <input
-              value={code}
-              onChange={(e) => setCode(e.target.value.toUpperCase())}
-              required
-              className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
-            />
-          </div>
-          <div>
             <label className="block text-sm text-gray-500 mb-1">Tên</label>
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
               required
+              autoFocus
               className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
+            />
+          </div>
+          <div>
+            <label className="block text-sm text-gray-500 mb-1">Mã (tự sinh từ tên)</label>
+            <input
+              value={code || 'Nhập tên để tự sinh mã'}
+              disabled
+              className="w-full bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 text-gray-500 font-mono text-sm cursor-not-allowed"
             />
           </div>
         </div>
@@ -284,7 +293,12 @@ function CreateWorkflowModal({
           />
         </div>
 
-        <WorkflowConfigEditor config={config} onChange={setConfig} identificationMethods={identificationMethods} />
+        <WorkflowConfigEditor
+          config={config}
+          onChange={setConfig}
+          identificationMethods={identificationMethods}
+          photoKinds={photoKinds}
+        />
 
         {error && <div className="p-2.5 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">{error}</div>}
         <div className="flex justify-end gap-2 pt-1">
@@ -293,7 +307,7 @@ function CreateWorkflowModal({
           </button>
           <button
             type="submit"
-            disabled={saving || !code.trim() || !name.trim()}
+            disabled={saving || !code || !name.trim()}
             className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold text-sm disabled:opacity-50"
           >
             {saving ? 'Đang tạo...' : 'Tạo'}
@@ -344,11 +358,13 @@ function WorkflowStepIndicator({ hasDraft, publishedBefore }: { hasDraft: boolea
 function WorkflowDetailModal({
   workflow,
   identificationMethods,
+  photoKinds,
   onClose,
   onChanged,
 }: {
   workflow: WorkflowDetail;
   identificationMethods: IdentificationMethod[];
+  photoKinds: PhotoKind[];
   onClose: () => void;
   onChanged: () => void;
 }) {
@@ -432,11 +448,35 @@ function WorkflowDetailModal({
           ✕
         </button>
 
-        <div className="flex items-center gap-2 flex-wrap mb-1">
-          <h2 className="text-xl font-bold text-gray-900">{workflow.name}</h2>
-          <span className="px-2 py-0.5 rounded-full border border-gray-200 bg-gray-50 text-gray-600 text-xs font-medium">
-            {WORKFLOW_STATUS_LABEL[workflow.status]}
-          </span>
+        <div className="flex items-start justify-between gap-3 flex-wrap mb-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <h2 className="text-xl font-bold text-gray-900">{workflow.name}</h2>
+            <span className="px-2 py-0.5 rounded-full border border-gray-200 bg-gray-50 text-gray-600 text-xs font-medium">
+              {WORKFLOW_STATUS_LABEL[workflow.status]}
+            </span>
+          </div>
+          {/* 2026-09-22: pulled out of the routine "thao tác" button cluster
+              below (Tạo nháp / Kiểm tra / Lưu nháp / Lưu trữ) — publishing
+              is the one action here that actually changes what live
+              campaigns use, so it gets its own prominent spot next to the
+              title instead of sitting among the everyday buttons. */}
+          {draftVersion && (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() =>
+                void withBusy(async () => {
+                  await publishWorkflow(workflow.id);
+                  setMessage('Đã publish version này — campaign chọn workflow này sẽ dùng cấu hình mới.');
+                  onChanged();
+                  reloadVersions();
+                })
+              }
+              className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold disabled:opacity-50 shrink-0"
+            >
+              Publish version {draftVersion.version}
+            </button>
+          )}
         </div>
         <p className="text-sm text-gray-500 mb-4">
           {workflow.code} · Version hiện tại: {workflow.currentVersion ?? '— (chưa publish)'} · Dùng bởi {workflow.campaignCount} campaign
@@ -506,21 +546,6 @@ function WorkflowDetailModal({
               <button type="button" disabled={busy || !config} onClick={() => void saveConfig()} className="px-3 py-2 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 text-sm font-medium disabled:opacity-50">
                 Lưu nháp
               </button>
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() =>
-                  void withBusy(async () => {
-                    await publishWorkflow(workflow.id);
-                    setMessage('Đã publish version này — campaign chọn workflow này sẽ dùng cấu hình mới.');
-                    onChanged();
-                    reloadVersions();
-                  })
-                }
-                className="px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold disabled:opacity-50"
-              >
-                Publish version {draftVersion.version}
-              </button>
             </>
           )}
           {workflow.status !== 'ARCHIVED' && (
@@ -543,7 +568,12 @@ function WorkflowDetailModal({
 
         {draftVersion && config ? (
           <>
-            <WorkflowConfigEditor config={config} onChange={setConfig} identificationMethods={identificationMethods} />
+            <WorkflowConfigEditor
+              config={config}
+              onChange={setConfig}
+              identificationMethods={identificationMethods}
+              photoKinds={photoKinds}
+            />
             <div className="mt-3">
               <label className="block text-sm text-gray-500 mb-1">Ghi chú cho lần lưu này (tuỳ chọn)</label>
               <input value={note} onChange={(e) => setNote(e.target.value)} className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900 text-sm" />

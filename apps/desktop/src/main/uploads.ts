@@ -54,6 +54,69 @@ function parseCaptureIdemKey(
 const LOCAL_FILE_ID_PREFIX = 'local:';
 
 /**
+ * Strips a `LOCAL_FILE_ID_PREFIX`-tagged placeholder id back to `null` before
+ * it can reach a `POST /v1/devices/events` payload.
+ *
+ * 2026-09-23 (live production log the user pasted directly): `POST
+ * /v1/devices/events 19ms invalid input syntax for type uuid:
+ * "local:acd0d9c1-5cbe-41ed-a38e-606c4088ac19"`, seen twice in one session,
+ * tied by the user to "khi chụp xong trên cms chưa thấy thông tin" (captured
+ * session/photo info not showing up in the CMS afterward).
+ *
+ * Root cause: `buildSessionReportPayload()` below reads `row.fsFileId`
+ * straight off the LOCAL outbox row. That column is set by
+ * `UploadWorker.markUploaded()` (packages/fs-client) the instant a photo
+ * actually uploads, from whatever `ApiPhotoUploadClient.routeUpload()`
+ * returned — this class's own `local:`-prefixed placeholder (see that
+ * class's doc comment), not a real fs-core id. On a session's FIRST
+ * `approveSessionUpload()` call this is harmless (nothing has uploaded yet
+ * at that instant — `claimDue()`, packages/database's
+ * `UploadOutboxRepository`, only picks up rows with `approved_at IS NOT
+ * NULL`, and this function reads `listBySession()` synchronously right
+ * after stamping that same approval, with no `await` in between for the
+ * background worker to race). But the 2026-09-08 "chụp lại sau khi đã lưu"
+ * post-save-retake feature (see `supersedeStaleAttempt`'s own doc comment)
+ * means `approveSessionUpload()` can run a SECOND time for the same
+ * session — and by then the FIRST call's photos have had seconds to
+ * minutes to actually upload, so `listBySession()` now returns them with
+ * `fsFileId` already set to this placeholder. `buildSessionReportPayload()`
+ * carries that straight into the new SESSION_REPORT event's
+ * `photos[].fsFileId`, which `CaptureReportService.applySessionReport()`
+ * (apps/api) writes into `INSERT INTO photos (..., fs_file_id, ...)` — a
+ * `uuid`-typed column (`Photo.fsFileId`,
+ * apps/api/src/modules/capture/entities/photo.entity.ts) — and Postgres
+ * rejects the value at parameter-binding time, even for an existing photo
+ * whose `ON CONFLICT DO UPDATE` branch never actually assigns `fs_file_id`
+ * (Postgres still type-checks every VALUES parameter before evaluating the
+ * conflict).
+ *
+ * This is worse than a single lost update: `DeviceEventService.recordBatch()`
+ * applies an entire pushed batch (up to 50 events —
+ * `StatsEventRepository.claimPending()`) inside ONE transaction, so this one
+ * bad photo rolls back every other event in the same batch. And because
+ * `claimPending()` is strict FIFO with nothing to skip a poisoned row, this
+ * one bad event jams the kiosk's ENTIRE stats/report queue behind it on
+ * every 15s retry — including every LATER session's own SESSION_REPORT,
+ * which is how a captured session first becomes visible in the CMS at all.
+ * This is the almost-certain cause of the "chưa thấy thông tin trên CMS"
+ * part of the report too, not just the retaken session's own update.
+ *
+ * Safe to just drop rather than resolve to the real id: exactly like the
+ * *_STATUS events this file already stopped emitting for the identical
+ * "must never reach photos.fs_file_id" reason (see `startUploads()`'s own
+ * comment), the REAL fs-core id is filled in later by apps/api's own
+ * server-side `UploadWorkerService`/`VideoUploadWorkerService` once IT
+ * uploads these already-durable bytes to fs-core — nothing downstream ever
+ * needed the kiosk's own local placeholder. And `applySessionReport`'s own
+ * `ON CONFLICT DO UPDATE` deliberately never touches `fs_file_id` on a
+ * resend anyway (see that method's own doc comment), so `null` here changes
+ * nothing for a photo whose row already exists — it only avoids the crash.
+ */
+function stripLocalFileId(fsFileId: string | null): string | null {
+  return fsFileId && !fsFileId.startsWith(LOCAL_FILE_ID_PREFIX) ? fsFileId : null;
+}
+
+/**
  * Drop-in `FsClient` substitute for `UploadWorker` — routes EVERY capture,
  * photo or video, to apps/api's own `POST /v1/devices/photos`/
  * `POST /v1/devices/videos` instead of fs-core directly, so a kiosk capture
@@ -640,7 +703,10 @@ export function buildSessionReportPayload(
         virtualPath: row.virtualPath,
         capturedAt: step?.capturedAt ?? new Date(row.createdAt).toISOString(),
         localStatus: row.status,
-        fsFileId: row.fsFileId,
+        // 2026-09-23 — never forward this class's own `local:`-prefixed
+        // placeholder into a `POST /v1/devices/events` payload; see
+        // stripLocalFileId()'s own doc comment for the full incident.
+        fsFileId: stripLocalFileId(row.fsFileId),
         fsStatus: row.fsStatus,
       };
     }),
@@ -890,7 +956,12 @@ async function enqueueSessionVideos(
         idemKey,
         uploadId: deterministicUuid(idemKey),
         // Recorded evidence, not shareable content — same reasoning as
-        // capture:queue's handler in index.ts uses for photos.
+        // capture:queue's handler in index.ts uses for photos, and, per that
+        // same handler's own comment, dead the same way on the current
+        // path: routeUpload's pushDeviceVideo call doesn't forward this
+        // field, and apps/api's SessionVideoService hardcodes 'public'
+        // server-side instead. Kept for the same direct-to-fs-core fallback
+        // reason.
         visibility: 'private',
         stepId: stream.id,
         attempt: 1,
@@ -1024,6 +1095,16 @@ export async function getPhotoViewSource(
   if (!client) {
     throw new Error('No file-service is configured, so the photo cannot be fetched.');
   }
+  if (item.fsFileId.startsWith(LOCAL_FILE_ID_PREFIX)) {
+    // Every capture now routes through ApiPhotoUploadClient.routeUpload,
+    // which stores this synthetic placeholder instead of a real fs-core id
+    // (see LOCAL_FILE_ID_PREFIX's own comment). getFile()'s override makes
+    // waitUntilReady() resolve at once for it, but issueDownloadLink() below
+    // is not overridden and would send this id straight to fs-core, which
+    // never had a file under it. The real fs-core id, if any, lives only in
+    // apps/api's photos.fs_file_id — not reachable from this desktop process.
+    throw new Error('This photo is no longer stored locally and has no server copy this app can fetch directly.');
+  }
 
   // A freshly uploaded file is not readable until the server has scanned it;
   // asking for a link before then produces errors that come and go with timing.
@@ -1067,6 +1148,11 @@ export async function downloadPhoto(
 
   if (!item.fsFileId) throw new Error('This photo is neither stored locally nor on the server.');
   if (!client) throw new Error('No file-service is configured, so the photo cannot be fetched.');
+  if (item.fsFileId.startsWith(LOCAL_FILE_ID_PREFIX)) {
+    // See the identical guard in getPhotoViewSource() above for why this
+    // placeholder id must not be sent to fs-core.
+    throw new Error('This photo is no longer stored locally and has no server copy this app can fetch directly.');
+  }
 
   await client.waitUntilReady(item.fsFileId, { timeoutMs: 30_000, pollMs: 2_000 });
 

@@ -71,13 +71,38 @@ export function CampaignDangerActions({
  * one confirmation, not a browsing surface. Exported so other confirmation
  * dialogs (e.g. `DevicesPanel`'s reissue-on-an-activated-device confirm)
  * share the same visual language instead of inventing another modal style.
+ *
+ * `maxWidth` (2026-09-22, "form cho rộng hơn" — `PhotoKindFormModal` needed
+ * more room than a typical 1-2-field confirm dialog) defaults to the
+ * original `max-w-md` so every existing caller keeps its current width
+ * unless it opts into something wider. The explicit × button (same day,
+ * "chưa có dấu x đóng") is new for every caller — previously the only way
+ * to close was clicking the backdrop, easy to miss.
  */
-export function ModalShell({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+export function ModalShell({
+  title,
+  onClose,
+  children,
+  maxWidth = 'max-w-md',
+}: {
+  title: string;
+  onClose: () => void;
+  children: ReactNode;
+  maxWidth?: string;
+}) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/30" onClick={onClose} />
-      <div className="relative w-full max-w-md bg-white rounded-2xl shadow-xl p-5 space-y-4">
-        <h3 className="font-semibold text-gray-900">{title}</h3>
+      <div className={`relative w-full ${maxWidth} max-h-[90vh] overflow-y-auto bg-white rounded-2xl shadow-xl p-5 space-y-4`}>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Đóng"
+          className="absolute top-4 right-4 text-gray-400 hover:text-gray-600 text-lg leading-none w-6 h-6 flex items-center justify-center rounded-full hover:bg-gray-100"
+        >
+          ✕
+        </button>
+        <h3 className="font-semibold text-gray-900 pr-6">{title}</h3>
         {children}
       </div>
     </div>

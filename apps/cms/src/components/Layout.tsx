@@ -111,12 +111,9 @@ export function Layout({ children }: { children: ReactNode }) {
             as the rest of the CMS currently does.
           */}
           <div className="pt-3 mt-3 border-t border-gray-200">
+            {/* "Phân công duyệt" (plan §5.2, feature 13) used to be its own nav link/route here — moved to a tab ON `/review` itself (2026-09-22), so this section no longer needs a second link for it. */}
             <NavLink to="/review" className={navItemClass}>
               Duyệt ảnh
-            </NavLink>
-            {/* "Phân công duyệt" (plan §5.2, feature 13) — who reviews which lớp/khoa/ngành. Write actions are ADMIN only server-side. */}
-            <NavLink to="/review/assignments" className={navItemClass}>
-              Phân công duyệt
             </NavLink>
             <NavLink to="/print" className={navItemClass}>
               In thẻ

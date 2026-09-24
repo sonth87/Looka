@@ -117,4 +117,13 @@ export class ListSetsQueryDto extends QueryPaginateDto {
   @Transform(parseQueryBoolean)
   @IsBoolean()
   overdue?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'true = chỉ hồ sơ đã duyệt (APPROVED), false = chỉ hồ sơ chưa duyệt (mọi trạng thái khác) — độc lập với `status` (khớp đúng 1 giá trị)',
+  })
+  @IsOptional()
+  @Transform(parseQueryBoolean)
+  @IsBoolean()
+  approved?: boolean;
 }

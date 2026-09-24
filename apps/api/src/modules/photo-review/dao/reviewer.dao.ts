@@ -1,18 +1,14 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Expose } from 'class-transformer';
-import { REVIEW_ASSIGNMENT_GROUP_FIELDS } from '../photo-review.constants';
 
-export class ReviewAssignmentDao {
-  @ApiProperty()
-  @Expose()
-  id: string;
-
+/** A user with unrestricted REVIEWER access (`users.roles @> '["REVIEWER"]'`) — see `ReviewAssignmentService.listReviewers`'s own doc comment. */
+export class ReviewerDao {
   @ApiProperty()
   @Expose()
   userId: string;
 
   @ApiPropertyOptional({
-    description: 'Tên/email người được gán, nếu tra được',
+    description: 'Tên/email người được cấp, nếu tra được',
   })
   @Expose()
   userName?: string;
@@ -24,26 +20,10 @@ export class ReviewAssignmentDao {
   @ApiPropertyOptional({ nullable: true, description: 'Khoa' })
   @Expose()
   userFaculty?: string | null;
-  @ApiPropertyOptional({
+  @ApiProperty({
     type: [String],
     description: 'Mã vai trò RBAC (roles.code) của người này',
   })
   @Expose()
-  userRoleCodes?: string[];
-
-  @ApiProperty({ enum: REVIEW_ASSIGNMENT_GROUP_FIELDS })
-  @Expose()
-  groupField: string;
-
-  @ApiProperty()
-  @Expose()
-  groupValue: string;
-
-  @ApiPropertyOptional()
-  @Expose()
-  createdByUserId?: string;
-
-  @ApiProperty()
-  @Expose()
-  createdAt: Date;
+  userRoleCodes: string[];
 }

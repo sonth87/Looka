@@ -3,6 +3,7 @@ export * from './approve-reject.dto';
 export * from './create-photo-kind.dto';
 export * from './create-review-assignment.dto';
 export * from './export-query.dto';
+export * from './grant-reviewer.dto';
 export * from './group-values-query.dto';
 export * from './list-events-query.dto';
 export * from './list-photo-kinds-query.dto';

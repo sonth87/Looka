@@ -70,9 +70,24 @@ import {
   getHostname,
   storeSelfEnrolledDevice,
 } from './secrets.js';
-import { openCameraSetupWindow } from './cameraSetupWindow.js';
+import { openCameraSetupWindow, sendToCameraSetupWindow } from './cameraSetupWindow.js';
 import { openSsoLoginWindow } from './ssoLogin.js';
-import { detectTetheredCamera, captureTetheredPhoto, getTetheredLiveViewFrame, openZadig } from './tetheredCamera.js';
+import {
+  detectTetheredCamera,
+  captureTetheredPhoto,
+  getTetheredLiveViewFrame,
+  openZadig,
+  listTetheredCameraConfig,
+  getTetheredCameraConfigValue,
+  getTetheredThermalWarning,
+  TETHERED_DEVICE_ID,
+} from './tetheredCamera.js';
+import {
+  onTetheredCameraWatcherStatus,
+  setTetheredCameraWanted,
+  setTetheredCameraWatcherPaused,
+  stopTetheredCameraWatcher,
+} from './tetheredCameraWatcher.js';
 import { openRecentStudentsWindow } from './recentStudentsWindow.js';
 import { fetchRecentCaptures, getDeviceAccessStatus, lookupCampaignSubject } from './deviceApi.js';
 import { startVideoStream, endVideoStream, discardSessionVideos } from './streams.js';
@@ -370,6 +385,21 @@ app.whenReady().then(async () => {
     startEmbeddingEnroll();
   }
 
+  // Auto-detect watcher (docs/plans/canon-auto-detect-polling-plan-2026-09-24.md)
+  // — independent of `dbResult.ok`, since the role mapping lives in
+  // secrets.ts's own store, not the SQLite DB. Push the current
+  // connect/disconnect status to every open window that cares whenever it
+  // changes (not every poll tick — `tetheredCameraWatcher.ts` already
+  // dedupes that); pick up whatever mapping was already saved from a
+  // previous session so a kiosk that already had a Canon role assigned
+  // starts polling immediately, without waiting for the operator to touch
+  // Camera Setup again.
+  onTetheredCameraWatcherStatus((status) => {
+    mainWindow?.webContents.send('tetheredCamera:connectionChanged', status);
+    sendToCameraSetupWindow('tetheredCamera:connectionChanged', status);
+  });
+  setTetheredCameraWanted(Object.values(getCameraRoleMapping()).includes(TETHERED_DEVICE_ID));
+
   ipcMain.handle('app:getVersion', () => app.getVersion());
 
   /** Where the log lives, and a way to open it — for diagnosing an app that quit. */
@@ -661,6 +691,10 @@ app.whenReady().then(async () => {
     // preload's `onCameraRoleMappingChanged` doc comment for the live bug
     // this caused.
     mainWindow?.webContents.send('camera:roleMappingChanged', sanitized);
+    // Auto-detect watcher (2026-09-24) only needs to poll while some role
+    // actually points at the Canon — re-check every time the mapping
+    // changes, not just once at startup.
+    setTetheredCameraWanted(Object.values(sanitized).includes(TETHERED_DEVICE_ID));
     return true;
   });
 
@@ -678,7 +712,7 @@ app.whenReady().then(async () => {
     return true;
   });
   ipcMain.handle('camera:openSetup', () => {
-    openCameraSetupWindow();
+    openCameraSetupWindow(mainWindow);
     return true;
   });
 
@@ -692,21 +726,46 @@ app.whenReady().then(async () => {
    * Setup test button expects — mirrors how a webcam snapshot already
    * crosses the renderer/main boundary as a data URL elsewhere in this app.
    */
-  ipcMain.handle('tetheredCamera:status', () => detectTetheredCamera());
-  ipcMain.handle('tetheredCamera:capture', async () => {
+  ipcMain.handle('tetheredCamera:status', async () => {
+    const status = await detectTetheredCamera();
+    if (status.connected) {
+      console.log(`[TetheredCamera] detected: ${status.model ?? '(unknown model)'}`);
+    } else {
+      console.warn(`[TetheredCamera] not detected: ${status.error ?? '(no error message)'}`);
+    }
+    return status;
+  });
+  ipcMain.handle('tetheredCamera:capture', async (_event, opts?: { saveDebugCopy?: boolean }) => {
+    console.log('[TetheredCamera] capture requested');
     try {
       const bytes = await captureTetheredPhoto();
       // Bước 0's own "chụp và lưu lại" hardware check (2026-09-21) — written
       // to a real, easy-to-find folder (Desktop) so the captured JPEG can
       // be opened directly, not just eyeballed as a tiny inline preview.
-      // Still test-only scope: no session/outbox/student record involved,
-      // same as this whole test panel.
-      const dir = path.join(app.getPath('desktop'), 'Looka-tethered-test-captures');
-      fs.mkdirSync(dir, { recursive: true });
-      const savedPath = path.join(dir, `canon-test-${Date.now()}.jpg`);
-      fs.writeFileSync(savedPath, bytes);
+      //
+      // 2026-09-24 fix (confirmed audit finding): this write used to run
+      // unconditionally, but this exact handler is also what
+      // `FaceCaptureApp.tsx`'s `captureTetheredFrame()` calls for every REAL
+      // student-session Canon shot — despite the comment above, it was NOT
+      // test-only scope at all: every real capture also left a full-
+      // resolution, unencrypted, unmirrored copy of the student's photo on
+      // the kiosk's Desktop, outside the outbox/approval/retention flow, and
+      // never cleaned up. Only the Camera Setup "Chụp thử" test button now
+      // asks for this debug copy (`saveDebugCopy: true` — see
+      // `TetheredCameraPanel.tsx`'s call site).
+      let savedPath: string | undefined;
+      if (opts?.saveDebugCopy) {
+        const dir = path.join(app.getPath('desktop'), 'Looka-tethered-test-captures');
+        fs.mkdirSync(dir, { recursive: true });
+        savedPath = path.join(dir, `canon-test-${Date.now()}.jpg`);
+        fs.writeFileSync(savedPath, bytes);
+        console.log(`[TetheredCamera] capture succeeded: ${bytes.length} bytes, saved to ${savedPath}`);
+      } else {
+        console.log(`[TetheredCamera] capture succeeded: ${bytes.length} bytes`);
+      }
       return { ok: true as const, dataUrl: `data:image/jpeg;base64,${bytes.toString('base64')}`, savedPath };
     } catch (err) {
+      console.error(`[TetheredCamera] capture failed: ${(err as Error).message}`);
       return { ok: false as const, error: (err as Error).message };
     }
   });
@@ -720,6 +779,51 @@ app.whenReady().then(async () => {
   });
   /** Opens the bundled Zadig for the one-time WinUSB driver step — see `openZadig()`'s own doc comment for why the app can only open it, not drive it. */
   ipcMain.handle('tetheredCamera:openZadig', () => openZadig());
+
+  /** Config discovery + thermal-warning polling (2026-09-23) — see `tetheredCamera.ts`'s own doc comments above `listTetheredCameraConfig`/`getTetheredThermalWarning` for why this exists instead of a hardcoded temperature reading. */
+  ipcMain.handle('tetheredCamera:listConfig', async () => {
+    try {
+      const paths = await listTetheredCameraConfig();
+      return { ok: true as const, paths };
+    } catch (err) {
+      return { ok: false as const, error: (err as Error).message };
+    }
+  });
+  ipcMain.handle('tetheredCamera:getConfigValue', async (_event, configPath: string) => {
+    try {
+      // 2026-09-24 fix (confirmed audit finding, defence-in-depth): every
+      // real gphoto2 config path from `listTetheredCameraConfig()` is a
+      // `/`-rooted identifier with no whitespace (e.g.
+      // `/main/imgsettings/imageformat`) — `getTetheredCameraConfigValue`'s
+      // own doc comment already says a caller here must pass one of those
+      // exact strings, but nothing enforced it. Without this, a
+      // renderer-supplied value starting with `-` would reach gphoto2's argv
+      // as `['--get-config', configPath]`; not a shell-injection risk
+      // (`spawn` runs with no shell), but still an unvalidated value handed
+      // to gphoto2's own option parser. Rejecting anything that isn't a
+      // plain `/`-rooted, whitespace-free path closes that off cheaply.
+      if (typeof configPath !== 'string' || !/^\/[!-~]+$/.test(configPath)) {
+        return { ok: false as const, error: 'configPath không hợp lệ' };
+      }
+      const value = await getTetheredCameraConfigValue(configPath);
+      return { ok: true as const, value };
+    } catch (err) {
+      return { ok: false as const, error: (err as Error).message };
+    }
+  });
+  ipcMain.handle('tetheredCamera:getThermalWarning', () => getTetheredThermalWarning());
+
+  /**
+   * Auto-detect watcher (docs/plans/canon-auto-detect-polling-plan-2026-09-24.md
+   * Bước 3) — `CampaignGate.tsx` calls this at the same `started`
+   * true/false transitions it already gates its own tethered live-view
+   * poll on, so the background detect polling doesn't compete with a real
+   * capture session for the shared gphoto2/PTP session.
+   */
+  ipcMain.handle('tetheredCameraWatcher:setSessionActive', (_, active: unknown) => {
+    setTetheredCameraWatcherPaused(!!active);
+    return true;
+  });
 
   /**
    * Real Microsoft 365 SSO login (see ssoLogin.ts's own doc comment) — the
@@ -998,9 +1102,18 @@ app.whenReady().then(async () => {
         const mimeType = dataUrl.slice(5, dataUrl.indexOf(';'));
         const data = Buffer.from(dataUrl.replace(/^data:image\/\w+;base64,/, ''), 'base64');
 
-        // Every capture this kiosk takes is a face/attendance image — never
-        // public — decided here, at the one place that knows that, rather
-        // than assumed by the generic queue/upload machinery downstream.
+        // Every capture this kiosk takes is a face/attendance image, so this
+        // is set to 'private' at the one place that knows that — but as of
+        // the switch to routing every capture through apps/api (2026-09-14),
+        // this value never actually reaches fs-core: ApiPhotoUploadClient.
+        // routeUpload (uploads.ts) sends the bytes to apps/api's own
+        // POST /v1/devices/photos, which does not forward this field, and
+        // apps/api's PhotoService.addPhoto hardcodes 'public' server-side
+        // instead (see that method's own comment for why). This plumbing is
+        // kept, not removed, only because it is still exactly right for the
+        // direct-to-fs-core path a plain (non-Api) FsClient subclass would
+        // take — the intent stays 'private' even though nothing on the
+        // current path acts on it.
         const visibility: Visibility = 'private';
 
         const jobId = queueCapture({
@@ -1159,7 +1272,16 @@ app.whenReady().then(async () => {
     // Only ever open inside our own export root.
     const root = path.resolve(path.join(app.getPath('documents'), 'FaceCapture', 'Exports'));
     const target = path.resolve(String(dirPath ?? ''));
-    if (!target.startsWith(root) || !fs.existsSync(target)) return false;
+    // 2026-09-24 fix (confirmed audit finding): a bare `target.startsWith(root)`
+    // has no separator boundary, so a SIBLING path that merely starts with
+    // the same characters (e.g. `.../FaceCapture/Exports_evil`, or even a
+    // FILE `.../FaceCapture/Exports_x.exe`) would pass this check and get
+    // handed to `shell.openPath` — which runs an executable's default
+    // handler, not just "open a folder". `session:exportImages` above
+    // already guards its own writes with the `+ path.sep` form; this mirrors
+    // that, plus requires the target to actually be a directory.
+    if (target !== root && !target.startsWith(root + path.sep)) return false;
+    if (!fs.existsSync(target) || !fs.statSync(target).isDirectory()) return false;
     shell.openPath(target);
     return true;
   });
@@ -1210,7 +1332,7 @@ app.whenReady().then(async () => {
   // window rather than something bolted onto the kiosk UI. A global shortcut
   // rather than an on-screen button: this app has no resolved "CB Help mode"
   // surface yet (open question §4 #16) to put a button on.
-  globalShortcut.register('CommandOrControl+Shift+K', () => openCameraSetupWindow());
+  globalShortcut.register('CommandOrControl+Shift+K', () => openCameraSetupWindow(mainWindow));
 
   // Toggles the CB Help extended-display mirror — see cbHelpWindow.ts's own
   // doc comment. Unlike the camera setup shortcut above, this one *does*
@@ -1242,6 +1364,7 @@ app.on('window-all-closed', () => {
   stopEmbeddingEnroll();
   stopStatsEventPush();
   stopCccdRosterWatcher();
+  stopTetheredCameraWatcher();
   closeDatabase();
   if (process.platform !== 'darwin') app.quit();
 });
@@ -1251,6 +1374,7 @@ app.on('before-quit', () => {
   stopEmbeddingEnroll();
   stopStatsEventPush();
   stopCccdRosterWatcher();
+  stopTetheredCameraWatcher();
   closeDatabase();
   closeLogger();
   globalShortcut.unregisterAll();

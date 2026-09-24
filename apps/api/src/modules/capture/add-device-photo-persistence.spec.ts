@@ -189,7 +189,11 @@ describeDb('addDevicePhoto session upsert (PhotoService)', () => {
     // Guards against a regression where widening the upsert to DO UPDATE for
     // operator_user_id accidentally widened it for every other column too —
     // the task this change implements explicitly calls for touching ONLY
-    // operator_user_id's conflict behaviour.
+    // operator_user_id's conflict behaviour. Exercised here with a SECOND
+    // photo from the SAME device/campaign (unlike the test below, which
+    // covers a different device/campaign — now rejected outright, see its
+    // own doc comment) so this still proves the DO-NOTHING contract for
+    // device_id/campaign_id/status without relying on rejected behaviour.
     const sessionId = randomUUID();
     await photoService.addDevicePhoto(deviceId, campaignId, {
       photoId: randomUUID(),
@@ -199,21 +203,7 @@ describeDb('addDevicePhoto session upsert (PhotoService)', () => {
       dataUrl: jpegDataUrl(1),
     });
 
-    // A second campaign+device pair, distinct from the session's real one.
-    const [otherCampaign] = await dataSource.query(
-      `INSERT INTO campaigns (name) VALUES ($1) RETURNING id`,
-      [`add-device-photo-spec-other-${randomUUID()}`],
-    );
-    const [otherDevice] = await dataSource.query(
-      `INSERT INTO devices (campaign_id, name, device_secret_hash) VALUES ($1, $2, $3) RETURNING id`,
-      [
-        otherCampaign.id,
-        `add-device-photo-spec-other-${randomUUID()}`,
-        'y'.repeat(64),
-      ],
-    );
-
-    await photoService.addDevicePhoto(otherDevice.id, otherCampaign.id, {
+    await photoService.addDevicePhoto(deviceId, campaignId, {
       photoId: randomUUID(),
       sessionId,
       stepId: 'LEFT',
@@ -232,5 +222,64 @@ describeDb('addDevicePhoto session upsert (PhotoService)', () => {
     expect(rows[0].device_id).toBe(deviceId);
     expect(rows[0].campaign_id).toBe(campaignId);
     expect(rows[0].status).toBe('IN_PROGRESS');
+  });
+
+  test('addDevicePhoto rejects a sessionId that belongs to a different device/campaign (2026-09-24 fix, confirmed audit finding — cross-device session hijack)', async () => {
+    const sessionId = randomUUID();
+    await photoService.addDevicePhoto(deviceId, campaignId, {
+      photoId: randomUUID(),
+      sessionId,
+      stepId: 'FRONT',
+      attempt: 1,
+      dataUrl: jpegDataUrl(1),
+    });
+
+    // A second campaign+device pair, distinct from the session's real one —
+    // session ids are visible to every device in a campaign via
+    // GET /v1/devices/recent-captures, so a device holding valid credentials
+    // for some OTHER session/campaign must never be able to attach its own
+    // photo to this one.
+    const [otherCampaign] = await dataSource.query(
+      `INSERT INTO campaigns (name) VALUES ($1) RETURNING id`,
+      [`add-device-photo-spec-other-${randomUUID()}`],
+    );
+    const [otherDevice] = await dataSource.query(
+      `INSERT INTO devices (campaign_id, name, device_secret_hash) VALUES ($1, $2, $3) RETURNING id`,
+      [
+        otherCampaign.id,
+        `add-device-photo-spec-other-${randomUUID()}`,
+        'y'.repeat(64),
+      ],
+    );
+
+    await expect(
+      photoService.addDevicePhoto(otherDevice.id, otherCampaign.id, {
+        photoId: randomUUID(),
+        sessionId,
+        stepId: 'LEFT',
+        attempt: 1,
+        dataUrl: jpegDataUrl(2),
+      }),
+    ).rejects.toThrow();
+
+    const rows: Array<{
+      device_id: string;
+      campaign_id: string;
+      status: string;
+    }> = await dataSource.query(
+      `SELECT device_id, campaign_id, status FROM sessions WHERE id = $1`,
+      [sessionId],
+    );
+    expect(rows[0].device_id).toBe(deviceId);
+    expect(rows[0].campaign_id).toBe(campaignId);
+    expect(rows[0].status).toBe('IN_PROGRESS');
+
+    // The rejected call must also never have created a `photos` row for the
+    // other device's attempted write.
+    const photoRows: Array<Record<string, unknown>> = await dataSource.query(
+      `SELECT 1 FROM photos WHERE session_id = $1 AND step_id = $2`,
+      [sessionId, 'LEFT'],
+    );
+    expect(photoRows.length).toBe(0);
   });
 });

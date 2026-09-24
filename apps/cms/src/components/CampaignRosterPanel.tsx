@@ -12,6 +12,7 @@ import {
   listCampaignSubjects,
 } from '../api';
 import { DEFAULT_PAGE_SIZE, Pager } from './Pager';
+import { ModalShell } from './CampaignDangerActions';
 
 const STATUS_LABEL: Record<CampaignSubjectStatus, string> = {
   VALID: 'Hợp lệ',
@@ -44,6 +45,8 @@ const IMPORT_STATUS_LABEL: Record<CampaignSubjectImport['status'], string> = {
 export function CampaignRosterPanel({ campaignId }: { campaignId: string }) {
   const [imports, setImports] = useState<CampaignSubjectImport[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -81,20 +84,23 @@ export function CampaignRosterPanel({ campaignId }: { campaignId: string }) {
     }
   }
 
-  async function handleFileSelected(file: File) {
+  async function handleUpload() {
+    if (!selectedFile) return;
     setUploading(true);
     setUploadError(null);
     try {
-      await importCampaignRoster(campaignId, file);
+      await importCampaignRoster(campaignId, selectedFile);
       reloadImports();
       setPage(1);
       // Re-trigger the subjects list too.
       listCampaignSubjects(campaignId, { page: 1, limit: pageSize }).then(setSubjectsResult).catch(() => {});
+      setSelectedFile(null);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      setShowImportModal(false);
     } catch (err) {
       setUploadError(err instanceof ApiError ? err.message : String(err));
     } finally {
       setUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = '';
     }
   }
 
@@ -105,25 +111,14 @@ export function CampaignRosterPanel({ campaignId }: { campaignId: string }) {
       <div className="p-4 rounded-2xl border border-gray-200 bg-white shadow-sm space-y-3">
         <div className="flex items-center justify-between">
           <h3 className="text-sm font-semibold text-gray-900">Import roster từ Excel</h3>
-          <button type="button" onClick={() => void downloadTemplate()} className="text-xs text-blue-600 hover:text-blue-800 underline">
-            Tải file mẫu
+          <button
+            type="button"
+            onClick={() => setShowImportModal(true)}
+            className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold"
+          >
+            Import roster
           </button>
         </div>
-        <div className="flex items-center gap-3">
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".xlsx"
-            disabled={uploading}
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file) void handleFileSelected(file);
-            }}
-            className="text-sm text-gray-700"
-          />
-          {uploading && <span className="text-xs text-gray-500">Đang tải lên...</span>}
-        </div>
-        {uploadError && <div className="p-2.5 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">{uploadError}</div>}
 
         {imports && imports.length > 0 && (
           <div className="pt-2 border-t border-gray-100">
@@ -258,6 +253,63 @@ export function CampaignRosterPanel({ campaignId }: { campaignId: string }) {
           }}
         />
       </div>
+
+      {showImportModal && (
+        <ModalShell
+          title="Import roster từ Excel"
+          onClose={() => {
+            if (uploading) return;
+            setShowImportModal(false);
+            setSelectedFile(null);
+            setUploadError(null);
+            if (fileInputRef.current) fileInputRef.current.value = '';
+          }}
+        >
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-gray-500">Chọn file Excel (.xlsx) theo đúng mẫu.</span>
+              <button type="button" onClick={() => void downloadTemplate()} className="text-xs text-blue-600 hover:text-blue-800 underline shrink-0">
+                Tải file mẫu
+              </button>
+            </div>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".xlsx"
+              disabled={uploading}
+              onChange={(e) => {
+                setSelectedFile(e.target.files?.[0] ?? null);
+                setUploadError(null);
+              }}
+              className="w-full text-sm text-gray-700"
+            />
+            {uploadError && <div className="p-2.5 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">{uploadError}</div>}
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowImportModal(false);
+                  setSelectedFile(null);
+                  setUploadError(null);
+                  if (fileInputRef.current) fileInputRef.current.value = '';
+                }}
+                disabled={uploading}
+                className="px-3 py-1.5 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 text-sm font-semibold disabled:opacity-50"
+              >
+                Huỷ
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleUpload()}
+                disabled={!selectedFile || uploading}
+                className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold disabled:opacity-50"
+              >
+                {uploading ? 'Đang tải lên...' : 'Tải lên'}
+              </button>
+            </div>
+          </div>
+        </ModalShell>
+      )}
     </div>
   );
 }

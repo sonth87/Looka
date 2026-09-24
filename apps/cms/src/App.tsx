@@ -14,7 +14,6 @@ import { RolesPage } from './components/RolesPage';
 import { UsersPage } from './components/UsersPage';
 import { ReviewListPage } from './photo-review/ReviewListPage';
 import { ReviewDetailPage } from './photo-review/ReviewDetailPage';
-import { ReviewAssignmentsPage } from './photo-review/ReviewAssignmentsPage';
 import { PrintPage } from './print/PrintPage';
 import { PrintBatchDetailPage } from './print/PrintBatchDetailPage';
 import { CampaignPrintStatusPage } from './print/CampaignPrintStatusPage';
@@ -70,7 +69,8 @@ export default function App() {
               <Route path="/capture-configurations" element={<Navigate to="/workflows" replace />} />
               <Route path="/config" element={<PhotoKindsPage />} />
               <Route path="/review" element={<ReviewListPage />} />
-              <Route path="/review/assignments" element={<ReviewAssignmentsPage />} />
+              {/* "Phân công duyệt" moved from its own route into a tab on `/review` itself (2026-09-22 — "để 1 trang trong duyệt ảnh", not a separate page); old bookmarks still land somewhere real. */}
+              <Route path="/review/assignments" element={<Navigate to="/review" replace />} />
               <Route path="/review/:id" element={<ReviewDetailPage />} />
               <Route path="/print" element={<PrintPage />} />
               <Route path="/print/by-campaign" element={<CampaignPrintStatusPage />} />

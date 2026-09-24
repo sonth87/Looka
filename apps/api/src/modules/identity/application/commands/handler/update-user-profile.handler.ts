@@ -49,6 +49,8 @@ export class UpdateUserProfileHandler
       user.displayName = command.displayName;
     if (command.title !== undefined) user.title = command.title;
     if (command.phone !== undefined) user.phone = command.phone;
+    if (command.department !== undefined) user.department = command.department;
+    if (command.faculty !== undefined) user.faculty = command.faculty;
 
     await this.users.save(user);
     return { id: user.id };

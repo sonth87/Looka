@@ -401,12 +401,21 @@ export class BrowserCameraService implements CameraService {
    * any output size.
    */
   public captureBase64Snapshot(opts?: { maxWidth?: number; quality?: number }): string | null {
-    let video: HTMLVideoElement | null = this.videoElement;
-    if (!video || video.readyState < 2) {
-      if (typeof document !== 'undefined') {
-        video = document.querySelector('video');
-      }
-    }
+    // 2026-09-24 fix (confirmed audit finding): this used to fall back to
+    // `document.querySelector('video')` — ANY `<video>` element anywhere on
+    // the page — whenever this service's OWN offscreen element (set up in
+    // `setupFrameExtractor`) was null or not yet ready. That window is real:
+    // `start()` calls `stop()` (which nulls `this.videoElement`) before
+    // `await`ing a fresh `getUserMedia()`, and the resulting element then
+    // stays below `readyState 2` until its own metadata loads. A UI-owned
+    // `<video>` for a DIFFERENT camera (e.g. the main preview still showing
+    // the previous camera's frozen last frame) sits in the DOM the whole
+    // time, so a capture that lands in exactly that window used to silently
+    // save/upload the WRONG camera's frame under this step's label instead
+    // of failing loudly. Returning null here (same as "no video element
+    // found" below) lets the normal "camera chưa sẵn sàng, chụp lại" retry
+    // path handle it instead.
+    const video: HTMLVideoElement | null = this.videoElement;
     if (!video || video.readyState < 2) {
       this.warnSnapshotRejected(video ? 'video not ready' : 'no video element found', video);
       return null;

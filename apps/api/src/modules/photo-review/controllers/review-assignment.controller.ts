@@ -13,9 +13,10 @@ import {
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Request } from 'express';
-import { ReviewAssignmentDao } from '../dao';
+import { ReviewAssignmentDao, ReviewerDao } from '../dao';
 import {
   CreateReviewAssignmentDto,
+  GrantReviewerDto,
   GroupValuesQueryDto,
   ListReviewAssignmentsQueryDto,
 } from '../dto';
@@ -86,5 +87,44 @@ export class ReviewAssignmentController {
   async remove(@Param('id') id: string, @Req() req: Request): Promise<void> {
     if (!req.user?.isAdmin) throw new ForbiddenException('Requires admin');
     await this.assignmentService.remove(id);
+  }
+
+  /**
+   * "Người có quyền duyệt" (2026-09-22) — unrestricted reviewers
+   * (`users.roles` contains `'REVIEWER'`), as opposed to the scoped grants
+   * above. ADMIN only, same as every other write/list-all route here.
+   */
+  @Get('reviewers')
+  @ApiOperation({
+    summary: 'List users with unrestricted REVIEWER access. ADMIN only.',
+  })
+  listReviewers(@Req() req: Request): Promise<ReviewerDao[]> {
+    if (!req.user?.isAdmin) throw new ForbiddenException('Requires admin');
+    return this.assignmentService.listReviewers();
+  }
+
+  @Post('reviewers')
+  @ApiOperation({
+    summary: 'Grant unrestricted REVIEWER access to a user. ADMIN only.',
+  })
+  async grantReviewer(
+    @Body() dto: GrantReviewerDto,
+    @Req() req: Request,
+  ): Promise<{ userId: string }> {
+    if (!req.user?.isAdmin) throw new ForbiddenException('Requires admin');
+    await this.assignmentService.grantReviewer(dto.userId);
+    return { userId: dto.userId };
+  }
+
+  @Delete('reviewers/:userId')
+  @ApiOperation({
+    summary: 'Revoke unrestricted REVIEWER access from a user. ADMIN only.',
+  })
+  async revokeReviewer(
+    @Param('userId') userId: string,
+    @Req() req: Request,
+  ): Promise<void> {
+    if (!req.user?.isAdmin) throw new ForbiddenException('Requires admin');
+    await this.assignmentService.revokeReviewer(userId);
   }
 }

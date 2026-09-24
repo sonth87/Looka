@@ -8,6 +8,8 @@ export class UserReadModel {
   @ApiPropertyOptional({ nullable: true }) title: string | null;
   @ApiPropertyOptional({ nullable: true }) code: string | null;
   @ApiPropertyOptional({ nullable: true }) phone: string | null;
+  @ApiPropertyOptional({ nullable: true }) department: string | null;
+  @ApiPropertyOptional({ nullable: true }) faculty: string | null;
   @ApiPropertyOptional({ nullable: true }) avatarFsFileId: string | null;
   @ApiProperty() isAdmin: boolean;
   @ApiProperty({ enum: ['ACTIVE', 'DISABLED'] }) status: 'ACTIVE' | 'DISABLED';

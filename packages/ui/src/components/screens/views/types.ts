@@ -104,6 +104,32 @@ export interface SharedCaptureViewProps {
   gestureState?: GestureState | null;
   gestureProgress: number;
   onShutterCapture?: () => void;
+  /**
+   * True when CENTER's assigned camera is the tethered Canon (gphoto2) —
+   * 2026-09-22, tethered-capture integration. That camera has no live
+   * `MediaStream`, only periodic still previews, so `faceState` can never
+   * reach `detected: true` for it; the shutter/CTA "face ready" gates below
+   * fall back to this flag instead of staying permanently disabled. Side
+   * frames need no equivalent — `multiFrame.allSideFramesReady` already
+   * treats a tethered side frame as ready the instant its stream-open step
+   * runs (see `FaceCaptureApp.tsx`'s `openFrameStreams`).
+   */
+  centerIsTethered?: boolean;
+  /**
+   * The tethered Canon's own periodic still (2026-09-24 — "trong màn hình
+   * cấu hình đã có hiển thị camera máy ảnh nhưng khi hiển thị trên màn
+   * action thì chưa có"). Disclosed gap from 2026-09-22 finally hit in
+   * practice: once `centerIsTethered` is true, `stream` stays `null`
+   * FOREVER by design (there is no `MediaStream` for a tethered camera at
+   * all) — this main "Live Camera" viewport's `!stream` branch had no
+   * tethered-aware fallback, so it was stuck showing the generic "Bật
+   * Camera" placeholder for the camera's entire tethered lifetime, not just
+   * the brief instant it covers for a real webcam. Same `tetheredPreview`
+   * state already feeding the small per-step tile grid's `imagePath`
+   * fallback (`FrameTile.tsx`) — just also threaded up here for the one
+   * surface that never got it.
+   */
+  tetheredCenterPreview?: string | null;
   cameraScale: CameraScale;
   decreaseScale: () => void;
   increaseScale: () => void;

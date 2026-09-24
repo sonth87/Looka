@@ -21,6 +21,8 @@ interface UserRow {
   title: string | null;
   code: string | null;
   phone: string | null;
+  department: string | null;
+  faculty: string | null;
   avatarFsFileId: string | null;
   isAdmin: boolean;
   status: 'ACTIVE' | 'DISABLED';
@@ -80,7 +82,7 @@ export class UserDirectoryReadRepository {
       `
       SELECT
         u.id, u.sso_user_code AS "ssoUserCode", u.email, u.display_name AS "displayName",
-        u.title, u.code, u.phone, u.avatar_fs_file_id AS "avatarFsFileId",
+        u.title, u.code, u.phone, u.department, u.faculty, u.avatar_fs_file_id AS "avatarFsFileId",
         u.is_admin AS "isAdmin", u.status, u.source,
         u.last_login_at AS "lastLoginAt", u.created_at AS "createdAt",
         COALESCE(
@@ -111,7 +113,7 @@ export class UserDirectoryReadRepository {
       `
       SELECT
         u.id, u.sso_user_code AS "ssoUserCode", u.email, u.display_name AS "displayName",
-        u.title, u.code, u.phone, u.avatar_fs_file_id AS "avatarFsFileId",
+        u.title, u.code, u.phone, u.department, u.faculty, u.avatar_fs_file_id AS "avatarFsFileId",
         u.is_admin AS "isAdmin", u.status, u.source,
         u.last_login_at AS "lastLoginAt", u.created_at AS "createdAt",
         COALESCE(
@@ -144,7 +146,7 @@ export class UserDirectoryReadRepository {
       `
       SELECT
         u.id, u.sso_user_code AS "ssoUserCode", u.email, u.display_name AS "displayName",
-        u.title, u.code, u.phone, u.avatar_fs_file_id AS "avatarFsFileId",
+        u.title, u.code, u.phone, u.department, u.faculty, u.avatar_fs_file_id AS "avatarFsFileId",
         u.is_admin AS "isAdmin", u.status, u.source,
         u.last_login_at AS "lastLoginAt", u.created_at AS "createdAt",
         COALESCE(

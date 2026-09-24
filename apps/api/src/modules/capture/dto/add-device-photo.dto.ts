@@ -7,8 +7,24 @@ import {
   IsOptional,
   IsString,
   IsUUID,
+  Matches,
   Min,
 } from 'class-validator';
+
+/**
+ * 2026-09-24 fix (confirmed audit finding): `stepId` used to be validated
+ * only as `@IsString() @IsNotEmpty()` and then went straight into a
+ * file-service virtual path unsanitised (`PhotoService.addDevicePhoto`'s
+ * `students/<identity>/<stepId>-<attempt>.<ext>` / `sessions/<sessionId>/
+ * <stepId>-...`) — unlike `identityNumber`, which that method strips to
+ * `\w`/`-` before using the same way. A `/` (or `..`) in `stepId` from a
+ * tampered kiosk or leaked device credential could create unexpected
+ * sub-folders or, depending on how fs-core normalises the path, escape the
+ * intended prefix. Every real `stepId` this platform generates is a plain
+ * workflow-step slug (`FRONT`, `step-front`, `step-0-FRONT`, …) — letters,
+ * digits, `-`/`_` only — so this is not a functional restriction.
+ */
+const STEP_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 
 /** `@face/core`'s `CaptureTriggerSource` — same list `AddPhotoDto` validates against. */
 const TRIGGER_SOURCES: CaptureTriggerSource[] = [
@@ -87,6 +103,9 @@ export class AddDevicePhotoDto {
   @ApiProperty({ description: 'Bước trong quy trình chụp, ví dụ FRONT/LEFT' })
   @IsString()
   @IsNotEmpty()
+  @Matches(STEP_ID_PATTERN, {
+    message: 'stepId must contain only letters, digits, "-" and "_"',
+  })
   stepId: string;
 
   @ApiPropertyOptional({ description: 'Loại bước (FRONT/LEFT/RIGHT…), nếu có' })

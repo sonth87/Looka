@@ -3,7 +3,6 @@ import { CustomException, ERROR_CODE } from '@app/shared/errors/legacy';
 import { CommonService } from '@app/shared/common/common.service';
 import { Pagination } from '@app/shared/http/pagination';
 import { SessionService } from '@app/modules/capture/services/session.service';
-import { FileStorageService } from '@app/modules/file-storage/services/file-storage.service';
 import { WorkflowCatalogReadRepository } from '@app/modules/workflow/infrastructure/read/workflow-catalog.read-repository';
 import {
   BadRequestException,
@@ -12,9 +11,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
-import archiver from 'archiver';
 import { randomUUID } from 'node:crypto';
-import { PassThrough } from 'node:stream';
 import { DataSource, Repository } from 'typeorm';
 import { CampaignDao } from '../dao';
 import { CreateCampaignDto, UpdateCampaignDto } from '../dto';
@@ -53,7 +50,6 @@ export class CampaignService extends CommonService<Campaign> {
     private readonly dataSource: DataSource,
     private readonly sessionService: SessionService,
     private readonly workflowCatalog: WorkflowCatalogReadRepository,
-    private readonly fileStorage: FileStorageService,
     private readonly advisoryLock: AdvisoryLockService,
   ) {
     super(repository);
@@ -627,164 +623,5 @@ export class CampaignService extends CommonService<Campaign> {
         [campaignIds],
       );
     return new Map(rows.map((r) => [r.campaign_id, r.count]));
-  }
-
-  /**
-   * `GET /v1/campaigns/:id/export-approved-photos` — Phase F.4 of
-   * docs/plans/card-photo-export-and-filters-plan-2026-09-17.md. Builds a
-   * zip with the full roster (`campaign_subjects`, every row regardless of
-   * status — a roster list, not a photo list), a CSV of only the
-   * `subject_photo_sets` rows that are `APPROVED` for this campaign, and one
-   * `${subjectCode}.jpg` per approved set (bytes fetched via
-   * `current_card_variant_id` → `photo_variants.fs_file_id` → file-storage).
-   *
-   * `subject_photo_sets`/`photo_variants`/`photo_review_events` belong to
-   * the `photo-review` module — read here via raw SQL against their plain
-   * table names, same cross-module-read convention `bulkApprovedSetCounts`
-   * above already uses for `subject_photo_sets` (that module deliberately
-   * has no structural dependency back onto this one, see that module's own
-   * top comment).
-   *
-   * `approvedAt` has no dedicated column on `subject_photo_sets` — it is
-   * read off the most recent `photo_review_events` row with
-   * `action = 'APPROVED'` for that set (a set can be approved more than
-   * once across its history, e.g. re-approved after a reject), which is a
-   * more accurate signal than `subject_photo_sets.updated_at` (that column
-   * can move for unrelated reasons, e.g. `SET_CURRENT`).
-   *
-   * Same `archiver` + `PassThrough` zip-building shape as
-   * `PrintPackageService.buildPackage` (built fresh on every call, not
-   * cached, for the same "an approval can happen after the zip was last
-   * downloaded" reason).
-   */
-  async exportApprovedPhotos(
-    id: string,
-  ): Promise<{ zip: Buffer; filename: string }> {
-    const campaign = await this.findCampaignEntityOrFail(id);
-
-    const rosterRows: Array<{
-      subject_code: string;
-      full_name: string;
-      citizen_id: string | null;
-      class_name: string | null;
-      faculty: string | null;
-      major: string | null;
-      status: string;
-    }> = await this.dataSource.query(
-      `SELECT subject_code, full_name, citizen_id, class_name, faculty, major, status
-         FROM campaign_subjects
-        WHERE campaign_id = $1
-        ORDER BY subject_code ASC`,
-      [id],
-    );
-
-    const approvedRows: Array<{
-      subject_code: string;
-      full_name: string | null;
-      class_name: string | null;
-      faculty: string | null;
-      approved_at: Date | null;
-      fs_file_id: string | null;
-    }> = await this.dataSource.query(
-      `SELECT s.subject_code, s.subject_name AS full_name, s.class_name, s.faculty,
-              ev.approved_at, pv.fs_file_id
-         FROM subject_photo_sets s
-         LEFT JOIN photo_variants pv ON pv.id = s.current_card_variant_id
-         LEFT JOIN LATERAL (
-           SELECT MAX(e.at) AS approved_at
-             FROM photo_review_events e
-            WHERE e.set_id = s.id AND e.action = 'APPROVED'
-         ) ev ON true
-        WHERE s.campaign_id = $1 AND s.status = 'APPROVED'
-        ORDER BY s.subject_code ASC`,
-      [id],
-    );
-
-    const archive = archiver('zip', { zlib: { level: 9 } });
-    const output = new PassThrough();
-    const chunks: Buffer[] = [];
-    output.on('data', (chunk: Buffer) => chunks.push(chunk));
-    const done = new Promise<Buffer>((resolve, reject) => {
-      output.on('end', () => resolve(Buffer.concat(chunks)));
-      archive.on('error', reject);
-    });
-    archive.pipe(output);
-
-    const csvField = (value: string) => `"${value.replace(/"/g, '""')}"`;
-
-    const rosterLines = [
-      'subjectCode,fullName,citizenId,className,faculty,major,status',
-    ];
-    for (const r of rosterRows) {
-      rosterLines.push(
-        [
-          csvField(r.subject_code),
-          csvField(r.full_name ?? ''),
-          csvField(r.citizen_id ?? ''),
-          csvField(r.class_name ?? ''),
-          csvField(r.faculty ?? ''),
-          csvField(r.major ?? ''),
-          r.status,
-        ].join(','),
-      );
-    }
-    archive.append(rosterLines.join('\n'), {
-      name: 'danh-sach-sinh-vien.csv',
-    });
-
-    const approvedLines = [
-      'subjectCode,fullName,className,faculty,approvedAt,fileName',
-    ];
-    for (const r of approvedRows) {
-      const fileName = `${r.subject_code}.jpg`;
-      approvedLines.push(
-        [
-          csvField(r.subject_code),
-          csvField(r.full_name ?? ''),
-          csvField(r.class_name ?? ''),
-          csvField(r.faculty ?? ''),
-          r.approved_at ? new Date(r.approved_at).toISOString() : '',
-          csvField(fileName),
-        ].join(','),
-      );
-
-      if (r.fs_file_id) {
-        await this.appendApprovedPhoto(archive, r.fs_file_id, fileName);
-      }
-    }
-    archive.append(approvedLines.join('\n'), {
-      name: 'danh-sach-anh-da-duyet.csv',
-    });
-
-    await archive.finalize();
-    const zip = await done;
-    return { zip, filename: `campaign-${campaign.code}-approved-photos.zip` };
-  }
-
-  /** Same fetch-by-`fsFileId`-and-append pattern as `PrintPackageService.appendSide` — logs and skips on failure rather than failing the whole export for one missing/unreachable file. */
-  private async appendApprovedPhoto(
-    archive: archiver.Archiver,
-    fsFileId: string,
-    fileName: string,
-  ): Promise<void> {
-    try {
-      const link = await this.fileStorage.issueViewLink(
-        fsFileId,
-        'campaign-export',
-      );
-      const response = await fetch(link.url);
-      if (!response.ok) {
-        this.logger.warn(
-          `export-approved-photos download failed for ${fileName}: HTTP ${response.status}`,
-        );
-        return;
-      }
-      const buf = Buffer.from(await response.arrayBuffer());
-      archive.append(buf, { name: fileName });
-    } catch (error) {
-      this.logger.warn(
-        `export-approved-photos download failed for ${fileName}: ${(error as Error).message}`,
-      );
-    }
   }
 }

@@ -715,26 +715,6 @@ export async function downloadRosterImportTemplate(): Promise<{ blob: Blob; file
   return { blob: await res.blob(), filename: match?.[1] ?? 'roster-template.xlsx' };
 }
 
-/**
- * `GET /v1/campaigns/:id/export-approved-photos` — Phase F.4
- * (docs/plans/card-photo-export-and-filters-plan-2026-09-17.md). A zip:
- * full roster CSV + approved-photos CSV + one `{subjectCode}.jpg` per
- * approved set. Same "blob + filename off Content-Disposition" pattern
- * `downloadRosterImportTemplate`/`downloadPrintBatchPackage` already use.
- */
-export async function downloadCampaignApprovedPhotos(campaignId: string): Promise<{ blob: Blob; filename: string }> {
-  const res = await fetch(`${baseUrl()}${campaignsPath(campaignId)}/export-approved-photos`, {
-    headers: { ...authHeaders() },
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new ApiError(text.slice(0, 300) || res.statusText, res.status);
-  }
-  const disposition = res.headers.get('Content-Disposition') ?? '';
-  const match = /filename="([^"]+)"/.exec(disposition);
-  return { blob: await res.blob(), filename: match?.[1] ?? `campaign-${campaignId}-approved-photos.zip` };
-}
-
 /** `POST /v1/campaigns/:id/subjects/imports` (multipart) — same `FormData`, no-manual-Content-Type pattern `uploadReplacePhoto` already uses. */
 export async function importCampaignRoster(campaignId: string, file: File): Promise<CampaignSubjectImport> {
   const form = new FormData();
@@ -815,8 +795,11 @@ export interface UserListItem {
   id: string;
   email: string;
   displayName?: string | null;
+  title?: string | null;
   code?: string | null;
   phone?: string | null;
+  department?: string | null;
+  faculty?: string | null;
   isAdmin: boolean;
   status: 'ACTIVE' | 'DISABLED';
   source: UserSource;
@@ -860,6 +843,20 @@ export interface UserDetail extends UserListItem {
   roleCodes: string[];
 }
 export const getUser = (id: string) => request<UserDetail>(`${USERS_PATH}/${id}`);
+
+/** `POST /v1/users` — "Thêm người dùng bằng tay", `roleIds` optional (phân quyền ngay hoặc để sau, see `CreateUserDto`'s own doc comment). */
+export interface CreateUserInput {
+  displayName: string;
+  email: string;
+  title?: string;
+  code?: string;
+  phone?: string;
+  department?: string;
+  faculty?: string;
+  roleIds?: string[];
+}
+export const createUser = (input: CreateUserInput) =>
+  request<{ id: string }>(USERS_PATH, { method: 'POST', body: JSON.stringify(input) });
 
 // --- Roles & Permissions (phân quyền) -----------------------------------
 // Mirrors apps/api/src/modules/identity's role.command.controller.ts,
@@ -1324,6 +1321,8 @@ export interface ListReviewSetsParams {
   missingCard?: boolean;
   /** "Quá hạn xử lý" (D-Q6) — backend has supported this since P4; plan item 12 wires it into the CMS. */
   overdue?: boolean;
+  /** `true` = chỉ APPROVED, `false` = chỉ chưa duyệt (mọi trạng thái khác) — độc lập với `status` (khớp đúng 1 giá trị). */
+  approved?: boolean;
   q?: string;
   /** Lớp/ngành/khoa (khớp đúng) — plan §G.2.b/c, 2026-09-17; populated in the CMS from `listCampaignSubjectDistinctValues`, not free text. */
   className?: string;
@@ -1347,6 +1346,7 @@ export function listReviewSets(params: ListReviewSetsParams = {}): Promise<Pagin
   if (params.hasUpload) search.set('hasUpload', 'true');
   if (params.missingCard) search.set('missingCard', 'true');
   if (params.overdue) search.set('overdue', 'true');
+  if (params.approved !== undefined) search.set('approved', String(params.approved));
   if (params.q) search.set('q', params.q);
   if (params.className) search.set('className', params.className);
   if (params.major) search.set('major', params.major);
@@ -1429,6 +1429,10 @@ export interface ReviewAssignment {
   id: string;
   userId: string;
   userName?: string;
+  userEmail?: string;
+  userDepartment?: string | null;
+  userFaculty?: string | null;
+  userRoleCodes?: string[];
   groupField: ReviewAssignmentGroupField;
   groupValue: string;
   createdByUserId?: string;
@@ -1455,6 +1459,26 @@ export const createReviewAssignment = (input: {
 /** `DELETE /v1/review/assignments/:id` — ADMIN only. */
 export const deleteReviewAssignment = (id: string) =>
   request<void>(`${REVIEW_ASSIGNMENTS_PATH}/${id}`, { method: 'DELETE' });
+
+/**
+ * "Người có quyền duyệt" (2026-09-22) — unrestricted REVIEWER access
+ * (`users.roles` contains `'REVIEWER'`), distinct from the scoped
+ * `ReviewAssignment` grants above. This is now what "Thêm phân công" on
+ * `ReviewAssignmentsPage.tsx` actually grants — no groupField/groupValue.
+ */
+export interface Reviewer {
+  userId: string;
+  userName?: string;
+  userEmail?: string;
+  userDepartment?: string | null;
+  userFaculty?: string | null;
+  userRoleCodes: string[];
+}
+export const listReviewers = () => request<Reviewer[]>(`${REVIEW_ASSIGNMENTS_PATH}/reviewers`);
+export const grantReviewer = (userId: string) =>
+  request<{ userId: string }>(`${REVIEW_ASSIGNMENTS_PATH}/reviewers`, { method: 'POST', body: JSON.stringify({ userId }) });
+export const revokeReviewer = (userId: string) =>
+  request<void>(`${REVIEW_ASSIGNMENTS_PATH}/reviewers/${userId}`, { method: 'DELETE' });
 
 /**
  * "Loại ảnh" — `GET/POST/PATCH /v1/photo-kinds` (ADMIN only, §7). No DELETE
@@ -1699,6 +1723,70 @@ export async function exportPrintBatchPackage(id: string, itemIds?: string[]): P
 /** `POST /v1/print/batches/:id/complete` — CENTRALIZED "Hoàn tất đợt" (Giai đoạn 4): moves the batch to DONE once at least one item is EXPORTED/PRINTED. */
 export const completePrintBatch = (id: string) =>
   request<PrintBatch>(`${PRINT_BATCHES_PATH}/${id}/complete`, { method: 'POST' });
+
+// --- Print result import (Giai đoạn 4, plan §4.3) — backend existed with
+// no CMS UI until 2026-09-22 ("upload lại file kết quả in ấn"). Same
+// upload/list/template shape `importCampaignRoster`/`listCampaignRosterImports`/
+// `downloadRosterImportTemplate` already establish for `CampaignSubjectImport`.
+
+export type PrintResultImportStatus = 'PROCESSING' | 'DONE' | 'FAILED';
+
+export interface PrintResultImport {
+  id: string;
+  batchId: string;
+  fileName: string;
+  uploadedByUserId?: string | null;
+  status: PrintResultImportStatus;
+  totalRows: number;
+  matchedRows: number;
+  printedRows: number;
+  failedRows: number;
+  unmatchedRows: number;
+  errorReportUrl?: string | null;
+  failureReason?: string | null;
+  createdAt: string;
+}
+
+/** `POST /v1/print/batches/:id/result-imports` (multipart) — same `FormData`, no-manual-Content-Type pattern `importCampaignRoster` already uses. */
+export async function uploadPrintResultFile(batchId: string, file: File): Promise<PrintResultImport> {
+  const form = new FormData();
+  form.append('file', file);
+  const res = await fetch(`${baseUrl()}${PRINT_BATCHES_PATH}/${batchId}/result-imports`, {
+    method: 'POST',
+    headers: { ...authHeaders() },
+    body: form,
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    let message = text.slice(0, 300) || res.statusText;
+    try {
+      const parsed = JSON.parse(text) as { message?: string };
+      message = parsed.message || message;
+    } catch {
+      /* keep the raw text */
+    }
+    throw new ApiError(message, res.status);
+  }
+  const envelope = (await res.json()) as { data: PrintResultImport };
+  return envelope.data;
+}
+
+export const listPrintResultImports = (batchId: string) =>
+  request<PrintResultImport[]>(`${PRINT_BATCHES_PATH}/${batchId}/result-imports`);
+
+/** `GET /v1/print/result-template` — an .xlsx StreamableFile, same "blob + filename off Content-Disposition" pattern `downloadRosterImportTemplate` already uses. */
+export async function downloadPrintResultTemplate(): Promise<{ blob: Blob; filename: string }> {
+  const res = await fetch(`${baseUrl()}/v1/print/result-template`, {
+    headers: { ...authHeaders() },
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(text.slice(0, 300) || res.statusText, res.status);
+  }
+  const disposition = res.headers.get('Content-Disposition') ?? '';
+  const match = /filename="([^"]+)"/.exec(disposition);
+  return { blob: await res.blob(), filename: match?.[1] ?? 'print-result-template.xlsx' };
+}
 
 /** `GET /v1/print/items` row (mirrors `PrintItemListItemDao`). */
 export interface PrintItem {
@@ -2348,7 +2436,7 @@ export interface WorkflowConfigOutput {
   cardSpec: CardSpec;
 }
 
-/** The 5-group `config` jsonb (`eligibility` moved off this onto `Campaign.eligibilityConfig`, 2026-09-18 — see that section's own header comment) — `aiProcessing`/`printing` stay `Record<string, unknown>` (edited as raw JSON in the CMS, no structured CMS equivalent exists for them yet — see `WorkflowConfigEditor.tsx`'s own doc comment); `capture`/`output` reuse `CaptureAnglesTable`/`CardSpecFields` as of plan item 6, and `identification` has its own real field type. */
+/** The 5-group `config` jsonb (`eligibility` moved off this onto `Campaign.eligibilityConfig`, 2026-09-18 — see that section's own header comment) — `aiProcessing`/`printing` stay `Record<string, unknown>` (edited as raw JSON in the CMS, no structured CMS equivalent exists for them yet — see `WorkflowConfigEditor.tsx`'s own doc comment); `capture` reuses `CaptureAnglesTable` as of plan item 6, `output` picks a Photo Kind (2026-09-22, see that file's "Đầu ra / ảnh thẻ" section), and `identification` has its own real field type. */
 export interface WorkflowConfig {
   capture: WorkflowConfigCapture;
   identification: WorkflowConfigIdentification;

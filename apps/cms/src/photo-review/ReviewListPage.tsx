@@ -14,9 +14,11 @@ import {
   listReviewSets,
 } from '../api';
 import { REVIEW_STATUS_BADGE_CLASS, REVIEW_STATUS_LABEL, isReviewSetLocked } from './reviewFormat';
+import { ReviewAssignmentsPage } from './ReviewAssignmentsPage';
 import { ReviewDetailModal } from './ReviewDetailModal';
 
 const PAGE_SIZE = 24;
+type Tab = 'list' | 'assignments';
 const STATUS_OPTIONS: ReviewSetStatus[] = ['PENDING_AUTO', 'AUTO_FAILED', 'READY', 'IN_REVIEW', 'APPROVED', 'REJECTED'];
 
 /**
@@ -27,13 +29,27 @@ const STATUS_OPTIONS: ReviewSetStatus[] = ['PENDING_AUTO', 'AUTO_FAILED', 'READY
  * count strip the mockup also shows — that strip needs dataset-wide counts
  * the list endpoint's contract doesn't specify, so this page only shows the
  * current page's pagination info instead of fabricating totals.
+ *
+ * "Phân công duyệt" (`ReviewAssignmentsPage`) is a TAB here as of
+ * 2026-09-22 ("để 1 trang trong duyệt ảnh" — product feedback that it
+ * shouldn't be a separate page/route), not a second `/review/assignments`
+ * route — that old route now just redirects here (see `App.tsx`).
+ * `ReviewAssignmentsPage` itself is unchanged/still self-contained (own
+ * data fetching, own "Người có quyền duyệt" list + thêm/xoá), just
+ * rendered inline instead of routed to.
  */
 export function ReviewListPage() {
+  const [tab, setTab] = useState<Tab>('list');
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [kinds, setKinds] = useState<PhotoKind[]>([]);
   const [campaignId, setCampaignId] = useState('');
   const [kindId, setKindId] = useState('');
   const [status, setStatus] = useState<ReviewSetStatus | ''>('');
+  // "Đã duyệt / Chưa duyệt" (2026-09-22) — independent of `status` above
+  // (that one is an exact single-value match, e.g. only READY); this
+  // groups every non-APPROVED status together, since picking "chưa duyệt"
+  // one status at a time isn't practical.
+  const [approved, setApproved] = useState<'' | 'true' | 'false'>('');
   const [hasAi, setHasAi] = useState(false);
   const [hasUpload, setHasUpload] = useState(false);
   const [missingCard, setMissingCard] = useState(false);
@@ -100,6 +116,7 @@ export function ReviewListPage() {
     if (campaignId) params.campaignId = campaignId;
     if (kindId) params.kindId = kindId;
     if (status) params.status = status;
+    if (approved) params.approved = approved === 'true';
     if (hasAi) params.hasAi = true;
     if (hasUpload) params.hasUpload = true;
     if (missingCard) params.missingCard = true;
@@ -113,7 +130,7 @@ export function ReviewListPage() {
     listReviewSets(params)
       .then(setResult)
       .catch((err) => setError(err instanceof ApiError ? err.message : String(err)));
-  }, [campaignId, kindId, status, hasAi, hasUpload, missingCard, overdue, q, className, major, faculty, page]);
+  }, [campaignId, kindId, status, approved, hasAi, hasUpload, missingCard, overdue, q, className, major, faculty, page]);
 
   const sets = result?.items ?? [];
   const meta = result?.meta;
@@ -123,6 +140,29 @@ export function ReviewListPage() {
     <div>
       <h1 className="text-2xl font-bold text-gray-900 mb-6">Duyệt ảnh</h1>
 
+      <div className="flex items-center gap-1 border-b border-gray-200 mb-6">
+        <button
+          onClick={() => setTab('list')}
+          className={`px-3 py-2 text-sm font-medium border-b-2 -mb-px ${
+            tab === 'list' ? 'border-blue-600 text-blue-700' : 'border-transparent text-gray-500 hover:text-gray-800'
+          }`}
+        >
+          Danh sách
+        </button>
+        <button
+          onClick={() => setTab('assignments')}
+          className={`px-3 py-2 text-sm font-medium border-b-2 -mb-px ${
+            tab === 'assignments' ? 'border-blue-600 text-blue-700' : 'border-transparent text-gray-500 hover:text-gray-800'
+          }`}
+        >
+          Phân công duyệt
+        </button>
+      </div>
+
+      {tab === 'assignments' && <ReviewAssignmentsPage />}
+
+      {tab === 'list' && (
+        <>
       <div className="p-5 rounded-2xl border border-gray-200 bg-white shadow-sm space-y-4 mb-6">
         <div className="flex flex-wrap gap-3">
           <select
@@ -232,6 +272,19 @@ export function ReviewListPage() {
             ))}
           </select>
 
+          <select
+            value={approved}
+            onChange={(e) => {
+              setApproved(e.target.value as '' | 'true' | 'false');
+              setPage(1);
+            }}
+            className="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900"
+          >
+            <option value="">Đã duyệt & chưa duyệt</option>
+            <option value="true">Đã duyệt</option>
+            <option value="false">Chưa duyệt</option>
+          </select>
+
           <input
             type="text"
             value={q}
@@ -330,6 +383,8 @@ export function ReviewListPage() {
               </button>
             </div>
           )}
+        </>
+      )}
         </>
       )}
 

@@ -12,7 +12,9 @@ import { SessionVideoService } from '../services/session-video.service';
 /**
  * Mirrors `PhotoController` — CMS-only (`SessionDetailDrawer`), so
  * SsoAuthGuard rather than the kiosk/web capture path's shared `x-api-key`;
- * see that controller's own doc comment.
+ * see that controller's own doc comment, including why it deliberately has
+ * no `@RequirePermission` (a documented product decision, not an oversight)
+ * and its 2026-09-24 viewer-identity fix, both applied identically here.
  */
 @Controller({ path: 'videos', version: '1' })
 @ApiTags('capture')
@@ -35,6 +37,10 @@ export class VideoController {
    * `SessionVideoService.SCAN_STALE_MS` — instead of the previous
    * "resolveViewContext or throw GONE" behaviour, which left the CMS with no
    * way to show a video at all once fs-core lost it.
+   *
+   * Viewer identity is `req.user.id`, not a client-supplied `viewerId` — see
+   * `PhotoController.viewLink`'s identical 2026-09-24 fix and
+   * `ViewLinkDto`'s own doc comment.
    */
   @Post(':id/view-link')
   @ApiOperation({
@@ -43,13 +49,13 @@ export class VideoController {
   async viewLink(
     @Req() req: Request,
     @Param('id') videoId: string,
-    @Body() dto: ViewLinkDto,
+    @Body() _dto: ViewLinkDto,
   ): Promise<PhotoViewLink> {
     const source = await this.sessionVideoService.resolveViewSource(videoId);
     if (source.kind === 'remote') {
       return this.fileStorage.issueViewLink(
         source.fsFileId,
-        dto.viewerId ?? 'web-viewer',
+        req.user!.id,
         source.tenantName,
       );
     }

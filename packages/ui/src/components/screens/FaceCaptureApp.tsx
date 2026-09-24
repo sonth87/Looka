@@ -45,6 +45,7 @@ import {
   RECORDING_LIVENESS_CHECK_INTERVAL_MS,
 } from '../../lib/recordingLiveness.js';
 import { deviceUnauthorizedMessage, type DeviceRejectReason } from '../../lib/deviceBlockMessage.js';
+import { createTetheredCanvasStream } from '../../lib/tetheredCanvasStream.js';
 
 /**
  * What a caller that already resolved access some other way (2026-09-08:
@@ -366,6 +367,37 @@ interface CbHelpFrame {
   deviceId: string | null;
   status: CbHelpFrameStatus;
   capturedDataUrl?: string;
+  /**
+   * Periodic still of this non-CENTER frame's own live camera (2026-09-23
+   * fix, live field report, quoted verbatim: "màn extend khi mở chọn cam
+   * giữa thì hiển thị cả 3 góc cam nhưng ảnh chỉ của cam giữa" — CB Help
+   * shows all 3 camera-angle tiles during an active session, but only
+   * CENTER ever has a real image). Root cause: `CbHelpFrames.tsx` used to
+   * open its OWN independent `getUserMedia` for each non-CENTER frame's
+   * `deviceId` — the exact same physical device THIS window already holds
+   * open exclusively via `frameStreamsRef`/`openRoundStreams` for the
+   * active capture session itself (same class of "1 UVC reader at a time"
+   * conflict item 12b's `centerPreviewDataUrl` already fixed for CENTER,
+   * and `CampaignGate.tsx`'s `pausedForSetup` fixed for the Camera Setup
+   * popup — just contended against THIS window's own session streams this
+   * time). CB Help's second open always lost that race and failed silently
+   * (`NotReadableError: Device in use`), leaving every non-CENTER tile
+   * blank. Fixed the same way item 12b fixed CENTER: attach a periodic
+   * snapshot of THIS window's own already-open stream (`frameVideoElsRef`)
+   * to each frame here, in the same `publishCbHelpState` heartbeat that
+   * already computes `centerPreviewDataUrl` below, instead of leaving
+   * `CbHelpFrames.tsx` to fight for a second reader.
+   *
+   * Kept as a SEPARATE field from `capturedDataUrl` on purpose —
+   * `capturedDataUrl` means "the actual saved photo for this step"
+   * (`sessionStep?.capturedImagePath` below) and must never be overwritten
+   * with an in-progress live still, or a retake/late arrival of the real
+   * photo could race against this heartbeat and show the wrong image.
+   * `undefined`/`null` for CENTER (has its own `centerPreviewDataUrl`) and
+   * once COMPLETED (the real photo already covers it) — see this field's
+   * own attach site in `publishCbHelpState` below.
+   */
+  livePreviewDataUrl?: string | null;
   attempt: number;
 }
 
@@ -642,6 +674,93 @@ function markFrameReadyWhenPlaying(video: HTMLVideoElement, onReady: () => void)
     requestAnimationFrame(poll);
   };
   poll();
+}
+
+/**
+ * Tethered Canon (gphoto2) synthetic device id — 2026-09-22 capture-session
+ * integration, docs/plans/canon-tethered-capture-plan-2026-09-21.md's
+ * deferred "Bước 4/5". Must match `CameraSetupScreen.tsx`'s own
+ * `TETHERED_DEVICE_ID` constant exactly (that screen writes it into
+ * `camera.roleMapping` via "Kiểm tra kết nối" + role assignment; this file
+ * only ever reads it back from `cameraRoleMapping`) — duplicated rather than
+ * imported, same "no shared module across this renderer/main-process
+ * boundary" convention every other `faceAPI`-backed constant in this app
+ * already follows.
+ */
+const TETHERED_DEVICE_ID = 'tethered:gphoto2';
+
+/**
+ * Fires a REAL shutter release via gphoto2 (main process, seconds not
+ * milliseconds — see `tetheredCamera.ts`'s own doc comment) and returns the
+ * resulting photo as a data URL, or `null` on any failure. The one place
+ * this app talks to the tethered camera for an actual capture (as opposed
+ * to the live-view *preview* polling — see `useTetheredPreview` below);
+ * every call site below feeds the result straight into
+ * `engine.recordExternalCapture(stepId, dataUrl)`, the exact same
+ * synchronous, already-unit-tested entry point simultaneous-capture side
+ * frames use (`SimultaneousRetake.test.ts` et al.) — this function is only
+ * responsible for getting a data URL, never for engine/session bookkeeping.
+ */
+/**
+ * De-dupes overlapping calls (2026-09-24 fix, confirmed audit finding):
+ * AUTO mode can re-emit `external-capture-ready` for the same still-pending
+ * step every `autoHoldMs` (the tethered path never sets `engine.isCapturing`,
+ * so nothing in the engine itself stops that), and a stuck-looking multi-
+ * second Canon shot can also tempt an operator into a second shutter tap or
+ * gesture. Without this, each of those became its own real, queued
+ * `gphoto2`/shutter release. A call that arrives while one is already in
+ * flight now just awaits that same in-flight capture instead of firing a
+ * second real shutter release.
+ *
+ * Keyed on `{ sessionId, stepId }` (2026-09-24 follow-up fix, confirmed
+ * audit finding): the dedupe above used to share the pending promise with
+ * ANY caller regardless of which session/step it belonged to. A real gphoto2
+ * shutter release can take up to `CAPTURE_TIMEOUT_MS`; if the operator
+ * cancelled that session and a NEW one reached a tethered step before the
+ * old shot resolved, the new session's own stale-session guard (each call
+ * site records its `sessionId` before awaiting this function) compared its
+ * own id against itself and passed, so the old session's photo silently
+ * landed on the new session's step. A caller that does not match the
+ * in-flight identity now waits for that capture to settle (gphoto2 already
+ * serializes concurrent shutter releases in the main process via
+ * `withCameraLock`) and discards its result, then fires its own fresh
+ * capture — it never adopts a photo that was not taken for it.
+ */
+let tetheredCaptureInFlight: { sessionId: string | null; stepId: string; promise: Promise<string | null> } | null =
+  null;
+
+async function captureTetheredFrame(identity: { sessionId: string | null; stepId: string }): Promise<string | null> {
+  if (tetheredCaptureInFlight) {
+    if (tetheredCaptureInFlight.sessionId === identity.sessionId && tetheredCaptureInFlight.stepId === identity.stepId) {
+      return tetheredCaptureInFlight.promise;
+    }
+    // Belongs to a different session/step — never adopt its result. Wait for
+    // it to settle so we don't pile up concurrent real shutter releases, then
+    // fall through to fire our own.
+    await tetheredCaptureInFlight.promise.catch(() => null);
+  }
+  // Declared with a placeholder `promise` and filled in right after — TS's
+  // definite-assignment check (correctly) cannot prove `entry` is safe to
+  // reference from inside its own initializer, even though the IIFE below
+  // only ever reads it after `await`, once this whole statement has already
+  // finished running.
+  const entry: { sessionId: string | null; stepId: string; promise: Promise<string | null> } = {
+    sessionId: identity.sessionId,
+    stepId: identity.stepId,
+    promise: null as unknown as Promise<string | null>,
+  };
+  entry.promise = (async () => {
+    try {
+      const result = await (window as any).faceAPI?.captureTetheredPhoto?.();
+      return result?.ok ? result.dataUrl : null;
+    } catch {
+      return null;
+    } finally {
+      if (tetheredCaptureInFlight === entry) tetheredCaptureInFlight = null;
+    }
+  })();
+  tetheredCaptureInFlight = entry;
+  return entry.promise;
 }
 
 export interface FaceCaptureAppProps {
@@ -1294,7 +1413,16 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     }
 
     const frames: FrameSpec[] = framesForWorkflow(workflow);
-    const preflight = checkFramesReadiness(frames, mapping, devs);
+    // 2026-09-24 fix (confirmed audit finding): `devs` is real
+    // `enumerateDevices()` output only and can never contain the synthetic
+    // tethered-Canon id, so a role mapped to it always read as "missing" here
+    // even when the Canon is actually connected and working — see
+    // `isFrameMissingDevice`'s identical fix below for the matching bug on
+    // the live capture screen.
+    const devsForPreflight = Object.values(mapping).includes(TETHERED_DEVICE_ID)
+      ? [...devs, { id: TETHERED_DEVICE_ID, label: 'Canon (kết nối dây)' }]
+      : devs;
+    const preflight = checkFramesReadiness(frames, mapping, devsForPreflight);
     setFramePreflight(preflight);
     return preflight;
   };
@@ -1348,6 +1476,20 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   const openFrameStreams = async (frames: FrameReadiness[]): Promise<boolean> => {
     for (const frame of frames) {
       if (frame.role === 'CENTER' || !frame.deviceId) continue;
+
+      // Tethered Canon (2026-09-22): no `MediaStream` exists for gphoto2 —
+      // `getUserMedia({ deviceId: { exact: TETHERED_DEVICE_ID } })` below
+      // would just throw (no such real device) and abort the whole session
+      // start. There is nothing to "wait until playing" the way a real
+      // webcam has, so this frame is simply marked ready immediately;
+      // `useTetheredPreview` (mounted once, below) independently keeps its
+      // `imagePath` fed for display, and the real photo comes from
+      // `captureTetheredFrame()` at actual capture time, not from a stream.
+      if (frame.deviceId === TETHERED_DEVICE_ID) {
+        frameReadinessRef.current[frame.stepId] = true;
+        setFrameReadiness((prev) => ({ ...prev, [frame.stepId]: true }));
+        continue;
+      }
 
       const existing = frameStreamsRef.current[frame.stepId];
       if (existing && existing.getTracks().some((t) => t.readyState === 'live')) continue;
@@ -1474,10 +1616,25 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     // closure yet — see `planCaptureRounds`'s `connectedDeviceIds` doc
     // comment for why routing a step to a stale/disconnected device instead
     // of falling back is exactly the bug this closes.
+    // 2026-09-24 fix (confirmed audit finding, root cause of user bugs #1/#2/
+    // #3 in simultaneous mode): `devicesRef.current` is real
+    // `enumerateDevices()` output only and can never contain the synthetic
+    // tethered-Canon id, so a role mapped to it was always treated as
+    // "disconnected" here — `planCaptureRounds` then silently rerouted that
+    // step onto another mapped camera (or blocked the whole session if the
+    // Canon was the only mapped camera). The Canon has no `MediaStream` to
+    // enumerate, but it is a real, distinct capture path
+    // (`captureTetheredFrame`/gphoto2) whenever the mapping actually uses it,
+    // so it must count as "connected" for round-planning purposes exactly
+    // like `openFrameStreams`/`isFrameMissingDevice` already special-case it.
+    const connectedDeviceIds = [
+      ...devicesRef.current.map((d) => d.id),
+      ...(Object.values(mapping).includes(TETHERED_DEVICE_ID) ? [TETHERED_DEVICE_ID] : []),
+    ];
     const plan = planCaptureRounds(workflow.steps, mapping, {
       sequencing,
       physicalAngles,
-      connectedDeviceIds: devicesRef.current.map((d) => d.id),
+      connectedDeviceIds,
     });
     stepRoundIndexRef.current = new Map();
     roundDrivingStepRef.current = new Map();
@@ -1646,6 +1803,18 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     currentRoundIdxRef.current = 0;
 
     const centerDeviceId = mapping['CENTER'];
+    // TEMP DIAGNOSTIC — see the logs in startLiveMode/handleSelectCamera/the
+    // corrective effect. Confirms what this gate resolved CENTER to at
+    // actual session-start time, and whether it thought a call to
+    // handleSelectCamera was even necessary.
+    console.warn(
+      '[TetheredDebug] runSimultaneousCaptureGate: centerDeviceId =',
+      centerDeviceId,
+      'currentSelectedDevice =',
+      cameraServiceRef.current?.getSelectedDevice()?.id,
+      'willCallHandleSelectCamera =',
+      !!(centerDeviceId && centerDeviceId !== cameraServiceRef.current?.getSelectedDevice()?.id)
+    );
     if (centerDeviceId && centerDeviceId !== cameraServiceRef.current?.getSelectedDevice()?.id) {
       await handleSelectCamera(centerDeviceId);
     }
@@ -1706,14 +1875,62 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    * `effectiveYaw`/`effectivePitch`, baked into its `pose` by
    * `buildRoundPlan`), but the photo comes from this step's own physical
    * camera instead of the engine's CENTER-only snapshot provider.
+   *
+   * Tethered Canon branch (2026-09-22, added alongside the above rather
+   * than replacing it): a step whose resolved role is assigned the
+   * tethered device (`TETHERED_DEVICE_ID`) has no `MediaStream`/`<video>`
+   * at all — `snapshotVideoFrame` fundamentally cannot apply — so it routes
+   * through `captureTetheredFrame()` (a real, seconds-long gphoto2 shutter
+   * release) instead, still landing on the exact same
+   * `recordExternalCapture(stepId, dataUrl)` call every other path here
+   * uses. Unlike the simultaneous-only side-frame branch above, this one
+   * fires for ANY role (including CENTER) and regardless of
+   * `simultaneousCaptureRef` — a tethered role has the identical "wrong/no
+   * camera for the engine's built-in provider" problem whether or not this
+   * kiosk's OTHER cameras happen to run simultaneously.
    */
-  const captureRetakingSideFrame = (engine: WorkflowEngine, stepIdOverride?: string): boolean => {
-    if (!simultaneousCaptureRef.current) return false;
+  const captureRetakingSideFrame = async (
+    engine: WorkflowEngine,
+    stepIdOverride?: string
+  ): Promise<boolean> => {
     const stepId = stepIdOverride ?? engine.retakingStepId ?? engine.currentState.stepId ?? null;
     if (!stepId) return false;
 
     const frame = framesForWorkflow(activeWorkflowRef.current).find((f) => f.stepId === stepId);
-    if (!frame || frame.role === 'CENTER') return false;
+    if (!frame) return false;
+
+    if (cameraRoleMappingRef.current[frame.role] === TETHERED_DEVICE_ID) {
+      // 2026-09-24 fix (confirmed audit finding): a real gphoto2 shutter
+      // release takes seconds — long enough for the operator to cancel or
+      // restart the session, or for it to finish and the next student's
+      // session to start, before this resolves. `engine` is one long-lived
+      // instance reused across every session, and step ids are workflow ids
+      // that repeat identically session to session, so without this check a
+      // late photo would still pass `recordExternalCapture`'s RUNNING+PENDING
+      // checks and land on the WRONG (next) student's step.
+      const sessionIdAtCapture = engine.currentSession?.id ?? null;
+      const dataUrl = await captureTetheredFrame({ sessionId: sessionIdAtCapture, stepId });
+      if (engine.currentSession?.id !== sessionIdAtCapture) {
+        console.warn(
+          `[FaceCaptureApp] tethered capture: session changed while capturing ${frame.label} (${frame.role}) — discarding stale photo`
+        );
+        return true;
+      }
+      if (!dataUrl) {
+        console.warn(`[FaceCaptureApp] tethered capture: no photo for ${frame.label} (${frame.role})`);
+        setStoreError(
+          `Khung ${frame.label} (${CAMERA_ROLE_LABELS_VI[frame.role]}): chụp Canon lỗi, chụp lại góc này.`
+        );
+        return true;
+      }
+      const recorded = engine.recordExternalCapture(stepId, dataUrl);
+      console.log(
+        `[FaceCaptureApp] tethered capture: ${recorded ? 'recorded' : 'REJECTED by engine'} for ${frame.label} (${frame.role}, step ${stepId})`
+      );
+      return true;
+    }
+
+    if (!simultaneousCaptureRef.current || frame.role === 'CENTER') return false;
 
     const videoEl = frameVideoElsRef.current[stepId];
     const dataUrl = videoEl ? snapshotVideoFrame(videoEl, undefined, CAPTURE_MIRRORED) : null;
@@ -2095,6 +2312,42 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   };
 
   const cameraServiceRef = useRef<BrowserCameraService | null>(null);
+  /**
+   * 2026-09-24 fix (confirmed audit finding — tethered-Canon race): monotonic
+   * counter bumped by every call to `startLiveMode`/`handleSelectCamera` that
+   * is about to open a real webcam. `camera.start()` awaits `getUserMedia`,
+   * which cannot be cancelled once in flight — `BrowserCameraService.stop()`
+   * is a no-op against a start that hasn't resolved yet (its `activeStream`
+   * field is only assigned once `getUserMedia` itself resolves), so a
+   * tethered switch (`handleSelectCamera(TETHERED_DEVICE_ID)`, or the
+   * corrective effect below) that runs while an earlier webcam `start()` is
+   * still pending could not stop it — that webcam would resolve afterwards
+   * and `setStream()` a live feed onto a CENTER the mapping already says is
+   * tethered, with nothing left to undo it (the corrective effect only fires
+   * once, on the `centerIsTethered` transition, which has already happened).
+   * Every awaited webcam `start()` below re-checks its own captured
+   * generation (and the current role mapping) once it resolves, and releases
+   * the stream instead of publishing it when either has moved on.
+   */
+  const cameraOpGenRef = useRef(0);
+  /**
+   * 2026-09-24 fix (confirmed audit finding — video lost on a fast approve):
+   * both recording effects below (single-stream and multi-channel) used to
+   * fire-and-forget their own finalization promise from their `useEffect`
+   * cleanup (`void stopAndFinalize()`/`void stopAndFinalizeAll()`) whenever
+   * `recordingSessionKey` was cleared on session completion. That promise
+   * runs `recorder.stop()` → its async `onstop` (encode the `Blob`, copy it
+   * to an `ArrayBuffer`, then an IPC round-trip to `faceAPI.endVideoStream`,
+   * which is what finally sets `capture_streams.ended_at`). `onAccept` below
+   * used to call `approveUpload()` immediately after the 'completed' event,
+   * with nothing to wait on — `enqueueSessionVideos` (main process) only
+   * ever enqueues a stream whose `ended_at` is already set, so approving
+   * before that finished silently dropped the whole recording, with no
+   * error shown anywhere. Holds whichever recording effect's own
+   * finalization promise is currently in flight so `onAccept` has something
+   * to await before approving.
+   */
+  const recordingFinalizeRef = useRef<Promise<void> | null>(null);
   const liveWorkflowEngineRef = useRef<WorkflowEngine | null>(null);
   /**
    * The CB Help window's greeting/errorMessage are "sticky, until explicitly
@@ -2348,6 +2601,15 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   };
 
   useEffect(() => {
+    // 2026-09-24 fix (confirmed audit finding — StrictMode double-init): in
+    // dev, React intentionally mounts→unmounts→remounts this effect once to
+    // surface exactly this class of bug; this mount-only effect's `init()`
+    // had no way to notice its own invocation had already been torn down,
+    // so both the original and the remounted call could reach `startLiveMode`
+    // and open the same physical camera twice (one `MediaStream` leaked,
+    // never `.stop()`d, keeping the device's light on). Checked once, right
+    // before the one call that actually opens hardware.
+    let cancelled = false;
     async function init() {
       // Guarded on its own, separate from the try below: a database that fails
       // to open must degrade the local cache, not the whole screen. The two were
@@ -2367,6 +2629,23 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
       }
 
       try {
+        // 2026-09-24 fix (confirmed audit finding — mount-order): this whole
+        // block runs `runSimultaneousCaptureGate` (which, in simultaneous
+        // mode, calls `runFramePreflight`) BEFORE `startLiveMode()` further
+        // down — `startLiveMode` is the only place that used to construct
+        // `cameraServiceRef.current`, so `runFramePreflight`'s own
+        // `cameraServiceRef.current?.enumerateDevices()` read `undefined` and
+        // fell back to `devices` state, which is still `[]` on first mount.
+        // `buildRoundPlan` then read every real webcam as disconnected at
+        // mount ("các camera đã được kết nối nhưng vào màn chụp vẫn báo là
+        // chưa kết nối"). Constructing the service here, before the gate
+        // runs, makes real enumeration available immediately; it has no side
+        // effects beyond registering the device-change listener (no
+        // `getUserMedia` call), and `startLiveMode`'s own
+        // `cameraServiceRef.current || new BrowserCameraService()` already
+        // reuses whatever instance is here instead of replacing it.
+        if (!cameraServiceRef.current) cameraServiceRef.current = new BrowserCameraService();
+
         const liveEngine = new WorkflowEngine();
         liveEngine.setSensitivity(sensitivity);
         liveEngine.setCaptureTriggerConfig({
@@ -2374,6 +2653,47 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           autoHoldMs: getSettings().autoHoldMs || 2000,
         });
         liveEngine.setSnapshotProvider(() => {
+          // Defence in depth (2026-09-23, real user report: "ảnh chụp thật
+          // (lưu lại) không phải từ Canon" — see the `setExternalCaptureOnly`
+          // fix in the `state-change` listener below for the actual bug and
+          // fix). This callback is `CaptureController.captureCurrentFrame`'s
+          // ONLY source of image data, and `captureCurrentFrame` is only ever
+          // reached from `WorkflowEngine.triggerManualCapture` — i.e. this IS
+          // the final-save path, never just a CV/preview feed, so it must
+          // never hand back a real webcam frame while CENTER is tethered.
+          // The `externalCaptureOnly` arming above is what's supposed to keep
+          // AUTO/MANUAL/OFF from ever calling this in that situation at all;
+          // this is a second, independent check in case some future or
+          // currently-unnoticed call path reaches `triggerManualCapture`
+          // without going through that gate. Deliberately returns null
+          // (`captureCurrentFrame`'s own documented "nothing to give" signal,
+          // which fails the capture and lets it be retried) rather than
+          // `tetheredPreviewRef.current` — that ref is a continuously-
+          // refreshed live-view still for the CV/preview pipeline, not a real
+          // shutter release, and this callback is synchronous so it cannot
+          // await a real `captureTetheredFrame()` here. Silently saving a
+          // stale preview frame as the final photo would be exactly the same
+          // class of bug this whole fix is for, just with a different wrong
+          // image instead of the webcam's.
+          //
+          // 2026-09-24 fix (confirmed audit finding): this used to check only
+          // CENTER, so in SEQUENTIAL mode with the Canon on CENTER every
+          // OTHER step (LEFT/RIGHT/UP/DOWN) hit this same null — even though
+          // cameraServiceRef was correctly streaming that step's own real
+          // webcam — because those steps never route through
+          // captureRetakingSideFrame's tethered branch (frame.role isn't
+          // CENTER there) and fall through to this provider instead. Checking
+          // the CURRENT step's own resolved role rather than hardcoding
+          // CENTER fixes that while keeping the exact same defence for a
+          // tethered CENTER/current step.
+          const liveStepId = liveEngine.retakingStepId ?? liveEngine.currentState.stepId ?? null;
+          const liveFrame = liveStepId
+            ? framesForWorkflow(activeWorkflowRef.current).find((f) => f.stepId === liveStepId)
+            : null;
+          const liveRole = liveFrame?.role ?? 'CENTER';
+          if (cameraRoleMappingRef.current[liveRole] === TETHERED_DEVICE_ID) {
+            return null;
+          }
           if (cameraServiceRef.current) {
             return cameraServiceRef.current.captureBase64Snapshot();
           }
@@ -2409,10 +2729,43 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           // role-switch effect keeps `cameraServiceRef`'s single stream
           // pointed at whichever physical camera the current step actually
           // needs — so the engine's own snapshot provider is always correct
-          // there, and this must stay a no-op outside simultaneous mode.
-          if (state.stepId && simultaneousCaptureRef.current) {
+          // there, and this used to stay a no-op outside simultaneous mode.
+          //
+          // Tethered-CENTER AUTO bug (2026-09-23, real user report: "ảnh
+          // chụp thật (lưu lại) không phải từ Canon" — the saved CENTER photo
+          // was from the regular webcam, not the tethered Canon, even though
+          // the operator captured with Canon assigned to CENTER): the
+          // "role-switch effect keeps cameraServiceRef pointed at the right
+          // camera" assumption above is false specifically for a tethered
+          // CENTER. `handleSelectCamera`'s `TETHERED_DEVICE_ID` branch
+          // deliberately never calls `cameraServiceRef.current.start()` (no
+          // `MediaStream` exists for gphoto2), so `cameraServiceRef.current`
+          // is left pointing at whatever real webcam it last held (or
+          // nothing) — and CENTER never set `externalCaptureOnly` above
+          // regardless of mode, so `processFrame`'s AUTO branch called
+          // `triggerManualCapture` straight through to
+          // `liveEngine.setSnapshotProvider`'s raw `cameraServiceRef.current
+          // ?.captureBase64Snapshot()` callback below, silently saving that
+          // stale webcam frame as the "Canon" photo. MANUAL (gesture) and OFF
+          // (shutter) modes never had this bug — `captureRetakingSideFrame`
+          // is called unconditionally ahead of their own trigger paths (see
+          // its own doc comment's "Tethered Canon branch"), and already
+          // resolves `engine.currentState.stepId` for a first attempt, not
+          // just a retake. AUTO's auto-fire is the one path that skips
+          // `captureRetakingSideFrame` entirely whenever `externalCaptureOnly`
+          // is false, so arming it for a tethered role — independently of
+          // `simultaneousCaptureRef` and of the non-CENTER-only condition
+          // below, exactly like `captureRetakingSideFrame`'s own tethered
+          // branch already does — routes AUTO through `external-capture-ready`
+          // → `captureRetakingSideFrame` → a real `captureTetheredFrame()`
+          // shutter release, instead of the stale-webcam snapshot provider.
+          if (state.stepId) {
             const frame = framesForWorkflow(activeWorkflowRef.current).find((f) => f.stepId === state.stepId);
-            liveEngine.setExternalCaptureOnly(!!frame && frame.role !== 'CENTER');
+            const roleIsTethered =
+              !!frame && cameraRoleMappingRef.current[frame.role] === TETHERED_DEVICE_ID;
+            const nonCenterSideFrameInSimultaneous =
+              simultaneousCaptureRef.current && !!frame && frame.role !== 'CENTER';
+            liveEngine.setExternalCaptureOnly(roleIsTethered || nonCenterSideFrameInSimultaneous);
           }
 
           // CB Help "step change" (§3.5) — de-duped against this event's
@@ -2427,7 +2780,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           }
         });
 
-        liveEngine.on('capture-trigger', (data: { stepId: string; imagePath: string }) => {
+        liveEngine.on('capture-trigger', async (data: { stepId: string; imagePath: string }) => {
           setLatestCapturedImage({ ...data });
 
           // attempts counts completed retakes, so the wire value is 1-based: a
@@ -2456,6 +2809,42 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
                 if (rsp.step.id === data.stepId) continue;
                 const sessionStep = liveEngine.currentSession?.steps.find((st) => st.stepId === rsp.step.id);
                 if (sessionStep?.status === 'COMPLETED') continue;
+
+                // Tethered Canon round-mate (2026-09-22): a real shutter
+                // release, awaited in place — sequential per round-mate is
+                // fine here (gphoto2 itself serializes concurrent calls via
+                // `withCameraLock` in the main process, see
+                // `tetheredCamera.ts`), just slower than the instant
+                // `snapshotVideoFrame` path for the other, real-webcam
+                // round-mates.
+                if (cameraRoleMappingRef.current[rsp.cameraRole] === TETHERED_DEVICE_ID) {
+                  // 2026-09-24 fix (confirmed audit finding) — same stale-
+                  // session race as `captureRetakingSideFrame`'s tethered
+                  // branch: this real gphoto2 shutter release can resolve
+                  // after the operator cancelled/restarted the session.
+                  const roundMateSessionIdAtCapture = liveEngine.currentSession?.id ?? null;
+                  const dataUrl = await captureTetheredFrame({ sessionId: roundMateSessionIdAtCapture, stepId: rsp.step.id });
+                  if (liveEngine.currentSession?.id !== roundMateSessionIdAtCapture) {
+                    console.warn(
+                      `[FaceCaptureApp] simultaneous capture: session changed while capturing ${rsp.step.type} (${rsp.cameraRole}) — discarding stale photo`
+                    );
+                    continue;
+                  }
+                  if (!dataUrl) {
+                    console.warn(
+                      `[FaceCaptureApp] simultaneous capture: tethered shot failed for ${rsp.step.type} (${rsp.cameraRole})`
+                    );
+                    setStoreError(
+                      `Khung ${rsp.step.type} (${CAMERA_ROLE_LABELS_VI[rsp.cameraRole]}): chụp Canon lỗi, chụp lại góc này.`
+                    );
+                    continue;
+                  }
+                  const recorded = liveEngine.recordExternalCapture(rsp.step.id, dataUrl);
+                  console.log(
+                    `[FaceCaptureApp] simultaneous capture: tethered shot ${recorded ? 'recorded' : 'REJECTED by engine'} for ${rsp.step.type} (${rsp.cameraRole}, step ${rsp.step.id})`
+                  );
+                  continue;
+                }
 
                 const videoEl = frameVideoElsRef.current[rsp.step.id];
                 const dataUrl = videoEl ? snapshotVideoFrame(videoEl, undefined, CAPTURE_MIRRORED) : null;
@@ -2497,7 +2886,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         // (see WorkflowEngine's `externalCaptureOnly` doc comment). Routes
         // through the exact same helper the shutter/gesture call sites use.
         liveEngine.on('external-capture-ready', (data: { stepId: string }) => {
-          captureRetakingSideFrame(liveEngine, data.stepId);
+          void captureRetakingSideFrame(liveEngine, data.stepId);
         });
 
         liveEngine.on('completed', (completedSession: CaptureSession) => {
@@ -2555,6 +2944,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         // Opening the camera was gated behind a user-agent test, so a desktop
         // showed a live-mode interface with no picture in it: stream stayed
         // null and the face overlay, which needs one, drew nothing.
+        if (cancelled) return;
         startLiveMode();
       } catch (err) {
         console.error('❌ [FaceCaptureApp] Initialization error:', err);
@@ -2564,6 +2954,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     init();
 
     return () => {
+      cancelled = true;
       cameraServiceRef.current?.stop();
       closeFrameStreams();
     };
@@ -2626,8 +3017,10 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
                 // Simultaneous capture: a side frame being retaken (MANUAL
                 // mode's gesture) must snapshot its own camera, never the
                 // engine's normal (CENTER-only) capture path — see
-                // captureRetakingSideFrame's own doc comment.
-                if (!captureRetakingSideFrame(engine)) {
+                // captureRetakingSideFrame's own doc comment. Also where a
+                // tethered role's gesture-triggered capture routes through
+                // (same function, see its own tethered branch).
+                if (!(await captureRetakingSideFrame(engine))) {
                   const wf = engine as any;
                   // Pass the same frame isFaceReady was just computed from, so
                   // the engine's own quality gate (WorkflowEngine.
@@ -2661,7 +3054,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     };
   }, []);
 
-  const handleShutterCapture = useCallback(() => {
+  const handleShutterCapture = useCallback(async () => {
     const engine = liveWorkflowEngineRef.current;
     if (!engine) return;
 
@@ -2669,8 +3062,11 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     // button) must snapshot its own camera, never the engine's normal
     // (CENTER-only) capture path — see captureRetakingSideFrame's own doc
     // comment. Checked ahead of the `faceState?.detected` gate below: a side
-    // frame's retake does not depend on CENTER seeing a face at all.
-    if (captureRetakingSideFrame(engine)) return;
+    // frame's retake does not depend on CENTER seeing a face at all. Also
+    // where a tethered role's shutter-triggered capture routes through
+    // (same function, see its own tethered branch) — now `await`ed since a
+    // real gphoto2 shutter release is seconds, not instant.
+    if (await captureRetakingSideFrame(engine)) return;
 
     if (faceState?.detected) {
       const wf = engine as any;
@@ -2715,6 +3111,24 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     setCameraError(null);
     setIsCameraLoading(true);
 
+    // Tethered Canon assigned to CENTER (2026-09-23 — "cam giữ đã set cho
+    // camera [Canon] nhưng vào chụp thì lại lấy camera của máy tính"), fixed
+    // once already below (skip auto-select/start of a real camera for
+    // CENTER) — but that first cut early-`return`ed BEFORE device
+    // enumeration too, which broke a second, unrelated thing: `devices`
+    // (`setDevices(devs)` a few lines down) is what `runFramePreflight`/the
+    // LEFT/RIGHT "camera đã gán không được kết nối" check reads for EVERY
+    // role, not just CENTER's own stream (see the `isNewCameraService`
+    // block's own doc comment) — skipping enumeration entirely made LEFT
+    // and RIGHT's real, actually-connected webcams read as disconnected
+    // too (live hardware evidence, same day: "các camera đã được kết nối
+    // nhưng vào màn chụp vẫn báo là chưa kết nối", all 3 roles, not just
+    // CENTER). The mapping is re-read from the ref (never a snapshot taken
+    // before an `await`) at every point below that decides whether to touch
+    // CENTER's stream — see the 2026-09-24 fix further down (this function
+    // and the corrective effect, keyed on `centerIsTethered`) for why a
+    // single upfront snapshot was not enough on its own.
+
     if (typeof window !== 'undefined' && window.isSecureContext === false) {
       alert(
         'Trình duyệt đã chặn Camera do bạn đang truy cập qua địa chỉ IP HTTP từ máy khác.\n\n' +
@@ -2742,6 +3156,11 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     // starts pushing frames the moment `livePipelineRef.current` is assigned
     // below, whenever that happens relative to `setStream`.
     try {
+      // 2026-09-24 fix (confirmed audit finding) — see `cameraOpGenRef`'s own
+      // doc comment. Captured once per call; re-checked (alongside the role
+      // mapping) after every await below before this call is allowed to
+      // publish a stream.
+      const myGen = ++cameraOpGenRef.current;
       const isNewCameraService = !cameraServiceRef.current;
       const camera = cameraServiceRef.current || new BrowserCameraService();
       cameraServiceRef.current = camera;
@@ -2775,9 +3194,38 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
 
       const devs = await camera.enumerateDevices().catch(() => []);
       setDevices(devs);
+
+      // Re-read the ref rather than trust `centerTethered` — the mapping can
+      // have changed while `enumerateDevices()` above was pending.
+      if (cameraRoleMappingRef.current?.CENTER === TETHERED_DEVICE_ID) {
+        // Enumeration above still ran (LEFT/RIGHT and the device picker
+        // need it) — just never auto-select/start a real camera for
+        // CENTER's own stream. Mirrors `handleSelectCamera`'s own tethered
+        // branch.
+        setCameraError(null);
+        setIsCameraLoading(false);
+        setStream(null);
+        return;
+      }
+
       if (devs.length > 0) setSelectedDeviceId(devs[0].id);
 
       const st = await camera.start();
+
+      // 2026-09-24 fix (confirmed audit finding): `getUserMedia` above cannot
+      // be cancelled once in flight, so by the time it resolves CENTER may
+      // have been switched to tethered (role mapping changed), or this call
+      // may have been superseded by a newer `startLiveMode`/
+      // `handleSelectCamera` call. Publishing `st` in either case would put a
+      // live webcam feed on a CENTER the mapping already says is tethered,
+      // with no later effect left to undo it. Release the just-opened stream
+      // instead of setStream-ing it.
+      if (myGen !== cameraOpGenRef.current || cameraRoleMappingRef.current?.CENTER === TETHERED_DEVICE_ID) {
+        st.getTracks().forEach((track) => track.stop());
+        setIsCameraLoading(false);
+        return;
+      }
+
       setStream(st);
       setIsCameraLoading(false);
     } catch (err: any) {
@@ -2870,10 +3318,50 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
 
   const handleSelectCamera = async (devId: string) => {
     setSelectedDeviceId(devId);
+    // 2026-09-24 fix (confirmed audit finding): bump the shared generation
+    // counter for BOTH branches below, before any `await` — this is what
+    // lets a tethered call invalidate an already-in-flight webcam `start()`
+    // from a previous call (see the re-check after `await ...start()`
+    // further down, and `cameraOpGenRef`'s own doc comment).
+    const myGen = ++cameraOpGenRef.current;
+    // Tethered Canon assigned to CENTER (2026-09-22): `BrowserCameraService.
+    // start()` is exclusively `getUserMedia` — there is no real device for
+    // it to open, so skip it entirely rather than let it throw and surface
+    // a "không thể chuyển sang camera" error for what is actually a
+    // successful, expected assignment. No live `MediaStream` means no live
+    // pose-guidance CV either (accepted product decision — see
+    // `centerIsTethered` prop's own doc comment); the per-step tiles still
+    // get a periodic still via `useTetheredPreview`, and the shutter/CTA
+    // gates bypass their `faceState`-readiness check for this case.
+    if (devId === TETHERED_DEVICE_ID) {
+      setCameraError(null);
+      setIsCameraLoading(false);
+      setStream(null);
+      // 2026-09-24 fix (confirmed audit finding): this branch used to only
+      // clear the React `stream` state and leave `cameraServiceRef`'s
+      // `getUserMedia` stream (from whatever webcam a previous LEFT/RIGHT
+      // step opened) running untouched — that stream's tracks kept feeding
+      // CV/gesture detection against the wrong camera. Actually releasing it
+      // here matches the role switch this call represents.
+      void cameraServiceRef.current?.stop();
+      return;
+    }
     if (cameraServiceRef.current) {
       try {
         setIsCameraLoading(true);
         const st = await cameraServiceRef.current.start({ deviceId: devId });
+        // 2026-09-24 fix (confirmed audit finding): `getUserMedia` cannot be
+        // cancelled once in flight, so by the time it resolves a later call
+        // to this function (e.g. the role switch back to tethered above, or
+        // another camera pick) may already have won. Publishing a stale
+        // stream here would revive a webcam feed CENTER should no longer be
+        // showing. Re-check both the generation and the live role mapping
+        // before publishing.
+        if (myGen !== cameraOpGenRef.current || cameraRoleMappingRef.current?.CENTER === TETHERED_DEVICE_ID) {
+          st.getTracks().forEach((track) => track.stop());
+          setIsCameraLoading(false);
+          return;
+        }
         setStream(st);
         setIsCameraLoading(false);
       } catch (err: any) {
@@ -2929,12 +3417,18 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     // re-confirming afterwards approves it for real instead of no-op'ing.
     retookSinceReopenRef.current = true;
 
-    const frame = simultaneousCaptureRef.current
-      ? framesForWorkflow(activeWorkflowRef.current).find((f) => f.stepId === stepId)
-      : null;
-    const isSideFrameRetake = !!frame && frame.role !== 'CENTER';
+    // Not gated on `simultaneousCaptureRef` alone anymore (2026-09-22) — a
+    // tethered role needs `externalCapture: true` regardless of that
+    // setting (see `captureRetakingSideFrame`'s own doc comment on why a
+    // tethered camera has the same "wrong/no camera for the engine's
+    // built-in provider" problem either way).
+    const frame = framesForWorkflow(activeWorkflowRef.current).find((f) => f.stepId === stepId) ?? null;
+    const isTetheredRetake = !!frame && cameraRoleMappingRef.current[frame.role] === TETHERED_DEVICE_ID;
+    const isSideFrameRetake = simultaneousCaptureRef.current && !!frame && frame.role !== 'CENTER';
 
-    const started = await engine.retakeStep(stepId, { externalCapture: isSideFrameRetake });
+    const started = await engine.retakeStep(stepId, {
+      externalCapture: isSideFrameRetake || isTetheredRetake,
+    });
     if (!started) return;
 
     setShowReviewModal(false);
@@ -3114,6 +3608,149 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    * single-camera behavior, unchanged.
    */
   const [cameraRoleMapping, setCameraRoleMapping] = useState<Record<string, string>>({});
+  /**
+   * 2026-09-22 tethered-capture integration — true when CENTER's assigned
+   * camera is the tethered Canon (no live `MediaStream`, so `faceState` can
+   * never reach `detected: true` for it). Threaded down to
+   * `GuidedCaptureScreen`/`DesktopCaptureView`/`MobileCaptureView` (see
+   * `SharedCaptureViewProps.centerIsTethered`'s own doc comment) to bypass
+   * the shutter/CTA/keyboard-shortcut face-readiness gates for this case,
+   * and read directly by this file's own keyboard-shortcut effect below.
+   */
+  const centerIsTethered = cameraRoleMapping.CENTER === TETHERED_DEVICE_ID;
+
+  /**
+   * Corrective half of the `startLiveMode` tethered-CENTER fix above
+   * (2026-09-23, same field report — real hardware showed a live webcam
+   * feed with active face-detection for a tethered CENTER session). The
+   * role mapping is fetched asynchronously (`faceAPI.getCameraRoleMapping()`
+   * in the mount effect below) and can resolve AFTER `startLiveMode` has
+   * already run and started a real webcam — `startLiveMode`'s own ref check
+   * only catches the case where the mapping was already known in time. This
+   * effect is the other half: whenever `centerIsTethered` newly becomes
+   * true while a real camera is still active, it tears that real camera
+   * down retroactively, regardless of which of the two orderings actually
+   * happened. A no-op once nothing is active.
+   *
+   * Deliberately does NOT null out `cameraServiceRef.current` — only
+   * `.stop()`s it. `handleSelectCamera`'s own non-tethered branch (`if
+   * (cameraServiceRef.current) { ... cameraServiceRef.current.start(...) }`)
+   * only ever reuses an EXISTING service instance, it never constructs a new
+   * one (only `startLiveMode` does that, via `cameraServiceRef.current ||
+   * new BrowserCameraService()`) — nulling the ref here would silently break
+   * the operator manually switching CENTER back to a real camera later in
+   * the same session.
+   */
+  useEffect(() => {
+    if (!centerIsTethered) return;
+    // 2026-09-24 fix (confirmed audit finding): bump the shared generation
+    // counter too, so a webcam `start()` that is still in flight right now
+    // (its `.stop()` below cannot cancel it — see `cameraOpGenRef`'s own doc
+    // comment) self-cancels once it resolves instead of publishing a stale
+    // stream afterwards.
+    cameraOpGenRef.current += 1;
+    cameraServiceRef.current?.stop();
+    setStream(null);
+    setCameraError(null);
+    setIsCameraLoading(false);
+    // Safety net: also keyed on `stream`, not just the `centerIsTethered`
+    // transition. The effect above only fires once, when `centerIsTethered`
+    // itself flips — if a stream still slipped through afterwards (a bug
+    // this generation counter is meant to prevent, but this is cheap
+    // insurance), `stream` changing re-runs this effect and tears it down
+    // again immediately, rather than leaving it up for the rest of the
+    // session.
+  }, [centerIsTethered, stream]);
+
+  /**
+   * Periodic still preview for whichever frame(s) the tethered Canon is
+   * assigned to (2026-09-22 — "khung hình... đang không hiển thị"). One
+   * shared value, not per-role: there is realistically only ever one
+   * physical tethered camera per kiosk, matching `TetheredCameraPanel.tsx`'s
+   * own single-preview design. Fed into `imagePath` below for any
+   * not-yet-COMPLETED frame whose role resolves to `TETHERED_DEVICE_ID` —
+   * `FrameTile.tsx`'s existing `imagePath` fallback (proven since 2026-09-09
+   * for CB Help's own CENTER preview) already renders it whenever that
+   * frame has no live `stream`, no new rendering path needed.
+   *
+   * Same backoff-on-failure as `TetheredCameraPanel.tsx` (repeated failures
+   * back off instead of hammering a struggling camera at a fixed rate) —
+   * deliberately NO idle auto-stop here, unlike that other screen: this
+   * poll only runs while a session actually has the tethered camera
+   * assigned to a role, which can legitimately be an entire kiosk shift,
+   * not a diagnostic check someone forgot to turn off.
+   *
+   * Base pause kept in sync with `TetheredCameraPanel.tsx`'s own value —
+   * see that file's doc comment for the full history (1000ms→200ms→60ms→
+   * 200ms on 2026-09-24→350ms later that same day, "giật các khung hình
+   * khác khi kết nối camera Canon" — 60ms was fast enough to measurably
+   * starve the real webcams' own video/CV work on this SAME renderer
+   * thread once Canon and real webcams were all live at once, which
+   * matters MORE here than on the setup screen: this IS the production
+   * capture-session screen, where that contention scenario is the normal
+   * case, not an edge case; the 200ms step turned out to still stutter on
+   * at least one real kiosk's own hardware/camera-count combination, hence
+   * the further bump). Keep this equal to that file's value — if one needs
+   * retuning, retune both together.
+   */
+  const TETHERED_PREVIEW_BASE_INTERVAL_MS = 350;
+  const TETHERED_PREVIEW_MAX_INTERVAL_MS = 8000;
+  const [tetheredPreview, setTetheredPreview] = useState<string | null>(null);
+  const tetheredAnyRoleAssigned = Object.values(cameraRoleMapping).includes(TETHERED_DEVICE_ID);
+  useEffect(() => {
+    if (!tetheredAnyRoleAssigned) {
+      setTetheredPreview(null);
+      return;
+    }
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let consecutiveFailures = 0;
+    const poll = async () => {
+      if (cancelled) return;
+      try {
+        const result = await (window as any).faceAPI?.getTetheredLiveViewFrame?.();
+        if (cancelled) return;
+        if (result?.ok) {
+          setTetheredPreview(result.dataUrl);
+          consecutiveFailures = 0;
+          // 2026-09-23 ("màn extend hiển thị khá lag") — a first attempt
+          // here piggybacked a `publishCbHelpState()` call onto every
+          // successful poll tick (this poll, at 60ms), reasoning that the
+          // tethered path skips the expensive synchronous canvas-draw+
+          // JPEG-encode `CB_HELP_HEARTBEAT_MS` was originally tuned to
+          // amortize for the REAL webcam path. Measured on real hardware
+          // via temporary diagnostic logging in `CbHelpFrames.tsx`: gaps
+          // between consecutive `cbhelp:update` pushes still averaged
+          // ~350ms (up to ~900ms), because the actual bottleneck was never
+          // the per-tick encode cost — it's THIS window's JS thread being
+          // busy running real-time face-detection ML inference
+          // continuously, which delays how promptly it can even START the
+          // next `publishCbHelpState()` call, let alone finish it. Reverted:
+          // that piggyback only added MORE work to the already-congested
+          // thread for no real benefit. The actual fix is in
+          // `CbHelpFrames.tsx` — that window now polls
+          // `getTetheredLiveViewFrame()` directly itself, on its own,
+          // uncongested thread, instead of waiting on this one to relay it.
+        } else {
+          consecutiveFailures += 1;
+        }
+      } catch {
+        consecutiveFailures += 1;
+      }
+      if (cancelled) return;
+      const delay = Math.min(
+        TETHERED_PREVIEW_BASE_INTERVAL_MS * 2 ** consecutiveFailures,
+        TETHERED_PREVIEW_MAX_INTERVAL_MS
+      );
+      timer = setTimeout(poll, delay);
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [tetheredAnyRoleAssigned]);
+
   useEffect(() => {
     const faceAPI = (window as any).faceAPI;
     faceAPI?.getCameraRoleMapping?.()
@@ -3239,6 +3876,21 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   useEffect(() => {
     devicesRef.current = devices;
   }, [devices]);
+
+  /**
+   * Ref mirror of `tetheredPreview`, same reason as `cameraRoleMappingRef`
+   * above — `publishCbHelpState` is a stable `useCallback` (empty deps) that
+   * can run from the 800ms heartbeat or the mount-only engine handlers, so it
+   * must read this through a ref rather than close over the state value.
+   * 2026-09-23 fix (user field report: "cam hiển thị ở màn extent chọn cam
+   * giữa dù thiết lập là cam khác nhưng vẫn đang dùng cam máy tính") — see
+   * `centerPreviewDataUrl`'s own doc comment below for the actual bug this
+   * ref exists to fix.
+   */
+  const tetheredPreviewRef = useRef<string | null>(null);
+  useEffect(() => {
+    tetheredPreviewRef.current = tetheredPreview;
+  }, [tetheredPreview]);
 
   /**
    * De-dupes the CB Help "step change" publish (see the live engine's
@@ -3372,7 +4024,52 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
               selectedDeviceIdRef.current,
               devicesRef.current,
               cbHelpVisibilityRef.current
-            )
+            ).map((frame) => ({
+              ...frame,
+              // 2026-09-24 fix (confirmed audit finding — performance): a
+              // completed step's `capturedDataUrl` is the FULL-resolution
+              // captured still (for a tethered Canon shot, several MB —
+              // `mirrorDataUrlHorizontally` in preload re-encodes it at full
+              // sensor resolution). `buildCbHelpFrames` above always sets it
+              // from `sessionStep?.capturedImagePath` with no size cap, and
+              // this whole `state` object is IPC-cloned to the main process
+              // on every `CB_HELP_HEARTBEAT_MS` (1500ms) tick — including
+              // while the CB Help window is closed and nothing can even
+              // render it. Gated on the same `cbHelpWindowOpenRef` that
+              // `livePreviewDataUrl`/`centerPreviewDataUrl` already use for
+              // an identical reason: the value is still recomputed the
+              // moment the window opens (that ref self-corrects within its
+              // own 2s poll, well inside one more heartbeat tick), so
+              // nothing the window ever actually shows changes — only the
+              // wasted clone while nobody is looking.
+              capturedDataUrl: cbHelpWindowOpenRef.current ? frame.capturedDataUrl : undefined,
+              // 2026-09-23 fix — see `CbHelpFrame.livePreviewDataUrl`'s own
+              // doc comment above for the full root-cause story. Snapshots
+              // THIS window's own already-open offscreen `<video>` for the
+              // frame (`frameVideoElsRef`, populated by `openFrameStreams`/
+              // `openRoundStreams` — never set for CENTER, see that
+              // function's own `role === 'CENTER'` skip), the same
+              // `snapshotVideoFrame`/`CAPTURE_MIRRORED` pairing
+              // `captureRetakingSideFrame`/the capture-trigger fan-out
+              // already use for these exact same elements elsewhere in this
+              // file, so the pushed still is pixel-mirrored consistently
+              // with every other non-CENTER still this app ever produces.
+              // Skipped (stays `undefined`) once COMPLETED — the real
+              // `capturedDataUrl` already covers it, and the stream may
+              // already be closed/stale by then — and whenever CB Help
+              // isn't even open (`cbHelpWindowOpenRef`, same gate
+              // `centerPreviewDataUrl` below already uses): nowhere for
+              // this to be seen otherwise, so encoding it is pure waste.
+              livePreviewDataUrl:
+                cbHelpWindowOpenRef.current && frame.role !== 'CENTER' && frame.status !== 'COMPLETED'
+                  ? (() => {
+                      const videoEl = frameVideoElsRef.current[frame.stepId];
+                      return videoEl
+                        ? snapshotVideoFrame(videoEl, CB_HELP_PREVIEW_SNAPSHOT_OPTS.quality, CAPTURE_MIRRORED)
+                        : null;
+                    })()
+                  : null,
+            }))
           : [],
         greeting: cbHelpOverlayRef.current.greeting,
         // Item 12b, widened 2026-09-10 ("camera live vẫn phải hiển thị" —
@@ -3391,8 +4088,27 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         // open — see `cbHelpWindowOpenRef`'s own doc comment; there is
         // nowhere for this snapshot to be seen otherwise, so encoding it is
         // pure waste.
+        //
+        // 2026-09-23 fix (user field report: "cam hiển thị ở màn extent chọn
+        // cam giữa dù thiết lập là cam khác nhưng vẫn đang dùng cam máy
+        // tính") — this used to unconditionally call
+        // `cameraServiceRef.current?.captureBase64Snapshot(...)`, but that
+        // service only ever manages a REAL webcam's `<video>` element.
+        // `handleSelectCamera` deliberately never starts `cameraServiceRef`
+        // for a tethered CENTER (see `TETHERED_DEVICE_ID` there — it sets
+        // `stream: null` instead and relies on `tetheredPreview`'s own poll),
+        // so with CENTER mapped to the tethered Canon this was capturing
+        // whatever webcam `cameraServiceRef` last had open (stale from
+        // earlier in the session) or `null` — never the tethered camera. Read
+        // `cameraRoleMappingRef` (not the `centerIsTethered` const — this
+        // callback is a stable `useCallback([])` and must not close over
+        // render-scoped state) so a tethered CENTER reuses the same
+        // `tetheredPreviewRef` still-frame the main window's own tile grid
+        // already shows, instead of the webcam snapshot.
         centerPreviewDataUrl: cbHelpWindowOpenRef.current
-          ? cameraServiceRef.current?.captureBase64Snapshot(CB_HELP_PREVIEW_SNAPSHOT_OPTS) ?? null
+          ? cameraRoleMappingRef.current.CENTER === TETHERED_DEVICE_ID
+            ? tetheredPreviewRef.current
+            : cameraServiceRef.current?.captureBase64Snapshot(CB_HELP_PREVIEW_SNAPSHOT_OPTS) ?? null
           : null,
         errorMessage: cbHelpOverlayRef.current.errorMessage,
         thankYou: cbHelpOverlayRef.current.thankYou,
@@ -3455,11 +4171,22 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    * effects below applies. Two roles can point at the same physical device
    * (e.g. C0 covering for a failed C1, see §2.1), so this dedupes by device
    * id rather than counting roles.
+   *
+   * `TETHERED_DEVICE_ID` (2026-09-24, "record for Canon" feature): included
+   * here even though it never appears in `devices` (that array only ever
+   * comes from `enumerateDevices()`, which has no concept of a gphoto2
+   * session) — same "append it back in" pattern `devsForPreflight` above
+   * already uses for the readiness check. Whether a role is mapped to it is
+   * the only signal available; there is no live "is the Canon actually
+   * connected right now" check at this point, matching how a real webcam id
+   * is trusted here too (a genuinely unplugged one just fails later, inside
+   * the recording effect's own try/catch, the same as a bad `getUserMedia`
+   * call would).
    */
   const multiChannelDeviceIds = useMemo(
     () =>
       Array.from(new Set(Object.values(cameraRoleMapping))).filter(
-        (id): id is string => !!id && devices.some((d) => d.id === id)
+        (id): id is string => !!id && (devices.some((d) => d.id === id) || id === TETHERED_DEVICE_ID)
       ),
     [cameraRoleMapping, devices]
   );
@@ -3676,7 +4403,10 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
       cancelled = true;
       if (capTimerId) clearInterval(capTimerId);
       if (livenessTimerId) clearInterval(livenessTimerId);
-      void stopAndFinalize();
+      // 2026-09-24 fix (confirmed audit finding) — see `recordingFinalizeRef`'s
+      // own doc comment: kept instead of fire-and-forgotten so `onAccept` can
+      // await it before approving.
+      recordingFinalizeRef.current = stopAndFinalize();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recordVideo, stream, recordingSessionKey, multiChannelDeviceIds.length]);
@@ -3750,6 +4480,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         recordVideo,
         recordingSessionKey,
         multiChannelDeviceCount: multiChannelDeviceIds.length,
+        hasTetheredChannel: multiChannelDeviceIds.includes(TETHERED_DEVICE_ID),
       }) ||
       !faceAPI?.startVideoStream
     )
@@ -3768,6 +4499,8 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
       ownsStream: boolean;
       /** §3.10 layer 2 — see recordingLiveness.ts. Mutated in place by `ondataavailable` and the liveness-check interval below. */
       liveness: import('../../lib/recordingLiveness.js').RecordingLivenessState;
+      /** Set only for a `TETHERED_DEVICE_ID` channel (2026-09-24) — `createTetheredCanvasStream`'s own `stop()`, which clears its internal poll `setInterval` in addition to stopping `mediaStream`'s tracks. A plain `mediaStream.getTracks().forEach(t => t.stop())` alone would leave that poll loop running forever, still calling `getTetheredLiveViewFrame()` on a stream nothing reads from anymore. Called INSTEAD of the generic track-stop below, not alongside it — see `stopAndFinalizeAll`. */
+      stopTethered?: () => void;
     }> = [];
     let capTimerId: ReturnType<typeof setInterval> | null = null;
     let livenessTimerId: ReturnType<typeof setInterval> | null = null;
@@ -3792,14 +4525,18 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
       const stopPromises = channels.map(
         (channel) =>
           new Promise<string | null>((resolve) => {
-            const { recorder, mediaStream, streamId, chunks, ownsStream } = channel;
+            const { recorder, mediaStream, streamId, chunks, ownsStream, stopTethered } = channel;
+            const stopStream = () => {
+              if (stopTethered) stopTethered();
+              else if (ownsStream) mediaStream.getTracks().forEach((t) => t.stop());
+            };
             if (recorder.state === 'inactive') {
-              if (ownsStream) mediaStream.getTracks().forEach((t) => t.stop());
+              stopStream();
               resolve(null);
               return;
             }
             recorder.onstop = async () => {
-              if (ownsStream) mediaStream.getTracks().forEach((t) => t.stop());
+              stopStream();
               try {
                 const blob = new Blob(chunks, { type: recorder.mimeType });
                 const data = new Uint8Array(await blob.arrayBuffer());
@@ -3838,47 +4575,74 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
 
       for (const deviceId of multiChannelDeviceIds) {
         try {
-          const reusedFrameStream = simultaneousCapture
-            ? Object.values(frameStreamsRef.current).find(
-                (s) => s.getVideoTracks()[0]?.getSettings().deviceId === deviceId
-              ) ?? null
-            : null;
-
-          // Double-open fix (discussion doc §3.10 point 5, §7.1 point 6 —
-          // "chỗ còn mở hai lần là Tuần tự + có camera bên được gán"): if
-          // this device is the CV pipeline's own already-open stream right
-          // now, clone it instead of a second `getUserMedia` for the same
-          // physical camera — see this effect's own doc comment above for
-          // exactly what this does and does not cover.
-          const cvService = cameraServiceRef.current;
-          const reusedCvStream =
-            !reusedFrameStream && cvService?.getSelectedDevice()?.id === deviceId
-              ? cvService.getActiveStream()
-              : null;
-
           let mediaStream: MediaStream;
           let ownsStream: boolean;
-          if (reusedFrameStream) {
-            mediaStream = reusedFrameStream;
-            ownsStream = false;
-          } else if (reusedCvStream) {
-            mediaStream = reusedCvStream.clone();
-            ownsStream = true; // a clone's tracks are independent — this effect must stop them itself
-          } else {
-            mediaStream = await navigator.mediaDevices.getUserMedia({
-              audio: false,
-              video: { deviceId: { exact: deviceId } },
+          let stopTethered: (() => void) | undefined;
+
+          if (deviceId === TETHERED_DEVICE_ID) {
+            // Record for Canon (2026-09-24) — see tetheredCanvasStream.ts's
+            // own header comment for why this is a canvas capturing the same
+            // live-view frames the preview already polls, not real
+            // camera-sensor video: gphoto2 has no recording mode to hand a
+            // real MediaStream. `getTetheredLiveViewFrame` throws on an
+            // `{ ok: false }` reply, and `createTetheredCanvasStream` now
+            // (2026-09-24 fix, confirmed audit finding) awaits a real first
+            // frame before resolving, so a genuinely disconnected/busy Canon
+            // fails this channel the same way a bad `getUserMedia` call
+            // fails a webcam channel below — into this same `catch` — rather
+            // than silently starting a channel that only ever records a
+            // blank canvas.
+            const handle = await createTetheredCanvasStream(async () => {
+              const res = await faceAPI.getTetheredLiveViewFrame();
+              if (!res?.ok) throw new Error(res?.error || 'Không lấy được khung hình live view từ Canon');
+              return res.dataUrl;
             });
+            mediaStream = handle.stream;
             ownsStream = true;
+            stopTethered = handle.stop;
+          } else {
+            const reusedFrameStream = simultaneousCapture
+              ? Object.values(frameStreamsRef.current).find(
+                  (s) => s.getVideoTracks()[0]?.getSettings().deviceId === deviceId
+                ) ?? null
+              : null;
+
+            // Double-open fix (discussion doc §3.10 point 5, §7.1 point 6 —
+            // "chỗ còn mở hai lần là Tuần tự + có camera bên được gán"): if
+            // this device is the CV pipeline's own already-open stream right
+            // now, clone it instead of a second `getUserMedia` for the same
+            // physical camera — see this effect's own doc comment above for
+            // exactly what this does and does not cover.
+            const cvService = cameraServiceRef.current;
+            const reusedCvStream =
+              !reusedFrameStream && cvService?.getSelectedDevice()?.id === deviceId
+                ? cvService.getActiveStream()
+                : null;
+
+            if (reusedFrameStream) {
+              mediaStream = reusedFrameStream;
+              ownsStream = false;
+            } else if (reusedCvStream) {
+              mediaStream = reusedCvStream.clone();
+              ownsStream = true; // a clone's tracks are independent — this effect must stop them itself
+            } else {
+              mediaStream = await navigator.mediaDevices.getUserMedia({
+                audio: false,
+                video: { deviceId: { exact: deviceId } },
+              });
+              ownsStream = true;
+            }
           }
           if (cancelled) {
-            if (ownsStream) mediaStream.getTracks().forEach((t) => t.stop());
+            if (stopTethered) stopTethered();
+            else if (ownsStream) mediaStream.getTracks().forEach((t) => t.stop());
             continue;
           }
 
           const result = await faceAPI.startVideoStream({ sessionId, cameraId: deviceId, mimeType });
           if (cancelled) {
-            if (ownsStream) mediaStream.getTracks().forEach((t) => t.stop());
+            if (stopTethered) stopTethered();
+            else if (ownsStream) mediaStream.getTracks().forEach((t) => t.stop());
             continue;
           }
 
@@ -3901,6 +4665,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
             chunks,
             ownsStream,
             liveness: createRecordingLivenessState(Date.now()),
+            stopTethered,
           };
           channelEntry.recorder = new MediaRecorder(mediaStream, {
             ...(mimeType ? { mimeType } : {}),
@@ -3944,7 +4709,8 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
             maxMs: MAX_RECORDING_DURATION_MS,
           });
           if (capTimerId) clearInterval(capTimerId);
-          void stopAndFinalizeAll();
+          // 2026-09-24 fix (confirmed audit finding) — see `recordingFinalizeRef`'s own doc comment.
+          recordingFinalizeRef.current = stopAndFinalizeAll();
           setRecordingSessionKey((current) => (current === recordingSessionKey ? null : current));
         }, 30_000);
       }
@@ -4001,7 +4767,10 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
       cancelled = true;
       if (capTimerId) clearInterval(capTimerId);
       if (livenessTimerId) clearInterval(livenessTimerId);
-      void stopAndFinalizeAll();
+      // 2026-09-24 fix (confirmed audit finding) — see `recordingFinalizeRef`'s
+      // own doc comment: kept instead of fire-and-forgotten so `onAccept` can
+      // await it before approving.
+      recordingFinalizeRef.current = stopAndFinalizeAll();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recordVideo, recordingSessionKey, multiChannelDeviceIds.join(','), simultaneousCapture]);
@@ -4036,7 +4805,13 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     const mappedDeviceId = cameraRoleMapping[role];
     if (!mappedDeviceId) return;
     if (mappedDeviceId === selectedDeviceId) return;
-    if (!devices.some((d) => d.id === mappedDeviceId)) return; // mapped camera not plugged in right now
+    // Tethered Canon (2026-09-24 fix, confirmed audit finding): it never
+    // appears in `devices` (real `enumerateDevices()` output only), so this
+    // guard used to always return here and `handleSelectCamera` was never
+    // called back to the Canon after a LEFT/RIGHT webcam step ran — the main
+    // preview kept showing that stale side webcam (bug #3) for every later
+    // CENTER-role step even though the Canon actually took the photo.
+    if (mappedDeviceId !== TETHERED_DEVICE_ID && !devices.some((d) => d.id === mappedDeviceId)) return; // mapped camera not plugged in right now
 
     void handleSelectCamera(mappedDeviceId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -4087,7 +4862,14 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    * below, where its semantics are still accurate.
    */
   const isFrameMissingDevice = (role: CameraRole): boolean =>
-    role !== 'CENTER' && !devices.some((d) => d.id === cameraRoleMapping[role]);
+    role !== 'CENTER' &&
+    // Tethered Canon (2026-09-24 fix, confirmed audit finding): it never
+    // appears in `devices` (real `enumerateDevices()` output only), so this
+    // used to mark any non-CENTER role mapped to it as MISSING even while
+    // connected and streaming — same exemption `openFrameStreams`/
+    // `buildRoundPlan` already give it.
+    cameraRoleMapping[role] !== TETHERED_DEVICE_ID &&
+    !devices.some((d) => d.id === cameraRoleMapping[role]);
 
   const currentRoundFrames = (): FrameSpec[] => {
     const plan = capturePlanRef.current;
@@ -4114,6 +4896,32 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
             // `frameReadiness`'s own doc comment. CENTER never needs this
             // (its readiness is already covered by the face-quality gate).
             const isReady = frame.role !== 'CENTER' && frameReadiness[frame.stepId] === true;
+            // Tethered (gphoto2) frames have no live MediaStream — only the
+            // periodic `tetheredPreview` still. Show it in place of a real
+            // capture until one lands, same fallback FrameTile.tsx already
+            // renders `imagePath` through for the CENTER heartbeat preview.
+            const isTetheredFrame = deviceId === TETHERED_DEVICE_ID;
+            // 2026-09-24 field bug ("vẫn hiển thị cam của máy tính", CAM 1/
+            // CENTER tile): `sessionStep?.capturedImagePath` used to be
+            // checked FIRST via `??`, ahead of `tetheredPreview`, so a
+            // not-yet-COMPLETED tethered step whose `capturedImagePath` was
+            // still populated from an earlier attempt (a retake, or an
+            // earlier run before CENTER was reassigned from a real webcam to
+            // the tethered Canon — `retakeStep()`/`retakeAllSteps()` in
+            // WorkflowEngine.ts deliberately leave `capturedImagePath` alone
+            // across a retake "so the old photo stays visible until the
+            // replacement actually lands", by design for a normal
+            // real-camera retake) kept showing that stale, wrong-camera
+            // photo — a normal webcam selfie framing — instead of the
+            // Canon's own live-view still, even while the tile's badge read
+            // "ĐANG CHỤP". For a not-yet-COMPLETED tethered frame the only
+            // trustworthy source is the live `tetheredPreview` poll, so it
+            // must win outright, not merely as a `??` fallback behind a
+            // possibly-stale `capturedImagePath`. Once the step actually
+            // reaches COMPLETED, `recordExternalCapture` has just written the
+            // real Canon still into `capturedImagePath`, so that's what's
+            // shown from then on (also matches the frozen-thumbnail behavior
+            // every other, non-tethered tile already has post-capture).
 
             return {
               stepId: frame.stepId,
@@ -4138,7 +4946,10 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
                 : isReady
                 ? 'READY'
                 : 'PENDING',
-              imagePath: sessionStep?.capturedImagePath,
+              imagePath:
+                isTetheredFrame && !isCompleted
+                  ? tetheredPreview ?? undefined
+                  : sessionStep?.capturedImagePath ?? undefined,
             };
           }),
           // Only the zero-cameras-mapped case still blocks outright
@@ -4196,6 +5007,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           const frameStream = frameStreams[frame.stepId] ?? null;
           const isMissing = isFrameMissingDevice(frame.role);
           const isReady = frameReadiness[frame.stepId] === true;
+          const isTetheredFrame = deviceId === TETHERED_DEVICE_ID;
           frames.push({
             stepId: frame.stepId,
             label: frame.label,
@@ -4203,7 +5015,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
             deviceLabel,
             stream: frameStream,
             status: isMissing ? (frameStream ? 'UNASSIGNED' : 'MISSING') : isReady ? 'READY' : 'PENDING',
-            imagePath: null,
+            imagePath: isTetheredFrame ? tetheredPreview ?? null : null,
           });
         }
         return frames;
@@ -4244,16 +5056,26 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         if (tag === 'BUTTON') return;
       }
 
-      if (effectiveTriggerConfig.mode !== 'OFF') return; // only the manual-shutter trigger mode has anything to fire
+      // 2026-09-24 fix (confirmed audit finding): AUTO/MANUAL(gesture) both
+      // depend on live webcam frames (`processFrame`/the gesture loop), which
+      // never arrive while CENTER is the tethered Canon — so without this
+      // exemption Enter/Space had no way to fire that first Canon shot in
+      // either mode, same reasoning as the ShutterButton/sidebar CTA
+      // exemptions in DesktopCaptureView.tsx.
+      if (effectiveTriggerConfig.mode !== 'OFF' && !centerIsTethered) return; // only the manual-shutter trigger mode (or a tethered CENTER) has anything to fire manually
       if (!isWorkflowStartedRef.current) return; // no session running yet
       if (awaitingStudentRef.current) return; // still identifying the student
       if (showReviewModal || thankYouStudent || isAcceptingRef.current) return; // confirm modal / thank-you overlay / accept in flight
       if (capturingRef.current) return; // a previous key-triggered capture hasn't settled yet — new re-entrancy guard, `handleShutterCapture` never had one before this
 
+      // `centerIsTethered` (2026-09-22) bypasses the face-detected leg —
+      // see that value's own computation/doc comment below, same reasoning
+      // as the on-screen ShutterButton's identical bypass.
       const faceReady =
-        faceState?.detected === true &&
-        faceState?.presence === 'SINGLE_FACE' &&
-        faceState?.quality?.accepted === true &&
+        (centerIsTethered ||
+          (faceState?.detected === true &&
+            faceState?.presence === 'SINGLE_FACE' &&
+            faceState?.quality?.accepted === true)) &&
         (!multiFrameProp || multiFrameProp.allSideFramesReady);
       if (!faceReady) return;
 
@@ -4262,11 +5084,13 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
       // page might have wanted it.
       e.preventDefault();
       capturingRef.current = true;
-      handleShutterCapture();
+      void handleShutterCapture();
       // Released on a short timer rather than tied to a future engine
-      // event — `handleShutterCapture` is fire-and-forget (returns void,
-      // nothing to await), and the pose/step the engine gates on will have
-      // already moved on well before a human can press the key again.
+      // event — `handleShutterCapture` is fire-and-forget from THIS call
+      // site's perspective (nothing here awaits it, even though it's now
+      // `async` internally for the tethered-capture case), and the
+      // pose/step the engine gates on will have already moved on well
+      // before a human can press the key again.
       setTimeout(() => {
         capturingRef.current = false;
       }, 500);
@@ -4274,7 +5098,15 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [effectiveTriggerConfig.mode, faceState, multiFrameProp, showReviewModal, thankYouStudent, handleShutterCapture]);
+  }, [
+    effectiveTriggerConfig.mode,
+    faceState,
+    multiFrameProp,
+    showReviewModal,
+    thankYouStudent,
+    handleShutterCapture,
+    centerIsTethered,
+  ]);
 
   /*
    * Item 8 (2026-09-09): "Mô phỏng (Simulation)" / "Live Camera" mode-toggle
@@ -4566,6 +5398,8 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         gestureState={gestureState}
         gestureProgress={gestureProgress}
         onShutterCapture={handleShutterCapture}
+        centerIsTethered={centerIsTethered}
+        tetheredCenterPreview={tetheredPreview}
         sensitivity={sensitivity}
         onSensitivityChange={handleSensitivityChange}
         captureMode={effectiveTriggerConfig.mode}
@@ -4672,6 +5506,25 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
               setIsPostSaveReview(false);
               setAwaitingStudent(true);
               return;
+            }
+            // 2026-09-24 fix (confirmed audit finding — video lost on a fast
+            // approve): see `recordingFinalizeRef`'s own doc comment. Without
+            // this, a fast "Xác nhận & Lưu hồ sơ" tap could race ahead of the
+            // async `recorder.stop()` → `onstop` → `endVideoStream` chain the
+            // recording effect's cleanup kicked off when this session
+            // completed — `enqueueSessionVideos` (main process) only ever
+            // picks up a stream whose `ended_at` is already set, so approving
+            // before that chain finished silently dropped the whole
+            // recording, with no error anywhere. Bounded so a genuinely stuck
+            // finalize (e.g. a hung IPC call) cannot block approval forever;
+            // the operator can still approve, same as before this fix, for
+            // anything slower than the timeout.
+            if (recordingFinalizeRef.current) {
+              const RECORDING_FINALIZE_WAIT_MS = 8000;
+              await Promise.race([
+                recordingFinalizeRef.current.catch(() => undefined),
+                new Promise<void>((resolve) => setTimeout(resolve, RECORDING_FINALIZE_WAIT_MS)),
+              ]);
             }
             const approved = await approveUpload(steps, completedSession?.id);
             if (!approved) return;

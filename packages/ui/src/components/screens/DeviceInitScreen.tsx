@@ -56,6 +56,21 @@ export interface DeviceInitScreenProps {
   isAdmin?: boolean;
   /** Live per-role preview streams (CENTER/LEFT/RIGHT/UP/DOWN → stream) for the "Thiết bị này" panel's multi-camera grid — only present for roles that are both mapped and currently connected. Owned/acquired by `CampaignGate` (see its own doc comment), not this screen. */
   previewStreams?: Record<string, MediaStream>;
+  /**
+   * 2026-09-23 — still-image counterpart to `previewStreams`, for a role
+   * mapped to the tethered Canon (gphoto2). That camera has no real browser
+   * `MediaStream` at all (see `CampaignGate`'s `TETHERED_DEVICE_ID` doc
+   * comment), so it can never show up in `previewStreams`; without this, its
+   * tile fell through to `status: 'MISSING'`/"Thiếu camera" forever even
+   * while correctly assigned and streaming fine in Camera Setup. Same
+   * `imagePath`-as-fallback-for-no-stream convention `MultiFrameViewFrame`/
+   * `FrameTile` already use elsewhere in this codebase (CB Help's CENTER
+   * preview, `FaceCaptureApp.tsx`'s own tethered side-frame handling) — a
+   * role present here always means "no live stream, but here's a still
+   * that's just as good," never combined with a real `previewStreams` entry
+   * for the same role.
+   */
+  previewImages?: Record<string, string>;
   /** Per-role mapped-camera status (label + live-connected flag) — the exact same list `KioskShell`'s footer already builds from `faceAPI.getCameraRoleMapping()` + live `enumerateDevices()`, reused here so a selected campaign's card can show "cần N camera · đang kết nối M" without a second source of truth. */
   cameraStatuses?: { id: string; label: string; ready: boolean }[];
   selectedCampaign: CampaignSummary | null;
@@ -211,6 +226,7 @@ export function DeviceInitScreen({
   onReloadCampaigns,
   isAdmin,
   previewStreams = {},
+  previewImages = {},
   cameraStatuses = [],
   selectedCampaign,
   onSelectCampaign,
@@ -301,13 +317,21 @@ export function DeviceInitScreen({
   const cameraFrames: (FrameTileProps & { stepId: string })[] = neededRoles.map((role) => {
     const connected = cameraStatuses.find((cam) => cam.id === role)?.ready ?? false;
     const stream = connected ? previewStreams[role] ?? null : null;
+    // 2026-09-23: the tethered Canon has no `previewStreams` entry (see that
+    // prop's own doc comment) — `previewImages` is its still-image
+    // counterpart. `FrameTile` already renders `imagePath` in place of a
+    // live `<video>` whenever a tile has no `stream`, so this alone is
+    // enough to make a tethered role's tile show something real instead of
+    // a blank box.
+    const imagePath = connected ? previewImages[role] ?? null : null;
     return {
       stepId: role,
       label: role,
       roleLabel: CAMERA_ROLE_LABELS_VI[role as keyof typeof CAMERA_ROLE_LABELS_VI] ?? role,
       deviceLabel: null,
       stream,
-      status: stream ? 'READY' : 'MISSING',
+      imagePath,
+      status: stream || imagePath ? 'READY' : 'MISSING',
       mirrored: CAPTURE_MIRRORED,
       showCompositionGrid: role === 'CENTER',
     };

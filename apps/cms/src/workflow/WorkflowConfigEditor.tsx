@@ -1,13 +1,12 @@
 import { useState } from 'react';
 import {
-  CardSpec,
   IdentificationMethod,
+  PhotoKind,
   WorkflowClickMode,
   WorkflowConfig,
 } from '../api';
 import { CaptureAngleRow, captureStepToRow, rowToCaptureStep } from '../captureAngleSteps';
 import { CaptureAnglesTable } from '../components/CaptureAnglesTable';
-import { CardSpecFields } from '../components/CardSpecFields';
 
 const CLICK_MODE_LABEL: Record<WorkflowClickMode, string> = {
   MANUAL_SEQUENTIAL: 'Bấm chụp lần lượt từng cam',
@@ -28,44 +27,31 @@ interface PrintingConfigShape {
 }
 
 /**
- * `config.aiProcessing`'s real shape stays `{enabled, steps: [{code, params}]}`
- * server-side (`workflow-config.schema.ts`, unchanged) — nothing reads this
- * config to actually run AI yet (confirmed 2026-09-18: grepped `apps/api`
- * for any consumer of `config.aiProcessing`, found only the zod schema and
- * a migration seeding an empty default; the `ai_pipeline_steps` catalog
- * table exists but nothing queries it either). Per product feedback the
- * same day ("chỉ để điền thông tin prompt, không cần thiết kế phức tạp" —
- * the multi-step/JSON-params editor this replaced was overbuilt for a
- * config with no real consumer), the CMS now only ever writes AT MOST one
- * implicit step here, fixed `code: 'PROMPT'`, holding a single free-text
- * `params.prompt` — see `AI_PROMPT_STEP_CODE`/`aiPrompt` below. The step
- * shape itself is untouched so a later real pipeline can still add proper
- * multi-step support without a schema migration.
- */
-interface AiProcessingStep {
-  code: string;
-  params?: Record<string, unknown>;
-}
-interface AiProcessingConfigShape {
-  enabled: boolean;
-  steps: AiProcessingStep[];
-}
-
-const AI_PROMPT_STEP_CODE = 'PROMPT';
-
-/**
  * Structured editor for a workflow draft version's `config`. `capture`
- * (angles + click mode) and `output` (photo kind + card spec) reuse the
- * `CaptureAnglesTable`/`CardSpecFields` components — removed from the
- * raw-JSON groups as of plan item 6, 2026-09-17. `printing` got its own
+ * (angles + click mode) reuses the `CaptureAnglesTable` component —
+ * removed from the raw-JSON groups as of plan item 6, 2026-09-17. `output`
+ * (photo kind + card spec) picks a Photo Kind from `/photo-kinds`'
+ * catalog (2026-09-22) rather than re-entering `cardSpec` by hand — see
+ * this file's own "Đầu ra / ảnh thẻ" section for why. `printing` got its own
  * structured editor as of plan item E.1, 2026-09-17 (`PrintingConfigShape`
- * above): a single DIRECT/CENTRALIZED `<select>`. `aiProcessing` got a
- * structured editor the same day, then was simplified further 2026-09-18
- * (see `AiProcessingConfigShape`'s own doc comment) down to an enabled
- * checkbox plus one prompt textarea. This is now the ONLY place any of
- * these 5 config groups gets authored: the older, separate "Mẫu chụp"
- * (`CaptureConfigurationsPage.tsx`) picker this used to duplicate was
- * retired the same day (see `CampaignForm.tsx`'s own doc comment).
+ * above): a single DIRECT/CENTRALIZED `<select>`.
+ *
+ * `aiProcessing` had a structured editor here too (an enabled checkbox +
+ * one prompt textarea) until 2026-09-22, removed per product feedback
+ * ("chế độ AI chuyển sang phần cấu hình bên workflow không cần nữa") —
+ * it never had a real backend consumer to begin with (confirmed
+ * 2026-09-18: grepped `apps/api` for any reader of `config.aiProcessing`,
+ * found only the zod schema and a migration seeding an empty default),
+ * and the actually-used AI-edit prompt config lives on `PhotoKind.
+ * promptHints` (`/photo-kinds`) instead — a different, already-real
+ * feature. `config.aiProcessing` itself still exists on `WorkflowConfig`
+ * (server schema requires the field) — this component just passes
+ * whatever value it already had straight through, unedited.
+ *
+ * This is now the ONLY place any of these 4 config groups gets authored:
+ * the older, separate "Mẫu chụp" (`CaptureConfigurationsPage.tsx`) picker
+ * this used to duplicate was retired 2026-09-17 (see `CampaignForm.tsx`'s
+ * own doc comment).
  *
  * "Điều kiện tiếp nhận" (eligibility) used to be a 6th group edited here —
  * moved OFF this component entirely, later the same day (2026-09-18,
@@ -82,10 +68,12 @@ export function WorkflowConfigEditor({
   config,
   onChange,
   identificationMethods,
+  photoKinds,
 }: {
   config: WorkflowConfig;
   onChange: (next: WorkflowConfig) => void;
   identificationMethods: IdentificationMethod[];
+  photoKinds: PhotoKind[];
 }) {
   // One-time-copy convention for `CaptureAnglesTable`'s own row state —
   // `config` only ever changes by remount
@@ -111,20 +99,6 @@ export function WorkflowConfigEditor({
 
   function updatePrinting(patch: Partial<PrintingConfigShape>) {
     onChange({ ...config, printing: { ...printing, ...patch } });
-  }
-
-  const aiProcessing = (config.aiProcessing as unknown as Partial<AiProcessingConfigShape>) ?? {};
-  const aiEnabled = aiProcessing.enabled ?? false;
-  const aiPrompt = (aiProcessing.steps?.[0]?.params?.prompt as string | undefined) ?? '';
-
-  function updateAiProcessing(patch: Partial<AiProcessingConfigShape>) {
-    onChange({ ...config, aiProcessing: { ...aiProcessing, ...patch } });
-  }
-
-  function updateAiPrompt(prompt: string) {
-    updateAiProcessing({
-      steps: prompt ? [{ code: AI_PROMPT_STEP_CODE, params: { prompt } }] : [],
-    });
   }
 
   return (
@@ -223,17 +197,73 @@ export function WorkflowConfigEditor({
       <section className="p-4 rounded-xl border border-gray-200 bg-white space-y-3">
         <h3 className="text-sm font-semibold text-gray-900">Đầu ra / ảnh thẻ (output)</h3>
         <div>
-          <label className="block text-sm text-gray-500 mb-1">Mã loại ảnh (photo kind)</label>
-          <input
+          <label className="block text-sm text-gray-500 mb-1">Loại ảnh (photo kind)</label>
+          <select
             value={config.output.photoKindCode}
-            onChange={(e) => updateOutput({ photoKindCode: e.target.value })}
+            onChange={(e) => {
+              const kind = photoKinds.find((k) => k.code === e.target.value);
+              if (!kind) return;
+              updateOutput({ photoKindCode: kind.code, cardSpec: kind.cardSpec });
+            }}
             className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
-          />
+          >
+            <option value="">— Chọn loại ảnh —</option>
+            {!photoKinds.some((k) => k.code === config.output.photoKindCode) && config.output.photoKindCode && (
+              <option value={config.output.photoKindCode}>{config.output.photoKindCode} (không còn trong danh mục)</option>
+            )}
+            {photoKinds.map((k) => (
+              <option key={k.code} value={k.code}>
+                {k.labelVi} ({k.code}){!k.active ? ' — đã tắt' : ''}
+              </option>
+            ))}
+          </select>
+          {photoKinds.length === 0 && (
+            <p className="text-xs text-gray-400 mt-1">Chưa có loại ảnh nào trong danh mục — thêm ở trang "Loại ảnh".</p>
+          )}
         </div>
-        <CardSpecFields
-          cardSpec={config.output.cardSpec}
-          onChange={(updater) => updateOutput({ cardSpec: updater(config.output.cardSpec as CardSpec) })}
-        />
+
+        {/*
+          2026-09-22 fix: cardSpec (cỡ/dpi/màu nền/tỉ lệ/làm mịn) is no
+          longer entered here at all — it comes entirely from the picked
+          Photo Kind's own catalog entry (`/photo-kinds`, `PhotoKind.cardSpec`
+          — already the full shape this section used to duplicate manual
+          inputs for). Read-only summary only, so an admin can see what
+          they're about to save without re-entering it; to change these
+          values, edit the Photo Kind itself, which then applies to every
+          workflow using that kind.
+        */}
+        {config.output.cardSpec && (
+          <div className="p-3 rounded-lg bg-gray-50 border border-gray-200 text-sm text-gray-700 space-y-1">
+            <p className="text-xs text-gray-500">
+              Cấu hình thẻ áp dụng từ loại ảnh đã chọn (sửa ở trang "Loại ảnh" nếu cần đổi):
+            </p>
+            <p>
+              Cỡ ảnh: <span className="font-medium">{config.output.cardSpec.size ?? '—'} cm</span> · DPI:{' '}
+              <span className="font-medium">{config.output.cardSpec.dpi ?? '—'}</span> · Màu nền:{' '}
+              <span className="inline-flex items-center gap-1 align-middle">
+                <span
+                  className="inline-block w-3.5 h-3.5 rounded border border-gray-300 align-middle"
+                  style={{ backgroundColor: config.output.cardSpec.backgroundColor ?? '#FFFFFF' }}
+                />
+                <span className="font-mono text-xs">{config.output.cardSpec.backgroundColor ?? '—'}</span>
+              </span>
+            </p>
+            <p>
+              Tỉ lệ chiều cao đầu:{' '}
+              <span className="font-medium">
+                {config.output.cardSpec.headHeightRatio?.[0] ?? '—'}–{config.output.cardSpec.headHeightRatio?.[1] ?? '—'}
+              </span>{' '}
+              · Tỉ lệ đường mắt:{' '}
+              <span className="font-medium">
+                {config.output.cardSpec.eyeLineRatio?.[0] ?? '—'}–{config.output.cardSpec.eyeLineRatio?.[1] ?? '—'}
+              </span>{' '}
+              · Làm mịn:{' '}
+              <span className="font-medium">
+                {config.output.cardSpec.retouch?.enabled ? config.output.cardSpec.retouch.strength ?? 'LIGHT' : 'Tắt'}
+              </span>
+            </p>
+          </div>
+        )}
       </section>
 
       <section className="p-4 rounded-xl border border-gray-200 bg-white space-y-3">
@@ -254,30 +284,6 @@ export function WorkflowConfigEditor({
         </div>
       </section>
 
-      <section className="p-4 rounded-xl border border-gray-200 bg-white space-y-3">
-        <h3 className="text-sm font-semibold text-gray-900">Xử lý AI (aiProcessing)</h3>
-        <label className="flex items-center gap-2 text-sm text-gray-700">
-          <input
-            type="checkbox"
-            checked={aiEnabled}
-            onChange={(e) => updateAiProcessing({ enabled: e.target.checked })}
-            className="rounded border-gray-300"
-          />
-          Bật xử lý AI
-        </label>
-        {aiEnabled && (
-          <div>
-            <label className="block text-sm text-gray-500 mb-1">Prompt</label>
-            <textarea
-              value={aiPrompt}
-              onChange={(e) => updateAiPrompt(e.target.value)}
-              rows={3}
-              placeholder="Mô tả yêu cầu chỉnh sửa ảnh bằng AI..."
-              className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
-            />
-          </div>
-        )}
-      </section>
     </div>
   );
 }

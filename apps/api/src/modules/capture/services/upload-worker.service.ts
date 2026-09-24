@@ -82,6 +82,25 @@ export class UploadWorkerService implements OnModuleInit {
   ) {}
 
   async onModuleInit(): Promise<void> {
+    // Only the worker host (and the SERVICE_TYPE=all monolith) actually
+    // drains this queue — see app-worker.module.ts / app-query.module.ts's
+    // own doc comments: only app-worker.module.ts imports
+    // ScheduleModule.forRoot(), so this class's @Cron methods are simply
+    // never picked up on a command/query host. This lifecycle hook runs
+    // regardless of that, though — CaptureModule is still imported into all
+    // four root modules for its controllers, so this service still gets
+    // instantiated (and onModuleInit called) on every host. Without this
+    // guard, booting a command/query pod (a routine deploy/scale event, not
+    // a crash) would reset every row this class's OWN comment assumes only
+    // "a process that died mid-flight" could have left SENDING — including
+    // one a live worker on another pod is still genuinely mid-`send()` for.
+    // A second worker (or the same one, next tick) can then claim and
+    // re-POST that same row concurrently with the same Idempotency-Key,
+    // racing the first attempt.
+    const serviceType = process.env.SERVICE_TYPE;
+    if (serviceType === 'command' || serviceType === 'query') {
+      return;
+    }
     // Anything left SENDING belongs to a process that died mid-flight. The
     // upload is idempotent, so re-sending is safe and leaving it stuck is not.
     await this.dataSource
@@ -477,7 +496,24 @@ export class UploadWorkerService implements OnModuleInit {
         [job.virtual_path, job.photo_id],
       );
 
-    const occupant = prior[0];
+    let occupant = prior[0];
+    if (!occupant?.fs_file_id || !occupant.fs_etag) {
+      // Purge-recovery case (retryPurgedUploads, see its own doc comment):
+      // the job's OWN photo row can already carry the fs_file_id/fs_etag
+      // from before a scan-pipeline purge — that method deliberately leaves
+      // them untouched precisely so this lookup would find them. The query
+      // above can never find them itself (it excludes `o.photo_id = $2` on
+      // purpose, for the OTHER case this method handles: a different
+      // photo's row occupying the same flat path) — this was the exact gap
+      // that made purge recovery on a unique/kiosk-no-CCCD path always fail,
+      // contrary to this class's own doc comment on retryPurgedUploads.
+      const own: Array<{ fs_file_id: string | null; fs_etag: string | null }> =
+        await this.dataSource.query(
+          `SELECT fs_file_id, fs_etag FROM photos WHERE id = $1`,
+          [job.photo_id],
+        );
+      occupant = own[0] as typeof occupant;
+    }
     if (!occupant?.fs_file_id || !occupant.fs_etag) {
       // Nothing on file explains the conflict (a different tenant's file, or
       // a prior occupant this API never recorded an etag for) — not

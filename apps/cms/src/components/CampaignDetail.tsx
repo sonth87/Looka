@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { ApiError, Campaign, Device, downloadCampaignApprovedPhotos, getCampaign, listDevices } from '../api';
+import { ApiError, Campaign, Device, getCampaign, listDevices } from '../api';
 import { StatsPanel } from './StatsPanel';
 import { SessionsPanel } from './SessionsPanel';
 import { CampaignDangerActions } from './CampaignDangerActions';
@@ -106,7 +106,6 @@ export function CampaignDetail() {
    * removed.
    */
   const [focusDeviceId] = useState<string | undefined>(undefined);
-  const [exportingPhotos, setExportingPhotos] = useState(false);
 
   const reload = () => {
     if (!id) return;
@@ -119,32 +118,6 @@ export function CampaignDetail() {
   };
 
   useEffect(reload, [id]);
-
-  /**
-   * "Xuất ảnh đã duyệt" (Phase F.4,
-   * docs/plans/card-photo-export-and-filters-plan-2026-09-17.md) — downloads
-   * `GET /v1/campaigns/:id/export-approved-photos` (roster CSV +
-   * approved-photos CSV + one `{subjectCode}.jpg` per approved set) as a
-   * zip, same `createObjectURL`-then-click-an-`<a>` pattern
-   * `CampaignRosterPanel.downloadTemplate` already uses.
-   */
-  async function handleExportApprovedPhotos() {
-    if (!id) return;
-    setExportingPhotos(true);
-    try {
-      const { blob, filename } = await downloadCampaignApprovedPhotos(id);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = filename;
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : String(err));
-    } finally {
-      setExportingPhotos(false);
-    }
-  }
 
   if (error) return <div className="p-4 rounded-xl bg-red-50 border border-red-200 text-red-700">{error}</div>;
   if (!campaign || !id) return <p className="text-gray-500">Đang tải...</p>;
@@ -194,14 +167,6 @@ export function CampaignDetail() {
         </div>
 
         <div className="flex items-center gap-2 shrink-0">
-          <button
-            type="button"
-            onClick={handleExportApprovedPhotos}
-            disabled={exportingPhotos}
-            className="px-3 py-1.5 rounded-lg bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm font-semibold disabled:opacity-50"
-          >
-            {exportingPhotos ? 'Đang xuất...' : 'Xuất ảnh đã duyệt'}
-          </button>
           <Link
             to={`/campaigns/${campaign.id}/edit`}
             className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold"

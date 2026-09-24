@@ -12,6 +12,7 @@ import {
 } from '../api';
 import { ModalShell } from './CampaignDangerActions';
 import { DEFAULT_PAGE_SIZE, Pager } from './Pager';
+import { slugifyCode } from '../slug';
 
 // `CardSpec`'s own fields are all optional (shared with `CampaignForm`'s
 // looser "an older campaign might not have one at all" reading) — the
@@ -27,6 +28,7 @@ const DEFAULT_EYE_LINE_RATIO: [number, number] = [0.4, 0.45];
 function cardSpecSummary(spec: CardSpec): string {
   return `${spec.size ?? DEFAULT_SIZE} · ${spec.dpi ?? DEFAULT_DPI}dpi · nền ${spec.backgroundColor ?? DEFAULT_BACKGROUND_COLOR}`;
 }
+
 
 /**
  * "Cấu hình" — standalone admin page for "loại ảnh" (`photo_kinds`),
@@ -220,8 +222,8 @@ function PhotoKindFormModal({
   onSaved: (kind: PhotoKind) => void;
 }) {
   const isEdit = kind != null;
-  const [code, setCode] = useState(kind?.code ?? '');
   const [labelVi, setLabelVi] = useState(kind?.labelVi ?? '');
+  const code = isEdit ? (kind?.code ?? '') : slugifyCode(labelVi);
   const [size, setSize] = useState(kind?.cardSpec.size ?? DEFAULT_SIZE);
   const [dpi, setDpi] = useState(kind?.cardSpec.dpi ?? DEFAULT_DPI);
   const [backgroundColor, setBackgroundColor] = useState(kind?.cardSpec.backgroundColor ?? DEFAULT_BACKGROUND_COLOR);
@@ -237,7 +239,7 @@ function PhotoKindFormModal({
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!labelVi.trim() || (!isEdit && !code.trim())) return;
+    if (!labelVi.trim() || (!isEdit && !code)) return;
     setSaving(true);
     setError(null);
 
@@ -259,7 +261,7 @@ function PhotoKindFormModal({
         const input: UpdatePhotoKindInput = { labelVi: labelVi.trim(), cardSpec, promptHints, active };
         onSaved(await updatePhotoKind(kind.id, input));
       } else {
-        const input: CreatePhotoKindInput = { code: code.trim().toUpperCase(), labelVi: labelVi.trim(), cardSpec, promptHints, active };
+        const input: CreatePhotoKindInput = { code, labelVi: labelVi.trim(), cardSpec, promptHints, active };
         onSaved(await createPhotoKind(input));
       }
     } catch (err) {
@@ -270,27 +272,27 @@ function PhotoKindFormModal({
   };
 
   return (
-    <ModalShell title={isEdit ? `Sửa loại ảnh "${kind?.labelVi}"` : 'Thêm loại ảnh'} onClose={onClose}>
+    <ModalShell title={isEdit ? `Sửa loại ảnh "${kind?.labelVi}"` : 'Thêm loại ảnh'} onClose={onClose} maxWidth="max-w-2xl">
       <form onSubmit={submit} className="space-y-3">
-        <div>
-          <label className="block text-sm text-gray-500 mb-1">Mã{isEdit ? ' (không đổi được)' : ''}</label>
-          <input
-            value={code}
-            onChange={(e) => setCode(e.target.value.toUpperCase())}
-            disabled={isEdit}
-            placeholder="STUDENT_CARD"
-            required
-            className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900 disabled:bg-gray-50 disabled:text-gray-500"
-          />
-        </div>
         <div>
           <label className="block text-sm text-gray-500 mb-1">Tên hiển thị</label>
           <input
             value={labelVi}
             onChange={(e) => setLabelVi(e.target.value)}
             required
+            autoFocus
             placeholder="Ảnh thẻ sinh viên"
             className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900"
+          />
+        </div>
+        <div>
+          <label className="block text-sm text-gray-500 mb-1">
+            Mã {isEdit ? '(không đổi được)' : '(tự sinh từ tên hiển thị)'}
+          </label>
+          <input
+            value={code || (isEdit ? '' : 'Nhập tên hiển thị để tự sinh mã')}
+            disabled
+            className="w-full bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 text-gray-500 font-mono text-sm cursor-not-allowed"
           />
         </div>
 

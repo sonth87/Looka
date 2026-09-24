@@ -4,7 +4,7 @@ import { HttpStatus, Injectable } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import { QueryFailedError } from 'typeorm';
-import { ReviewAssignmentDao } from '../dao';
+import { ReviewAssignmentDao, ReviewerDao } from '../dao';
 import { CreateReviewAssignmentDto } from '../dto';
 import { ReviewAssignment } from '../entities/review-assignment.entity';
 import {
@@ -40,18 +40,25 @@ export class ReviewAssignmentService {
       where: userId ? { userId } : {},
       order: { createdAt: 'DESC' },
     });
-    const nameMap = await this.batchResolveUserNames(rows.map((r) => r.userId));
+    const infoMap = await this.batchResolveUserInfo(rows.map((r) => r.userId));
     return toDao(
       ReviewAssignmentDao,
-      rows.map((r) => ({
-        id: r.id,
-        userId: r.userId,
-        userName: nameMap.get(r.userId),
-        groupField: r.groupField,
-        groupValue: r.groupValue,
-        createdByUserId: r.createdByUserId ?? undefined,
-        createdAt: r.createdAt,
-      })),
+      rows.map((r) => {
+        const info = infoMap.get(r.userId);
+        return {
+          id: r.id,
+          userId: r.userId,
+          userName: info?.name,
+          userEmail: info?.email,
+          userDepartment: info?.department,
+          userFaculty: info?.faculty,
+          userRoleCodes: info?.roleCodes ?? [],
+          groupField: r.groupField,
+          groupValue: r.groupValue,
+          createdByUserId: r.createdByUserId ?? undefined,
+          createdAt: r.createdAt,
+        };
+      }),
     );
   }
 
@@ -69,11 +76,17 @@ export class ReviewAssignmentService {
           createdByUserId: actorUserId,
         }),
       );
-      const nameMap = await this.batchResolveUserNames([created.userId]);
+      const info = (await this.batchResolveUserInfo([created.userId])).get(
+        created.userId,
+      );
       return toDao(ReviewAssignmentDao, {
         id: created.id,
         userId: created.userId,
-        userName: nameMap.get(created.userId),
+        userName: info?.name,
+        userEmail: info?.email,
+        userDepartment: info?.department,
+        userFaculty: info?.faculty,
+        userRoleCodes: info?.roleCodes ?? [],
         groupField: created.groupField,
         groupValue: created.groupValue,
         createdByUserId: created.createdByUserId ?? undefined,
@@ -92,11 +105,17 @@ export class ReviewAssignmentService {
           },
         });
         if (existing) {
-          const nameMap = await this.batchResolveUserNames([existing.userId]);
+          const info = (await this.batchResolveUserInfo([existing.userId])).get(
+            existing.userId,
+          );
           return toDao(ReviewAssignmentDao, {
             id: existing.id,
             userId: existing.userId,
-            userName: nameMap.get(existing.userId),
+            userName: info?.name,
+            userEmail: info?.email,
+            userDepartment: info?.department,
+            userFaculty: info?.faculty,
+            userRoleCodes: info?.roleCodes ?? [],
             groupField: existing.groupField,
             groupValue: existing.groupValue,
             createdByUserId: existing.createdByUserId ?? undefined,
@@ -110,6 +129,64 @@ export class ReviewAssignmentService {
 
   async remove(id: string): Promise<void> {
     await this.repository.delete({ id });
+  }
+
+  /**
+   * "Người có quyền duyệt" (2026-09-22 — replaces the old scoped-only
+   * "Thêm phân công" add-flow) — every user whose `users.roles` jsonb array
+   * contains `'REVIEWER'` (the same flag `ReviewerRoleGuard` checks), i.e.
+   * everyone with UNRESTRICTED review access. Distinct from `list()` above,
+   * which reads `review_assignments` rows (narrowing grants) — a person can
+   * appear in neither, either, or both lists.
+   */
+  async listReviewers(): Promise<ReviewerDao[]> {
+    const rows: Array<{
+      id: string;
+      name: string | null;
+      email: string;
+      department: string | null;
+      faculty: string | null;
+      roleCodes: string[];
+    }> = await this.dataSource.query(`
+      SELECT u.id, COALESCE(u.display_name, u.email) AS name, u.email, u.department, u.faculty,
+        COALESCE(
+          (SELECT array_agg(r.code ORDER BY r.code) FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = u.id),
+          ARRAY[]::text[]
+        ) AS "roleCodes"
+      FROM users u
+      WHERE u.roles @> '["REVIEWER"]'::jsonb
+      ORDER BY name
+    `);
+    return toDao(
+      ReviewerDao,
+      rows.map((r) => ({
+        userId: r.id,
+        userName: r.name ?? undefined,
+        userEmail: r.email,
+        userDepartment: r.department,
+        userFaculty: r.faculty,
+        userRoleCodes: r.roleCodes,
+      })),
+    );
+  }
+
+  /** Idempotent — adding `'REVIEWER'` to a user who already has it is a no-op. */
+  async grantReviewer(userId: string): Promise<void> {
+    await this.dataSource.query(
+      `UPDATE users SET roles = CASE WHEN roles @> '["REVIEWER"]'::jsonb THEN roles ELSE roles || '["REVIEWER"]'::jsonb END WHERE id = $1`,
+      [userId],
+    );
+  }
+
+  /** Removes only the `'REVIEWER'` tag — any other app-role tag a user might hold stays untouched. */
+  async revokeReviewer(userId: string): Promise<void> {
+    await this.dataSource.query(
+      `UPDATE users SET roles = COALESCE(
+         (SELECT jsonb_agg(elem) FROM jsonb_array_elements(roles) elem WHERE elem <> '"REVIEWER"'),
+         '[]'::jsonb
+       ) WHERE id = $1`,
+      [userId],
+    );
   }
 
   /**
@@ -191,18 +268,53 @@ export class ReviewAssignmentService {
     return { sql: `(${clauses.join(' OR ')})`, params };
   }
 
-  private async batchResolveUserNames(
+  /**
+   * "Thông tin người dùng cần hiển thị nhiều hơn, khoa, nào, role gì" —
+   * 2026-09-22. One batched lookup covering everything this module's
+   * user-facing lists (`list`/`create`/`listReviewers`) show per person:
+   * name/email/department/faculty straight off `users`, plus RBAC role
+   * codes via the same `user_roles`/`roles` join `UserDirectoryReadRepository.
+   * list` (identity module) already uses for the same "roleCodes" shape.
+   */
+  private async batchResolveUserInfo(
     userIds: string[],
-  ): Promise<Map<string, string | undefined>> {
-    const map = new Map<string, string | undefined>();
+  ): Promise<Map<string, UserInfo>> {
+    const map = new Map<string, UserInfo>();
     const unique = [...new Set(userIds)];
     if (unique.length === 0) return map;
-    const rows: Array<{ id: string; name: string | null }> =
-      await this.dataSource.query(
-        `SELECT id, COALESCE(display_name, email) AS name FROM users WHERE id = ANY($1)`,
-        [unique],
-      );
-    for (const row of rows) map.set(row.id, row.name ?? undefined);
+    const rows: Array<{
+      id: string;
+      name: string | null;
+      email: string;
+      department: string | null;
+      faculty: string | null;
+      roleCodes: string[];
+    }> = await this.dataSource.query(
+      `SELECT u.id, COALESCE(u.display_name, u.email) AS name, u.email, u.department, u.faculty,
+         COALESCE(
+           (SELECT array_agg(r.code ORDER BY r.code) FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = u.id),
+           ARRAY[]::text[]
+         ) AS "roleCodes"
+       FROM users u WHERE u.id = ANY($1)`,
+      [unique],
+    );
+    for (const row of rows) {
+      map.set(row.id, {
+        name: row.name ?? undefined,
+        email: row.email,
+        department: row.department,
+        faculty: row.faculty,
+        roleCodes: row.roleCodes,
+      });
+    }
     return map;
   }
+}
+
+interface UserInfo {
+  name?: string;
+  email: string;
+  department: string | null;
+  faculty: string | null;
+  roleCodes: string[];
 }

@@ -109,6 +109,8 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
     gestureState = null,
     gestureProgress,
     onShutterCapture,
+    centerIsTethered = false,
+    tetheredCenterPreview = null,
     cameraScale,
     decreaseScale,
     increaseScale,
@@ -221,17 +223,28 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
   // Same face-quality gate the on-canvas ShutterButton already uses (OFF
   // mode) — reused as-is for the new sidebar CTA button in bước 6, rather
   // than a second, possibly-drifting copy of the readiness rule.
+  // `centerIsTethered` (2026-09-22) bypasses this entirely — a tethered
+  // Canon has no live feed for `faceState` to ever report `detected: true`
+  // on, see that prop's own doc comment.
   const isFaceReadyForCapture =
-    faceState?.detected === true &&
-    faceState?.presence === "SINGLE_FACE" &&
-    faceState?.quality?.accepted === true;
+    centerIsTethered ||
+    (faceState?.detected === true &&
+      faceState?.presence === "SINGLE_FACE" &&
+      faceState?.quality?.accepted === true);
   // The sidebar CTA reuses the exact same OFF-mode manual-shutter mechanism
   // as the existing on-canvas ShutterButton (see that button's own
   // `captureMode === "OFF" && onShutterCapture` condition below) — AUTO
   // fires itself once the pose stabilizes and MANUAL waits for a held
   // gesture, so this button has nothing new to trigger in those modes and
   // is shown disabled with the same real-time hint instead.
-  const canManualCaptureFromSidebar = captureMode === "OFF" && !!onShutterCapture;
+  //
+  // 2026-09-24 fix (confirmed audit finding): `centerIsTethered` bypasses
+  // that reasoning — AUTO's auto-fire and MANUAL's gesture hold both depend
+  // on live webcam frames that never arrive while CENTER is the tethered
+  // Canon (see `isFaceReadyForCapture`'s own doc comment just above), so
+  // without this exemption there was no way at all to fire the first Canon
+  // shot in either mode.
+  const canManualCaptureFromSidebar = (captureMode === "OFF" || centerIsTethered) && !!onShutterCapture;
 
   // Bottom 3-phase progress dots (bước 6 — "Góc trước / Chụp ảnh và Sinh
   // trắc / Xác nhận thực hiện"). This is a coarser, higher-level phase than
@@ -371,7 +384,25 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
           {/* Right Action Controls: Identical Button Sizing (w-8 h-8 rounded-xl) */}
           <div className="flex items-center gap-2 shrink-0">
             {/* Camera Selector */}
-            {devices && devices.length > 1 && (
+            {/*
+              2026-09-24 fix (confirmed audit finding): this picker's option
+              list only ever comes from `devices` (enumerateDevices output),
+              which never contains the tethered Canon (see this file's other
+              `centerIsTethered` comments) — with CENTER assigned to the
+              Canon, `selectedDeviceId` is `'tethered:gphoto2'`, matching no
+              `<option>`, so the browser silently falls back to showing the
+              FIRST webcam as if that were CENTER's active device. Picking
+              any webcam from there then actually opens it and replaces
+              CENTER's live `stream`, while the capture path still shoots
+              with the Canon (the role mapping itself never changes) — the
+              preview and the saved photo end up from two different cameras
+              with no way back to the Canon from this control. Hiding the
+              picker entirely while CENTER is tethered removes both the
+              wrong-camera-selected display and the accidental-switch path;
+              a tethered CENTER's camera is controlled by the saved role
+              mapping (Camera Setup screen), not this free-form picker.
+            */}
+            {!centerIsTethered && devices && devices.length > 1 && (
               <CameraSelector
                 devices={devices}
                 selectedDeviceId={selectedDeviceId}
@@ -858,7 +889,51 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                       : "bg-slate-50/95 text-slate-900",
                   )}
                 >
-                  {mode === "simulation" ? (
+                  {centerIsTethered ? (
+                    tetheredCenterPreview ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={tetheredCenterPreview}
+                        alt="Canon (dây)"
+                        className="absolute inset-0 w-full h-full object-cover"
+                      />
+                    ) : (
+                      <>
+                        <div
+                          className={cn(
+                            "w-14 h-14 rounded-full flex items-center justify-center border shadow-md",
+                            theme === "dark"
+                              ? "bg-blue-600/20 border-blue-500/40 text-blue-400"
+                              : "bg-blue-50 border-blue-300 text-blue-600 shadow-blue-500/10",
+                          )}
+                        >
+                          <Loader2 className="w-7 h-7 text-blue-500 animate-spin" />
+                        </div>
+                        <div className="text-center space-y-1 max-w-xs">
+                          <h3
+                            className={cn(
+                              "text-sm font-bold",
+                              theme === "dark"
+                                ? "text-slate-200"
+                                : "text-slate-800",
+                            )}
+                          >
+                            Canon (dây)
+                          </h3>
+                          <p
+                            className={cn(
+                              "text-xs font-medium",
+                              theme === "dark"
+                                ? "text-slate-400"
+                                : "text-slate-500",
+                            )}
+                          >
+                            Đang chờ khung hình đầu tiên từ máy ảnh...
+                          </p>
+                        </div>
+                      </>
+                    )
+                  ) : mode === "simulation" ? (
                     <>
                       <div
                         className={cn(
@@ -1020,26 +1095,36 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                   gestureState={gestureState}
                   gestureProgress={gestureProgress}
                   faceReady={
-                    faceState?.detected === true &&
-                    faceState?.presence === "SINGLE_FACE" &&
-                    faceState?.quality?.accepted === true
+                    centerIsTethered ||
+                    (faceState?.detected === true &&
+                      faceState?.presence === "SINGLE_FACE" &&
+                      faceState?.quality?.accepted === true)
                   }
                 />
               )}
 
-              {captureMode === "OFF" && onShutterCapture && (
+              {/* 2026-09-24 fix (confirmed audit finding): also shown for a
+                  tethered CENTER regardless of captureMode — AUTO/MANUAL both
+                  need live webcam frames that never arrive for the Canon, so
+                  they had no way to trigger that first shot; see
+                  `canManualCaptureFromSidebar`'s matching fix above. */}
+              {(captureMode === "OFF" || centerIsTethered) && onShutterCapture && (
                 <ShutterButton
                   className="pointer-events-auto"
                   enabled={
-                    faceState?.detected === true &&
-                    faceState?.presence === "SINGLE_FACE" &&
-                    faceState?.quality?.accepted === true &&
+                    (centerIsTethered ||
+                      (faceState?.detected === true &&
+                        faceState?.presence === "SINGLE_FACE" &&
+                        faceState?.quality?.accepted === true)) &&
                     // 2026-09-05 black-frame fix: in simultaneous-capture mode,
                     // every side frame must have actually rendered a real
                     // video frame before the shutter fires — see
                     // `allSideFramesReady` in lib/multiFrame.ts. Absent
                     // (`multiFrame` undefined, the sequential single-camera
                     // path) this is simply not checked, unchanged from before.
+                    // A tethered side frame is marked ready the instant its
+                    // stream-open step runs (no real video to wait on), so
+                    // this stays correct unmodified for that case too.
                     (!multiFrame || multiFrame.allSideFramesReady)
                   }
                   disabledHint={

@@ -76,6 +76,10 @@ export class CardTemplateAssetService {
       mimeType: file.mimetype,
       data: new Uint8Array(file.buffer),
       idempotencyKey: this.templateService.generateAssetIdempotencyKey(),
+      // Explicit, not left to the server default — same convention every
+      // other uploadRaw call site in this codebase already follows (e.g.
+      // campaign-subject.service.ts, photo-review.service.ts).
+      visibility: 'public',
     });
 
     const asset = this.assets.create({

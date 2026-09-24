@@ -10,12 +10,14 @@ import {
   PrintItemGroup,
   PrintItemStatus,
   Printer,
+  PrintResultImport,
   addItemsToPrintBatch,
   bulkApplyPrintTemplate,
   bulkCreatePrintItems,
   cancelPrintBatch,
   completePrintBatch,
   downloadPrintBatchPackage,
+  downloadPrintResultTemplate,
   exportPrintBatchPackage,
   getPrintBatch,
   listCampaigns,
@@ -24,6 +26,7 @@ import {
   listPrintItemGroups,
   listPrintItems,
   listPrinters,
+  listPrintResultImports,
   previewCardTemplateUrl,
   previewPrintItemUrl,
   removeItemFromPrintBatch,
@@ -33,6 +36,7 @@ import {
   reprintPrintItem,
   sendPrintBatch,
   updatePrintBatch,
+  uploadPrintResultFile,
 } from '../api';
 import { CardPreviewModal } from './CardPreviewModal';
 import { ModalShell } from '../components/CampaignDangerActions';
@@ -92,6 +96,8 @@ export function PrintBatchDetailPage() {
   const [previewingDefaultTemplate, setPreviewingDefaultTemplate] = useState(false);
   const [renderResult, setRenderResult] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [resultImports, setResultImports] = useState<PrintResultImport[]>([]);
+  const [uploadResultOpen, setUploadResultOpen] = useState(false);
 
   useEffect(() => {
     listCampaigns().then(setCampaigns).catch(() => {});
@@ -124,6 +130,15 @@ export function PrintBatchDetailPage() {
   }
 
   useEffect(reload, [id, page, pageSize, statusFilter, classNameFilter, facultyFilter, q]);
+
+  function reloadResultImports() {
+    if (!id) return;
+    listPrintResultImports(id)
+      .then(setResultImports)
+      .catch(() => {});
+  }
+
+  useEffect(reloadResultImports, [id]);
 
   useEffect(() => {
     if (batch?.campaignId) {
@@ -558,6 +573,67 @@ export function PrintBatchDetailPage() {
         }}
       />
 
+      <div className="mt-6 p-4 rounded-2xl border border-gray-200 bg-white shadow-sm space-y-3">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-gray-900">Kết quả in ấn</h3>
+          <button
+            type="button"
+            onClick={() => setUploadResultOpen(true)}
+            className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold"
+          >
+            Tải lên kết quả in
+          </button>
+        </div>
+
+        {resultImports.length === 0 && <p className="text-sm text-gray-500">Chưa có lần upload kết quả in nào.</p>}
+
+        {resultImports.length > 0 && (
+          <table className="w-full text-xs">
+            <thead className="text-gray-500 uppercase">
+              <tr>
+                <th className="text-left py-1.5">File</th>
+                <th className="text-left py-1.5">Trạng thái</th>
+                <th className="text-left py-1.5">Khớp / Đã in / Lỗi / Không khớp / Tổng</th>
+                <th className="text-left py-1.5">Lúc</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {resultImports.map((imp) => (
+                <tr key={imp.id}>
+                  <td className="py-1.5 text-gray-900">{imp.fileName}</td>
+                  <td className="py-1.5">
+                    <span
+                      className={`px-1.5 py-0.5 rounded-full border ${
+                        imp.status === 'DONE'
+                          ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                          : imp.status === 'FAILED'
+                            ? 'bg-red-50 border-red-200 text-red-700'
+                            : 'bg-gray-50 border-gray-200 text-gray-600'
+                      }`}
+                    >
+                      {imp.status === 'DONE' ? 'Hoàn tất' : imp.status === 'FAILED' ? 'Lỗi' : 'Đang xử lý'}
+                    </span>
+                    {imp.failureReason && <span className="ml-1.5 text-red-600">{imp.failureReason}</span>}
+                  </td>
+                  <td className="py-1.5 text-gray-500 tabular-nums">
+                    {imp.matchedRows} / {imp.printedRows} / {imp.failedRows} / {imp.unmatchedRows} / {imp.totalRows}
+                  </td>
+                  <td className="py-1.5 text-gray-500">{formatDateTime(imp.createdAt)}</td>
+                  <td className="py-1.5 text-right">
+                    {imp.errorReportUrl && (
+                      <a href={imp.errorReportUrl} target="_blank" rel="noreferrer" className="text-blue-600 hover:text-blue-800">
+                        Xem lỗi
+                      </a>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
       {addOpen && batch.campaignId && (
         <AddApprovedStudentsModal
           batchId={batch.id}
@@ -590,6 +666,18 @@ export function PrintBatchDetailPage() {
           onSaved={(updated) => {
             setEditPrinterOpen(false);
             setBatch(updated);
+          }}
+        />
+      )}
+
+      {uploadResultOpen && (
+        <UploadPrintResultModal
+          batchId={batch.id}
+          onClose={() => setUploadResultOpen(false)}
+          onUploaded={() => {
+            setUploadResultOpen(false);
+            reloadResultImports();
+            reload();
           }}
         />
       )}
@@ -998,5 +1086,92 @@ function AddApprovedStudentsModal({
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * "Tải lên kết quả in" (Giai đoạn 4, plan §4.3) — the backend
+ * (`PrintResultImportController`) existed with no CMS UI at all until
+ * 2026-09-22. Same "button opens a dialog, dialog has a separate upload
+ * button" shape `CampaignRosterPanel`'s roster-import dialog already
+ * uses (2026-09-22 product ask, applied here too for consistency) rather
+ * than an always-visible inline file input.
+ */
+function UploadPrintResultModal({
+  batchId,
+  onClose,
+  onUploaded,
+}: {
+  batchId: string;
+  onClose: () => void;
+  onUploaded: () => void;
+}) {
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+
+  async function downloadTemplate() {
+    try {
+      const { blob, filename } = await downloadPrintResultTemplate();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setUploadError(err instanceof ApiError ? err.message : String(err));
+    }
+  }
+
+  async function handleUpload() {
+    if (!selectedFile) return;
+    setUploading(true);
+    setUploadError(null);
+    try {
+      await uploadPrintResultFile(batchId, selectedFile);
+      onUploaded();
+    } catch (err) {
+      setUploadError(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  return (
+    <ModalShell title="Tải lên kết quả in" onClose={onClose}>
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <span className="text-sm text-gray-500">Chọn file Excel (.xlsx) kết quả in theo đúng mẫu.</span>
+          <button type="button" onClick={() => void downloadTemplate()} className="text-xs text-blue-600 hover:text-blue-800 underline shrink-0">
+            Tải file mẫu
+          </button>
+        </div>
+        <input
+          type="file"
+          accept=".xlsx"
+          disabled={uploading}
+          onChange={(e) => {
+            setSelectedFile(e.target.files?.[0] ?? null);
+            setUploadError(null);
+          }}
+          className="w-full text-sm text-gray-700"
+        />
+        {uploadError && <div className="p-2.5 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">{uploadError}</div>}
+        <div className="flex justify-end gap-2 pt-1">
+          <button type="button" onClick={onClose} disabled={uploading} className="px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-100 disabled:opacity-50">
+            Huỷ
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleUpload()}
+            disabled={!selectedFile || uploading}
+            className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold text-sm disabled:opacity-50"
+          >
+            {uploading ? 'Đang tải lên...' : 'Tải lên'}
+          </button>
+        </div>
+      </div>
+    </ModalShell>
   );
 }

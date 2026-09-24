@@ -26,6 +26,11 @@ export const ERROR_CODE = {
   SESSION_NOT_FOUND: 1000,
   SESSION_ALREADY_COMPLETED: 1001,
   SESSION_REPORT_INVALID_PAYLOAD: 1002,
+  // 2026-09-24 fix (confirmed audit finding): a kiosk device authenticates
+  // itself, but nothing checked that a `sessionId` it posts a photo/video
+  // for actually belongs to ITS OWN device+campaign — see
+  // `PhotoService.addDevicePhoto`/`SessionVideoService.addDeviceVideo`.
+  SESSION_DEVICE_MISMATCH: 1003,
 
   // PHOTO (2xxx)
   PHOTO_NOT_FOUND: 2000,
