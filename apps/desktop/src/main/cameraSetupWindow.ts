@@ -85,7 +85,17 @@ export function openCameraSetupWindow(mainWindow: BrowserWindow | null): void {
 
   cameraSetupWindow.on('closed', () => {
     cameraSetupWindow = null;
-    mainWindow?.webContents.send('camera:resumeAfterSetup');
+    // 2026-09-25 fix (real-log crash, "[fatal] uncaught exception: TypeError:
+    // Object has been destroyed" at this exact line): during app quit, the
+    // main window can already be destroyed by the time this popup's own
+    // 'closed' event fires (window-close ordering during shutdown is not
+    // guaranteed) — `mainWindow?.` alone only guards against `null`/
+    // `undefined`, not a non-null reference to an already-destroyed
+    // `BrowserWindow`, whose `.webContents` getter throws instead of
+    // returning a usable object.
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('camera:resumeAfterSetup');
+    }
     setTetheredCameraWatcherPausedForSetup(false);
   });
 }

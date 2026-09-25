@@ -22,7 +22,7 @@
  * to the much slower `CONNECTED_POLL_MS`, since the only thing left to
  * detect is a disconnect, not "is the camera ready yet".
  */
-import { detectTetheredCamera, type TetheredCameraStatus } from './tetheredCamera.js';
+import { detectTetheredCamera, isMovieStreamHealthy, type TetheredCameraStatus } from './tetheredCamera.js';
 import { createBackoff } from './backoff.js';
 
 const DISCONNECTED_BASE_MS = 3_000;
@@ -75,6 +75,27 @@ async function tick(): Promise<void> {
   if (!running || inFlight) return;
   inFlight = true;
   try {
+    // 2026-09-25 fix (confirmed real-log root cause of "khung view vẫn lag"
+    // + "hay lỗi"): a live-view movie stream that is currently alive and has
+    // delivered a fresh frame IS the connection check — running the real
+    // `--auto-detect` subprocess on top of that only ever exists to stop
+    // that exact stream first (`withCameraLock`), forcing a multi-second
+    // cold restart the live-view poller then has to pay for, every single
+    // `CONNECTED_POLL_MS` tick. Skipping the subprocess entirely here, and
+    // reporting connected from the stream's own health instead, removes
+    // that self-inflicted churn without weakening real disconnect
+    // detection: once the camera actually disconnects, the stream stops
+    // producing fresh frames and this falls through to a real detect again.
+    if (isMovieStreamHealthy()) {
+      const status: TetheredCameraStatus = { connected: true, model: lastStatus?.model };
+      if (statusChanged(lastStatus, status)) {
+        lastStatus = status;
+        listener?.(status);
+      }
+      backoff.reset();
+      schedule(CONNECTED_POLL_MS);
+      return;
+    }
     const status = await detectTetheredCamera();
     if (statusChanged(lastStatus, status)) {
       lastStatus = status;

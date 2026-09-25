@@ -983,10 +983,17 @@ function RoleCard({
           // from that one panel below, not from this card.
           <div className="absolute inset-0 flex items-center justify-center text-center text-xs text-kiosk-text-muted px-3">
             {tetheredLiveFrame ? (
+              /* 2026-09-25 — same cosmetic-only perceived-sharpness boost as
+                 TetheredCameraPanel.tsx's own copy of this image; see that
+                 file's doc comment for why this can't be a real fix
+                 (gphoto2's live-view frame is capped at EVF/preview
+                 resolution, a hardware/protocol limit `contrast` cannot
+                 restore detail past). */
               <img
                 src={tetheredLiveFrame}
                 alt="Live view máy ảnh qua dây"
                 className={`w-full h-full object-cover${CAPTURE_MIRRORED ? ' scale-x-[-1]' : ''}`}
+                style={{ filter: 'contrast(1.15)' }}
               />
             ) : (
               'Máy ảnh qua dây (gphoto2) — đang tải khung hình live view...'

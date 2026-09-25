@@ -258,6 +258,31 @@ export interface TetheredCameraStatus {
 }
 
 /**
+ * 2026-09-25 — REVERTED same day, twice: first tried `--port <port>` (a
+ * cached port went stale between separate `gphoto2.exe` invocations on
+ * Windows, made every stream die after a consistent ~5s — worse than
+ * before), then `--camera <model>` as the fix for that (real retest showed
+ * the EXACT SAME ~5s-death pattern, so the selector itself — not which kind
+ * — is what's wrong; possibly the `--auto-detect`-reported model string
+ * ("Canon EOS R6m2") isn't the exact string gphoto2's own `--camera` option
+ * expects, or some other mismatch not verified). Reverting rather than
+ * guessing a third syntax blind, per this project's own established "Bước 0
+ * trước, code sâu sau" rule — two guessed-and-disproven attempts in one
+ * session is the signal to stop guessing, not try a third variant, without
+ * real hardware to actually verify gphoto2's `--camera`/`--port` behavior
+ * against. `detectTetheredCamera()`'s phone-name filter above (pure
+ * string-parsing, no gphoto2 argv involvement) stays — it's independently
+ * correct regardless of this. If device-conflict pinning is revisited later,
+ * verify the EXACT accepted `--camera`/`--port` value on real hardware first
+ * (e.g. `gphoto2 --auto-detect` then immediately `gphoto2 --camera "<that
+ * exact string>" --summary` to confirm it's accepted at all) before wiring
+ * it into the movie-stream/capture paths again.
+ */
+function pinnedCameraArgs(): string[] {
+  return [];
+}
+
+/**
  * `gphoto2` talks to the camera over a single USB/PTP session — it cannot
  * run two operations against the same physical camera at once. The Camera
  * Setup test panel's live-view polling loop and its "Chụp thử" button both
@@ -288,8 +313,17 @@ export interface TetheredCameraStatus {
  * the same USB/PTP session instead of waiting for it.
  */
 let cameraQueue: Promise<void> = Promise.resolve();
-function withCameraLock<T>(fn: () => Promise<T>): Promise<T> {
+/**
+ * `label` (2026-09-25 TEMP DIAGNOSTIC, "khung view vẫn lag" + "hay lỗi" field
+ * report): the movie-stream start/close log lines alone don't say WHO
+ * triggered each stop — this does, with a timestamp, so a real capture of
+ * this log can show whether the churn is one caller firing far more often
+ * than expected (e.g. the watcher, or a UI action) versus something more
+ * structural. Remove alongside the other TEMP-FPS logging once resolved.
+ */
+function withCameraLock<T>(fn: () => Promise<T>, label: string): Promise<T> {
   const run = async () => {
+    console.log(`[TetheredCamera] [TEMP-LOCK] ${new Date().toISOString()} ${label} acquiring lock (stopping live view if running)`);
     await stopMovieStreamAndWait();
     return fn();
   };
@@ -312,6 +346,27 @@ function withCameraLock<T>(fn: () => Promise<T>): Promise<T> {
  * fixed header line count, so this stays correct even if gphoto2 changes
  * header wording/spacing across versions.
  */
+/**
+ * 2026-09-25 fix (real-log field discovery — `detected: Apple iPhone 5 (PTP
+ * mode)`): `--auto-detect` lists EVERY PTP device gphoto2 can see, one per
+ * line — a phone plugged into the same PC for charging/sync commonly
+ * exposes itself in PTP ("camera") mode too, and the code below used to just
+ * grab the FIRST `usb:` line unconditionally, with no regard for whether it
+ * was actually the Canon. Whichever device's line happened to come first in
+ * gphoto2's own listing order won — sometimes the Canon, sometimes the
+ * phone — and `startMovieStream()`/`captureViaStdout()` (neither of which
+ * pass gphoto2 a `--camera`/`--port` selector at all) then talked to
+ * whichever one `--auto-detect` had most recently "confirmed", explaining
+ * the observed intermittent live-view failures: `gphoto2 --capture-movie`
+ * against a phone that doesn't implement Canon's EOS movie/liveview PTP
+ * vendor extensions just exits immediately with no frames, code 0 — not an
+ * error gphoto2 itself flags, so nothing before this fix could tell the two
+ * cases apart. Filters out common phone-OS identifiers first and only falls
+ * back to the first line if every detected device looks like a phone,
+ * rather than silently reporting no camera at all.
+ */
+const NON_CAMERA_PTP_DEVICE_PATTERN = /iphone|ipad|android|apple/i;
+
 export async function detectTetheredCamera(): Promise<TetheredCameraStatus> {
   return withCameraLock(async () => {
     try {
@@ -319,17 +374,25 @@ export async function detectTetheredCamera(): Promise<TetheredCameraStatus> {
       if (code !== 0) {
         return { connected: false, error: stderr.trim() || `gphoto2 thoát với mã lỗi ${code}` };
       }
-      const dataLine = stdout.split(/\r?\n/).find((line) => /usb:/i.test(line));
-      if (!dataLine) {
+      const dataLines = stdout.split(/\r?\n/).filter((line) => /usb:/i.test(line));
+      if (dataLines.length === 0) {
         return { connected: false, error: 'Không tìm thấy máy ảnh nào đang cắm (gphoto2 --auto-detect rỗng)' };
       }
-      const match = /^(.*?)\s+usb:\S*/i.exec(dataLine);
+      const dataLine =
+        dataLines.find((line) => !NON_CAMERA_PTP_DEVICE_PATTERN.test(line)) ?? dataLines[0];
+      const match = /^(.*?)\s+(usb:\S*)/i.exec(dataLine);
       const model = match?.[1]?.trim();
+      const port = match?.[2]?.trim();
+      if (dataLines.length > 1) {
+        console.warn(
+          `[TetheredCamera] --auto-detect saw ${dataLines.length} USB PTP devices, picked "${model}" (${port}) — unplug any other camera/phone in PTP mode to avoid this ambiguity`
+        );
+      }
       return { connected: true, model: model || undefined };
     } catch (err) {
       return { connected: false, error: (err as Error).message };
     }
-  });
+  }, 'detectTetheredCamera');
 }
 
 /**
@@ -353,7 +416,14 @@ export async function detectTetheredCamera(): Promise<TetheredCameraStatus> {
  */
 export async function listTetheredCameraConfig(): Promise<string[]> {
   return withCameraLock(async () => {
-    const { stdout, stderr, code } = await runGphoto2(['--list-config'], DETECT_TIMEOUT_MS);
+    // `--list-config` enumerates every PTP property the camera exposes —
+    // on an EOS R-series body that's a much larger round-trip than the
+    // lightweight `--auto-detect` DETECT_TIMEOUT_MS was sized for. Real
+    // hardware retest 2026-09-25 hit a bare "PTP Timeout" at 10s with no
+    // other symptom (stream healthy right before/after) — reusing
+    // CAPTURE_TIMEOUT_MS here instead of guessing a new constant, since
+    // it's already the app's "this is a slow one-off op" timeout.
+    const { stdout, stderr, code } = await runGphoto2([...pinnedCameraArgs(), '--list-config'], CAPTURE_TIMEOUT_MS);
     if (code !== 0) {
       throw new Error(stderr.trim() || `gphoto2 thoát với mã lỗi ${code}`);
     }
@@ -361,18 +431,45 @@ export async function listTetheredCameraConfig(): Promise<string[]> {
       .split(/\r?\n/)
       .map((line) => line.trim())
       .filter(Boolean);
-  });
+  }, 'listTetheredCameraConfig');
 }
 
 /** `gphoto2 --get-config <path>` — `configPath` must be one of the exact strings `listTetheredCameraConfig()` returned. Passed as its own `spawn` argv entry (never shell-interpolated), so an unexpected/malformed path is just a gphoto2 "unknown config" error, not a command-injection risk. */
 export async function getTetheredCameraConfigValue(configPath: string): Promise<string> {
   return withCameraLock(async () => {
-    const { stdout, stderr, code } = await runGphoto2(['--get-config', configPath], DETECT_TIMEOUT_MS);
+    const { stdout, stderr, code } = await runGphoto2([...pinnedCameraArgs(), '--get-config', configPath], DETECT_TIMEOUT_MS);
     if (code !== 0) {
       throw new Error(stderr.trim() || `gphoto2 thoát với mã lỗi ${code}`);
     }
     return stdout;
-  });
+  }, `getTetheredCameraConfigValue(${configPath})`);
+}
+
+/**
+ * `gphoto2 --set-config <path>=<value>` (2026-09-25, "setup manual focus
+ * camera" — the reused config-discovery UI's write-side counterpart to
+ * `getTetheredCameraConfigValue`). Same "operator confirms the exact real
+ * path/value against real hardware, no guessed property name" discipline as
+ * every other config-driven feature in this file: `getTetheredCameraConfigValue`
+ * shows the current value's `Choices:` list first, so whatever gets passed
+ * here is a value the camera itself already advertised, not a guess.
+ *
+ * `<path>=<value>` as ONE argv entry (not two separate ones) because that is
+ * gphoto2's own documented `--set-config` syntax — unlike `--get-config`,
+ * which takes the path alone. Still never shell-interpolated (`spawn`), so a
+ * malformed value is just a gphoto2 "invalid choice"/"unknown config" error,
+ * not a command-injection risk.
+ */
+export async function setTetheredCameraConfigValue(configPath: string, value: string): Promise<void> {
+  return withCameraLock(async () => {
+    const { stderr, code } = await runGphoto2(
+      [...pinnedCameraArgs(), '--set-config', `${configPath}=${value}`],
+      DETECT_TIMEOUT_MS
+    );
+    if (code !== 0) {
+      throw new Error(stderr.trim() || `gphoto2 thoát với mã lỗi ${code}`);
+    }
+  }, `setTetheredCameraConfigValue(${configPath}=${value})`);
 }
 
 export interface TetheredThermalWarning {
@@ -417,6 +514,54 @@ export async function getTetheredThermalWarning(): Promise<TetheredThermalWarnin
     // lock contention); the error is still surfaced so it isn't silently
     // swallowed, just not conflated with an actual thermal warning.
     return { enabled: true, warning: false, error: (err as Error).message };
+  }
+}
+
+export interface TetheredBatteryStatus {
+  /** False when `TETHERED_BATTERY_CONFIG_PATH` isn't set — same "hide, don't guess" rule as thermal. */
+  enabled: boolean;
+  /** Parsed 0-100 percentage, when the raw value contained one. */
+  percent?: number;
+  /** Raw `getTetheredCameraConfigValue()` text, shown so the operator can see exactly what was read even if parsing failed. */
+  raw?: string;
+  error?: string;
+}
+
+/**
+ * 2026-09-25 ("có thể hiển thị phần trăm pin của máy ảnh lên giao diện để dễ
+ * theo dõi không?") — same "discover the real path on real hardware first,
+ * don't guess a property name" rule this file's thermal-warning section
+ * above already established, and for the same reason: no camera was
+ * confirmed against this exact property here. Unlike temperature (which is
+ * often manufacturer/model-specific or absent), PTP does define a standard
+ * `BatteryLevel` device property, so gphoto2 exposes SOME battery reading
+ * for most cameras — but the exact `--list-config` path and value FORMAT
+ * (a bare percentage like "80%", an enum like "High"/"Low"/"Critical", or a
+ * raw code) still varies by camera and gphoto2 version, so this stays
+ * env-var-gated exactly like thermal rather than hardcoding a guess. Reuses
+ * `TetheredCameraPanel.tsx`'s existing "Chẩn đoán cấu hình máy ảnh" discovery
+ * UI (filter for "batt") — already live on real hardware in this same
+ * session, no new UI needed to find the path.
+ */
+const BATTERY_CONFIG_PATH = process.env.TETHERED_BATTERY_CONFIG_PATH?.trim();
+
+export async function getTetheredBatteryLevel(): Promise<TetheredBatteryStatus> {
+  if (!BATTERY_CONFIG_PATH) return { enabled: false };
+  try {
+    const raw = await getTetheredCameraConfigValue(BATTERY_CONFIG_PATH);
+    // gphoto2's --get-config output is multi-line ("Label: ...\nType:
+    // ...\nCurrent: 80%\n..."); the percentage is whatever number (if any)
+    // appears in there, not necessarily the whole string — an enum-style
+    // camera might report "Current: High" instead, with no number at all,
+    // which is why `percent` stays optional and the raw text is always
+    // returned too.
+    const match = raw.match(/(\d{1,3})\s*%/);
+    const percent = match ? Math.min(100, Math.max(0, parseInt(match[1], 10))) : undefined;
+    return { enabled: true, percent, raw };
+  } catch (err) {
+    // Same fail-closed reasoning as thermal — a read error mid-capture or
+    // during USB lock contention must not be shown as "0% battery".
+    return { enabled: true, error: (err as Error).message };
   }
 }
 
@@ -489,10 +634,39 @@ function fixWindowsStdoutTextModeCorruption(buf: Buffer): Buffer {
  */
 const MIN_PLAUSIBLE_JPEG_BYTES = 10_000;
 
+/**
+ * 2026-09-25 fix (real-hardware retest, "chụp lần 1 được, lần 2 liên tục
+ * lỗi" — reproduced consistently across many power-cycles today, always the
+ * same shape: capture #1 succeeds, capture #2 comes back 0 bytes or PTP-
+ * times-out): this is the exact same "camera still settling from heavy
+ * back-to-back traffic" symptom `MIN_PLAUSIBLE_JPEG_BYTES`'s own doc comment
+ * already named on 2026-09-23 ("succeeded again once it had a moment to
+ * rest") — that fix only DETECTED the bad result, it never gave the camera
+ * the rest it needed. Real logs from today's retest show why: right after a
+ * successful capture, the live-view movie stream restarts (and gets stopped
+ * again for the next one-shot command) 2-3 times within the following
+ * ~10 seconds — the app's own normal live-view-resumes-between-shots
+ * behavior — before the operator's next shutter press even lands, giving
+ * the camera's PTP session zero real idle time between the still capture
+ * and the next round of traffic. Reusing `movieStreamRetryAt` (the same gate
+ * `ensureMovieStream()` already honours for the "no camera" backoff) forces
+ * a real settle window after EVERY capture attempt — success or failure,
+ * since even a failed one still drove real PTP traffic — before the movie
+ * stream is allowed to spin back up. Unverified against real hardware yet
+ * (this session's camera was already in the failing state by the time this
+ * was written) — a genuine attempt at the fix `MIN_PLAUSIBLE_JPEG_BYTES`
+ * stopped short of, not a guessed gphoto2 flag.
+ */
+const POST_CAPTURE_COOLDOWN_MS = 3_000;
+
 /** Wrapped in `withCameraLock` — shared by both exported capture functions below, see that helper's own doc comment for why. */
 async function captureViaStdout(args: string[], timeoutMs: number): Promise<Buffer> {
   return withCameraLock(async () => {
-    const { code, stdout, stderr } = await runGphoto2Binary([...args, '--stdout'], timeoutMs);
+    const { code, stdout, stderr } = await runGphoto2Binary([...pinnedCameraArgs(), ...args, '--stdout'], timeoutMs);
+    // Set before any of the validation throws below so EVERY outcome —
+    // success, gphoto2 error exit, or a plausible-but-empty/corrupt result —
+    // gives the camera the same real cooldown before the next command.
+    movieStreamRetryAt = Date.now() + POST_CAPTURE_COOLDOWN_MS;
     if (code !== 0) {
       throw new Error(stderr.trim() || `gphoto2 thoát với mã lỗi ${code}`);
     }
@@ -519,7 +693,7 @@ async function captureViaStdout(args: string[], timeoutMs: number): Promise<Buff
       );
     }
     return fixed;
-  });
+  }, `captureViaStdout(${args.join(' ')})`);
 }
 
 /** Plan Bước 3 — real shutter trigger + download. Camera should be configured to save JPEG (not RAW) so this slots straight into the existing card/AI pipeline with no conversion step. */
@@ -620,11 +794,11 @@ function extractLeadingFrame(buf: Buffer): [Buffer, Buffer] | null {
 
 function startMovieStream(): MovieStream {
   const bin = gphoto2BinaryPath();
-  const child = spawn(bin, ['--capture-movie', '--stdout'], {
+  const child = spawn(bin, [...pinnedCameraArgs(), '--capture-movie', '--stdout'], {
     windowsHide: true,
     env: { ...process.env, ...resolvePluginEnv(bin) },
   });
-  console.log(`[TetheredCamera] live-view stream starting (pid=${child.pid})`);
+  console.log(`[TetheredCamera] ${new Date().toISOString()} live-view stream starting (pid=${child.pid})`);
   const stream: MovieStream = {
     child,
     buffer: Buffer.alloc(0),
@@ -636,6 +810,17 @@ function startMovieStream(): MovieStream {
   };
 
   let loggedFirstFrame = false;
+  // TEMP DIAGNOSTIC (2026-09-25, "khung view vẫn lag" field report, all 3
+  // screens affected equally with a steady slow/choppy rate — not periodic
+  // freezes): logs the RAW gphoto2 movie-stream's own frame rate, ground
+  // truth, independent of any renderer-side poll interval or React
+  // re-render cost. If this number is already far below what 2026-09-23's
+  // doc comment measured (~25fps, one new frame every ~40ms) then the
+  // slowdown is in gphoto2/the USB link itself, not in any of the polling
+  // code this session already changed — remove once the report is
+  // resolved.
+  let fpsWindowCount = 0;
+  let fpsWindowStart = Date.now();
   child.stdout?.on('data', (chunk: Buffer) => {
     stream.buffer = stream.buffer.length ? Buffer.concat([stream.buffer, chunk]) : chunk;
     let leading = extractLeadingFrame(stream.buffer);
@@ -649,6 +834,13 @@ function startMovieStream(): MovieStream {
         loggedFirstFrame = true;
         movieStreamBackoff.reset();
         console.log(`[TetheredCamera] live-view stream delivering frames (first frame ${stream.latestFrame.length} bytes)`);
+      }
+      fpsWindowCount += 1;
+      const elapsed = Date.now() - fpsWindowStart;
+      if (elapsed >= 2000) {
+        console.log(`[TetheredCamera] [TEMP-FPS] raw movie stream: ${(fpsWindowCount / (elapsed / 1000)).toFixed(1)} fps (${fpsWindowCount} frames / ${elapsed}ms)`);
+        fpsWindowCount = 0;
+        fpsWindowStart = Date.now();
       }
     }
     // Guard against an unbounded buffer if the stream ever stops looking
@@ -668,17 +860,25 @@ function startMovieStream(): MovieStream {
   });
   child.on('close', (code) => {
     if (movieStream === stream) movieStream = null;
-    if (!loggedFirstFrame && !stream.intentionalStop) {
-      // Never produced a real frame — almost certainly "no camera plugged
-      // in" rather than a genuine mid-session disconnect, so back off
-      // before letting the next `ensureMovieStream()` spawn another one.
-      // Skipped for a stream WE killed on purpose (`intentionalStop`,
-      // 2026-09-24 fix, confirmed audit finding) — e.g. a shutter release
-      // that landed before the very first live-view frame decoded; that is
-      // not evidence of a missing camera and must not start this cooldown.
+    if (!stream.intentionalStop) {
+      // 2026-09-25 fix (real-hardware retest, "hay lỗi" recurring): this used
+      // to only back off when the stream NEVER delivered a single frame
+      // (treated as "no camera plugged in"). But real logs from this same
+      // day show a second, distinct failure shape — the stream starts fine,
+      // delivers frames for a few seconds, then dies on its own (`code=0`,
+      // not killed by us) every ~5s repeatedly, the exact same "degraded
+      // USB/PTP session" symptom this file's own doc history already traces
+      // to abrupt process churn. With the old logic, THIS shape got zero
+      // backoff at all (loggedFirstFrame was already true) — `ensureMovie
+      // Stream()` respawned gphoto2 again instantly on every poll, hammering
+      // an already-struggling PTP session with back-to-back cold starts
+      // instead of giving it room to recover. Backing off here too (still
+      // skipped for a stream WE killed on purpose, same as before) trades a
+      // little latency on a genuine mid-session drop for not compounding a
+      // real hardware/session fragility loop.
       movieStreamRetryAt = Date.now() + movieStreamBackoff.next();
     }
-    console.log(`[TetheredCamera] live-view stream closed (pid=${child.pid}, code=${code})`);
+    console.log(`[TetheredCamera] ${new Date().toISOString()} live-view stream closed (pid=${child.pid}, code=${code}, intentionalStop=${stream.intentionalStop})`);
   });
 
   movieStream = stream;
@@ -790,4 +990,29 @@ export async function getTetheredLiveViewFrame(): Promise<Buffer> {
     throw new Error('Khung hình live view đã cũ — luồng có thể bị treo, thử lại');
   }
   return stream.latestFrame;
+}
+
+/**
+ * 2026-09-25 fix (real-log field investigation, "khung view vẫn lag" +
+ * "hay lỗi"): the actual root cause of both — timestamped logs from a real
+ * run showed the movie stream repeatedly self-terminating via
+ * `MOVIE_IDLE_STOP_MS` (its own 5s idle timeout) every time
+ * `tetheredCameraWatcher.ts`'s background `detectTetheredCamera()` tick ran,
+ * because that call is a `withCameraLock`-wrapped `gphoto2 --auto-detect`
+ * subprocess that stops this stream first (see `withCameraLock`'s own doc
+ * comment) — killing a stream the live-view poller was actively relying on,
+ * every `CONNECTED_POLL_MS` (15s), for no reason: a stream that is ALIVE and
+ * has delivered a frame recently is itself already proof the camera is
+ * connected (the exact same principle `CampaignGate.tsx`'s own tethered
+ * preview effect already documents for why IT never calls
+ * `getTetheredCameraStatus()`). The fix is for the watcher to check this
+ * function first and skip its own disruptive `--auto-detect` entirely
+ * whenever live view already answers the question it's trying to ask.
+ */
+export function isMovieStreamHealthy(): boolean {
+  return (
+    movieStream !== null &&
+    movieStream.latestFrame !== null &&
+    Date.now() - movieStream.latestFrameAt <= MOVIE_FRAME_STALE_MS
+  );
 }

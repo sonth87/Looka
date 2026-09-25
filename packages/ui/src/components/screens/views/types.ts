@@ -105,6 +105,19 @@ export interface SharedCaptureViewProps {
   gestureProgress: number;
   onShutterCapture?: () => void;
   /**
+   * True while a shutter-triggered capture is still in flight — 2026-09-25
+   * ("thêm phần inactive button để tránh ấn nhiều lần"). A tethered Canon
+   * shot is a multi-second `gphoto2 --capture-image-and-download` round
+   * trip, not the instant webcam snapshot the button's `enabled` gate was
+   * originally designed around; without this, the button stayed clickable
+   * (and Enter/Space kept firing) for that whole window, letting an
+   * impatient double-press queue a second capture attempt on top of the
+   * first. Folded into `ShutterButton`'s own `enabled` prop alongside the
+   * existing face/side-frame gates — see `DesktopCaptureView`/
+   * `MobileCaptureView`'s identical `enabled` expressions.
+   */
+  shutterBusy?: boolean;
+  /**
    * True when CENTER's assigned camera is the tethered Canon (gphoto2) —
    * 2026-09-22, tethered-capture integration. That camera has no live
    * `MediaStream`, only periodic still previews, so `faceState` can never

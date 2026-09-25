@@ -109,6 +109,7 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
     gestureState = null,
     gestureProgress,
     onShutterCapture,
+    shutterBusy = false,
     centerIsTethered = false,
     tetheredCenterPreview = null,
     cameraScale,
@@ -1112,6 +1113,7 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                 <ShutterButton
                   className="pointer-events-auto"
                   enabled={
+                    !shutterBusy &&
                     (centerIsTethered ||
                       (faceState?.detected === true &&
                         faceState?.presence === "SINGLE_FACE" &&
@@ -1128,7 +1130,9 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                     (!multiFrame || multiFrame.allSideFramesReady)
                   }
                   disabledHint={
-                    multiFrame && !multiFrame.allSideFramesReady && multiFrame.notReadyRoleLabel
+                    shutterBusy
+                      ? "Đang chụp…"
+                      : multiFrame && !multiFrame.allSideFramesReady && multiFrame.notReadyRoleLabel
                       ? `Đang chờ camera ${multiFrame.notReadyRoleLabel}…`
                       : undefined
                   }

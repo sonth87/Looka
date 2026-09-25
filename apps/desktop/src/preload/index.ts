@@ -105,7 +105,22 @@ function mirrorDataUrlHorizontally(dataUrl: string, maxDimension?: number): Prom
         ctx.translate(canvas.width, 0);
         ctx.scale(-1, 1);
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        resolve(canvas.toDataURL('image/jpeg', 0.92));
+        const out = canvas.toDataURL('image/jpeg', 0.92);
+        // Diagnostic (2026-09-25, "ảnh chụp đã lấy đủ và lưu chưa" field
+        // question): only logged for the still-capture path (maxDimension
+        // set — see STILL_MAX_DIMENSION_PX's call site), not the live-view
+        // poll, so this doesn't spam devtools every ~200ms. Shows exactly
+        // what left the kiosk for a real Canon shot: the camera's real
+        // sensor dimensions/bytes in, and the resized/re-encoded
+        // dimensions/bytes out — open DevTools (Ctrl+Shift+I) on the
+        // capture screen and look for this line right after a Canon shot.
+        if (maxDimension) {
+          const outBytes = Math.ceil((out.length - out.indexOf(',') - 1) * 0.75);
+          console.log(
+            `[TetheredCapture] ${naturalWidth}x${naturalHeight} (~${Math.ceil((dataUrl.length - dataUrl.indexOf(',') - 1) * 0.75 / 1024)}KB) from camera -> ${canvas.width}x${canvas.height} (~${Math.ceil(outBytes / 1024)}KB) after resize/mirror`
+          );
+        }
+        resolve(out);
       } catch (err) {
         reject(err instanceof Error ? err : new Error(String(err)));
       }
@@ -733,7 +748,9 @@ export interface FaceAPIBridge {
    */
   listTetheredCameraConfig: () => Promise<{ ok: true; paths: string[] } | { ok: false; error: string }>;
   getTetheredCameraConfigValue: (configPath: string) => Promise<{ ok: true; value: string } | { ok: false; error: string }>;
+  setTetheredCameraConfigValue: (configPath: string, value: string) => Promise<{ ok: true } | { ok: false; error: string }>;
   getTetheredThermalWarning: () => Promise<{ enabled: boolean; warning: boolean; raw?: string; error?: string }>;
+  getTetheredBatteryLevel: () => Promise<{ enabled: boolean; percent?: number; raw?: string; error?: string }>;
 
   /**
    * Auto-detect watcher (docs/plans/canon-auto-detect-polling-plan-2026-09-24.md)
@@ -924,7 +941,10 @@ const faceAPI: FaceAPIBridge = {
   openTetheredCameraZadig: () => ipcRenderer.invoke('tetheredCamera:openZadig'),
   listTetheredCameraConfig: () => ipcRenderer.invoke('tetheredCamera:listConfig'),
   getTetheredCameraConfigValue: (configPath: string) => ipcRenderer.invoke('tetheredCamera:getConfigValue', configPath),
+  setTetheredCameraConfigValue: (configPath: string, value: string) =>
+    ipcRenderer.invoke('tetheredCamera:setConfigValue', configPath, value),
   getTetheredThermalWarning: () => ipcRenderer.invoke('tetheredCamera:getThermalWarning'),
+  getTetheredBatteryLevel: () => ipcRenderer.invoke('tetheredCamera:getBatteryLevel'),
   onTetheredConnectionChanged: (callback) => {
     const listener = (_: unknown, status: { connected: boolean; model?: string; error?: string }) => callback(status);
     ipcRenderer.on('tetheredCamera:connectionChanged', listener);

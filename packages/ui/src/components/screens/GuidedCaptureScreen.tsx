@@ -59,6 +59,8 @@ export interface GuidedCaptureScreenProps {
   gestureState?: GestureState | null;
   gestureProgress?: number;
   onShutterCapture?: () => void;
+  /** See `SharedCaptureViewProps.shutterBusy` (views/types.ts) — 2026-09-25. */
+  shutterBusy?: boolean;
   /** See `SharedCaptureViewProps.centerIsTethered` (views/types.ts) — tethered-capture integration, 2026-09-22. */
   centerIsTethered?: boolean;
   /** See `SharedCaptureViewProps.tetheredCenterPreview` (views/types.ts) — 2026-09-24. */
@@ -140,6 +142,7 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (
     gestureState = null,
     gestureProgress = 0,
     onShutterCapture,
+    shutterBusy = false,
     centerIsTethered = false,
     tetheredCenterPreview = null,
     sensitivity: externalSensitivity,
@@ -524,6 +527,7 @@ export const GuidedCaptureScreen: React.FC<GuidedCaptureScreenProps> = (
     gestureState,
     gestureProgress,
     onShutterCapture,
+    shutterBusy,
     centerIsTethered,
     tetheredCenterPreview,
     cameraScale,
