@@ -3054,31 +3054,49 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     };
   }, []);
 
+  /**
+   * True from the moment a shutter-triggered capture starts until it fully
+   * resolves — 2026-09-25 field request ("thêm phần inactive button để
+   * tránh ấn nhiều lần"). A tethered Canon shot is a multi-second real
+   * round trip (`gphoto2 --capture-image-and-download`), not the near-
+   * instant webcam snapshot the on-screen button/keyboard shortcut were
+   * originally built around; without this, both stayed live for that whole
+   * window, letting an impatient extra press/click queue a second capture
+   * attempt on top of the one still running. Drives `ShutterButton.enabled`
+   * (via `shutterBusy` in views/types.ts) and the Enter/Space handler below.
+   */
+  const [shutterBusy, setShutterBusy] = useState(false);
+
   const handleShutterCapture = useCallback(async () => {
     const engine = liveWorkflowEngineRef.current;
     if (!engine) return;
 
-    // Simultaneous capture: a side frame being retaken (OFF mode's shutter
-    // button) must snapshot its own camera, never the engine's normal
-    // (CENTER-only) capture path — see captureRetakingSideFrame's own doc
-    // comment. Checked ahead of the `faceState?.detected` gate below: a side
-    // frame's retake does not depend on CENTER seeing a face at all. Also
-    // where a tethered role's shutter-triggered capture routes through
-    // (same function, see its own tethered branch) — now `await`ed since a
-    // real gphoto2 shutter release is seconds, not instant.
-    if (await captureRetakingSideFrame(engine)) return;
+    setShutterBusy(true);
+    try {
+      // Simultaneous capture: a side frame being retaken (OFF mode's shutter
+      // button) must snapshot its own camera, never the engine's normal
+      // (CENTER-only) capture path — see captureRetakingSideFrame's own doc
+      // comment. Checked ahead of the `faceState?.detected` gate below: a side
+      // frame's retake does not depend on CENTER seeing a face at all. Also
+      // where a tethered role's shutter-triggered capture routes through
+      // (same function, see its own tethered branch) — now `await`ed since a
+      // real gphoto2 shutter release is seconds, not instant.
+      if (await captureRetakingSideFrame(engine)) return;
 
-    if (faceState?.detected) {
-      const wf = engine as any;
-      // Same reasoning as the gesture trigger above: pass the faceState this
-      // click was actually decided under so the engine's quality gate has
-      // real data to re-check, instead of silently accepting whatever the
-      // shutter button's own `enabled` prop happened to miss (e.g. a smile
-      // that started the instant before the click landed).
-      //
-      // `{ source: 'SHUTTER' }` — pure additive plumbing (discussion doc
-      // §3.7.1), same as the gesture loop's own trigger info above.
-      if (wf.triggerManualCapture) wf.triggerManualCapture(faceState, { source: 'SHUTTER' });
+      if (faceState?.detected) {
+        const wf = engine as any;
+        // Same reasoning as the gesture trigger above: pass the faceState this
+        // click was actually decided under so the engine's quality gate has
+        // real data to re-check, instead of silently accepting whatever the
+        // shutter button's own `enabled` prop happened to miss (e.g. a smile
+        // that started the instant before the click landed).
+        //
+        // `{ source: 'SHUTTER' }` — pure additive plumbing (discussion doc
+        // §3.7.1), same as the gesture loop's own trigger info above.
+        if (wf.triggerManualCapture) await wf.triggerManualCapture(faceState, { source: 'SHUTTER' });
+      }
+    } finally {
+      setShutterBusy(false);
     }
   }, [faceState]);
 
@@ -3682,18 +3700,29 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    *
    * Base pause kept in sync with `TetheredCameraPanel.tsx`'s own value —
    * see that file's doc comment for the full history (1000ms→200ms→60ms→
-   * 200ms on 2026-09-24→350ms later that same day, "giật các khung hình
-   * khác khi kết nối camera Canon" — 60ms was fast enough to measurably
-   * starve the real webcams' own video/CV work on this SAME renderer
-   * thread once Canon and real webcams were all live at once, which
-   * matters MORE here than on the setup screen: this IS the production
-   * capture-session screen, where that contention scenario is the normal
-   * case, not an edge case; the 200ms step turned out to still stutter on
-   * at least one real kiosk's own hardware/camera-count combination, hence
-   * the further bump). Keep this equal to that file's value — if one needs
-   * retuning, retune both together.
+   * 200ms→350ms on 2026-09-24, then back to 200ms then down to 100ms on
+   * 2026-09-25 — a dedicated audit found the OTHER cameras' flicker was
+   * actually caused by an unconditional `<video>.srcObject` reassignment on
+   * every render in `CameraSetupScreen.tsx`, unrelated to this poll's rate
+   * (now guarded), and separately, real-hardware [TEMP-FPS] diagnostics
+   * confirmed the underlying gphoto2 movie stream itself sustains a clean
+   * ~30fps once an unrelated camera-connection-state issue was cleared by a
+   * power cycle — 200ms only reads 5 of those ~30 frames/sec, which is a
+   * real, separate source of visible choppiness. Nudged 200ms to 100ms to
+   * 70ms to 45ms the same day, the last step on explicit user request
+   * ("đưa xuống 40-50ms") — 45ms is BELOW the 60ms/~16.7fps value this
+   * history confirmed causes real webcam stutter on the Setup screen (which
+   * shows multiple webcam tiles alongside the Canon one); applied as asked,
+   * not as a value anyone has verified safe. Watch for the same class of
+   * stutter on any other live camera tile if simultaneous-capture mode has
+   * more than one open here too. Keep this equal to that file's value — if
+   * one needs retuning, retune both together. Separately: this interval does
+   * not affect the physical camera's own heat — it streams continuously at
+   * its own native rate regardless of how often this code reads a frame;
+   * see `getTetheredThermalWarning` for the feature actually built for real
+   * temperature monitoring.
    */
-  const TETHERED_PREVIEW_BASE_INTERVAL_MS = 350;
+  const TETHERED_PREVIEW_BASE_INTERVAL_MS = 45;
   const TETHERED_PREVIEW_MAX_INTERVAL_MS = 8000;
   const [tetheredPreview, setTetheredPreview] = useState<string | null>(null);
   const tetheredAnyRoleAssigned = Object.values(cameraRoleMapping).includes(TETHERED_DEVICE_ID);
@@ -5034,9 +5063,21 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    * function body would be a temporal-dead-zone error, not just
    * inconvenient.
    */
-  const capturingRef = useRef(false);
+  // TEMP DIAGNOSTIC (2026-09-25, "sau lần đầu tiên thì không thể ấn enter để
+  // chụp nữa"): a CAPTURE-phase listener fires before any bubble-phase
+  // handler could call stopPropagation() — if this logs but the bubble-phase
+  // one below (TEMP-KEY-RAW) does not, something in the DOM tree is
+  // swallowing the event before it reaches window's bubble listeners.
+  useEffect(() => {
+    function onKeyDownCapture(e: KeyboardEvent) {
+      console.log(`[TEMP-KEY-CAPTURE] key=${JSON.stringify(e.key)} defaultPrevented=${e.defaultPrevented}`);
+    }
+    window.addEventListener('keydown', onKeyDownCapture, { capture: true });
+    return () => window.removeEventListener('keydown', onKeyDownCapture, { capture: true });
+  }, []);
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
+      console.log(`[TEMP-KEY-RAW] key=${JSON.stringify(e.key)} repeat=${e.repeat} activeElementTag=${document.activeElement?.tagName}`);
       if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
       // Auto-repeat while held must never re-fire a capture per tick.
       if (e.repeat) return;
@@ -5049,11 +5090,17 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         // `preventDefault()` below happens for this branch), since a
         // scanner's payload can itself contain a literal space character.
         const tag = active.tagName;
-        if (tag === 'INPUT' || tag === 'TEXTAREA' || active.isContentEditable) return;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || active.isContentEditable) {
+          console.log(`[TEMP-KEY] blocked: focused ${tag} is a text input`);
+          return;
+        }
         // A focused native button already fires its own click on
         // Enter/Space — firing `handleShutterCapture` here too would
         // double-fire it.
-        if (tag === 'BUTTON') return;
+        if (tag === 'BUTTON') {
+          console.log('[TEMP-KEY] blocked: a <button> is focused (its own click handler fires instead)');
+          return;
+        }
       }
 
       // 2026-09-24 fix (confirmed audit finding): AUTO/MANUAL(gesture) both
@@ -5062,11 +5109,26 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
       // exemption Enter/Space had no way to fire that first Canon shot in
       // either mode, same reasoning as the ShutterButton/sidebar CTA
       // exemptions in DesktopCaptureView.tsx.
-      if (effectiveTriggerConfig.mode !== 'OFF' && !centerIsTethered) return; // only the manual-shutter trigger mode (or a tethered CENTER) has anything to fire manually
-      if (!isWorkflowStartedRef.current) return; // no session running yet
-      if (awaitingStudentRef.current) return; // still identifying the student
-      if (showReviewModal || thankYouStudent || isAcceptingRef.current) return; // confirm modal / thank-you overlay / accept in flight
-      if (capturingRef.current) return; // a previous key-triggered capture hasn't settled yet — new re-entrancy guard, `handleShutterCapture` never had one before this
+      if (effectiveTriggerConfig.mode !== 'OFF' && !centerIsTethered) {
+        console.log(`[TEMP-KEY] blocked: trigger mode=${effectiveTriggerConfig.mode}, centerIsTethered=${centerIsTethered}`);
+        return; // only the manual-shutter trigger mode (or a tethered CENTER) has anything to fire manually
+      }
+      if (!isWorkflowStartedRef.current) {
+        console.log('[TEMP-KEY] blocked: workflow not started');
+        return; // no session running yet
+      }
+      if (awaitingStudentRef.current) {
+        console.log('[TEMP-KEY] blocked: still awaiting student identification');
+        return; // still identifying the student
+      }
+      if (showReviewModal || thankYouStudent || isAcceptingRef.current) {
+        console.log(`[TEMP-KEY] blocked: showReviewModal=${showReviewModal}, thankYouStudent=${thankYouStudent}, isAccepting=${isAcceptingRef.current}`);
+        return; // confirm modal / thank-you overlay / accept in flight
+      }
+      if (shutterBusy) {
+        console.log('[TEMP-KEY] blocked: a capture is already in flight');
+        return; // re-entrancy guard — see `shutterBusy`'s own doc comment
+      }
 
       // `centerIsTethered` (2026-09-22) bypasses the face-detected leg —
       // see that value's own computation/doc comment below, same reasoning
@@ -5077,23 +5139,19 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
             faceState?.presence === 'SINGLE_FACE' &&
             faceState?.quality?.accepted === true)) &&
         (!multiFrameProp || multiFrameProp.allSideFramesReady);
-      if (!faceReady) return;
+      if (!faceReady) {
+        console.log(
+          `[TEMP-KEY] blocked: not faceReady — centerIsTethered=${centerIsTethered}, faceState.detected=${faceState?.detected}, presence=${faceState?.presence}, quality.accepted=${faceState?.quality?.accepted}, allSideFramesReady=${multiFrameProp?.allSideFramesReady}`
+        );
+        return;
+      }
+      console.log('[TEMP-KEY] all gates passed, firing capture');
 
       // Every guard passed — only now consume the key, so a rejected
       // Enter/Space (e.g. no face yet) never blocks whatever else on the
       // page might have wanted it.
       e.preventDefault();
-      capturingRef.current = true;
       void handleShutterCapture();
-      // Released on a short timer rather than tied to a future engine
-      // event — `handleShutterCapture` is fire-and-forget from THIS call
-      // site's perspective (nothing here awaits it, even though it's now
-      // `async` internally for the tethered-capture case), and the
-      // pose/step the engine gates on will have already moved on well
-      // before a human can press the key again.
-      setTimeout(() => {
-        capturingRef.current = false;
-      }, 500);
     }
 
     window.addEventListener('keydown', onKeyDown);
@@ -5106,6 +5164,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     thankYouStudent,
     handleShutterCapture,
     centerIsTethered,
+    shutterBusy,
   ]);
 
   /*
@@ -5398,6 +5457,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         gestureState={gestureState}
         gestureProgress={gestureProgress}
         onShutterCapture={handleShutterCapture}
+        shutterBusy={shutterBusy}
         centerIsTethered={centerIsTethered}
         tetheredCenterPreview={tetheredPreview}
         sensitivity={sensitivity}

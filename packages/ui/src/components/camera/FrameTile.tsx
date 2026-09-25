@@ -247,9 +247,25 @@ export const FrameTile: React.FC<FrameTileProps> = ({
               alt={label}
               className="max-h-[70%] max-w-[85%] rounded-lg object-cover shadow-lg"
             />
-            <span className="px-2 py-0.5 rounded-full bg-emerald-500 text-white text-[10px] font-bold">
-              Đã chụp
-            </span>
+            {/*
+              2026-09-25 fix (real-hardware field report, "vừa vào tôi chưa
+              chụp mà đã hiển thị đã chụp"): this "Đã chụp" pill used to be
+              unconditional, but the image above it isn't always a real
+              capture — the `!stream` half of this block's own condition
+              (just above) exists specifically for a tethered/CB-Help tile
+              showing a live PREVIEW still in place of a `MediaStream` it will
+              never have, independent of whether the step has actually been
+              captured yet (`status` stays PENDING/CURRENT the whole time a
+              tethered CENTER tile is merely live-previewing). Gating the
+              label on the real `status` — not just "an image is showing" —
+              stops a not-yet-captured tethered preview from lying about
+              being done.
+            */}
+            {status === 'COMPLETED' && (
+              <span className="px-2 py-0.5 rounded-full bg-emerald-500 text-white text-[10px] font-bold">
+                Đã chụp
+              </span>
+            )}
           </div>
         )
       )}

@@ -79,7 +79,9 @@ import {
   openZadig,
   listTetheredCameraConfig,
   getTetheredCameraConfigValue,
+  setTetheredCameraConfigValue,
   getTetheredThermalWarning,
+  getTetheredBatteryLevel,
   TETHERED_DEVICE_ID,
 } from './tetheredCamera.js';
 import {
@@ -174,6 +176,13 @@ function createWindow() {
 
   mainWindow.maximize();
   attachRendererDiagnostics(mainWindow);
+  // TEMP DIAGNOSTIC (2026-09-25, "sau lần đầu tiên thì không thể ấn enter để
+  // chụp nữa"): confirms whether the main window is actually losing OS-level
+  // focus after a capture — if so, no renderer-side keydown listener (bubble
+  // or capture phase) could ever see the key at all, since the OS would be
+  // routing it to whatever window IS focused instead.
+  mainWindow.on('blur', () => console.log('[TEMP-FOCUS] mainWindow blurred'));
+  mainWindow.on('focus', () => console.log('[TEMP-FOCUS] mainWindow focused'));
 
   if (process.env.VITE_DEV_SERVER_URL) {
     mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
@@ -784,8 +793,10 @@ app.whenReady().then(async () => {
   ipcMain.handle('tetheredCamera:listConfig', async () => {
     try {
       const paths = await listTetheredCameraConfig();
+      console.log(`[TEMP-CONFIG] ${paths.length} config paths:\n${paths.join('\n')}`);
       return { ok: true as const, paths };
     } catch (err) {
+      console.log(`[TEMP-CONFIG] listConfig failed: ${(err as Error).message}`);
       return { ok: false as const, error: (err as Error).message };
     }
   });
@@ -806,12 +817,31 @@ app.whenReady().then(async () => {
         return { ok: false as const, error: 'configPath không hợp lệ' };
       }
       const value = await getTetheredCameraConfigValue(configPath);
+      console.log(`[TEMP-CONFIG] ${configPath} =\n${value}`);
       return { ok: true as const, value };
     } catch (err) {
       return { ok: false as const, error: (err as Error).message };
     }
   });
   ipcMain.handle('tetheredCamera:getThermalWarning', () => getTetheredThermalWarning());
+  ipcMain.handle('tetheredCamera:getBatteryLevel', () => getTetheredBatteryLevel());
+
+  /** Write-side counterpart to `tetheredCamera:getConfigValue` — see `setTetheredCameraConfigValue`'s own doc comment. Same defence-in-depth path validation as the get handler above; `value` gets no such check since gphoto2 itself is the one that validates it against the property's real `Choices:` list and reports a clear error for anything else. */
+  ipcMain.handle('tetheredCamera:setConfigValue', async (_event, configPath: string, value: string) => {
+    try {
+      if (typeof configPath !== 'string' || !/^\/[!-~]+$/.test(configPath)) {
+        return { ok: false as const, error: 'configPath không hợp lệ' };
+      }
+      if (typeof value !== 'string' || !value) {
+        return { ok: false as const, error: 'value không hợp lệ' };
+      }
+      await setTetheredCameraConfigValue(configPath, value);
+      console.log(`[TEMP-CONFIG] set ${configPath}=${value}`);
+      return { ok: true as const };
+    } catch (err) {
+      return { ok: false as const, error: (err as Error).message };
+    }
+  });
 
   /**
    * Auto-detect watcher (docs/plans/canon-auto-detect-polling-plan-2026-09-24.md
@@ -934,7 +964,19 @@ app.whenReady().then(async () => {
     const rows = outboxRepo.listBySession(latest.sessionId);
     const attemptOffsets: Record<string, number> = {};
     for (const row of rows) {
-      if (row.kind !== 'photo' || !row.stepId || row.attempt === null) continue;
+      // 2026-09-25 fix (real-hardware field report, "chụp lại toàn bộ thì báo
+      // lỗi" — approveSessionUpload always found 0 pending rows for a
+      // returning student): this checked `row.kind !== 'photo'`, but every
+      // real photo capture is enqueued with `kind: 'face'`
+      // (`ElectronCaptureSink.savePhoto`, packages/ui/src/lib/CaptureSink.ts)
+      // — `'photo'` is not a value this column ever actually holds. Every
+      // row therefore failed this check and got skipped, so `attemptOffsets`
+      // was always `{}`, and the whole "chụp lại ghi đè ảnh cũ" resume always
+      // applied a zero offset — every returning student's fresh capture
+      // reused `${sessionId}:${stepId}:1`, the exact idemKey their prior
+      // approved photo already used, silently dropped by `ON CONFLICT
+      // (idem_key) DO NOTHING` before ever reaching the outbox as a new row.
+      if (row.kind !== 'face' || !row.stepId || row.attempt === null) continue;
       const current = attemptOffsets[row.stepId] ?? 0;
       if (row.attempt > current) attemptOffsets[row.stepId] = row.attempt;
     }
@@ -1130,6 +1172,15 @@ app.whenReady().then(async () => {
           dependsOn: typeof payload?.dependsOn === 'string' ? payload.dependsOn : undefined,
           visibility,
         });
+
+        // Diagnostic (2026-09-25, "ảnh chụp đã lấy đủ và lưu chưa" field
+        // question) — confirms, for every capture (webcam or Canon), the
+        // exact byte count that actually made it into the kiosk-local
+        // outbox row. Check this terminal/main.log right after a shot:
+        // if the number here is far smaller than expected for a Canon
+        // still, or missing entirely, the capture never reached this
+        // handler in the first place.
+        console.log(`[capture:queue] stored ${data.length} bytes (${mimeType}) as ${jobId}`);
 
         return { ok: true, jobId };
       } catch (err) {
