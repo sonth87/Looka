@@ -105,6 +105,14 @@ async function bootstrap() {
       'x-api-key',
       'x-refresh-token',
     ],
+    // A binary-download response header is invisible to browser JS by
+    // default (the CORS spec's own "safelisted response headers" list is
+    // tiny and doesn't include either of these) — without this, the CMS's
+    // `fetch()` for a zip/xlsx download can read the response body fine but
+    // `res.headers.get('Content-Disposition' | 'X-Print-Export-Failed-Item-Ids')`
+    // silently comes back `null`, indistinguishable from the server simply
+    // not having sent it.
+    exposedHeaders: ['Content-Disposition', 'X-Print-Export-Failed-Item-Ids'],
     credentials: true,
   });
 

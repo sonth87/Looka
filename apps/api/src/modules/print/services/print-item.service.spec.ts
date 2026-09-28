@@ -1,4 +1,4 @@
-import { ConflictException } from '@nestjs/common';
+import { ConflictException, ForbiddenException } from '@nestjs/common';
 import { Printer } from '../entities/printer.entity';
 import { PrintItemService } from './print-item.service';
 import { PrintItemStatusCallbackDto } from '../dto/print-item-status-callback.dto';
@@ -12,7 +12,12 @@ import { PrintItemStatusCallbackDto } from '../dto/print-item-status-callback.dt
  * would otherwise flag.
  */
 function fakeItemsRepo(
-  item: Partial<{ id: string; status: string; campaignId: string }>,
+  item: Partial<{
+    id: string;
+    status: string;
+    campaignId: string;
+    printerId: string;
+  }>,
 ) {
   return { findOne: jest.fn().mockResolvedValue(item) };
 }
@@ -28,6 +33,12 @@ function fakeDataSource() {
   const manager = {
     save: jest.fn().mockResolvedValue(undefined),
     increment: jest.fn().mockResolvedValue(undefined),
+    // `stampRosterPrinted` (feature 6 — see that method's own doc comment)
+    // runs this raw `UPDATE campaign_subjects ...` inside the same PRINTED
+    // transaction; the fake manager needs a `query` stub or that call
+    // throws `manager.query is not a function` the moment a real PRINTED
+    // transition reaches it.
+    query: jest.fn().mockResolvedValue(undefined),
   };
   return {
     transaction: jest.fn((fn: (manager: unknown) => Promise<void>) =>
@@ -55,6 +66,7 @@ describe('PrintItemService.statusCallback — idempotency (2026-09-16 database a
       id: 'item-1',
       status: 'PRINTED',
       campaignId: 'campaign-1',
+      printerId: 'printer-1',
     });
     const events = fakeEventsRepo();
     const dataSource = fakeDataSource();
@@ -86,6 +98,7 @@ describe('PrintItemService.statusCallback — idempotency (2026-09-16 database a
       id: 'item-2',
       status: 'FAILED',
       campaignId: 'campaign-1',
+      printerId: 'printer-1',
     });
     const dataSource = fakeDataSource();
     const printStats = fakePrintStats();
@@ -112,6 +125,7 @@ describe('PrintItemService.statusCallback — idempotency (2026-09-16 database a
       id: 'item-3',
       status: 'QUEUED',
       campaignId: 'campaign-1',
+      printerId: 'printer-1',
     });
     const events = fakeEventsRepo();
     const dataSource = fakeDataSource();
@@ -154,5 +168,31 @@ describe('PrintItemService.statusCallback — idempotency (2026-09-16 database a
     await expect(
       service.statusCallback('item-4', PRINTER, { status: 'PRINTED' }),
     ).rejects.toBeInstanceOf(ConflictException);
+  });
+
+  it('rejects a callback for an item queued to a DIFFERENT printer (agent-token ownership check)', async () => {
+    const items = fakeItemsRepo({
+      id: 'item-5',
+      status: 'QUEUED',
+      campaignId: 'campaign-1',
+      printerId: 'printer-OTHER',
+    });
+    const dataSource = fakeDataSource();
+    const service = new PrintItemService(
+      items as never,
+      fakeEventsRepo() as never,
+      undefined as never,
+      dataSource as never,
+      undefined as never,
+      undefined as never,
+      undefined as never,
+      fakePrintStats() as never,
+      fakePrinterService() as never,
+    );
+
+    await expect(
+      service.statusCallback('item-5', PRINTER, { status: 'PRINTED' }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(dataSource.transaction).not.toHaveBeenCalled();
   });
 });

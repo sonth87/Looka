@@ -52,24 +52,23 @@ export class ReviewAssignmentController {
     const userId = req.user?.isAdmin
       ? query.userId
       : (req.user?.id ?? undefined);
-    return this.assignmentService.list(userId);
+    return this.assignmentService.list(userId, query.campaignId);
   }
 
   @Get('group-values')
   @ApiOperation({
     summary:
-      'Distinct className/faculty/major values across all sets, for the assignment picker (plan §5.2). ADMIN only.',
+      'Distinct className/faculty/major values, optionally scoped to one campaign, for the assignment picker (plan §5.2). ADMIN only.',
   })
   groupValues(
     @Query() query: GroupValuesQueryDto,
     @Req() req: Request,
   ): Promise<string[]> {
-    // Global (no campaignId filter) across every set — only feeds the
-    // admin-only `create` picker below, so it must not be open to a
-    // non-admin reviewer (who is otherwise scope-restricted everywhere
-    // else, e.g. `PhotoReviewService.listSets`/`getSetDetail`).
+    // Only feeds the admin-only `create` picker below, so it must not be
+    // open to a non-admin reviewer (who is otherwise scope-restricted
+    // everywhere else, e.g. `PhotoReviewService.listSets`/`getSetDetail`).
     if (!req.user?.isAdmin) throw new ForbiddenException('Requires admin');
-    return this.assignmentService.groupValues(query.field);
+    return this.assignmentService.groupValues(query.field, query.campaignId);
   }
 
   @Post()

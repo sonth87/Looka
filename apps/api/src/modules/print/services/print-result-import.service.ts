@@ -1,6 +1,7 @@
 import { FileStorageService } from '@app/modules/file-storage/services/file-storage.service';
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   Logger,
   NotFoundException,
@@ -14,7 +15,11 @@ import { PrintBatch } from '../entities/print-batch.entity';
 import { PrintItem } from '../entities/print-item.entity';
 import { PrintItemEvent } from '../entities/print-item-event.entity';
 import { PrintResultImport } from '../entities/print-result-import.entity';
-import { PRINT_ITEM_INACTIVE_STATUSES } from '../print.constants';
+import {
+  PRINT_ITEM_INACTIVE_STATUSES,
+  type PrintBatchMode,
+  type PrintItemStatus,
+} from '../print.constants';
 import { PrinterService } from './printer.service';
 import { PrintStatsService } from '@app/modules/stats/services/print-stats.service';
 
@@ -35,9 +40,86 @@ const HEADER_ALIASES: Record<ResultFieldKey, string[]> = {
 };
 const REQUIRED_FIELDS: ResultFieldKey[] = ['subjectCode', 'printStatus'];
 
+/**
+ * Only items that were actually handed off for physical printing may be
+ * moved by a result-file row. Matching against every non-terminal status
+ * (as this used to do) let a "Đã in" row jump a never-exported
+ * PENDING/RENDERED item straight to PRINTED, and a "Lỗi" row regress it to
+ * RENDERED with no rendered PNG attached — either way leaving a card that
+ * was never packaged looking like it went through the print flow.
+ */
+const HANDED_OFF_ITEM_STATUSES = ['EXPORTED', 'PRINTED'];
+
+/**
+ * Vietnamese label for a print item's status, used only for the "chưa xuất
+ * gói" rejection reason below (see `HANDED_OFF_ITEM_STATUSES`) — a tiny
+ * server-side duplicate of the CMS's own `PRINT_ITEM_STATUS_LABEL`
+ * (`apps/cms/src/print/printFormat.ts`), not imported from there since
+ * `apps/api` must not depend on `apps/cms` (same module-boundary reasoning
+ * `HEADER_ALIASES`'s own doc comment gives for duplicating instead of
+ * importing a helper from another module). Keep in sync if the CMS's labels
+ * change.
+ */
+const PRINT_ITEM_STATUS_LABEL_VI: Record<PrintItemStatus, string> = {
+  PENDING: 'Chờ render',
+  RENDERED: 'Đã render',
+  EXPORTED: 'Đã xuất, chờ in',
+  QUEUED: 'Đã xếp hàng',
+  PRINTING: 'Đang in',
+  PRINTED: 'Đã in',
+  FAILED: 'Lỗi',
+  REPRINT_REQUESTED: 'Chờ in lại',
+  CANCELLED: 'Đã hủy',
+};
+
+/**
+ * Mirrors the CMS's mode-aware `printItemStatusLabel` (same file):
+ * a CENTRALIZED batch never renders (see `PrintBatchService.exportPackage`'s
+ * own doc comment — render is no longer a precondition for CENTRALIZED
+ * export), so a CENTRALIZED item sitting in PENDING or RENDERED reads to the
+ * operator as just "chưa in", not the raw enum value or a "chờ
+ * render"/"đã render" wording that only makes sense for a DIRECT batch.
+ */
+function statusLabelForRejectionReason(
+  status: PrintItemStatus,
+  batchMode: PrintBatchMode,
+): string {
+  if (
+    batchMode === 'CENTRALIZED' &&
+    (status === 'PENDING' || status === 'RENDERED')
+  ) {
+    return 'Chưa in';
+  }
+  return PRINT_ITEM_STATUS_LABEL_VI[status];
+}
+
+/**
+ * A "Lỗi in" row for an EXPORTED item must send it back to whatever it
+ * really was before "Xuất gói" — not a hardcoded `RENDERED`. Since the
+ * 2026-09-25 product decision that CENTRALIZED export promotes PENDING
+ * straight to EXPORTED with no render step (`PrintBatchService.exportPackage`'s
+ * own doc comment), an item can reach EXPORTED having never been rendered at
+ * all; regressing it to RENDERED unconditionally would leave it "Đã render"
+ * with no rendered PNG file actually attached.
+ *
+ * Read directly off `renderedFrontFsFileId`/`renderedBackFsFileId` — the
+ * item's own authoritative "was this actually rendered" columns — rather
+ * than looking up the item's latest `print_item_events` row (e.g. the
+ * `fromStatus` of its EXPORTED event): that would need an extra per-item
+ * query (or a batched follow-up query keyed by item id) for something this
+ * row's own two columns already answer directly, and stays correct even if
+ * an item somehow accumulated more than one EXPORTED event.
+ */
+function resolvePriorStatus(item: PrintItem): 'PENDING' | 'RENDERED' {
+  return item.renderedFrontFsFileId || item.renderedBackFsFileId
+    ? 'RENDERED'
+    : 'PENDING';
+}
+
 const PRINTED_VALUES = new Set([
   'da in',
   'in thanh cong',
+  'da in thanh cong',
   'thanh cong',
   'ok',
   'x',
@@ -46,6 +128,9 @@ const FAILED_VALUES = new Set([
   'loi',
   'khong in duoc',
   'in loi',
+  'in that bai',
+  'that bai',
+  'khong thanh cong',
   'tu choi',
   'fail',
 ]);
@@ -99,9 +184,33 @@ function classifyStatus(raw: string | null): StatusOutcome {
  * 1. The WHOLE file is unreadable/missing a required column →
  *    `PrintResultImport.status = 'FAILED'`, nothing else touched, thrown
  *    back as a 400 — the batch/items stay exactly as they were.
- * 2. A single ROW doesn't match any item in this batch, or its status
- *    text isn't recognized → counted into `unmatchedRows`, reported in the
- *    downloadable error file, but the rest of the file still applies.
+ * 2. A single ROW doesn't match any item in this batch, wasn't handed off
+ *    for printing yet, its status text isn't recognized, or it conflicts
+ *    with an item's current state (see below) → counted into
+ *    `unmatchedRows`, reported both in the downloadable error file AND
+ *    inline on this call's own response (`errors` — response-only, never
+ *    persisted), but the rest of the file still applies (partial apply, by
+ *    product decision — see `HANDED_OFF_ITEM_STATUSES`'s own doc comment for
+ *    why an item's CURRENT status, not just its subjectCode, gates whether a
+ *    row may act on it).
+ *
+ * 2026-09-25 product rule ("Chỉ ảnh đã được export... mới đổi trạng thái"):
+ * only an EXPORTED item may be moved by a row. A "Đã in" row on an
+ * already-PRINTED item is an idempotent no-op (cumulative sheets re-list old
+ * rows); an "In thất bại" row on an already-PRINTED item is rejected outright
+ * (a confirmed print must never be talked back into a failure). A "Lỗi" row
+ * on an EXPORTED item regresses it to its real prior status — RENDERED or
+ * PENDING, see `resolvePriorStatus` — never a hardcoded RENDERED.
+ *
+ * That "only EXPORTED" rule is enforced TWICE, not once: the in-memory plan
+ * built from the `find()` snapshot above (which items/rows to even attempt),
+ * AND the write-time `UPDATE ... WHERE status = 'EXPORTED' AND batch_id =
+ * $N` guards inside the transaction below — the snapshot can go stale
+ * between the two (a concurrent upload, `removeItems`, a reprint) in the gap
+ * this async method spans. A row whose write loses that race (0 rows
+ * `RETURNING`) is walked back out of `printedCount`/`failedCount` and
+ * reported exactly like any other rejected row (`RACE_LOST_REASON`) —
+ * counts always reflect what was actually WRITTEN, never merely planned.
  */
 @Injectable()
 export class PrintResultImportService {
@@ -129,6 +238,11 @@ export class PrintResultImportService {
   ): Promise<PrintResultImportDao> {
     const batch = await this.batches.findOne({ where: { id: batchId } });
     if (!batch) throw new NotFoundException('Không tìm thấy đợt in');
+    if (batch.status === 'CANCELLED') {
+      throw new ConflictException(
+        'Đợt in đã hủy — không thể tải lên kết quả in',
+      );
+    }
 
     const importRow = await this.imports.save(
       this.imports.create({
@@ -177,8 +291,39 @@ export class PrintResultImportService {
     let printedCount = 0;
     let failedCount = 0;
     let unmatched = 0;
-    const printedItems: PrintItem[] = [];
-    const failedItems: Array<{ item: PrintItem; message: string }> = [];
+    // Keyed by item id, not pushed straight into a `printedItems`/
+    // `failedItems` array per row — a file can list the same student more
+    // than once (a cumulative sheet re-listing an already-printed row, or
+    // a typo'd duplicate), and applying every row would double-decrement
+    // stock, double-count stats, and write duplicate events for one
+    // physical card. The LAST row for a given item wins, including across
+    // a PRINTED/FAILED conflict for the same code, so the file's own row
+    // order decides the outcome instead of "FAILED always wins" regardless
+    // of order.
+    // `rowNo`/`subjectCode` are carried on every entry (not just re-derived
+    // from `item` at write time) so a row that loses the write-time race
+    // (see the transaction below) can still be reported against the exact
+    // file row that produced it, using the file's own subjectCode text
+    // rather than the item's — same reasoning `reportRows` elsewhere in this
+    // loop already follows.
+    const outcomeByItemId = new Map<
+      string,
+      | {
+          item: PrintItem;
+          outcome: 'PRINTED';
+          rowNo: number;
+          subjectCode: string | null;
+        }
+      | {
+          item: PrintItem;
+          outcome: 'FAILED';
+          message: string;
+          /** Status to regress to — see `resolvePriorStatus`'s own doc comment. */
+          targetStatus: 'PENDING' | 'RENDERED';
+          rowNo: number;
+          subjectCode: string | null;
+        }
+    >();
     const reportRows: Array<{
       rowNo: number;
       subjectCode: string | null;
@@ -187,13 +332,29 @@ export class PrintResultImportService {
 
     for (const row of rows) {
       const code = row.subjectCode?.trim() || null;
-      const candidates = code ? itemsByCode.get(code) : undefined;
-      if (!candidates || candidates.length === 0) {
+      const allCandidates = code ? itemsByCode.get(code) : undefined;
+      if (!allCandidates || allCandidates.length === 0) {
         unmatched++;
         reportRows.push({
           rowNo: row.rowNo,
           subjectCode: row.subjectCode,
           reason: 'Không tìm thấy mã SV trong đợt in này',
+        });
+        continue;
+      }
+      // The code exists in this batch, but its item was never actually
+      // packaged/exported (still PENDING/RENDERED, or superseded by a
+      // reprint) — a result row must not fabricate a print outcome for a
+      // card the print vendor never received.
+      const candidates = allCandidates.filter((i) =>
+        HANDED_OFF_ITEM_STATUSES.includes(i.status),
+      );
+      if (candidates.length === 0) {
+        unmatched++;
+        reportRows.push({
+          rowNo: row.rowNo,
+          subjectCode: row.subjectCode,
+          reason: `Thẻ chưa được xuất gói (đang ở trạng thái ${statusLabelForRejectionReason(allCandidates[0].status, batch.mode)}) — cần "Xuất gói" trước khi ghi nhận kết quả in`,
         });
         continue;
       }
@@ -210,14 +371,47 @@ export class PrintResultImportService {
       matched++;
       const outcome = classifyStatus(row.printStatus);
       if (outcome === 'PRINTED') {
-        printedItems.push(item);
+        // Idempotent by construction, not a special case here: an
+        // already-PRINTED item re-listed as "Đã in" (a cumulative sheet
+        // re-including an old row) is set again below, but the write-time
+        // `status = 'EXPORTED'` guard on the UPDATE (see the transaction)
+        // simply never selects it — no re-decrement, no duplicate event,
+        // `printedCount` still counts it as a normal successful row. This is
+        // the ONE case where the write not touching a row is expected, not a
+        // race — everything else in `printedItems` is snapshotted EXPORTED
+        // here and is reconciled against what the UPDATE actually touched.
         printedCount++;
-      } else if (outcome === 'FAILED') {
-        failedItems.push({
+        outcomeByItemId.set(item.id, {
           item,
-          message: row.errorReason?.trim() || 'Lỗi in (từ file upload kết quả)',
+          outcome: 'PRINTED',
+          rowNo: row.rowNo,
+          subjectCode: row.subjectCode,
         });
-        failedCount++;
+      } else if (outcome === 'FAILED') {
+        if (item.status === 'PRINTED') {
+          // A card already confirmed printed must never be talked back into
+          // a failure by a later/conflicting row (e.g. a typo'd duplicate,
+          // or two rows for the same reprint window) — reported like any
+          // other row this import couldn't act on, not silently dropped.
+          unmatched++;
+          reportRows.push({
+            rowNo: row.rowNo,
+            subjectCode: row.subjectCode,
+            reason:
+              'Thẻ đã được ghi nhận in thành công trước đó — không thể chuyển sang lỗi',
+          });
+        } else {
+          failedCount++;
+          outcomeByItemId.set(item.id, {
+            item,
+            outcome: 'FAILED',
+            message:
+              row.errorReason?.trim() || 'Lỗi in (từ file upload kết quả)',
+            targetStatus: resolvePriorStatus(item),
+            rowNo: row.rowNo,
+            subjectCode: row.subjectCode,
+          });
+        }
       } else {
         unmatched++;
         reportRows.push({
@@ -228,206 +422,315 @@ export class PrintResultImportService {
       }
     }
 
-    await this.dataSource.transaction(async (manager) => {
-      const now = new Date();
+    const printedItems: Array<{
+      item: PrintItem;
+      rowNo: number;
+      subjectCode: string | null;
+    }> = [];
+    const failedItems: Array<{
+      item: PrintItem;
+      message: string;
+      targetStatus: 'PENDING' | 'RENDERED';
+      rowNo: number;
+      subjectCode: string | null;
+    }> = [];
+    for (const entry of outcomeByItemId.values()) {
+      if (entry.outcome === 'PRINTED')
+        printedItems.push({
+          item: entry.item,
+          rowNo: entry.rowNo,
+          subjectCode: entry.subjectCode,
+        });
+      else
+        failedItems.push({
+          item: entry.item,
+          message: entry.message,
+          targetStatus: entry.targetStatus,
+          rowNo: entry.rowNo,
+          subjectCode: entry.subjectCode,
+        });
+    }
+    /** Shared reason/message for any row whose in-memory plan (built above from a `find()` snapshot) loses the write-time race — see the transaction below for the write-time guards this covers. */
+    const RACE_LOST_REASON =
+      'Trạng thái thẻ đã thay đổi trong lúc xử lý — vui lòng tải lại trang và thử lại';
 
-      if (printedItems.length) {
-        const ids = printedItems.map((i) => i.id);
-        // `WHERE ... AND status <> 'PRINTED'` + `RETURNING id`, then only
-        // bookkeep the rows actually returned — a re-uploaded/duplicate
-        // result file (same file twice, or a cumulative sheet repeating
-        // already-PRINTED rows) must not re-decrement stock, re-count
-        // stats, append a duplicate PRINTED->PRINTED event, or overwrite
-        // the real first-print `printed_at`. `UPDATE ... RETURNING` here
-        // returns a `[rows, affectedCount]` tuple, same rule
-        // `PrintItemService.bulkUpdateTemplate` documents.
-        const [updatedRows]: [Array<{ id: string }>, number] =
-          await manager.query(
-            `UPDATE print_items
-                SET status = 'PRINTED', printed_at = COALESCE(printed_at, $2), error_message = NULL, updated_at = now()
-              WHERE id = ANY($1) AND status <> 'PRINTED'
-              RETURNING id`,
-            [ids, now],
-          );
-        const newlyPrintedIds = new Set(updatedRows.map((r) => r.id));
-        const newlyPrintedItems = printedItems.filter((i) =>
-          newlyPrintedIds.has(i.id),
-        );
+    try {
+      await this.dataSource.transaction(async (manager) => {
+        const now = new Date();
 
-        if (newlyPrintedItems.length) {
-          await manager.save(
-            PrintItemEvent,
-            newlyPrintedItems.map((item) =>
-              this.events.create({
-                itemId: item.id,
-                fromStatus: item.status,
-                toStatus: 'PRINTED',
-                source: 'RESULT_UPLOAD',
-                actorUserId: uploadedByUserId,
-                message: 'Xác nhận đã in (upload file kết quả)',
-              }),
-            ),
-          );
-
-          // Feature 6 wiring (Giai đoạn 3 deferred this exact write to here
-          // — see `campaign_subjects.printedAt`'s own doc comment). Grouped
-          // by campaign since one print batch's items can span more than
-          // one. `COALESCE` for the same double-upload reason as above.
-          const codesByCampaign = new Map<string, string[]>();
-          for (const item of newlyPrintedItems) {
-            const list = codesByCampaign.get(item.campaignId) ?? [];
-            list.push(item.subjectCode);
-            codesByCampaign.set(item.campaignId, list);
-          }
-          for (const [campaignId, codes] of codesByCampaign) {
+        if (printedItems.length) {
+          const ids = printedItems.map((p) => p.item.id);
+          // `WHERE ... AND batch_id = $2 AND status = 'EXPORTED'` +
+          // `RETURNING id` — NOT `status <> 'PRINTED'` (the old guard): that
+          // only stopped a RE-upload from re-decrementing stock, but let
+          // through any item that drifted off EXPORTED for another reason
+          // between the `find()` snapshot above and this write — a
+          // concurrent upload, a `removeItems`/cancel, or a reprint — since
+          // anything other than PENDING/RENDERED/QUEUED/PRINTING/CANCELLED/
+          // FAILED/REPRINT_REQUESTED would still have matched `<> 'PRINTED'`
+          // and been happily stamped PRINTED anyway. `batch_id` is pinned
+          // too so an item detached from this batch mid-upload can't be
+          // stamped as this batch's own PRINTED count. `UPDATE ...
+          // RETURNING` here returns a `[rows, affectedCount]` tuple, same
+          // rule `PrintItemService.bulkUpdateTemplate` documents.
+          const [updatedRows]: [Array<{ id: string }>, number] =
             await manager.query(
-              `UPDATE campaign_subjects
+              `UPDATE print_items
+                SET status = 'PRINTED', printed_at = COALESCE(printed_at, $3), error_message = NULL, updated_at = now()
+              WHERE id = ANY($1) AND batch_id = $2 AND status = 'EXPORTED'
+              RETURNING id`,
+              [ids, batchId, now],
+            );
+          const updatedIds = new Set(updatedRows.map((r) => r.id));
+          const newlyPrintedItems = printedItems
+            .filter((p) => updatedIds.has(p.item.id))
+            .map((p) => p.item);
+
+          // Rows NOT touched by the guarded UPDATE, split into the ONE
+          // expected case (already PRINTED at snapshot time — the idempotent
+          // no-op the loop above already anticipated) vs a genuine race:
+          // snapshotted EXPORTED, but something else moved it before this
+          // write landed. Only the latter is a real error — it must not
+          // silently vanish from the counts (`printedCount` was optimistically
+          // incremented for it above) nor be dropped from the report.
+          for (const p of printedItems) {
+            if (updatedIds.has(p.item.id) || p.item.status === 'PRINTED') {
+              continue;
+            }
+            printedCount--;
+            unmatched++;
+            reportRows.push({
+              rowNo: p.rowNo,
+              subjectCode: p.subjectCode,
+              reason: RACE_LOST_REASON,
+            });
+          }
+
+          if (newlyPrintedItems.length) {
+            await manager.save(
+              PrintItemEvent,
+              newlyPrintedItems.map((item) =>
+                this.events.create({
+                  itemId: item.id,
+                  fromStatus: item.status,
+                  toStatus: 'PRINTED',
+                  source: 'RESULT_UPLOAD',
+                  actorUserId: uploadedByUserId,
+                  message: 'Xác nhận đã in (upload file kết quả)',
+                }),
+              ),
+            );
+
+            // Feature 6 wiring (Giai đoạn 3 deferred this exact write to here
+            // — see `campaign_subjects.printedAt`'s own doc comment). Grouped
+            // by campaign since one print batch's items can span more than
+            // one. `COALESCE` for the same double-upload reason as above.
+            const codesByCampaign = new Map<string, string[]>();
+            for (const item of newlyPrintedItems) {
+              const list = codesByCampaign.get(item.campaignId) ?? [];
+              list.push(item.subjectCode);
+              codesByCampaign.set(item.campaignId, list);
+            }
+            for (const [campaignId, codes] of codesByCampaign) {
+              await manager.query(
+                `UPDATE campaign_subjects
                   SET printed_at = COALESCE(printed_at, now()), printed_batch_id = $3, updated_at = now()
                 WHERE campaign_id = $1 AND subject_code = ANY($2) AND status = 'VALID'`,
-              [campaignId, codes, batchId],
-            );
-          }
-
-          // Stock/stats bookkeeping — same "thao tác tay" path
-          // `PrintItemService.markPrintedManually` already follows, just
-          // looped per matched row; a printer that can't be resolved
-          // (common for a CENTRALIZED batch with no `printerId`) simply
-          // skips the stock decrement, same tolerant fallback that method
-          // documents. Only rows that just transitioned to PRINTED reach
-          // here, so a duplicate upload can never double-decrement stock or
-          // double-count the daily stats.
-          for (const item of newlyPrintedItems) {
-            const printerId = item.printerId ?? batch.printerId ?? null;
-            if (printerId) {
-              await this.printerService.applyStockDelta(
-                manager,
-                printerId,
-                -1,
-                'PRINT',
-                uploadedByUserId,
-                'Xác nhận đã in (upload file kết quả)',
+                [campaignId, codes, batchId],
               );
             }
-            await this.printStats.recordPrinted(
-              manager,
-              item.campaignId,
-              printerId,
-              now,
-            );
+
+            // Stock/stats bookkeeping — same "thao tác tay" path
+            // `PrintItemService.markPrintedManually` already follows, just
+            // looped per matched row; a printer that can't be resolved
+            // (common for a CENTRALIZED batch with no `printerId`) simply
+            // skips the stock decrement, same tolerant fallback that method
+            // documents. Only rows that just transitioned to PRINTED reach
+            // here, so a duplicate upload can never double-decrement stock or
+            // double-count the daily stats.
+            for (const item of newlyPrintedItems) {
+              const printerId = item.printerId ?? batch.printerId ?? null;
+              if (printerId) {
+                await this.printerService.applyStockDelta(
+                  manager,
+                  printerId,
+                  -1,
+                  'PRINT',
+                  uploadedByUserId,
+                  'Xác nhận đã in (upload file kết quả)',
+                );
+              }
+              await this.printStats.recordPrinted(
+                manager,
+                item.campaignId,
+                printerId,
+                now,
+              );
+            }
           }
         }
-      }
 
-      if (failedItems.length) {
-        // Per-row error message → `UPDATE ... FROM (VALUES ...)`, not a
-        // single `ANY($1)` update (every row needs its OWN message).
-        // `AND pi.status <> 'RENDERED'` + `RETURNING` so a duplicate
-        // upload repeating the same "Lỗi" row is a no-op instead of
-        // re-appending a RENDERED->RENDERED event/recordFailed() count;
-        // it also means an item this same upload just regressed from
-        // PRINTED gets `printed_at` (and the roster's mirrored
-        // `campaign_subjects.printed_at`/`printed_batch_id`) cleared,
-        // instead of silently keeping a stale "printed" record for a card
-        // that no longer has PRINTED status.
-        const valuesSql = failedItems
-          .map((_, idx) => `($${idx * 2 + 1}::uuid, $${idx * 2 + 2}::text)`)
-          .join(', ');
-        const params = failedItems.flatMap((f) => [f.item.id, f.message]);
-        const [regressedRows]: [Array<{ id: string }>, number] =
-          await manager.query(
-            `UPDATE print_items AS pi
-                SET status = 'RENDERED', error_message = v.msg, printed_at = NULL, updated_at = now()
-               FROM (VALUES ${valuesSql}) AS v(id, msg)
-              WHERE pi.id = v.id AND pi.status <> 'RENDERED'
-              RETURNING pi.id`,
-            params,
-          );
-        const regressedIds = new Set(regressedRows.map((r) => r.id));
-        const regressedItems = failedItems.filter(({ item }) =>
-          regressedIds.has(item.id),
-        );
-
-        if (regressedItems.length) {
-          await manager.save(
-            PrintItemEvent,
-            regressedItems.map(({ item, message }) =>
-              this.events.create({
-                itemId: item.id,
-                fromStatus: item.status,
-                toStatus: 'RENDERED',
-                source: 'RESULT_UPLOAD',
-                actorUserId: uploadedByUserId,
-                message,
-              }),
-            ),
-          );
-
-          const codesByCampaign = new Map<string, string[]>();
-          for (const { item } of regressedItems) {
-            const list = codesByCampaign.get(item.campaignId) ?? [];
-            list.push(item.subjectCode);
-            codesByCampaign.set(item.campaignId, list);
-          }
-          for (const [campaignId, codes] of codesByCampaign) {
+        if (failedItems.length) {
+          // Per-row error message AND per-row target status → `UPDATE ...
+          // FROM (VALUES ...)`, not a single `ANY($1)` update (every row can
+          // regress to a different prior status — see `resolvePriorStatus`).
+          // `pi.status = 'EXPORTED' AND pi.batch_id = $N` — NOT `pi.status <>
+          // v.target_status` (the old guard): every item reaching this
+          // branch was snapshotted EXPORTED at `find()` time (an
+          // already-PRINTED item is rejected before it ever gets here — see
+          // the "Thẻ đã được ghi nhận in thành công" branch above), so this
+          // guard is simply "is it STILL what we read" — the old one would
+          // just as happily regress an item a concurrent upload had ALREADY
+          // moved to PRINTED (stock already decremented for it) back down to
+          // PENDING/RENDERED, since PENDING/RENDERED always differ from
+          // whatever `v.target_status` is.
+          const valuesSql = failedItems
+            .map(
+              (_, idx) =>
+                `($${idx * 3 + 1}::uuid, $${idx * 3 + 2}::text, $${idx * 3 + 3}::varchar)`,
+            )
+            .join(', ');
+          const batchIdParamIndex = failedItems.length * 3 + 1;
+          const params = [
+            ...failedItems.flatMap((f) => [
+              f.item.id,
+              f.message,
+              f.targetStatus,
+            ]),
+            batchId,
+          ];
+          const [regressedRows]: [Array<{ id: string }>, number] =
             await manager.query(
-              `UPDATE campaign_subjects
+              `UPDATE print_items AS pi
+                SET status = v.target_status, error_message = v.msg, printed_at = NULL, updated_at = now()
+               FROM (VALUES ${valuesSql}) AS v(id, msg, target_status)
+              WHERE pi.id = v.id AND pi.batch_id = $${batchIdParamIndex} AND pi.status = 'EXPORTED'
+              RETURNING pi.id`,
+              params,
+            );
+          const regressedIds = new Set(regressedRows.map((r) => r.id));
+          const regressedItems = failedItems.filter(({ item }) =>
+            regressedIds.has(item.id),
+          );
+
+          // Every entry here was snapshotted EXPORTED — unlike the PRINTED
+          // branch above, there is no legitimate "expected no-op" case, so
+          // anything the guarded UPDATE didn't touch lost a genuine race.
+          for (const f of failedItems) {
+            if (regressedIds.has(f.item.id)) continue;
+            failedCount--;
+            unmatched++;
+            reportRows.push({
+              rowNo: f.rowNo,
+              subjectCode: f.subjectCode,
+              reason: RACE_LOST_REASON,
+            });
+          }
+
+          if (regressedItems.length) {
+            await manager.save(
+              PrintItemEvent,
+              regressedItems.map(({ item, message, targetStatus }) =>
+                this.events.create({
+                  itemId: item.id,
+                  fromStatus: item.status,
+                  toStatus: targetStatus,
+                  source: 'RESULT_UPLOAD',
+                  actorUserId: uploadedByUserId,
+                  message,
+                }),
+              ),
+            );
+
+            const codesByCampaign = new Map<string, string[]>();
+            for (const { item } of regressedItems) {
+              const list = codesByCampaign.get(item.campaignId) ?? [];
+              list.push(item.subjectCode);
+              codesByCampaign.set(item.campaignId, list);
+            }
+            for (const [campaignId, codes] of codesByCampaign) {
+              await manager.query(
+                `UPDATE campaign_subjects
                   SET printed_at = NULL, printed_batch_id = NULL, updated_at = now()
                 WHERE campaign_id = $1 AND subject_code = ANY($2) AND status = 'VALID'`,
-              [campaignId, codes],
-            );
-          }
+                [campaignId, codes],
+              );
+            }
 
-          for (const { item } of regressedItems) {
-            await this.printStats.recordFailed(
-              manager,
-              item.campaignId,
-              item.printerId ?? batch.printerId ?? null,
-              now,
-            );
+            for (const { item } of regressedItems) {
+              await this.printStats.recordFailed(
+                manager,
+                item.campaignId,
+                item.printerId ?? batch.printerId ?? null,
+                now,
+              );
+            }
           }
         }
-      }
 
-      // Bẫy 5 — recompute the batch's maintained counters from a real
-      // COUNT in this same transaction, rather than incrementing N times;
-      // this also self-heals any drift that predates this specific upload.
-      const [counts]: Array<{
-        printed: number;
-        failed: number;
-        total: number;
-      }> = await manager.query(
-        `SELECT COUNT(*) FILTER (WHERE status = 'PRINTED')::int AS printed,
-                  COUNT(*) FILTER (WHERE status = 'FAILED')::int AS failed,
+        // Bẫy 5 — recompute the batch's maintained counters from a real
+        // COUNT in this same transaction, rather than incrementing N times;
+        // this also self-heals any drift that predates this specific upload.
+        // A print-failure from a result upload lands the item back on its
+        // real prior status — RENDERED or PENDING, see `resolvePriorStatus`
+        // — with `error_message` set (never `FAILED`, see
+        // `PRINT_ITEM_STATUS`'s own doc comment on why); counting only
+        // `status = 'FAILED'` here would silently reset `failedCount` to 0
+        // on every such upload, making every upload-reported print failure
+        // invisible in the batch summary, so BOTH regressed statuses are
+        // counted whenever they carry an `error_message`.
+        const [counts]: Array<{
+          printed: number;
+          failed: number;
+          total: number;
+        }> = await manager.query(
+          `SELECT COUNT(*) FILTER (WHERE status = 'PRINTED')::int AS printed,
+                  COUNT(*) FILTER (WHERE status = 'FAILED' OR (status IN ('RENDERED', 'PENDING') AND error_message IS NOT NULL))::int AS failed,
                   COUNT(*)::int AS total
              FROM print_items WHERE batch_id = $1`,
-        [batchId],
-      );
-      await manager.update(PrintBatch, batchId, {
-        printedCount: counts.printed,
-        failedCount: counts.failed,
-        itemCount: counts.total,
-      });
-
-      // Bẫy 4's reopen rule — only when this upload actually sent an item
-      // back to RENDERED, and only if the batch had already been marked
-      // DONE; goes to READY (not PRINTING), matching `exportPackage()`'s
-      // own precondition so "Xuất gói" can run again immediately.
-      if (failedItems.length > 0) {
-        await manager.query(
-          `UPDATE print_batches SET status = 'READY', done_at = NULL WHERE id = $1 AND status = 'DONE'`,
           [batchId],
         );
-      }
+        await manager.update(PrintBatch, batchId, {
+          printedCount: counts.printed,
+          failedCount: counts.failed,
+          itemCount: counts.total,
+        });
 
-      await manager.update(PrintResultImport, importRow.id, {
-        status: 'DONE',
-        totalRows: rows.length,
-        matchedRows: matched,
-        printedRows: printedCount,
-        failedRows: failedCount,
-        unmatchedRows: unmatched,
+        // Bẫy 4's reopen rule — only when this upload actually sent an item
+        // back to a prior (not-yet-printed) status, and only if the batch
+        // had already been marked DONE; goes to READY (not PRINTING),
+        // matching `exportPackage()`'s own precondition so "Xuất gói" can
+        // run again immediately.
+        if (failedItems.length > 0) {
+          await manager.query(
+            `UPDATE print_batches SET status = 'READY', done_at = NULL WHERE id = $1 AND status = 'DONE'`,
+            [batchId],
+          );
+        }
+
+        await manager.update(PrintResultImport, importRow.id, {
+          status: 'DONE',
+          totalRows: rows.length,
+          matchedRows: matched,
+          printedRows: printedCount,
+          failedRows: failedCount,
+          unmatchedRows: unmatched,
+        });
       });
-    });
+    } catch (error) {
+      // Without this, any error inside the transaction (most realistically
+      // `PrinterService.applyStockDelta`'s `ConflictException` when a
+      // printer's `blank_stock` runs out mid-upload) rolls back every item
+      // update but leaves `importRow` — already committed as PROCESSING
+      // above, outside this transaction — stuck at "Đang xử lý" forever,
+      // and the whole upload fails with no result recorded anywhere.
+      const failureReason = (error as Error).message;
+      await this.imports.update(importRow.id, {
+        status: 'FAILED',
+        failureReason,
+      });
+      throw error;
+    }
 
     // Best-effort, outside the transaction — same precedent
     // `CampaignSubjectService.importRoster` follows for its own two
@@ -470,7 +773,7 @@ export class PrintResultImportService {
 
     await this.imports.update(importRow.id, { errorReportFsFileId, fsFileId });
 
-    return this.toDao({
+    const dao = await this.toDao({
       ...importRow,
       status: 'DONE',
       totalRows: rows.length,
@@ -481,6 +784,14 @@ export class PrintResultImportService {
       errorReportFsFileId,
       fsFileId,
     });
+    // Inline, response-only — NOT persisted (no new column/migration): the
+    // CMS needs these visible the moment the upload finishes, not only via
+    // the downloadable `errorReportUrl` xlsx. A later `listImports()`/
+    // `getImport()` for this same row won't have them (nothing to rebuild
+    // them from), which is fine — those already have `errorReportUrl` for
+    // reviewing an old upload's rejected rows.
+    dao.errors = reportRows;
+    return dao;
   }
 
   async listImports(batchId: string): Promise<PrintResultImportDao[]> {
@@ -505,12 +816,13 @@ export class PrintResultImportService {
     return this.toDao(row);
   }
 
+  /** Same 3 result-related column headers `PrintPackageService`'s own `danh-sach-in.xlsx` export uses (`Mã SV`/`Tình trạng`/`Lý do`), so a fresh template and the real export stay interchangeable through `parseWorkbook`'s `HEADER_ALIASES`. */
   async buildTemplate(): Promise<Buffer> {
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Ket qua in');
-    sheet.addRow(['Mã SV', 'Tình trạng', 'Ghi chú']);
+    sheet.addRow(['Mã SV', 'Tình trạng', 'Lý do']);
     sheet.addRow(['SV001', 'Đã in', '']);
-    sheet.addRow(['SV002', 'Lỗi', 'Kẹt giấy']);
+    sheet.addRow(['SV002', 'In thất bại', 'Kẹt giấy']);
     return Buffer.from(await workbook.xlsx.writeBuffer());
   }
 

@@ -1,4 +1,4 @@
-import { PrintBatchStatus, PrintItemStatus } from '../api';
+import { PrintBatchMode, PrintBatchStatus, PrintItemStatus } from '../api';
 
 export const PRINT_BATCH_STATUS_LABEL: Record<PrintBatchStatus, string> = {
   DRAFT: 'Nháp',
@@ -27,6 +27,28 @@ export const PRINT_ITEM_STATUS_LABEL: Record<PrintItemStatus, string> = {
   REPRINT_REQUESTED: 'Chờ in lại',
   CANCELLED: 'Đã hủy',
 };
+
+/**
+ * Mode-aware label for a print item's status — 2026-09-25 product ask:
+ * rendering is no longer part of the CENTRALIZED flow (see
+ * `PrintBatchService.exportPackage`'s own doc comment, "render() is no
+ * longer a precondition for CENTRALIZED export"), so a CENTRALIZED item
+ * sitting in PENDING or RENDERED reads to the operator as just "chưa in",
+ * not "chờ render"/"đã render" (both of those still describe a DIRECT
+ * item's real workflow step). Falls back to the plain
+ * `PRINT_ITEM_STATUS_LABEL` for every other status, and for a DIRECT batch
+ * or when `batchMode` isn't known (e.g. an item list with no single batch
+ * context).
+ */
+export function printItemStatusLabel(
+  status: PrintItemStatus,
+  batchMode?: PrintBatchMode | null,
+): string {
+  if (batchMode === 'CENTRALIZED' && (status === 'PENDING' || status === 'RENDERED')) {
+    return 'Chưa in';
+  }
+  return PRINT_ITEM_STATUS_LABEL[status];
+}
 
 export const PRINT_ITEM_STATUS_BADGE_CLASS: Record<PrintItemStatus, string> = {
   PENDING: 'bg-gray-50 border-gray-200 text-gray-600',

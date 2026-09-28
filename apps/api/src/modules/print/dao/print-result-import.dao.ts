@@ -1,6 +1,16 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import type { PrintResultImportStatus } from '../entities/print-result-import.entity';
 
+export class PrintResultImportRowErrorDao {
+  @ApiProperty({
+    description: 'Số thứ tự dòng trong file Excel (tính cả header)',
+  })
+  rowNo: number;
+  @ApiPropertyOptional() subjectCode: string | null;
+  @ApiProperty({ description: 'Lý do dòng này không được ghi nhận' })
+  reason: string;
+}
+
 export class PrintResultImportDao {
   @ApiProperty() id: string;
   @ApiProperty() batchId: string;
@@ -25,4 +35,13 @@ export class PrintResultImportDao {
   errorReportUrl?: string | null;
   @ApiPropertyOptional() failureReason?: string | null;
   @ApiProperty() createdAt: Date;
+  /**
+   * Rejected rows for THIS upload, inline — only populated on the direct
+   * `POST .../result-imports` response (see `PrintResultImportService
+   * .importResults`'s own doc comment on this field); a later
+   * `listImports()`/`getImport()` read of the same row leaves this
+   * undefined, use `errorReportUrl` there instead.
+   */
+  @ApiPropertyOptional({ type: [PrintResultImportRowErrorDao] })
+  errors?: PrintResultImportRowErrorDao[];
 }

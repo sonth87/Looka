@@ -13,6 +13,7 @@ import {
   listCardTemplates,
   listPrintBatches,
   listPrinters,
+  populatePrintBatch,
 } from '../api';
 import { DEFAULT_PAGE_SIZE, Pager } from '../components/Pager';
 import {
@@ -232,6 +233,15 @@ function CreateBatchModal({
         printerId: printerId || undefined,
         mode,
       });
+      // Plan §4.1: creating a batch for a campaign should load its
+      // already-approved photos right away, not leave the operator to find
+      // the separate "+ Thêm SV đã duyệt" flow. Best-effort — a populate
+      // failure (e.g. no APPROVED sets yet) must not block navigating to
+      // the newly-created batch, which the operator can always populate
+      // again from its detail page.
+      if (batch.campaignId) {
+        await populatePrintBatch(batch.id).catch(() => {});
+      }
       onCreated(batch);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : String(err));
@@ -255,7 +265,9 @@ function CreateBatchModal({
           />
         </div>
         <div>
-          <label className="block text-sm text-gray-500 mb-1">Campaign (không bắt buộc)</label>
+          <label className="block text-sm text-gray-500 mb-1">
+            Campaign (không bắt buộc — chọn để tự động nạp ảnh đã duyệt vào đợt in)
+          </label>
           <select
             value={campaignId}
             onChange={(e) => setCampaignId(e.target.value)}

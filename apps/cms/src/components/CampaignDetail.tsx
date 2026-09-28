@@ -197,7 +197,9 @@ export function CampaignDetail() {
 
       {tab === 'students' && <CampaignStudentsPanel campaignId={id} />}
 
-      {tab === 'roster' && <CampaignRosterPanel campaignId={id} />}
+      {tab === 'roster' && (
+        <CampaignRosterPanel campaignId={id} eligibilityMode={campaign.eligibilityConfig?.mode ?? 'NONE'} />
+      )}
 
       {tab === 'assignments' && <CampaignAssignmentsPanel campaignId={id} />}
 

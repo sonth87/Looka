@@ -680,12 +680,30 @@ export interface CampaignSubject {
   createdAt: string;
 }
 
-export type CampaignSubjectImportStatus = 'PROCESSING' | 'DONE' | 'FAILED';
+/**
+ * `PROCESSING`/`DONE`/`FAILED` are the `EXCEL` upload path's own lifecycle;
+ * `PENDING_FETCH`/`FETCHING`/`IMPORTING` only ever appear on an
+ * `EXTERNAL_API` pull row (`CampaignSubjectPullFetchWorker`/
+ * `CampaignSubjectPullWriteWorker`, apps/api's device-management module) —
+ * `GET :id/subjects/imports` returns BOTH kinds in the same list (mirrors
+ * `CampaignSubjectImportDao`'s own full enum), so this type needs to cover
+ * both even though this CMS screen was originally built Excel-only.
+ */
+export type CampaignSubjectImportStatus =
+  | 'PROCESSING'
+  | 'PENDING_FETCH'
+  | 'FETCHING'
+  | 'IMPORTING'
+  | 'DONE'
+  | 'FAILED';
+
+export type CampaignSubjectImportSource = 'EXCEL' | 'EXTERNAL_API';
 
 /** `POST/GET /v1/campaigns/:id/subjects/imports` row (mirrors `CampaignSubjectImportDao`). */
 export interface CampaignSubjectImport {
   id: string;
   campaignId: string;
+  source: CampaignSubjectImportSource;
   fileName: string;
   uploadedByUserId?: string | null;
   status: CampaignSubjectImportStatus;
@@ -747,6 +765,28 @@ export const getCampaignRosterImport = (campaignId: string, importId: string) =>
 
 export const deleteCampaignRosterImport = (campaignId: string, importId: string) =>
   request<{ id: string }>(`${campaignsPath(campaignId)}/subjects/imports/${importId}`, { method: 'DELETE' });
+
+/**
+ * `POST /v1/campaigns/:id/subjects/pulls` (2026-09-28) — manual "Kéo lại dữ
+ * liệu" re-pull for an `EXTERNAL_API`/`ROSTER_AND_API` campaign
+ * (`CampaignSubjectService.requestPull`). Returns the newly-queued
+ * `campaign_subject_imports` row at `PENDING_FETCH` immediately — the pull
+ * itself runs in the background (`CampaignSubjectPullFetchWorker`/
+ * `CampaignSubjectPullWriteWorker`), so the caller polls
+ * `listCampaignRosterImports` for progress, same as `CampaignRosterPanel.tsx`
+ * does.
+ *
+ * Throws a 409 `ApiError` when a pull for this campaign already ran/is
+ * running within the last 5 minutes — same "surface the message as-is,
+ * don't auto-retry" contract `deleteCampaign`'s own doc comment describes;
+ * here the caller should ask for explicit confirmation before resending
+ * with `force: true`.
+ */
+export const requestCampaignSubjectPull = (campaignId: string, options?: { force?: boolean }) =>
+  request<CampaignSubjectImport>(`${campaignsPath(campaignId)}/subjects/pulls`, {
+    method: 'POST',
+    body: JSON.stringify({ force: options?.force ?? false }),
+  });
 
 export function listCampaignSubjects(
   campaignId: string,
@@ -1420,11 +1460,15 @@ export const rejectReviewSet = (setId: string, note?: string) =>
 export const listReviewEvents = (setId: string) =>
   request<Paginated<ReviewEvent>>(`${REVIEW_SETS_PATH}/${setId}/events`);
 
-// --- Review assignments (chia việc duyệt theo nhóm, plan §5.2 feature 13) --
+// --- Review assignments (chia việc duyệt theo đợt/nhóm, plan §5.2 feature 13) --
+// PER-CAMPAIGN pivot 2026-09-28 — see `ReviewAssignment`'s own doc comment
+// (apps/api) for the full rule change: every grant is now scoped to one
+// `campaignId`, and a reviewer with zero rows for a campaign sees nothing in
+// it (the old "0 rows anywhere = unrestricted" default is gone).
 
 export type ReviewAssignmentGroupField = 'className' | 'faculty' | 'major';
 
-/** Mirrors `ReviewAssignmentDao` — a grant `(userId, groupField, groupValue)`, global (not per-campaign). Zero rows for a user = that user is unrestricted. */
+/** Mirrors `ReviewAssignmentDao` — a grant `(userId, campaignId, groupField?, groupValue?)`. `groupField`/`groupValue` both absent means "cả đợt chụp" (whole-campaign access); both present narrows to one Lớp/Khoa/Ngành within that campaign. */
 export interface ReviewAssignment {
   id: string;
   userId: string;
@@ -1433,32 +1477,47 @@ export interface ReviewAssignment {
   userDepartment?: string | null;
   userFaculty?: string | null;
   userRoleCodes?: string[];
-  groupField: ReviewAssignmentGroupField;
-  groupValue: string;
+  campaignId: string;
+  campaignName?: string;
+  groupField?: ReviewAssignmentGroupField;
+  groupValue?: string;
   createdByUserId?: string;
   createdAt: string;
 }
 
 const REVIEW_ASSIGNMENTS_PATH = '/v1/review/assignments';
 
-/** `GET /v1/review/assignments?userId=` — admin sees all/filtered by `userId`; a non-admin caller only ever gets back their own rows regardless of `userId` (server-enforced). */
-export const listReviewAssignments = (userId?: string) =>
-  request<ReviewAssignment[]>(`${REVIEW_ASSIGNMENTS_PATH}${userId ? `?userId=${userId}` : ''}`);
+/** `GET /v1/review/assignments?userId&campaignId` — admin sees all/filtered; a non-admin caller only ever gets back their own rows regardless of `userId` (server-enforced). */
+export const listReviewAssignments = (params: { userId?: string; campaignId?: string } = {}) => {
+  const search = new URLSearchParams();
+  if (params.userId) search.set('userId', params.userId);
+  if (params.campaignId) search.set('campaignId', params.campaignId);
+  const qs = search.toString();
+  return request<ReviewAssignment[]>(`${REVIEW_ASSIGNMENTS_PATH}${qs ? `?${qs}` : ''}`);
+};
 
-/** `GET /v1/review/assignments/group-values?field=` — distinct className/faculty/major values across every set, for the assignment picker's value dropdown. */
-export const listReviewAssignmentGroupValues = (field: ReviewAssignmentGroupField) =>
-  request<string[]>(`${REVIEW_ASSIGNMENTS_PATH}/group-values?field=${field}`);
+/** `GET /v1/review/assignments/group-values?field&campaignId` — distinct className/faculty/major values, scoped to one campaign's own roster, for the assignment picker's value dropdown. */
+export const listReviewAssignmentGroupValues = (field: ReviewAssignmentGroupField, campaignId: string) =>
+  request<string[]>(`${REVIEW_ASSIGNMENTS_PATH}/group-values?field=${field}&campaignId=${campaignId}`);
 
-/** `POST /v1/review/assignments` — ADMIN only. Re-granting an existing (userId, groupField, groupValue) is a harmless no-op (server returns the existing row). */
+/** `POST /v1/review/assignments` — ADMIN only. Auto-grants the REVIEWER role to `userId` server-side. Re-granting an existing (userId, campaignId, groupField, groupValue) is a harmless no-op (server returns the existing row). Omit `groupField`/`groupValue` together for whole-campaign access. */
 export const createReviewAssignment = (input: {
   userId: string;
-  groupField: ReviewAssignmentGroupField;
-  groupValue: string;
+  campaignId: string;
+  groupField?: ReviewAssignmentGroupField;
+  groupValue?: string;
 }) => request<ReviewAssignment>(REVIEW_ASSIGNMENTS_PATH, { method: 'POST', body: JSON.stringify(input) });
 
-/** `DELETE /v1/review/assignments/:id` — ADMIN only. */
+/** `DELETE /v1/review/assignments/:id` — ADMIN only. Does NOT revoke the REVIEWER role (see `revokeReviewer`). */
 export const deleteReviewAssignment = (id: string) =>
   request<void>(`${REVIEW_ASSIGNMENTS_PATH}/${id}`, { method: 'DELETE' });
+
+/** `GET /v1/review/my-campaigns` — campaigns the caller can review at all: every campaign for an admin, else only the ones they hold a `ReviewAssignment` row for. Feeds `ReviewListPage`'s campaign dropdown so a scoped reviewer is never offered a campaign they can't see anything in; an empty array means "chưa được phân công đợt chụp nào". */
+export interface MyReviewCampaign {
+  campaignId: string;
+  campaignName: string;
+}
+export const listMyReviewCampaigns = () => request<MyReviewCampaign[]>('/v1/review/my-campaigns');
 
 /**
  * "Người có quyền duyệt" (2026-09-22) — unrestricted REVIEWER access
@@ -1610,6 +1669,8 @@ export interface PrintBatch {
   failedCount: number;
   sentAt?: string | null;
   doneAt?: string | null;
+  /** Set/refreshed by "Xuất gói" (`exportPackage`) — when this CENTRALIZED batch was last packaged for print. */
+  lastExportedAt?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -1650,6 +1711,20 @@ export const updatePrintBatch = (id: string, input: UpdatePrintBatchInput) =>
   request<PrintBatch>(`${PRINT_BATCHES_PATH}/${id}`, { method: 'PATCH', body: JSON.stringify(input) });
 export const addItemsToPrintBatch = (id: string, itemIds: string[]) =>
   request<PrintBatch>(`${PRINT_BATCHES_PATH}/${id}/items`, { method: 'POST', body: JSON.stringify({ itemIds }) });
+/**
+ * `POST /v1/print/batches/:id/populate` — "Nạp ảnh đã duyệt": creates a
+ * print item for every APPROVED set in the batch's campaign that doesn't
+ * already have one, then attaches every such item (new or pre-existing,
+ * unassigned) to this batch. The server route already existed but was
+ * never called from the CMS (plan §4.1) — `CreateBatchModal` used to only
+ * create an empty DRAFT batch, so newly-approved photos never reached a
+ * batch on their own.
+ */
+export const populatePrintBatch = (id: string) =>
+  request<{ created: number; attached: number; skipped: Array<{ setId: string; reason: string }> }>(
+    `${PRINT_BATCHES_PATH}/${id}/populate`,
+    { method: 'POST' }
+  );
 export const removeItemFromPrintBatch = (id: string, itemId: string) =>
   request<{ removed: true }>(`${PRINT_BATCHES_PATH}/${id}/items/${itemId}`, { method: 'DELETE' });
 /** `POST /v1/print/batches/:id/items/remove {itemIds}` — bulk mirror of `removeItemFromPrintBatch` above, for the CMS's multi-select "Gỡ các mục đã chọn" action. */
@@ -1701,11 +1776,17 @@ export async function downloadPrintBatchPackage(id: string, itemIds?: string[]):
  * `POST /v1/print/batches/:id/package {itemIds?}` — the CENTRALIZED "Xuất
  * gói" action (Giai đoạn 4): same zip download as `downloadPrintBatchPackage`
  * above, but the `POST` twin that also stamps `exportedAt`/promotes
- * RENDERED→EXPORTED server-side. Omit/empty `itemIds` exports the whole
- * batch, sent as a JSON body (not query params) per the server's
+ * PENDING/RENDERED→EXPORTED server-side. Omit/empty `itemIds` exports the
+ * whole batch, sent as a JSON body (not query params) per the server's
  * `ExportPrintBatchDto`.
+ *
+ * `failedItemIds` comes off the `X-Print-Export-Failed-Item-Ids` response
+ * header (now in the server's CORS `exposedHeaders` — see `main.ts`) —
+ * items whose card photo couldn't be packaged (set no longer APPROVED, no
+ * current card variant, or a download failure) and so were NOT stamped as
+ * exported. Empty when every requested item made it into the zip.
  */
-export async function exportPrintBatchPackage(id: string, itemIds?: string[]): Promise<{ blob: Blob; filename: string }> {
+export async function exportPrintBatchPackage(id: string, itemIds?: string[]): Promise<{ blob: Blob; filename: string; failedItemIds: string[] }> {
   const res = await fetch(`${baseUrl()}${PRINT_BATCHES_PATH}/${id}/package`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
@@ -1717,7 +1798,12 @@ export async function exportPrintBatchPackage(id: string, itemIds?: string[]): P
   }
   const disposition = res.headers.get('Content-Disposition') ?? '';
   const match = /filename="([^"]+)"/.exec(disposition);
-  return { blob: await res.blob(), filename: match?.[1] ?? `${id}.zip` };
+  const failedHeader = res.headers.get('X-Print-Export-Failed-Item-Ids') ?? '';
+  const failedItemIds = failedHeader
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  return { blob: await res.blob(), filename: match?.[1] ?? `${id}.zip`, failedItemIds };
 }
 
 /** `POST /v1/print/batches/:id/complete` — CENTRALIZED "Hoàn tất đợt" (Giai đoạn 4): moves the batch to DONE once at least one item is EXPORTED/PRINTED. */
@@ -1730,6 +1816,12 @@ export const completePrintBatch = (id: string) =>
 // `downloadRosterImportTemplate` already establish for `CampaignSubjectImport`.
 
 export type PrintResultImportStatus = 'PROCESSING' | 'DONE' | 'FAILED';
+
+export interface PrintResultImportRowError {
+  rowNo: number;
+  subjectCode: string | null;
+  reason: string;
+}
 
 export interface PrintResultImport {
   id: string;
@@ -1745,6 +1837,8 @@ export interface PrintResultImport {
   errorReportUrl?: string | null;
   failureReason?: string | null;
   createdAt: string;
+  /** Rejected rows for this exact upload, inline — only present on the direct upload response, see the API's own doc comment on this field. */
+  errors?: PrintResultImportRowError[];
 }
 
 /** `POST /v1/print/batches/:id/result-imports` (multipart) — same `FormData`, no-manual-Content-Type pattern `importCampaignRoster` already uses. */
@@ -1804,6 +1898,8 @@ export interface PrintItem {
   printerId?: string | null;
   printedAt?: string | null;
   renderedAt?: string | null;
+  /** Set/refreshed by "Xuất gói" — when this item was last packaged for print. */
+  exportedAt?: string | null;
   errorMessage?: string | null;
   reprintOfItemId?: string | null;
   /** Computed at read time from missing fullName/className/faculty/variantId — never stored, see `PrintItemListItemDao`'s own doc comment. */
