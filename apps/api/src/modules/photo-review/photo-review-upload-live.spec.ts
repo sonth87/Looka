@@ -21,11 +21,15 @@ import {
   PhotoVariantKind,
   PhotoVariantStatus,
 } from './photo-review.constants';
+import { PHOTO_AI_PORT } from './application/ports/photo-ai.port';
+import { AiImageEditClient } from './services/ai-image-edit.client';
+import { PhotoAiAdapter } from './services/photo-ai.adapter';
 import { PhotoKindService } from './services/photo-kind.service';
 import { PhotoReviewSidecarService } from './services/photo-review-sidecar.service';
 import { PhotoReviewService } from './services/photo-review.service';
 import { ReviewAssignmentService } from './services/review-assignment.service';
 import { VariantUploadWorkerService } from './services/variant-upload-worker.service';
+import { WorkflowCatalogReadRepository } from '@app/modules/workflow/infrastructure/read/workflow-catalog.read-repository';
 
 // Unlike this module's sibling specs, this suite needs the REAL FS_BASE_URL/
 // FS_API_KEY (not just TEST_DATABASE_URL) to exercise a genuine
@@ -80,7 +84,13 @@ describeDb('photo-review uploadVariant/acceptVariant (live)', () => {
   let sidecar: {
     cardPhoto: jest.Mock;
     identitySimilarity: jest.Mock;
+  };
+  let aiImageEdit: {
     edit: jest.Mock;
+    health: jest.Mock;
+  };
+  let workflowCatalog: {
+    getVersionRef: jest.Mock;
   };
   const apiBaseUrl = 'http://localhost:3100';
 
@@ -114,12 +124,15 @@ describeDb('photo-review uploadVariant/acceptVariant (live)', () => {
         warnings: [],
       }),
       identitySimilarity: jest.fn().mockResolvedValue({ similarity: 0.92 }),
+    };
+    aiImageEdit = {
       edit: jest.fn().mockResolvedValue({
-        imageBase64: Buffer.from('fake-ai-bytes').toString('base64'),
+        imageBuffer: Buffer.from('fake-ai-bytes'),
         mimeType: 'image/jpeg',
-        width: 480,
-        height: 640,
+        seed: null,
+        durationMs: null,
       }),
+      health: jest.fn(),
     };
 
     const reviewAssignments = {
@@ -138,6 +151,14 @@ describeDb('photo-review uploadVariant/acceptVariant (live)', () => {
     };
     const domainEventDispatcher = {
       dispatch: jest.fn().mockResolvedValue(undefined),
+    };
+    // No campaign in this suite is workflow-pinned by default —
+    // `resolveAiProcessingSteps` should see "no version ref" and fall back
+    // to the pre-executor single `makeCardPhoto` call every existing
+    // assertion here already expects. One test below (the AI-pipeline
+    // executor test) overrides this per-call with `mockResolvedValueOnce`.
+    workflowCatalog = {
+      getVersionRef: jest.fn().mockResolvedValue(null),
     };
 
     const built = await Test.createTestingModule({
@@ -166,11 +187,14 @@ describeDb('photo-review uploadVariant/acceptVariant (live)', () => {
         PhotoKindService,
         { provide: FileStorageService, useValue: realFileStorage },
         { provide: PhotoReviewSidecarService, useValue: sidecar },
+        { provide: AiImageEditClient, useValue: aiImageEdit },
+        { provide: PHOTO_AI_PORT, useClass: PhotoAiAdapter },
         { provide: ConfigService, useValue: { get: () => 'test-api-key' } },
         { provide: ReviewAssignmentService, useValue: reviewAssignments },
         { provide: ReviewStatsService, useValue: reviewStats },
         { provide: TransactionContext, useValue: transactionContext },
         { provide: DomainEventDispatcher, useValue: domainEventDispatcher },
+        { provide: WorkflowCatalogReadRepository, useValue: workflowCatalog },
       ],
     }).compile();
 
@@ -199,7 +223,8 @@ describeDb('photo-review uploadVariant/acceptVariant (live)', () => {
     cleanup = { setIds: [], sessionIds: [] };
     sidecar.cardPhoto.mockClear();
     sidecar.identitySimilarity.mockClear();
-    sidecar.edit.mockClear();
+    aiImageEdit.edit.mockClear();
+    workflowCatalog.getVersionRef.mockClear();
   });
 
   afterEach(async () => {
@@ -684,6 +709,69 @@ describeDb('photo-review uploadVariant/acceptVariant (live)', () => {
       expect(accepted.id).toBe(aiVariant.id);
       const approved = await service.approve(setId, {}, null, apiBaseUrl);
       expect(approved.status).toBe(PhotoReviewSetStatus.APPROVED);
+    });
+  });
+
+  describe('reprocess() driven by a configured ai_pipeline_steps pipeline (2026-09-28 executor)', () => {
+    it("runs BOTH a CARD_CROP and an AI_EDIT_LIGHTING step in order (not just the single hardcoded card-crop) when the set's campaign is pinned to a workflow version with aiProcessing.enabled and those two steps configured", async () => {
+      const { setId, sessionId } = await seedUnlockedSetWithFrontPhoto(
+        PhotoReviewSetStatus.AUTO_FAILED,
+      );
+      cleanup.setIds.push(setId);
+      cleanup.sessionIds.push(sessionId);
+
+      // `resolveAiProcessingSteps` reads `campaigns.workflow_version_id` via
+      // real SQL (this module owns no `campaigns` entity — see
+      // `PhotoReviewService`'s own top doc comment) — needs a real row, even
+      // though `workflowCatalog.getVersionRef` (which reads the actual
+      // config behind that id) is mocked below.
+      const workflowVersionId = randomUUID();
+      const setRow: Array<{ campaign_id: string }> = await dataSource.query(
+        `SELECT campaign_id FROM subject_photo_sets WHERE id = $1`,
+        [setId],
+      );
+      const campaignId = setRow[0].campaign_id;
+      await dataSource.query(
+        `INSERT INTO campaigns (id, name, workflow_version_id) VALUES ($1, $2, $3)`,
+        [campaignId, 'zztest ai-pipeline campaign', workflowVersionId],
+      );
+      try {
+        workflowCatalog.getVersionRef.mockResolvedValueOnce({
+          workflowId: randomUUID(),
+          workflowCode: 'ZZTEST_WORKFLOW',
+          version: 1,
+          config: {
+            aiProcessing: {
+              enabled: true,
+              steps: [
+                { code: 'CARD_CROP', params: {} },
+                { code: 'AI_EDIT_LIGHTING', params: {} },
+              ],
+            },
+          },
+        });
+
+        const detail = await service.reprocess(setId, null, apiBaseUrl);
+
+        // Both steps actually dispatched, in order — proving this ran the
+        // configured 2-step pipeline rather than silently falling back to
+        // the old single `makeCardPhoto` call.
+        expect(sidecar.cardPhoto).toHaveBeenCalledTimes(1);
+        expect(aiImageEdit.edit).toHaveBeenCalledTimes(1);
+        expect(workflowCatalog.getVersionRef).toHaveBeenCalledWith(
+          workflowVersionId,
+        );
+        // AI_EDIT ran last — the final stored variant is `aiImageEdit`'s
+        // output, not `sidecar.cardPhoto`'s.
+        const currentVariant = detail.variants.find(
+          (v) => v.id === detail.currentCardVariantId,
+        );
+        expect(currentVariant?.status).toBe(PhotoVariantStatus.READY);
+      } finally {
+        await dataSource.query(`DELETE FROM campaigns WHERE id = $1`, [
+          campaignId,
+        ]);
+      }
     });
   });
 });

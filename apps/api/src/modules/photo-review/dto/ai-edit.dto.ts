@@ -1,7 +1,9 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
   IsIn,
+  IsInt,
   IsNotEmpty,
+  IsNumber,
   IsOptional,
   IsString,
   IsUUID,
@@ -55,4 +57,28 @@ export class AiEditDto {
   @IsOptional()
   @IsUUID()
   sourcePhotoId?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Mức bám prompt (1.0–8.0) gửi cho service AI edit. Bỏ trống → mặc định của app (2.0), không phải mặc định của service (3.0).',
+  })
+  @IsOptional()
+  @IsNumber()
+  cfg?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Số bước khử nhiễu (10–50) gửi cho service AI edit. Bỏ trống → mặc định của app (20), không phải mặc định của service (30).',
+  })
+  @IsOptional()
+  @IsInt()
+  steps?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Số ngẫu nhiên khởi tạo — truyền lại giá trị đã nhận trước đó (xem AiImageEditResult.seed) để tái tạo đúng kết quả cũ. Bỏ trống → service tự bốc ngẫu nhiên.',
+  })
+  @IsOptional()
+  @IsInt()
+  seed?: number;
 }

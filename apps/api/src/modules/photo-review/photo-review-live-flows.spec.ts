@@ -27,10 +27,14 @@ import {
   PhotoVariantKind,
   PhotoVariantStatus,
 } from './photo-review.constants';
+import { PHOTO_AI_PORT } from './application/ports/photo-ai.port';
+import { AiImageEditClient } from './services/ai-image-edit.client';
+import { PhotoAiAdapter } from './services/photo-ai.adapter';
 import { PhotoKindService } from './services/photo-kind.service';
 import { PhotoReviewSidecarService } from './services/photo-review-sidecar.service';
 import { PhotoReviewService } from './services/photo-review.service';
 import { ReviewAssignmentService } from './services/review-assignment.service';
+import { WorkflowCatalogReadRepository } from '@app/modules/workflow/infrastructure/read/workflow-catalog.read-repository';
 
 /**
  * Real-Postgres, real-`DomainEventDispatcher` coverage for the seam this
@@ -87,7 +91,10 @@ describeDb(
         background: jest.fn(),
         retouch: jest.fn(),
         identitySimilarity: jest.fn(),
+      };
+      const aiImageEdit = {
         edit: jest.fn(),
+        health: jest.fn(),
       };
       // Every call in this suite passes a null or a real-but-unassigned
       // actorUserId — never exercising the per-campaign assignment table
@@ -97,6 +104,11 @@ describeDb(
       const reviewAssignments = {
         assertInScope: jest.fn().mockResolvedValue(undefined),
         buildScopeFilter: jest.fn().mockResolvedValue(null),
+      };
+      // No campaign in this suite is workflow-pinned — see the same note in
+      // photo-review-upload-live.spec.ts.
+      const workflowCatalog = {
+        getVersionRef: jest.fn().mockResolvedValue(null),
       };
 
       const built = await Test.createTestingModule({
@@ -139,8 +151,11 @@ describeDb(
           ReviewStatsService,
           { provide: FileStorageService, useValue: fileStorage },
           { provide: PhotoReviewSidecarService, useValue: sidecar },
+          { provide: AiImageEditClient, useValue: aiImageEdit },
+          { provide: PHOTO_AI_PORT, useClass: PhotoAiAdapter },
           { provide: ConfigService, useValue: { get: () => 'test-api-key' } },
           { provide: ReviewAssignmentService, useValue: reviewAssignments },
+          { provide: WorkflowCatalogReadRepository, useValue: workflowCatalog },
           // `onSetApproved`/`onSetLeftApproved` are pure `manager`-driven (see
           // their own doc comments) — every OTHER constructor dep is
           // irrelevant here, same `undefined as never` convention
@@ -610,7 +625,7 @@ describeDb(
         cleanup.setIds.push(setId);
         cleanup.sessionIds.push(sessionId);
 
-        // `PhotoReviewSidecarService` is DI-overridden with a plain
+        // `AiImageEditClient` is DI-overridden with a plain
         // `{ edit: jest.fn(), ... }` object at construction (see beforeAll)
         // — `moduleRef.get()` types the return as the real class, whose
         // `edit` is a plain async method with no `.mockImplementation`, same
@@ -619,22 +634,21 @@ describeDb(
         // mock usage (see that file's own doc comment on this exact
         // trade-off) rather than fight `no-unnecessary-type-assertion` over
         // a cast TS considers redundant here.
-        const sidecar = moduleRef.get(PhotoReviewSidecarService);
+        const aiImageEdit = moduleRef.get(AiImageEditClient);
         // Long enough for discardVariant() below to land well before this
         // resolves — aiEdit() awaits this synchronously for the whole
         // duration (see that method's own doc comment), which is exactly the
         // "long async gap" the in-memory `variant` object is held across.
-        sidecar.edit.mockImplementation(
+        aiImageEdit.edit.mockImplementation(
           () =>
             new Promise((resolve) =>
               setTimeout(
                 () =>
                   resolve({
-                    imageBase64:
-                      Buffer.from('fake-ai-bytes').toString('base64'),
+                    imageBuffer: Buffer.from('fake-ai-bytes'),
                     mimeType: 'image/jpeg',
-                    width: 100,
-                    height: 100,
+                    seed: null,
+                    durationMs: null,
                   }),
                 300,
               ),

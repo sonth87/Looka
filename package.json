@@ -15,7 +15,6 @@
     "dev:app": "pnpm --filter @face/desktop dev",
     "dev:cms": "pnpm --filter @face/cms dev",
     "dev:api": "pnpm --filter @face/api start:dev",
-    "dev:ai": "services/python-ai/.venv/Scripts/python.exe -m uvicorn src.api.app:app --reload --port 8321 --app-dir services/python-ai",
     "build:app": "pnpm --filter @face/desktop build",
     "package:app": "pnpm --filter @face/desktop package",
     "package:app:mac": "pnpm --filter @face/desktop package:mac",

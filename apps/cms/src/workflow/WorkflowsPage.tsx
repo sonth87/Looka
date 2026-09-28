@@ -41,7 +41,7 @@ const DEFAULT_NEW_WORKFLOW_CONFIG: WorkflowConfig = {
     cardSpec: {
       size: '4x6',
       dpi: 300,
-      backgroundColor: '#FFFFFF',
+      backgroundColor: '#F37320',
       headHeightRatio: [0.5, 0.7],
       eyeLineRatio: [0.4, 0.5],
       retouch: { enabled: false },
