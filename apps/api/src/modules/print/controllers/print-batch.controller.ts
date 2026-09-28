@@ -17,11 +17,12 @@ import {
   Post,
   Query,
   Req,
+  Res,
   StreamableFile,
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
-import type { Request } from 'express';
+import type { Request, Response } from 'express';
 import { PrintBatchDetailDao, PrintBatchListItemDao } from '../dao';
 import {
   BatchItemsDto,
@@ -166,7 +167,7 @@ export class PrintBatchController {
   @Header('Content-Type', 'application/zip')
   @ApiOperation({
     summary:
-      'Tải lại zip (ảnh mặt trước/sau + manifest.csv) — CHỈ ĐỌC, không đóng dấu ngày xuất. Bỏ trống itemIds = cả đợt.',
+      'Tải lại zip (ảnh thẻ đã duyệt {msv}.jpg + danh-sach-in.xlsx) — CHỈ ĐỌC, không đóng dấu ngày xuất. Bỏ trống itemIds = cả đợt.',
   })
   async downloadPackage(
     @Param('id') id: string,
@@ -186,18 +187,26 @@ export class PrintBatchController {
   @Header('Content-Type', 'application/zip')
   @ApiOperation({
     summary:
-      '"Xuất gói" (CENTRALIZED) — tải zip VÀ đóng dấu exported_at, RENDERED→EXPORTED cho các item có trong gói. Bỏ trống itemIds = cả đợt.',
+      '"Xuất gói" (CENTRALIZED) — tải zip VÀ đóng dấu exported_at, PENDING/RENDERED→EXPORTED cho các item có trong gói. Bỏ trống itemIds = cả đợt.',
   })
   async exportPackage(
     @Param('id') id: string,
     @Body() dto: ExportPrintBatchDto,
     @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<StreamableFile> {
-    const { zip, filename } = await this.batchService.exportPackage(
-      id,
-      dto.itemIds,
-      req.user?.id ?? null,
-    );
+    const { zip, filename, failedItemIds } =
+      await this.batchService.exportPackage(
+        id,
+        dto.itemIds,
+        req.user?.id ?? null,
+      );
+    // Items whose image failed to download were NOT stamped as
+    // exported/"chờ in" (see `exportPackage`'s own doc comment) — surfaced
+    // as a header since this route's body is the zip itself, not JSON.
+    if (failedItemIds.length > 0) {
+      res.setHeader('X-Print-Export-Failed-Item-Ids', failedItemIds.join(','));
+    }
     return new StreamableFile(zip, {
       disposition: `attachment; filename="${filename}"`,
     });
@@ -216,9 +225,15 @@ export class PrintBatchController {
 
   @Post(':id/cancel')
   @RequirePermission('print-batch:write', 'Hủy đợt in')
-  @ApiOperation({ summary: 'Hủy đợt in (không hủy các item bên trong)' })
+  @ApiOperation({
+    summary:
+      'Hủy đợt in (cascade hủy item còn QUEUED trong hàng đợi máy in; item PRINTING/khác giữ nguyên)',
+  })
   @ApiResponseDecorator(PrintBatchDetailDao)
-  cancel(@Param('id') id: string): Promise<PrintBatchDetailDao> {
-    return this.batchService.cancel(id);
+  cancel(
+    @Param('id') id: string,
+    @Req() req: Request,
+  ): Promise<PrintBatchDetailDao> {
+    return this.batchService.cancel(id, req.user?.id ?? null);
   }
 }

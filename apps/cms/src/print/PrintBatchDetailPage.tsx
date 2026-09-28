@@ -27,6 +27,7 @@ import {
   listPrintItems,
   listPrinters,
   listPrintResultImports,
+  populatePrintBatch,
   previewCardTemplateUrl,
   previewPrintItemUrl,
   removeItemFromPrintBatch,
@@ -47,6 +48,7 @@ import {
   PRINT_ITEM_STATUS_BADGE_CLASS,
   PRINT_ITEM_STATUS_LABEL,
   formatDateTime,
+  printItemStatusLabel,
 } from './printFormat';
 
 /**
@@ -98,6 +100,11 @@ export function PrintBatchDetailPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [resultImports, setResultImports] = useState<PrintResultImport[]>([]);
   const [uploadResultOpen, setUploadResultOpen] = useState(false);
+  // Cleared on unmount only (not persisted) — shows the just-finished
+  // upload's inline `errors`/counts right in this panel, since a rejected
+  // row today is only otherwise visible by downloading `errorReportUrl`'s
+  // xlsx (2026-09-25 product ask: errors must be obvious immediately).
+  const [lastUploadResult, setLastUploadResult] = useState<PrintResultImport | null>(null);
 
   useEffect(() => {
     listCampaigns().then(setCampaigns).catch(() => {});
@@ -232,6 +239,7 @@ export function PrintBatchDetailPage() {
       <p className="text-xs text-gray-400 mb-4">
         Tạo lúc {formatDateTime(batch.createdAt)}
         {batch.sentAt ? ` · Gửi lúc ${formatDateTime(batch.sentAt)}` : ''}
+        {batch.lastExportedAt ? ` · Xuất gói lúc ${formatDateTime(batch.lastExportedAt)}` : ''}
         {batch.doneAt ? ` · Hoàn tất lúc ${formatDateTime(batch.doneAt)}` : ''}
         {' · Phôi mặc định: '}
         {defaultTemplate ? (
@@ -278,6 +286,26 @@ export function PrintBatchDetailPage() {
             + Thêm SV đã duyệt
           </button>
         )}
+        {canEdit && batch.campaignId && (
+          <button
+            type="button"
+            disabled={busy}
+            title="Tạo thẻ cho mọi hồ sơ đã duyệt trong campaign này chưa có thẻ, rồi thêm vào đợt in này"
+            onClick={() =>
+              void withBusy(async () => {
+                const result = await populatePrintBatch(batch.id);
+                setRenderResult(
+                  `Đã nạp ${result.attached} thẻ vào đợt in (tạo mới ${result.created}${result.skipped.length > 0 ? `, bỏ qua ${result.skipped.length} hồ sơ` : ''}).`
+                );
+                setBatch(await getPrintBatch(batch.id));
+                reload();
+              })
+            }
+            className="px-3 py-2 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 text-sm font-medium disabled:opacity-50"
+          >
+            Nạp ảnh đã duyệt
+          </button>
+        )}
         <button
           type="button"
           disabled={busy || totalItemCount === 0}
@@ -314,13 +342,22 @@ export function PrintBatchDetailPage() {
             disabled={busy || totalItemCount === 0}
             onClick={() =>
               void withBusy(async () => {
-                const { blob, filename } = await exportPrintBatchPackage(batch.id, selectedIds);
+                const { blob, filename, failedItemIds } = await exportPrintBatchPackage(batch.id, selectedIds);
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
                 a.download = filename;
                 a.click();
                 URL.revokeObjectURL(url);
+                // Items with no approved card photo (or a download failure)
+                // were left out of the zip and NOT moved to "Đã xuất, chờ
+                // in" — surfaced here since the download itself always
+                // "succeeds" from the browser's point of view.
+                setRenderResult(
+                  failedItemIds.length > 0
+                    ? `${failedItemIds.length} sinh viên không xuất được ảnh (chưa có ảnh thẻ đã duyệt hoặc tải ảnh lỗi) — chưa chuyển sang Chờ in.`
+                    : null
+                );
                 reload();
               })
             }
@@ -458,7 +495,7 @@ export function PrintBatchDetailPage() {
           <option value="">Tất cả trạng thái</option>
           {(Object.keys(PRINT_ITEM_STATUS_LABEL) as PrintItemStatus[]).map((s) => (
             <option key={s} value={s}>
-              {PRINT_ITEM_STATUS_LABEL[s]}
+              {printItemStatusLabel(s, batch.mode)}
             </option>
           ))}
         </select>
@@ -501,9 +538,23 @@ export function PrintBatchDetailPage() {
                 <td className="px-3 py-2 text-gray-700">{item.fullName ?? '—'}</td>
                 <td className="px-3 py-2 text-gray-500">{item.className ?? '—'}</td>
                 <td className="px-3 py-2">
-                  <span className={`px-2 py-0.5 rounded-full border text-xs font-medium ${PRINT_ITEM_STATUS_BADGE_CLASS[item.status]}`}>
-                    {PRINT_ITEM_STATUS_LABEL[item.status]}
+                  <span
+                    className={`px-2 py-0.5 rounded-full border text-xs font-medium ${PRINT_ITEM_STATUS_BADGE_CLASS[item.status]}`}
+                    title={item.exportedAt ? `Xuất gói lúc ${formatDateTime(item.exportedAt)}` : undefined}
+                  >
+                    {printItemStatusLabel(item.status, batch.mode)}
                   </span>
+                  {/* A print failure reported via the result-file upload sends the item back to
+                      its real prior status — RENDERED or PENDING, see the backend's own
+                      `resolvePriorStatus` doc comment — with `errorMessage` set (never `FAILED`).
+                      Both statuses need this line, or "In lỗi" looks identical to "never exported
+                      yet" for a PENDING item. */}
+                  {(item.status === 'RENDERED' || item.status === 'PENDING') && item.errorMessage && (
+                    <div className="mt-1 text-xs text-red-600">In lỗi: {item.errorMessage}</div>
+                  )}
+                  {item.status === 'FAILED' && item.errorMessage && (
+                    <div className="mt-1 text-xs text-red-600">{item.errorMessage}</div>
+                  )}
                 </td>
                 <td className="px-3 py-2 text-amber-600 text-xs">{item.missingFields.length > 0 ? item.missingFields.join(', ') : '—'}</td>
                 <td className="px-3 py-2 text-right whitespace-nowrap">
@@ -584,6 +635,8 @@ export function PrintBatchDetailPage() {
             Tải lên kết quả in
           </button>
         </div>
+
+        {lastUploadResult && <UploadResultBanner result={lastUploadResult} onDismiss={() => setLastUploadResult(null)} />}
 
         {resultImports.length === 0 && <p className="text-sm text-gray-500">Chưa có lần upload kết quả in nào.</p>}
 
@@ -674,8 +727,9 @@ export function PrintBatchDetailPage() {
         <UploadPrintResultModal
           batchId={batch.id}
           onClose={() => setUploadResultOpen(false)}
-          onUploaded={() => {
+          onUploaded={(result) => {
             setUploadResultOpen(false);
+            setLastUploadResult(result);
             reloadResultImports();
             reload();
           }}
@@ -1104,7 +1158,7 @@ function UploadPrintResultModal({
 }: {
   batchId: string;
   onClose: () => void;
-  onUploaded: () => void;
+  onUploaded: (result: PrintResultImport) => void;
 }) {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -1129,8 +1183,8 @@ function UploadPrintResultModal({
     setUploading(true);
     setUploadError(null);
     try {
-      await uploadPrintResultFile(batchId, selectedFile);
-      onUploaded();
+      const result = await uploadPrintResultFile(batchId, selectedFile);
+      onUploaded(result);
     } catch (err) {
       setUploadError(err instanceof ApiError ? err.message : String(err));
     } finally {
@@ -1173,5 +1227,55 @@ function UploadPrintResultModal({
         </div>
       </div>
     </ModalShell>
+  );
+}
+
+/**
+ * Inline summary of the upload this page just made — 2026-09-25 product ask:
+ * a rejected row must be obvious right away, not only via `errorReportUrl`'s
+ * downloadable xlsx (that link stays available in the table below for
+ * revisiting an OLDER upload; this banner is only for the one that JUST
+ * finished, since `PrintResultImport.errors` is response-only — see the
+ * API's own doc comment — and isn't there on a reload). Same
+ * red/emerald `bg-*-50 border-*-200 text-*-700` alert box this page's own
+ * `uploadError` div already uses.
+ */
+function UploadResultBanner({ result, onDismiss }: { result: PrintResultImport; onDismiss: () => void }) {
+  const errors = result.errors ?? [];
+  const applied = result.printedRows + result.failedRows;
+  const hasErrors = errors.length > 0;
+  const allRejected = hasErrors && applied === 0 && result.totalRows > 0;
+  const shown = errors.slice(0, 20);
+
+  return (
+    <div className={`p-3 rounded-lg border text-sm ${hasErrors ? 'bg-red-50 border-red-200 text-red-700' : 'bg-emerald-50 border-emerald-200 text-emerald-700'}`}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex-1 min-w-0">
+          <p className="font-semibold">
+            {allRejected
+              ? `Không có dòng nào được ghi nhận — cả ${result.totalRows} dòng đều bị từ chối`
+              : hasErrors
+                ? `${errors.length} dòng không được ghi nhận`
+                : `Đã ghi nhận thành công ${applied} dòng`}
+          </p>
+          <p className="mt-0.5">
+            Đã ghi nhận {applied} / {result.totalRows} dòng ({result.printedRows} đã in, {result.failedRows} lỗi).
+          </p>
+          {hasErrors && (
+            <ul className="mt-1.5 space-y-0.5 list-disc list-inside">
+              {shown.map((e, idx) => (
+                <li key={idx}>
+                  {e.subjectCode ?? `dòng ${e.rowNo}`} — {e.reason}
+                </li>
+              ))}
+            </ul>
+          )}
+          {errors.length > shown.length && <p className="mt-1">và {errors.length - shown.length} dòng khác — xem đầy đủ trong "Xem lỗi" bên dưới.</p>}
+        </div>
+        <button type="button" onClick={onDismiss} className="shrink-0 text-xs opacity-60 hover:opacity-100" aria-label="Đóng thông báo">
+          ✕
+        </button>
+      </div>
+    </div>
   );
 }

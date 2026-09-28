@@ -690,6 +690,23 @@ function markFrameReadyWhenPlaying(video: HTMLVideoElement, onReady: () => void)
 const TETHERED_DEVICE_ID = 'tethered:gphoto2';
 
 /**
+ * Resolves whether a step's role is effectively driven by the tethered Canon
+ * right now. In SEQUENTIAL mode a step's raw `role` (LEFT/RIGHT/UP/DOWN) is
+ * never rewritten onto CENTER by any round-planning fallback — only
+ * SIMULTANEOUS mode's `buildRoundPlan` does that — but the role-switch effect
+ * further down (keyed on `activeGuidance.stepType`) already keeps the single
+ * physical camera on CENTER's own device for every role that has no camera of
+ * its own mapped (FRONT/UP/DOWN always, LEFT/RIGHT whenever nothing is mapped
+ * there). Every "is this step's photo supposed to come from the tethered
+ * Canon" check must fall back to CENTER's own mapping the same way, or it
+ * silently misses every step after the first whenever CENTER is the only
+ * mapped role (2026-09-25 fix, confirmed audit finding — second Enter press
+ * onward did nothing: no capture, no error, no log).
+ */
+const isRoleEffectivelyTethered = (mapping: Record<string, string>, role: CameraRole): boolean =>
+  (mapping[role] ?? mapping.CENTER) === TETHERED_DEVICE_ID;
+
+/**
  * Fires a REAL shutter release via gphoto2 (main process, seconds not
  * milliseconds — see `tetheredCamera.ts`'s own doc comment) and returns the
  * resulting photo as a data URL, or `null` on any failure. The one place
@@ -1899,7 +1916,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     const frame = framesForWorkflow(activeWorkflowRef.current).find((f) => f.stepId === stepId);
     if (!frame) return false;
 
-    if (cameraRoleMappingRef.current[frame.role] === TETHERED_DEVICE_ID) {
+    if (isRoleEffectivelyTethered(cameraRoleMappingRef.current, frame.role)) {
       // 2026-09-24 fix (confirmed audit finding): a real gphoto2 shutter
       // release takes seconds — long enough for the operator to cancel or
       // restart the session, or for it to finish and the next student's
@@ -2691,7 +2708,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
             ? framesForWorkflow(activeWorkflowRef.current).find((f) => f.stepId === liveStepId)
             : null;
           const liveRole = liveFrame?.role ?? 'CENTER';
-          if (cameraRoleMappingRef.current[liveRole] === TETHERED_DEVICE_ID) {
+          if (isRoleEffectivelyTethered(cameraRoleMappingRef.current, liveRole)) {
             return null;
           }
           if (cameraServiceRef.current) {
@@ -2762,7 +2779,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           if (state.stepId) {
             const frame = framesForWorkflow(activeWorkflowRef.current).find((f) => f.stepId === state.stepId);
             const roleIsTethered =
-              !!frame && cameraRoleMappingRef.current[frame.role] === TETHERED_DEVICE_ID;
+              !!frame && isRoleEffectivelyTethered(cameraRoleMappingRef.current, frame.role);
             const nonCenterSideFrameInSimultaneous =
               simultaneousCaptureRef.current && !!frame && frame.role !== 'CENTER';
             liveEngine.setExternalCaptureOnly(roleIsTethered || nonCenterSideFrameInSimultaneous);
@@ -3334,7 +3351,18 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     }
   };
 
-  const handleSelectCamera = async (devId: string) => {
+  /**
+   * `role` (2026-09-25 fix, confirmed audit finding): defaults to 'CENTER'
+   * for the manual device picker and the simultaneous-mode setup call, which
+   * are both genuinely about CENTER's own stream. The sequential-mode
+   * role-switch effect below passes the actual role (LEFT/RIGHT) it is
+   * switching for — the race-guard below used to always re-check CENTER's
+   * mapping regardless of which role this call was actually for, so it threw
+   * away a just-started LEFT/RIGHT webcam stream any time CENTER happened to
+   * be the tethered Canon, even though nothing about THAT role's mapping had
+   * changed.
+   */
+  const handleSelectCamera = async (devId: string, role: CameraRole = 'CENTER') => {
     setSelectedDeviceId(devId);
     // 2026-09-24 fix (confirmed audit finding): bump the shared generation
     // counter for BOTH branches below, before any `await` — this is what
@@ -3375,7 +3403,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         // stream here would revive a webcam feed CENTER should no longer be
         // showing. Re-check both the generation and the live role mapping
         // before publishing.
-        if (myGen !== cameraOpGenRef.current || cameraRoleMappingRef.current?.CENTER === TETHERED_DEVICE_ID) {
+        if (myGen !== cameraOpGenRef.current || cameraRoleMappingRef.current?.[role] === TETHERED_DEVICE_ID) {
           st.getTracks().forEach((track) => track.stop());
           setIsCameraLoading(false);
           return;
@@ -3441,7 +3469,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     // tethered camera has the same "wrong/no camera for the engine's
     // built-in provider" problem either way).
     const frame = framesForWorkflow(activeWorkflowRef.current).find((f) => f.stepId === stepId) ?? null;
-    const isTetheredRetake = !!frame && cameraRoleMappingRef.current[frame.role] === TETHERED_DEVICE_ID;
+    const isTetheredRetake = !!frame && isRoleEffectivelyTethered(cameraRoleMappingRef.current, frame.role);
     const isSideFrameRetake = simultaneousCaptureRef.current && !!frame && frame.role !== 'CENTER';
 
     const started = await engine.retakeStep(stepId, {
@@ -3554,6 +3582,19 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         if (preparedWorkflow) {
           setActiveWorkflow(preparedWorkflow);
           await activeEngine.startSession(preparedWorkflow);
+          // 2026-09-25 fix (confirmed audit finding): re-arm the started
+          // flag now that the new session is actually RUNNING — this
+          // function clears it at the top (same optimistic-then-revert shape
+          // as `handleStartWorkflow`) but, unlike `handleStartWorkflow`,
+          // never set it back on success. The only other way to set it back
+          // is the "Bắt đầu" button, which needs a non-null `stream` and
+          // therefore never renders for a tethered CENTER — so every
+          // "Chụp lại toàn bộ" from the pre-save review left Enter/Space (and
+          // the sidebar CTA) permanently dead for the rest of that kiosk
+          // session, with the on-screen shutter button (never gated on this
+          // flag) the only thing that still worked.
+          setIsWorkflowStarted(true);
+          isWorkflowStartedRef.current = true;
         }
       } else {
         setActiveWorkflow(workflow);
@@ -3638,6 +3679,31 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   const centerIsTethered = cameraRoleMapping.CENTER === TETHERED_DEVICE_ID;
 
   /**
+   * Which role the single shared `stream`/`cameraServiceRef` camera is
+   * supposed to be showing right now. In SIMULTANEOUS mode that shared
+   * stream always represents CENTER (side frames get their own always-open
+   * streams via `openFrameStreams`/`frameVideoElsRef`). In SEQUENTIAL mode
+   * the role-switch effect below repoints this same shared stream at a
+   * LEFT/RIGHT step's own mapped webcam so the subject doesn't have to turn
+   * to face a single camera — see that effect's own doc comment.
+   *
+   * Needed so code that reacts to `centerIsTethered` (the teardown effect
+   * right below, and `handleSelectCamera`'s own race-guard) does not treat
+   * EVERY active stream as if it were CENTER's: before this fix, a
+   * sequential LEFT/RIGHT step's real webcam stream was torn down the
+   * instant it started, any time CENTER happened to be the tethered Canon —
+   * because both of those checks only asked "is CENTER tethered", never
+   * "is the stream we're about to touch actually CENTER's" (2026-09-25 fix,
+   * confirmed audit finding).
+   */
+  const currentStreamRole: CameraRole =
+    !simultaneousCapture && activeGuidance.stepType === 'LEFT'
+      ? 'LEFT'
+      : !simultaneousCapture && activeGuidance.stepType === 'RIGHT'
+      ? 'RIGHT'
+      : 'CENTER';
+
+  /**
    * Corrective half of the `startLiveMode` tethered-CENTER fix above
    * (2026-09-23, same field report — real hardware showed a live webcam
    * feed with active face-detection for a tethered CENTER session). The
@@ -3661,6 +3727,15 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    */
   useEffect(() => {
     if (!centerIsTethered) return;
+    // 2026-09-25 fix (confirmed audit finding): only tear down the shared
+    // stream when it is actually supposed to be CENTER's right now. A
+    // sequential LEFT/RIGHT step legitimately repoints this same
+    // `stream`/`cameraServiceRef` at its own mapped webcam (see the
+    // role-switch effect below) — this effect used to kill that webcam the
+    // instant it started, any time CENTER itself was the tethered Canon,
+    // which silently broke face-detection (and therefore capture) on every
+    // sequential side step in a mixed Canon+webcam setup.
+    if (currentStreamRole !== 'CENTER') return;
     // 2026-09-24 fix (confirmed audit finding): bump the shared generation
     // counter too, so a webcam `start()` that is still in flight right now
     // (its `.stop()` below cannot cancel it — see `cameraOpGenRef`'s own doc
@@ -3678,7 +3753,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     // insurance), `stream` changing re-runs this effect and tears it down
     // again immediately, rather than leaving it up for the rest of the
     // session.
-  }, [centerIsTethered, stream]);
+  }, [centerIsTethered, stream, currentStreamRole]);
 
   /**
    * Periodic still preview for whichever frame(s) the tethered Canon is
@@ -4829,8 +4904,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    */
   useEffect(() => {
     if (simultaneousCapture) return;
-    const role =
-      activeGuidance.stepType === 'LEFT' ? 'LEFT' : activeGuidance.stepType === 'RIGHT' ? 'RIGHT' : 'CENTER';
+    const role = currentStreamRole;
     const mappedDeviceId = cameraRoleMapping[role];
     if (!mappedDeviceId) return;
     if (mappedDeviceId === selectedDeviceId) return;
@@ -4842,9 +4916,14 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     // CENTER-role step even though the Canon actually took the photo.
     if (mappedDeviceId !== TETHERED_DEVICE_ID && !devices.some((d) => d.id === mappedDeviceId)) return; // mapped camera not plugged in right now
 
-    void handleSelectCamera(mappedDeviceId);
+    // 2026-09-25 fix (confirmed audit finding): pass the role this switch is
+    // actually for — `handleSelectCamera`'s own race-guard re-checks THIS
+    // role's mapping (not always CENTER's), so a LEFT/RIGHT webcam started
+    // here is no longer discarded just because CENTER itself is the tethered
+    // Canon.
+    void handleSelectCamera(mappedDeviceId, role);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [simultaneousCapture, activeGuidance.stepType, activeGuidance.currentStepIndex, cameraRoleMapping]);
+  }, [simultaneousCapture, activeGuidance.stepType, activeGuidance.currentStepIndex, cameraRoleMapping, currentStreamRole]);
 
   // Annotated on the callback, not just on stepsList: an object literal returned
   // from an unannotated .map() is checked for assignability only, so a misspelt
@@ -5070,6 +5149,13 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   // swallowing the event before it reaches window's bubble listeners.
   useEffect(() => {
     function onKeyDownCapture(e: KeyboardEvent) {
+      // 2026-09-25 fix (confirmed audit finding, PII): only log Enter/Space,
+      // never the raw key value — this listener sees every keystroke typed
+      // into the hidden CCCD/student-code scanner input too, and logging
+      // each of those digits verbatim would put that PII in the console (and
+      // potentially in a persisted log, if this diagnostic's level is ever
+      // changed to reach one).
+      if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
       console.log(`[TEMP-KEY-CAPTURE] key=${JSON.stringify(e.key)} defaultPrevented=${e.defaultPrevented}`);
     }
     window.addEventListener('keydown', onKeyDownCapture, { capture: true });
@@ -5077,8 +5163,13 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   }, []);
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
-      console.log(`[TEMP-KEY-RAW] key=${JSON.stringify(e.key)} repeat=${e.repeat} activeElementTag=${document.activeElement?.tagName}`);
+      // 2026-09-25 fix (confirmed audit finding, PII): the non-Enter/Space
+      // early return now runs BEFORE this log, not after — this listener
+      // also sees every keystroke typed into the hidden CCCD/student-code
+      // scanner input, and logging each of those characters verbatim would
+      // put that PII in the console.
       if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
+      console.log(`[TEMP-KEY-RAW] key=${JSON.stringify(e.key)} repeat=${e.repeat} activeElementTag=${document.activeElement?.tagName}`);
       // Auto-repeat while held must never re-fire a capture per tick.
       if (e.repeat) return;
 
@@ -5103,15 +5194,26 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         }
       }
 
+      // 2026-09-25 fix (confirmed audit finding): follows the CURRENT STEP's
+      // own effective role, not just whether CENTER is tethered —
+      // `centerIsTethered` stays true for the whole session once CENTER is
+      // the Canon, so it used to also bypass this check (and the
+      // face-detected check below) for a LATER step that resolves to a real
+      // LEFT/RIGHT webcam. That step's capture never actually routes through
+      // the tethered Canon path, so bypassing its face-readiness gate just
+      // let every guard pass and then silently fire nothing (no live webcam
+      // frames were ever wired up for it either, until the stream-teardown
+      // fix above) — this is the "second Enter press does nothing" bug.
+      const currentStepIsTethered = isRoleEffectivelyTethered(cameraRoleMappingRef.current, currentStreamRole);
       // 2026-09-24 fix (confirmed audit finding): AUTO/MANUAL(gesture) both
       // depend on live webcam frames (`processFrame`/the gesture loop), which
-      // never arrive while CENTER is the tethered Canon — so without this
-      // exemption Enter/Space had no way to fire that first Canon shot in
+      // never arrive while the current step is the tethered Canon — so
+      // without this exemption Enter/Space had no way to fire that shot in
       // either mode, same reasoning as the ShutterButton/sidebar CTA
       // exemptions in DesktopCaptureView.tsx.
-      if (effectiveTriggerConfig.mode !== 'OFF' && !centerIsTethered) {
-        console.log(`[TEMP-KEY] blocked: trigger mode=${effectiveTriggerConfig.mode}, centerIsTethered=${centerIsTethered}`);
-        return; // only the manual-shutter trigger mode (or a tethered CENTER) has anything to fire manually
+      if (effectiveTriggerConfig.mode !== 'OFF' && !currentStepIsTethered) {
+        console.log(`[TEMP-KEY] blocked: trigger mode=${effectiveTriggerConfig.mode}, currentStepIsTethered=${currentStepIsTethered}`);
+        return; // only the manual-shutter trigger mode (or a tethered current step) has anything to fire manually
       }
       if (!isWorkflowStartedRef.current) {
         console.log('[TEMP-KEY] blocked: workflow not started');
@@ -5130,18 +5232,19 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         return; // re-entrancy guard — see `shutterBusy`'s own doc comment
       }
 
-      // `centerIsTethered` (2026-09-22) bypasses the face-detected leg —
-      // see that value's own computation/doc comment below, same reasoning
-      // as the on-screen ShutterButton's identical bypass.
+      // `currentStepIsTethered` (2026-09-25 fix, see its own comment above;
+      // was `centerIsTethered` before this fix) bypasses the face-detected
+      // leg — same reasoning as the on-screen ShutterButton's identical
+      // bypass, but scoped to whichever step is actually current.
       const faceReady =
-        (centerIsTethered ||
+        (currentStepIsTethered ||
           (faceState?.detected === true &&
             faceState?.presence === 'SINGLE_FACE' &&
             faceState?.quality?.accepted === true)) &&
         (!multiFrameProp || multiFrameProp.allSideFramesReady);
       if (!faceReady) {
         console.log(
-          `[TEMP-KEY] blocked: not faceReady — centerIsTethered=${centerIsTethered}, faceState.detected=${faceState?.detected}, presence=${faceState?.presence}, quality.accepted=${faceState?.quality?.accepted}, allSideFramesReady=${multiFrameProp?.allSideFramesReady}`
+          `[TEMP-KEY] blocked: not faceReady — currentStepIsTethered=${currentStepIsTethered}, faceState.detected=${faceState?.detected}, presence=${faceState?.presence}, quality.accepted=${faceState?.quality?.accepted}, allSideFramesReady=${multiFrameProp?.allSideFramesReady}`
         );
         return;
       }
@@ -5163,7 +5266,8 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     showReviewModal,
     thankYouStudent,
     handleShutterCapture,
-    centerIsTethered,
+    currentStreamRole,
+    cameraRoleMapping,
     shutterBusy,
   ]);
 

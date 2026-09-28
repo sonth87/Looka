@@ -1,12 +1,20 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
-import { DataSource, In, Repository } from 'typeorm';
+import {
+  DataSource,
+  DeepPartial,
+  EntityManager,
+  In,
+  QueryFailedError,
+  Repository,
+} from 'typeorm';
 import { Pagination } from '@app/shared/http/pagination';
 import { CardTemplateService } from '@app/modules/card-template/services/card-template.service';
 import { CardTemplateRenderService } from '@app/modules/card-template/services/card-template-render.service';
@@ -43,6 +51,23 @@ interface CandidateSetRow {
   date_of_birth: Date | string | null;
   card_valid_until: Date | string | null;
 }
+
+/** Postgres SQLSTATE for a unique-violation — see `isActiveSetConstraintViolation`'s own doc comment. */
+const UNIQUE_VIOLATION_CODE = '23505';
+
+/**
+ * `UQ_print_items_set_id_active` (`1818000000000-Print.ts`'s own top
+ * comment) — the partial unique index on `print_items(set_id)` excluding
+ * CANCELLED/FAILED/REPRINT_REQUESTED. `onSetApproved` below relies on this
+ * as its concurrency backstop (task brief rule 4) rather than an extra
+ * migration: it already enforces "at most one active item per set" at the
+ * DB level, so a lost create-race just needs to be caught and treated as
+ * "someone else already created it," not prevented up front.
+ */
+const ACTIVE_SET_ID_CONSTRAINT = 'UQ_print_items_set_id_active';
+
+/** Same active/inactive split `PRINT_ITEM_INACTIVE_STATUSES` documents — inlined as a literal SQL fragment (matching `bulkCreate`'s own existing `NOT EXISTS` subquery style) rather than string-built from the constant array, so the SQL stays grep-able. */
+const ACTIVE_STATUS_FILTER = `status NOT IN ('CANCELLED', 'FAILED', 'REPRINT_REQUESTED')`;
 
 /**
  * Core lifecycle for `print_items` — plan §2.5. Plain controller→service→
@@ -109,7 +134,7 @@ export class PrintItemService {
         `CASE i.status
            WHEN 'PENDING' THEN 0 WHEN 'RENDERED' THEN 0 WHEN 'FAILED' THEN 0
            WHEN 'REPRINT_REQUESTED' THEN 0 WHEN 'CANCELLED' THEN 0
-           WHEN 'QUEUED' THEN 1 WHEN 'PRINTING' THEN 1
+           WHEN 'QUEUED' THEN 1 WHEN 'PRINTING' THEN 1 WHEN 'EXPORTED' THEN 1
            WHEN 'PRINTED' THEN 2 ELSE 3 END`,
         'status_priority',
       );
@@ -273,9 +298,15 @@ export class PrintItemService {
         item.status = 'CANCELLED';
         toStatus = 'CANCELLED';
       } else if (dto.status === 'PRINTED') {
-        await this.markPrintedManually(item, actorUserId);
-        toStatus = 'PRINTED';
-        message = 'Xác nhận đã in (thao tác tay)';
+        // Idempotent, same reasoning as `statusCallback`'s own guard — this
+        // PATCH has no status precondition, so a double-click/retry on an
+        // already-PRINTED item must not decrement stock or count stats a
+        // second time for one physical card.
+        if (item.status !== 'PRINTED') {
+          await this.markPrintedManually(item, actorUserId);
+          toStatus = 'PRINTED';
+          message = 'Xác nhận đã in (thao tác tay)';
+        }
       } else {
         throw new BadRequestException(
           'Chỉ có thể chuyển sang CANCELLED hoặc PRINTED qua route này',
@@ -307,6 +338,33 @@ export class PrintItemService {
       item.renderedBackFsFileId = null;
       item.renderedAt = null;
     }
+  }
+
+  /**
+   * Feature 6 (`campaign_subjects.printedAt`'s own doc comment): "set... when
+   * a human confirms this subject's card actually printed". `PrintResult
+   * ImportService` already wires this for the CENTRALIZED xlsx-upload
+   * confirmation; this is the SAME guarded `UPDATE` (COALESCE so a re-print
+   * never clobbers an earlier timestamp, `status = 'VALID'` so a removed/
+   * superseded roster row is left alone), just for one item instead of a
+   * per-campaign batch — reused by both OTHER paths that confirm a card
+   * printed (`markPrintedManually` below and `statusCallback`'s PRINTED
+   * branch), which previously left this column permanently null and made
+   * `roster-group-stats.service.ts`'s "đã in" count silently blind to every
+   * DIRECT-mode agent callback and every manual "Xác nhận đã in" PATCH —
+   * only a CENTRALIZED result-upload ever moved that number.
+   */
+  private async stampRosterPrinted(
+    manager: EntityManager,
+    item: PrintItem,
+    now: Date,
+  ): Promise<void> {
+    await manager.query(
+      `UPDATE campaign_subjects
+          SET printed_at = COALESCE(printed_at, $3), printed_batch_id = $4, updated_at = now()
+        WHERE campaign_id = $1 AND subject_code = $2 AND status = 'VALID'`,
+      [item.campaignId, item.subjectCode, now, item.batchId ?? null],
+    );
   }
 
   /**
@@ -357,6 +415,7 @@ export class PrintItemService {
           1,
         );
       }
+      await this.stampRosterPrinted(manager, item, now);
     });
   }
 
@@ -417,14 +476,25 @@ export class PrintItemService {
     const templateId = await this.resolveTemplateId(item, batch);
     const template = await this.templateService.loadTemplateOrFail(templateId);
 
-    const setRows: Array<{ current_card_variant_id: string | null }> =
-      await this.dataSource.query(
-        `SELECT current_card_variant_id FROM subject_photo_sets WHERE id = $1`,
-        [item.setId],
-      );
+    const setRows: Array<{
+      current_card_variant_id: string | null;
+      status: string;
+    }> = await this.dataSource.query(
+      `SELECT current_card_variant_id, status FROM subject_photo_sets WHERE id = $1`,
+      [item.setId],
+    );
     if (setRows.length === 0) {
       throw new NotFoundException(
         'Không tìm thấy hồ sơ ảnh nguồn của item này',
+      );
+    }
+    // The photo may have been rejected, swapped, or retaken since this
+    // print item was created (bulkCreate only checks APPROVED at creation
+    // time) — render() must re-check right before baking the photo into a
+    // printable card, or a rejected/unreviewed photo could get printed.
+    if (setRows[0].status !== 'APPROVED') {
+      throw new ConflictException(
+        `Hồ sơ ảnh nguồn đang ở trạng thái ${setRows[0].status}, không còn APPROVED — không thể render thẻ in`,
       );
     }
     const freshVariantId = setRows[0].current_card_variant_id ?? null;
@@ -629,6 +699,17 @@ export class PrintItemService {
         'Item đã hủy, agent không thể cập nhật trạng thái',
       );
     }
+    // Ownership check — `PrinterAgentGuard` only authenticates the token,
+    // it deliberately does NOT compare `:id` route params against the
+    // caller (see the guard's own doc comment); without this, ANY printer's
+    // agent token could report status for ANY item in the system, in any
+    // campaign or batch. `item.printerId` is only ever set by `send()`
+    // (DIRECT queueing, stamped with `batch.printerId`) or by a previous
+    // call to this same method, so by the time an item is reachable through
+    // the agent flow it is already stamped with the printer that owns it.
+    if (item.printerId !== printer.id) {
+      throw new ForbiddenException('Item không thuộc máy in này');
+    }
     // Idempotency for an at-least-once HTTP callback (2026-09-16 database
     // audit, §3.1): the print-agent retries after a lost response the same
     // way any webhook consumer must be assumed to. Without this, a retried
@@ -672,6 +753,7 @@ export class PrintItemService {
             1,
           );
         }
+        await this.stampRosterPrinted(manager, item, now);
       } else {
         item.status = 'FAILED';
         item.errorMessage = dto.message ?? null;
@@ -743,6 +825,13 @@ export class PrintItemService {
       }
     }
 
+    // Excluding sets that already hold an active print item must happen
+    // INSIDE this query, before `LIMIT` — otherwise the first
+    // `MAX_BULK_ITEMS` sets by `subject_code` are selected first and only
+    // filtered afterwards, so once those sets all have items, every later
+    // call re-selects that exact same page, skips it all as
+    // ALREADY_HAS_ACTIVE_ITEM, and reports `created: 0` forever — sets past
+    // that first page can never get a print item.
     const candidates: CandidateSetRow[] = await this.dataSource.query(
       `SELECT sps.id, sps.campaign_id, sps.subject_code, sps.subject_name,
               COALESCE(sps.class_name, cs.class_name) AS class_name,
@@ -753,60 +842,48 @@ export class PrintItemService {
          LEFT JOIN campaign_subjects cs
            ON cs.campaign_id = sps.campaign_id AND cs.subject_code = sps.subject_code AND cs.status = 'VALID'
         WHERE ${where}
+          AND NOT EXISTS (
+            SELECT 1 FROM print_items pi
+             WHERE pi.set_id = sps.id
+               AND pi.status NOT IN ('CANCELLED', 'FAILED', 'REPRINT_REQUESTED')
+          )
         ORDER BY sps.subject_code
         LIMIT ${MAX_BULK_ITEMS}`,
       params,
     );
 
-    const existingRows: Array<{ set_id: string }> = candidates.length
-      ? await this.dataSource.query(
-          `SELECT set_id FROM print_items WHERE set_id = ANY($1) AND status NOT IN ('CANCELLED', 'FAILED', 'REPRINT_REQUESTED')`,
-          [candidates.map((c) => c.id)],
-        )
-      : [];
-    const alreadyActive = new Set(existingRows.map((r) => r.set_id));
-
     const skipped: Array<{ setId: string; reason: string }> = [];
     if (dto.setIds?.length) {
-      // Either the set doesn't exist or it isn't APPROVED — both reported
-      // the same way, no separate DB round-trip to tell them apart (the
-      // CMS already knows which sets it selected and why).
       const foundIds = new Set(candidates.map((c) => c.id));
-      for (const setId of dto.setIds) {
-        if (!foundIds.has(setId))
-          skipped.push({ setId, reason: 'NOT_APPROVED_OR_NOT_FOUND' });
+      const missingIds = dto.setIds.filter((setId) => !foundIds.has(setId));
+      if (missingIds.length) {
+        // A requested id can be missing from `candidates` for two different
+        // reasons — it already has an active item (excluded by the
+        // `NOT EXISTS` above), or it simply isn't APPROVED/doesn't exist.
+        // One extra targeted query (bounded by the caller's own `setIds`
+        // list, never by `MAX_BULK_ITEMS`) tells them apart so the CMS gets
+        // an accurate reason per set.
+        const activeRows: Array<{ set_id: string }> =
+          await this.dataSource.query(
+            `SELECT set_id FROM print_items WHERE set_id = ANY($1) AND status NOT IN ('CANCELLED', 'FAILED', 'REPRINT_REQUESTED')`,
+            [missingIds],
+          );
+        const activeSet = new Set(activeRows.map((r) => r.set_id));
+        for (const setId of missingIds) {
+          skipped.push({
+            setId,
+            reason: activeSet.has(setId)
+              ? 'ALREADY_HAS_ACTIVE_ITEM'
+              : 'NOT_APPROVED_OR_NOT_FOUND',
+          });
+        }
       }
     }
 
     let created = 0;
     const createdIds: string[] = [];
     for (const row of candidates) {
-      if (alreadyActive.has(row.id)) {
-        skipped.push({ setId: row.id, reason: 'ALREADY_HAS_ACTIVE_ITEM' });
-        continue;
-      }
-      const item = this.items.create({
-        campaignId: row.campaign_id,
-        setId: row.id,
-        variantId: row.current_card_variant_id,
-        subjectCode: row.subject_code,
-        fullName: row.subject_name,
-        className: row.class_name,
-        faculty: row.faculty,
-        extra: {
-          dob: row.date_of_birth
-            ? String(row.date_of_birth).slice(0, 10)
-            : null,
-          cardValidUntil: row.card_valid_until
-            ? String(row.card_valid_until).slice(0, 10)
-            : null,
-          // No spec defines a distinct barcode payload for a print item —
-          // defaults to the subject code, same default
-          // `CardTemplateRenderService.resolveFromSet`'s `qrPayload` uses.
-          barcode: row.subject_code,
-        },
-        status: 'PENDING',
-      });
+      const item = this.items.create(this.candidateRowToItemFields(row, null));
       const saved = await this.items.save(item);
       await this.writeEvent(
         saved.id,
@@ -821,6 +898,272 @@ export class PrintItemService {
     }
 
     return { created, createdIds, skipped };
+  }
+
+  /**
+   * Turns one `bulkCreate`/`onSetApproved` candidate row into the fields for
+   * a brand-new `print_items` row — factored out so
+   * `onSetApproved` (the `PhotoSetStatusChangedEvent` handler's auto-attach
+   * path) creates an item "exactly the way bulkCreate does" (task brief
+   * rule 1), rather than a second, driftable copy of this field list.
+   */
+  private candidateRowToItemFields(
+    row: CandidateSetRow,
+    batchId: string | null,
+  ): DeepPartial<PrintItem> {
+    return {
+      batchId,
+      campaignId: row.campaign_id,
+      setId: row.id,
+      variantId: row.current_card_variant_id,
+      subjectCode: row.subject_code,
+      fullName: row.subject_name,
+      className: row.class_name,
+      faculty: row.faculty,
+      extra: {
+        dob: row.date_of_birth ? String(row.date_of_birth).slice(0, 10) : null,
+        cardValidUntil: row.card_valid_until
+          ? String(row.card_valid_until).slice(0, 10)
+          : null,
+        // No spec defines a distinct barcode payload for a print item —
+        // defaults to the subject code, same default
+        // `CardTemplateRenderService.resolveFromSet`'s `qrPayload` uses.
+        barcode: row.subject_code,
+      },
+      status: 'PENDING',
+    };
+  }
+
+  private isActiveSetConstraintViolation(error: unknown): boolean {
+    if (!(error instanceof QueryFailedError)) return false;
+    const driverError = (
+      error as QueryFailedError & {
+        driverError?: { code?: string; constraint?: string };
+      }
+    ).driverError;
+    return (
+      driverError?.code === UNIQUE_VIOLATION_CODE &&
+      driverError?.constraint === ACTIVE_SET_ID_CONSTRAINT
+    );
+  }
+
+  /**
+   * Most-recently-created open CENTRALIZED batch for a campaign — "the
+   * campaign's target batch" (task brief rule 1). DIRECT batches are never
+   * a target: the centralized-print auto-attach flow has no business
+   * queueing a fresh approval straight at a printer.
+   */
+  private async findTargetCentralizedBatch(
+    manager: EntityManager,
+    campaignId: string,
+  ): Promise<string | null> {
+    const rows: Array<{ id: string }> = await manager.query(
+      `SELECT id FROM print_batches
+        WHERE campaign_id = $1 AND mode = 'CENTRALIZED' AND status IN ('DRAFT', 'READY')
+        ORDER BY created_at DESC LIMIT 1`,
+      [campaignId],
+    );
+    return rows[0]?.id ?? null;
+  }
+
+  /**
+   * `PhotoSetStatusChangedEvent` handler support (task brief rule 1) —
+   * "cứ duyệt xong thì sẽ có trong đợt in". MUST be called with the same
+   * `manager` as the photo-review status write that approved the set (see
+   * `PhotoSetStatusChangedHandler`'s own doc comment) — every read/write
+   * here goes through that `manager`, never `this.dataSource`/`this.items`.
+   *
+   * Design choice on "no open batch" (task brief rule 1): creates the item
+   * UNATTACHED (`batchId: null`) rather than skipping creation outright.
+   * This matches `bulkCreate`'s own existing behavior (it always creates
+   * items unattached, regardless of any batch — attaching is a separate
+   * step) and `PrintBatchService.populate()`'s existing "sweep up every
+   * unattached item for this campaign" behavior, so a later `populate()`
+   * call (or a future batch's own first approval) still picks the item up —
+   * the approval is never silently dropped just because no batch happened
+   * to be open yet.
+   *
+   * Never throws for an expected/benign condition — set no longer APPROVED
+   * by the time this runs (a fast subsequent transition), an active item
+   * already exists, or this lost a concurrent create/attach race against
+   * `populate()`/`bulkCreate()` (caught via `UQ_print_items_set_id_active`
+   * for a create race, or a 0-row guarded `UPDATE` for an attach race) —
+   * only a genuine DB error propagates, which correctly rolls the approval
+   * back too (dispatcher's documented semantics).
+   */
+  async onSetApproved(
+    manager: EntityManager,
+    setId: string,
+    campaignId: string,
+  ): Promise<void> {
+    const targetBatchId = await this.findTargetCentralizedBatch(
+      manager,
+      campaignId,
+    );
+
+    const existingRows: Array<{
+      id: string;
+      batch_id: string | null;
+      status: string;
+    }> = await manager.query(
+      `SELECT id, batch_id, status FROM print_items
+        WHERE set_id = $1 AND ${ACTIVE_STATUS_FILTER}
+        LIMIT 1`,
+      [setId],
+    );
+    const existing = existingRows[0];
+
+    if (existing) {
+      // Already attached somewhere (this batch or another one — rule 1 only
+      // asks to attach an UNATTACHED active item), or nothing to attach to.
+      if (existing.batch_id || !targetBatchId) return;
+      const [rows]: [Array<{ id: string }>, number] = await manager.query(
+        `UPDATE print_items SET batch_id = $1, updated_at = now()
+           WHERE id = $2 AND batch_id IS NULL
+         RETURNING id`,
+        [targetBatchId, existing.id],
+      );
+      if (!rows.length) return; // lost the race — something else attached it first
+      await manager.increment(
+        PrintBatch,
+        { id: targetBatchId },
+        'itemCount',
+        1,
+      );
+      await manager.getRepository(PrintItemEvent).save(
+        manager.getRepository(PrintItemEvent).create({
+          itemId: existing.id,
+          fromStatus: existing.status,
+          toStatus: existing.status,
+          source: 'SYSTEM',
+          actorUserId: null,
+          message: 'Tự động thêm vào đợt in khi ảnh được duyệt',
+        }),
+      );
+      return;
+    }
+
+    const candidateRows: CandidateSetRow[] = await manager.query(
+      `SELECT sps.id, sps.campaign_id, sps.subject_code, sps.subject_name,
+              COALESCE(sps.class_name, cs.class_name) AS class_name,
+              COALESCE(sps.faculty, cs.faculty) AS faculty,
+              sps.current_card_variant_id,
+              cs.date_of_birth, cs.card_valid_until
+         FROM subject_photo_sets sps
+         LEFT JOIN campaign_subjects cs
+           ON cs.campaign_id = sps.campaign_id AND cs.subject_code = sps.subject_code AND cs.status = 'VALID'
+        WHERE sps.id = $1 AND sps.status = 'APPROVED'`,
+      [setId],
+    );
+    const row = candidateRows[0];
+    if (!row) return; // no longer APPROVED by the time this ran — nothing to do
+
+    // A Postgres transaction is ABORTED the instant any statement inside it
+    // errors — every later statement then fails with "current transaction
+    // is aborted" and COMMIT silently becomes ROLLBACK. This `manager` is
+    // the SAME one as photo-review's own open approval transaction (see
+    // this method's own doc comment), so swallowing the unique-violation
+    // below with a bare try/catch (as an earlier version of this method
+    // did) would silently lose the approval itself on the lost-create-race
+    // path, while the API still reports success. A `SAVEPOINT` around ONLY
+    // the risky `INSERT` contains the failure: `ROLLBACK TO SAVEPOINT`
+    // undoes just that statement and leaves the rest of the (still-open,
+    // still-good) transaction usable, so the caller's approval write can
+    // still commit normally.
+    let saved: PrintItem;
+    await manager.query(`SAVEPOINT print_item_auto_create`);
+    try {
+      const repo = manager.getRepository(PrintItem);
+      saved = await repo.save(
+        repo.create(this.candidateRowToItemFields(row, targetBatchId)),
+      );
+      await manager.query(`RELEASE SAVEPOINT print_item_auto_create`);
+    } catch (error) {
+      await manager.query(`ROLLBACK TO SAVEPOINT print_item_auto_create`);
+      if (this.isActiveSetConstraintViolation(error)) return; // lost the create race
+      throw error;
+    }
+
+    await manager.getRepository(PrintItemEvent).save(
+      manager.getRepository(PrintItemEvent).create({
+        itemId: saved.id,
+        fromStatus: null,
+        toStatus: 'PENDING',
+        source: 'SYSTEM',
+        actorUserId: null,
+        message: targetBatchId
+          ? 'Tự động tạo và thêm vào đợt in khi ảnh được duyệt'
+          : 'Tự động tạo khi ảnh được duyệt (chưa có đợt in đang mở)',
+      }),
+    );
+    if (targetBatchId) {
+      await manager.increment(
+        PrintBatch,
+        { id: targetBatchId },
+        'itemCount',
+        1,
+      );
+    }
+  }
+
+  /**
+   * `PhotoSetStatusChangedEvent` handler support (task brief rule 2) — a set
+   * leaving APPROVED withdraws its active item from the print flow, but only
+   * while that item is still PENDING/RENDERED (not yet handed to the print
+   * shop — EXPORTED/QUEUED/PRINTING/PRINTED are left alone, per the task
+   * brief: "the card is already out of the system"). Same manager-binding
+   * requirement as `onSetApproved`.
+   *
+   * The `WITH ... FOR UPDATE` CTE (rather than a plain guarded `UPDATE`) is
+   * so the event/counter bookkeeping below can record the item's real
+   * PRE-cancel status (`from_status`) — a plain `UPDATE ... RETURNING`
+   * would only ever hand back the ALREADY-CANCELLED row.
+   */
+  async onSetLeftApproved(
+    manager: EntityManager,
+    setId: string,
+  ): Promise<void> {
+    // This is still, at the outer level, an `UPDATE ... RETURNING` (the
+    // `WITH` clause doesn't change the statement's command tag) — same
+    // `[rows, affectedCount]` TUPLE shape every other `UPDATE ... RETURNING`
+    // in this module destructures (see `bulkApplyTemplate`'s own doc
+    // comment for the flat-array-vs-tuple pitfall this avoids).
+    const [rows]: [
+      Array<{ id: string; from_status: string; batch_id: string | null }>,
+      number,
+    ] = await manager.query(
+      `WITH old AS (
+         SELECT id, status, batch_id FROM print_items
+          WHERE set_id = $1 AND status IN ('PENDING', 'RENDERED')
+          FOR UPDATE
+       )
+       UPDATE print_items pi SET status = 'CANCELLED', updated_at = now()
+         FROM old WHERE pi.id = old.id
+       RETURNING pi.id, old.status AS from_status, old.batch_id`,
+      [setId],
+    );
+    const item = rows[0];
+    if (!item) return;
+
+    await manager.getRepository(PrintItemEvent).save(
+      manager.getRepository(PrintItemEvent).create({
+        itemId: item.id,
+        fromStatus: item.from_status,
+        toStatus: 'CANCELLED',
+        source: 'SYSTEM',
+        actorUserId: null,
+        message: 'Tự rút khỏi đợt in: ảnh không còn ở trạng thái đã duyệt',
+      }),
+    );
+    if (item.batch_id) {
+      // Atomic decrement, not a stale `save(batch)` — same
+      // `GREATEST(item_count - 1, 0)` pattern `PrintBatchService.removeItem`
+      // already uses.
+      await manager.query(
+        `UPDATE print_batches SET item_count = GREATEST(item_count - 1, 0), updated_at = now() WHERE id = $1`,
+        [item.batch_id],
+      );
+    }
   }
 
   /**
@@ -865,7 +1208,17 @@ export class PrintItemService {
         params.push(dto.filter!.status);
         clauses.push(`status = $${params.length}`);
       }
-      where = clauses.length ? clauses.join(' AND ') : '1=1';
+      if (clauses.length === 0) {
+        // An empty `filter: {}` object passes the earlier
+        // `!dto.itemIds?.length && !dto.filter` check (a truthy empty
+        // object is not "no filter"), and with no clauses this would
+        // otherwise become `WHERE 1=1`, retemplating and resetting the
+        // render of every print item in every campaign in one call.
+        throw new BadRequestException(
+          'Filter cần ít nhất một điều kiện (campaignId, batchId, className, faculty hoặc status)',
+        );
+      }
+      where = clauses.join(' AND ');
     }
     where += ` AND status <> 'CANCELLED'`;
 

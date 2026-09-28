@@ -2,14 +2,14 @@ import { useEffect, useState } from 'react';
 import { Lock } from 'lucide-react';
 import {
   ApiError,
-  Campaign,
   ListReviewSetsParams,
+  MyReviewCampaign,
   Paginated,
   PhotoKind,
   ReviewSetListItem,
   ReviewSetStatus,
-  listCampaigns,
   listCampaignSubjectDistinctValues,
+  listMyReviewCampaigns,
   listPhotoKinds,
   listReviewSets,
 } from '../api';
@@ -40,7 +40,14 @@ const STATUS_OPTIONS: ReviewSetStatus[] = ['PENDING_AUTO', 'AUTO_FAILED', 'READY
  */
 export function ReviewListPage() {
   const [tab, setTab] = useState<Tab>('list');
-  const [campaigns, setCampaigns] = useState<Campaign[]>([]);
+  // 2026-09-28 PER-CAMPAIGN pivot — `GET /v1/review/my-campaigns` instead of
+  // the generic `listCampaigns()`: for an admin this still returns every
+  // campaign (unchanged behavior), but for a scoped reviewer it returns only
+  // the campaigns they actually hold an assignment for, so the dropdown
+  // never offers one they'd just get an empty/403 result from. `null` while
+  // loading, `[]` once loaded means "chưa được phân công đợt chụp nào" (see
+  // the empty state below).
+  const [myCampaigns, setMyCampaigns] = useState<MyReviewCampaign[] | null>(null);
   const [kinds, setKinds] = useState<PhotoKind[]>([]);
   const [campaignId, setCampaignId] = useState('');
   const [kindId, setKindId] = useState('');
@@ -77,11 +84,9 @@ export function ReviewListPage() {
   const [openSetId, setOpenSetId] = useState<string | null>(null);
 
   useEffect(() => {
-    listCampaigns()
-      .then(setCampaigns)
-      .catch(() => {
-        /* campaign filter just stays empty — not fatal */
-      });
+    listMyReviewCampaigns()
+      .then(setMyCampaigns)
+      .catch(() => setMyCampaigns([]));
     listPhotoKinds()
       .then(setKinds)
       .catch(() => {
@@ -135,6 +140,12 @@ export function ReviewListPage() {
   const sets = result?.items ?? [];
   const meta = result?.meta;
   const isEmpty = result !== null && sets.length === 0;
+  // "Bạn chưa được phân công duyệt đợt chụp nào" (plan §5.2, 2026-09-28) —
+  // distinct from `isEmpty` above (which means "0 sets match the current
+  // filters"): this means the reviewer has ZERO campaigns to even pick from,
+  // so showing the normal filter bar + bare grid would be misleading (there
+  // is nothing any filter combination could ever surface for them).
+  const noCampaignsAssigned = myCampaigns !== null && myCampaigns.length === 0;
 
   return (
     <div>
@@ -161,7 +172,14 @@ export function ReviewListPage() {
 
       {tab === 'assignments' && <ReviewAssignmentsPage />}
 
-      {tab === 'list' && (
+      {tab === 'list' && noCampaignsAssigned && (
+        <div className="p-8 rounded-2xl border border-dashed border-gray-300 bg-gray-50 text-center">
+          <p className="text-gray-700 font-medium">Bạn chưa được phân công duyệt đợt chụp nào.</p>
+          <p className="text-sm text-gray-500 mt-1">Liên hệ quản trị viên để được cấp quyền duyệt cho một đợt chụp cụ thể.</p>
+        </div>
+      )}
+
+      {tab === 'list' && !noCampaignsAssigned && (
         <>
       <div className="p-5 rounded-2xl border border-gray-200 bg-white shadow-sm space-y-4 mb-6">
         <div className="flex flex-wrap gap-3">
@@ -179,10 +197,10 @@ export function ReviewListPage() {
             }}
             className="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900"
           >
-            <option value="">Tất cả campaign</option>
-            {campaigns.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
+            <option value="">Tất cả đợt chụp được phân công</option>
+            {(myCampaigns ?? []).map((c) => (
+              <option key={c.campaignId} value={c.campaignId}>
+                {c.campaignName}
               </option>
             ))}
           </select>

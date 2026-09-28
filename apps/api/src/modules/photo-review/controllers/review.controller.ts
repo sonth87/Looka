@@ -24,6 +24,7 @@ import {
 } from '@nestjs/swagger';
 import type { Request } from 'express';
 import {
+  MyReviewCampaignDao,
   PhotoVariantDao,
   ReviewEventDao,
   ReviewSetDetailDao,
@@ -44,6 +45,7 @@ import {
   PhotoReviewSetStatus,
 } from '../photo-review.constants';
 import { PhotoReviewService } from '../services/photo-review.service';
+import { ReviewAssignmentService } from '../services/review-assignment.service';
 import { Pagination } from '@app/shared/http/pagination';
 import { ReviewStatsDao } from '@app/modules/stats/dao';
 import { ReviewStatsQueryDto } from '@app/modules/stats/dto';
@@ -81,6 +83,7 @@ export class ReviewController {
   constructor(
     private readonly photoReviewService: PhotoReviewService,
     private readonly statsQuery: StatsQueryService,
+    private readonly reviewAssignments: ReviewAssignmentService,
   ) {}
 
   /**
@@ -110,14 +113,28 @@ export class ReviewController {
     );
   }
 
-  /** cms-8-screens-api-plan.md §2.9/P4 — reads from `stats_daily_review`, `byStatus` is a live count. */
+  /**
+   * cms-8-screens-api-plan.md §2.9/P4 — reads from `stats_daily_review`,
+   * `byStatus` is a live count. 2026-09-28 PER-CAMPAIGN pivot: `stats_daily_
+   * review` has no per-group breakdown to filter down to, so a non-admin
+   * caller must hold a WHOLE-campaign assignment for `query.campaignId`
+   * (checked via `assertWholeCampaignAccess`) — a group-scoped-only reviewer
+   * gets a 403 rather than the whole campaign's numbers, and `campaignId`
+   * itself is required for a non-admin (no "all campaigns" aggregate view
+   * makes sense for someone who cannot see every campaign).
+   */
   @Get('stats')
   @ApiOperation({
     summary: 'Thống kê duyệt/không duyệt/dùng AI (plan §2.4/§2.9)',
   })
   async reviewStats(
     @Query() query: ReviewStatsQueryDto,
+    @Req() req: Request,
   ): Promise<ReviewStatsDao> {
+    await this.reviewAssignments.assertWholeCampaignAccess(
+      req.user?.id ?? null,
+      query.campaignId,
+    );
     const { from, to } = defaultDateRange(query.from, query.to, 30);
     return this.statsQuery.reviewStats({
       campaignId: query.campaignId,
@@ -125,6 +142,22 @@ export class ReviewController {
       to,
       reviewerUserId: query.reviewerUserId,
     });
+  }
+
+  /**
+   * `GET /v1/review/my-campaigns` (2026-09-28) — every campaign for an
+   * admin, else the distinct campaigns the caller holds at least one
+   * `review_assignments` row for. Feeds the CMS review-list page's own
+   * campaign dropdown/filter, and its "chưa được phân công" empty state
+   * (an empty array here means exactly that).
+   */
+  @Get('my-campaigns')
+  @ApiOperation({
+    summary:
+      'Campaigns the caller can review at all — admin: every campaign; else: their own assignments only',
+  })
+  myCampaigns(@Req() req: Request): Promise<MyReviewCampaignDao[]> {
+    return this.reviewAssignments.myCampaigns(req.user?.id ?? null);
   }
 
   @Get('sets/:id')

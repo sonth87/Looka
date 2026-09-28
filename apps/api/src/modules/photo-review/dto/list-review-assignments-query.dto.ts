@@ -7,4 +7,10 @@ export class ListReviewAssignmentsQueryDto {
   @IsOptional()
   @IsUUID()
   userId?: string;
+
+  /** 2026-09-28 PER-CAMPAIGN pivot — CMS table's own campaign filter. */
+  @ApiPropertyOptional({ description: 'Lọc theo đợt chụp' })
+  @IsOptional()
+  @IsUUID()
+  campaignId?: string;
 }

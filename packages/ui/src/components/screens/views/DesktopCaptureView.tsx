@@ -1350,8 +1350,16 @@ export const DesktopCaptureView: React.FC<SharedCaptureViewProps> = (props) => {
                       variant="primary"
                       size="xl"
                       className="w-full uppercase tracking-wide"
-                      disabled={!canManualCaptureFromSidebar || !isFaceReadyForCapture}
-                      onClick={canManualCaptureFromSidebar ? onShutterCapture : undefined}
+                      // 2026-09-25 fix (confirmed audit finding): unlike the
+                      // on-canvas ShutterButton just above, this CTA had no
+                      // `shutterBusy` guard — during a real (multi-second)
+                      // gphoto2 shutter release it stayed enabled and kept
+                      // focus, so a second click (or an Enter routed to this
+                      // focused native <button> instead of the keyboard
+                      // handler) could re-enter the capture handler while the
+                      // first one was still in flight.
+                      disabled={!canManualCaptureFromSidebar || !isFaceReadyForCapture || shutterBusy}
+                      onClick={canManualCaptureFromSidebar && !shutterBusy ? onShutterCapture : undefined}
                     >
                       Xác nhận chuẩn bị & chụp trong 3 giây
                     </Button>

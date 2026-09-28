@@ -4,12 +4,14 @@ import {
   CampaignSubject,
   CampaignSubjectImport,
   CampaignSubjectStatus,
+  EligibilityConfig,
   Paginated,
   deleteCampaignRosterImport,
   downloadRosterImportTemplate,
   importCampaignRoster,
   listCampaignRosterImports,
   listCampaignSubjects,
+  requestCampaignSubjectPull,
 } from '../api';
 import { DEFAULT_PAGE_SIZE, Pager } from './Pager';
 import { ModalShell } from './CampaignDangerActions';
@@ -24,11 +26,38 @@ const STATUS_BADGE_CLASS: Record<CampaignSubjectStatus, string> = {
   ERROR: 'bg-red-50 border-red-200 text-red-700',
   DUPLICATE: 'bg-amber-50 border-amber-200 text-amber-700',
 };
+/**
+ * Covers BOTH the `EXCEL` upload lifecycle (`PROCESSING`/`DONE`/`FAILED`)
+ * AND an `EXTERNAL_API` pull's own (`PENDING_FETCH`/`FETCHING`/
+ * `IMPORTING`/`DONE`/`FAILED`) — `listCampaignRosterImports` returns both
+ * kinds in one list (see `apps/cms/src/api.ts`'s `CampaignSubjectImport`
+ * doc comment). Before this, an API-pull row rendered a blank status cell
+ * here (`IMPORT_STATUS_LABEL[status]` was `undefined` for any of the 3
+ * pull-only statuses) — a real gap found while auditing the roster-pull
+ * queue (2026-09-28), since this table was built before the API-pull
+ * feature existed and never revisited for it.
+ */
 const IMPORT_STATUS_LABEL: Record<CampaignSubjectImport['status'], string> = {
   PROCESSING: 'Đang xử lý',
+  PENDING_FETCH: 'Chờ gọi API',
+  FETCHING: 'Đang gọi API',
+  IMPORTING: 'Đang ghi dữ liệu',
   DONE: 'Hoàn tất',
   FAILED: 'Lỗi',
 };
+/** Non-terminal statuses for EITHER import lifecycle — an import still at one of these hasn't finished yet. */
+const IMPORT_IN_PROGRESS_STATUSES = new Set<CampaignSubjectImport['status']>([
+  'PROCESSING',
+  'PENDING_FETCH',
+  'FETCHING',
+  'IMPORTING',
+]);
+/** How often to re-poll `listCampaignRosterImports` while a triggered pull is still in progress — roughly matches `CampaignSubjectPullWriteWorker`'s own 2s drain tick. */
+const PULL_POLL_INTERVAL_MS = 2_000;
+/** Stop auto-polling after this long even if still running — a genuinely stuck pull is `CampaignSubjectPullStuckJobRecoveryWorker`'s job (30 min), not this tab's; the operator can still see progress via a manual reload. */
+const PULL_POLL_TIMEOUT_MS = 2 * 60_000;
+/** Mirrors `CampaignSubjectService.requestPull`'s own 5-minute "already running" guard — used to show an approximate remaining wait on its 409. */
+const PULL_RECENCY_GUARD_MS = 5 * 60_000;
 
 /**
  * "Danh sách roster" tab (plan item 15, 2026-09-17) — import Excel roster
@@ -41,8 +70,20 @@ const IMPORT_STATUS_LABEL: Record<CampaignSubjectImport['status'], string> = {
  * this is its first CMS screen. Deliberately separate from the "Sinh viên"
  * tab (`CampaignStudentsPanel`, captured sessions) — this is the EXPECTED
  * roster a session gets checked against, not who has actually shown up.
+ *
+ * `eligibilityMode` (2026-09-28) — the campaign's OWN `eligibilityConfig.mode`
+ * (`CampaignDetail.tsx` already has the full `Campaign` loaded, so it's
+ * passed down rather than re-fetched here). The "Kéo lại dữ liệu" re-pull
+ * button only makes sense for `EXTERNAL_API`/`ROSTER_AND_API` — a plain
+ * `ROSTER`/`NONE` campaign has no API configured to pull from.
  */
-export function CampaignRosterPanel({ campaignId }: { campaignId: string }) {
+export function CampaignRosterPanel({
+  campaignId,
+  eligibilityMode,
+}: {
+  campaignId: string;
+  eligibilityMode: EligibilityConfig['mode'];
+}) {
   const [imports, setImports] = useState<CampaignSubjectImport[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showImportModal, setShowImportModal] = useState(false);
@@ -57,12 +98,81 @@ export function CampaignRosterPanel({ campaignId }: { campaignId: string }) {
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [subjectsResult, setSubjectsResult] = useState<Paginated<CampaignSubject> | null>(null);
 
+  const canPullFromApi = eligibilityMode === 'EXTERNAL_API' || eligibilityMode === 'ROSTER_AND_API';
+  const [pulling, setPulling] = useState(false);
+  const [pullError, setPullError] = useState<string | null>(null);
+  const [pullRetryAfterSeconds, setPullRetryAfterSeconds] = useState<number | null>(null);
+  const [confirmForcePull, setConfirmForcePull] = useState(false);
+  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   const reloadImports = () => {
     listCampaignRosterImports(campaignId)
       .then(setImports)
       .catch((err) => setError(err instanceof ApiError ? err.message : String(err)));
   };
   useEffect(reloadImports, [campaignId]);
+
+  function stopPullPolling() {
+    if (pollTimerRef.current) {
+      clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+  }
+  // Stop any in-flight poll when the tab is torn down or switches campaign —
+  // otherwise it would keep hitting the API for a campaign no longer shown.
+  useEffect(() => stopPullPolling, [campaignId]);
+
+  /** Re-fetches the import list every `PULL_POLL_INTERVAL_MS` until `importId` itself reaches a terminal status, so the operator sees PENDING_FETCH → FETCHING → IMPORTING → DONE/FAILED without a manual reload — same end result `handleUpload` gets from one `reloadImports()` call, except a pull is asynchronous (the two-tier worker queue), so one refetch right after the POST would almost always still show PENDING_FETCH. */
+  function pollPullUntilDone(importId: string) {
+    stopPullPolling();
+    const startedAt = Date.now();
+    pollTimerRef.current = setInterval(() => {
+      if (Date.now() - startedAt > PULL_POLL_TIMEOUT_MS) {
+        stopPullPolling();
+        return;
+      }
+      listCampaignRosterImports(campaignId)
+        .then((fresh) => {
+          setImports(fresh);
+          const row = fresh.find((imp) => imp.id === importId);
+          if (row && !IMPORT_IN_PROGRESS_STATUSES.has(row.status)) {
+            stopPullPolling();
+          }
+        })
+        .catch(() => {
+          /* a transient poll failure isn't worth surfacing — the next tick (or a manual reload) recovers */
+        });
+    }, PULL_POLL_INTERVAL_MS);
+  }
+
+  const latestApiImport = (imports ?? []).find((imp) => imp.source === 'EXTERNAL_API') ?? null;
+  const pullRunning = latestApiImport ? IMPORT_IN_PROGRESS_STATUSES.has(latestApiImport.status) : false;
+
+  async function handleRequestPull(force: boolean) {
+    setPulling(true);
+    setPullError(null);
+    setPullRetryAfterSeconds(null);
+    try {
+      const imp = await requestCampaignSubjectPull(campaignId, { force });
+      setConfirmForcePull(false);
+      reloadImports();
+      pollPullUntilDone(imp.id);
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : String(err);
+      setPullError(message);
+      if (err instanceof ApiError && err.status === 409) {
+        setConfirmForcePull(true);
+        if (latestApiImport) {
+          const elapsedMs = Date.now() - new Date(latestApiImport.createdAt).getTime();
+          setPullRetryAfterSeconds(Math.max(0, Math.ceil((PULL_RECENCY_GUARD_MS - elapsedMs) / 1000)));
+        }
+      } else {
+        setConfirmForcePull(false);
+      }
+    } finally {
+      setPulling(false);
+    }
+  }
 
   useEffect(() => {
     listCampaignSubjects(campaignId, { status: statusFilter || undefined, q: q.trim() || undefined, page, limit: pageSize })
@@ -111,14 +221,47 @@ export function CampaignRosterPanel({ campaignId }: { campaignId: string }) {
       <div className="p-4 rounded-2xl border border-gray-200 bg-white shadow-sm space-y-3">
         <div className="flex items-center justify-between">
           <h3 className="text-sm font-semibold text-gray-900">Import roster từ Excel</h3>
-          <button
-            type="button"
-            onClick={() => setShowImportModal(true)}
-            className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold"
-          >
-            Import roster
-          </button>
+          <div className="flex items-center gap-2">
+            {canPullFromApi && (
+              <button
+                type="button"
+                onClick={() => void handleRequestPull(false)}
+                disabled={pulling || pullRunning}
+                className="px-3 py-1.5 rounded-lg border border-blue-300 text-blue-700 hover:bg-blue-50 text-sm font-semibold disabled:opacity-50"
+              >
+                {pullRunning ? 'Đang kéo dữ liệu...' : pulling ? 'Đang gửi yêu cầu...' : 'Kéo lại dữ liệu'}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setShowImportModal(true)}
+              className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold"
+            >
+              Import roster
+            </button>
+          </div>
         </div>
+
+        {pullError && (
+          <div className="p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-sm flex items-center justify-between gap-3">
+            <span>
+              {pullError}
+              {confirmForcePull && pullRetryAfterSeconds !== null && pullRetryAfterSeconds > 0 && (
+                <> (còn khoảng {pullRetryAfterSeconds}s)</>
+              )}
+            </span>
+            {confirmForcePull && (
+              <button
+                type="button"
+                onClick={() => void handleRequestPull(true)}
+                disabled={pulling}
+                className="shrink-0 px-2.5 py-1 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold disabled:opacity-50"
+              >
+                Kéo ngay dù mới chạy gần đây?
+              </button>
+            )}
+          </div>
+        )}
 
         {imports && imports.length > 0 && (
           <div className="pt-2 border-t border-gray-100">

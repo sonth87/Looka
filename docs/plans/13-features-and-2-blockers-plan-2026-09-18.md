@@ -978,6 +978,22 @@ upload (tái dùng gần như nguyên mẫu panel lịch sử import roster), th
 >   duyệt" tạo/liệt kê/xóa qua UI thật (không chỉ gọi API tay). Toàn bộ dữ
 >   liệu test (2 user, 1 dòng gán) đã dọn sau khi verify.
 >
+> **CẬP NHẬT 2026-09-28 — đổi luật, không xóa lịch sử trên**: `review_
+> assignments` chuyển từ GLOBAL sang PER-CAMPAIGN: mỗi dòng gán giờ có thêm
+> `campaignId` (không FK, đúng quy ước module), `groupField`/`groupValue`
+> đều tùy chọn (cả hai NULL = "cả đợt chụp"). Luật mới: được phép NẾU có
+> dòng "cả đợt" cho campaign đó, HOẶC dòng nhóm khớp field/value TRONG
+> CÙNG campaign đó — **"0 dòng = không giới hạn" ở trên KHÔNG còn đúng nữa**
+> (0 dòng cho một campaign = không thấy gì trong campaign đó, admin vẫn
+> luôn không giới hạn). Migration `1838000000000-ReviewAssignmentsPerCampaign`
+> giữ nguyên quyền hiện có (mỗi reviewer trước đây "không giới hạn" nhận 1
+> dòng "cả đợt" cho MỌI campaign đang có; mỗi dòng nhóm cũ được copy vào mọi
+> campaign đang có). `create()` giờ tự cấp role REVIEWER trong cùng
+> transaction. Thêm `GET /v1/review/my-campaigns`. Xem doc comment của
+> `ReviewAssignment` entity (apps/api) và `ReviewAssignmentService` cho luật
+> đầy đủ; không sửa lại đoạn tường trình 2026-09-21 ở trên vì đó là lịch sử
+> tại thời điểm đó.
+>
 > Chưa commit — theo đúng quy ước "không commit tới khi người dùng xác nhận
 > đã test đầu-cuối xong".
 

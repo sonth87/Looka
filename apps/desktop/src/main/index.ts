@@ -255,8 +255,21 @@ function attachRendererDiagnostics(win: BrowserWindow): void {
         ? resolvedLevel === 'warning' || resolvedLevel === 'error'
         : typeof resolvedLevel === 'number' && resolvedLevel >= 2;
 
-    // Only errors and warnings; ordinary logs would drown the operator log.
-    if (isWarningOrError) {
+    // 2026-09-25 fix (confirmed audit finding): a `[TEMP-` prefixed message
+    // is forwarded regardless of level. These are ad-hoc `console.log`
+    // (info-level) diagnostics added straight into the renderer to chase a
+    // specific bug report (see FaceCaptureApp.tsx's TEMP-KEY* listeners) —
+    // without this, they never reach main.log at all, and an investigation
+    // reading only main.log cannot tell a genuinely-missing keydown apart
+    // from one that arrived but was rejected by a gate. Matched on the
+    // message text, not a level bump, so this stays narrowly scoped to
+    // these deliberately-tagged lines instead of also forwarding every
+    // other ordinary renderer log.
+    const isTempDiagnostic = typeof resolvedMessage === 'string' && resolvedMessage.startsWith('[TEMP-');
+
+    // Only errors, warnings, and the explicit [TEMP-*] diagnostics above;
+    // ordinary logs would drown the operator log.
+    if (isWarningOrError || isTempDiagnostic) {
       console.error(`[renderer] ${resolvedMessage} (${resolvedSourceId}:${resolvedLine})`);
     }
   });

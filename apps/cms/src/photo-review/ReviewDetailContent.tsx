@@ -256,6 +256,7 @@ export function ReviewDetailContent({ id, onClose }: { id: string; onClose?: () 
               <span className="text-xs text-gray-400">Chưa có ảnh thẻ hiện tại</span>
             )}
           </div>
+          {currentVariant?.viewUrl && <DownloadLink url={currentVariant.viewUrl} className="mt-2" />}
           {currentVariant?.qualityReport && (
             <div className="mt-2 text-xs text-gray-500 space-y-0.5">
               {Object.entries(currentVariant.qualityReport).map(([k, v]) => (
@@ -442,8 +443,42 @@ function VariantRow({
         <button type="button" onClick={onView} disabled={!variant.viewUrl} className="text-gray-600 hover:text-gray-800 font-medium disabled:opacity-40">
           Xem
         </button>
+        {variant.viewUrl && <DownloadLink url={variant.viewUrl} />}
       </div>
     </div>
+  );
+}
+
+/**
+ * "Tải xuống" affordance — added 2026-09-28 to close a confirmed gap (no
+ * download link/button existed anywhere in this module; a photo could only
+ * be saved via the browser's own right-click "Save image as..."). Honest
+ * limitation, not fully solved here: `url` is either an fs-core view-link
+ * (a third origin, e.g. `192.168.101.32:8080`) or this API's own
+ * `local-content` link (a different origin than the CMS in dev, :3100 vs
+ * :3200) — the HTML `download` attribute is only honored by browsers for a
+ * SAME-ORIGIN (or blob/data) URL, and neither `VariantContentController`
+ * nor the fs-core view-link route sets `Content-Disposition: attachment`.
+ * So this does not reliably trigger a one-click "Save As" dialog; what it
+ * reliably does is open the full-resolution image in a new tab (`target=
+ * "_blank"`) as a clearly labeled, distinct action from just viewing it
+ * inline — from there "Save image as..." still works, same as it always
+ * did on the plain `<img>`. A true one-click download would need a
+ * same-origin proxy route that sets `Content-Disposition: attachment`
+ * (out of scope here — see this task's own report for the concrete
+ * suggestion, left for the user to decide).
+ */
+function DownloadLink({ url, className = '' }: { url: string; className?: string }) {
+  return (
+    <a
+      href={url}
+      download
+      target="_blank"
+      rel="noopener noreferrer"
+      className={`text-xs text-blue-600 hover:text-blue-800 font-medium inline-block ${className}`}
+    >
+      Tải xuống
+    </a>
   );
 }
 
@@ -534,11 +569,22 @@ function ReviewDecisionModal({
   );
 }
 
+/** Shared viewer for both original photos and variants — see `DownloadLink`'s own doc comment for what this button does and does not guarantee. */
 function Lightbox({ url, onClose }: { url: string; onClose: () => void }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-6" onClick={onClose}>
       <div className="absolute inset-0 bg-black/70" />
       <img src={url} alt="" className="relative max-w-full max-h-full rounded-lg shadow-2xl" />
+      <a
+        href={url}
+        download
+        target="_blank"
+        rel="noopener noreferrer"
+        onClick={(e) => e.stopPropagation()}
+        className="absolute top-6 right-6 px-3 py-1.5 rounded-lg bg-white/90 hover:bg-white text-gray-800 text-sm font-medium shadow"
+      >
+        Tải xuống
+      </a>
     </div>
   );
 }

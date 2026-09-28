@@ -1,4 +1,7 @@
 import { FileStorageService } from '@app/modules/file-storage/services/file-storage.service';
+import { ReviewStatsService } from '@app/modules/stats/services/review-stats.service';
+import { DomainEventDispatcher } from '@app/shared/cqrs/domain-event.dispatcher';
+import { TransactionContext } from '@app/shared/database/transaction-context';
 import { ConfigService } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
 import { TypeOrmModule } from '@nestjs/typeorm';
@@ -18,6 +21,7 @@ import {
 import { PhotoKindService } from './services/photo-kind.service';
 import { PhotoReviewSidecarService } from './services/photo-review-sidecar.service';
 import { PhotoReviewService } from './services/photo-review.service';
+import { ReviewAssignmentService } from './services/review-assignment.service';
 
 /**
  * Real-Postgres persistence spec for the locking rule (plan §4) and the
@@ -63,6 +67,37 @@ describeDb('photo-review persistence', () => {
       identitySimilarity: jest.fn(),
       edit: jest.fn(),
     };
+    // `PhotoReviewService` grew 4 more constructor deps after this spec was
+    // first written (review-assignment scoping, stats hooks, and the
+    // domain-event seam that lets `PrintModule` react to approve/reject —
+    // see `PhotoReviewService`'s own top doc comment). None of the
+    // behavior under test here exercises any of the four for real: every
+    // call below passes `actorUserId: null`, which
+    // `ReviewAssignmentService.resolveActor` already short-circuits to
+    // "unrestricted" without a query — so a plain fake for each is enough,
+    // same faking style as `fileStorage`/`sidecar` above, rather than
+    // wiring up a real `DiscoveryModule`/`ReviewAssignment` repository this
+    // suite has no other need for.
+    const reviewAssignments = {
+      assertInScope: jest.fn().mockResolvedValue(undefined),
+      // `listSets` also calls this — `null` (no filter) matches the real
+      // `ReviewAssignmentService.buildScopeFilter`'s own "unrestricted"
+      // return for a null/admin actor, which every call in this suite is.
+      buildScopeFilter: jest.fn().mockResolvedValue(null),
+    };
+    const reviewStats = {
+      recordAutoFailed: jest.fn().mockResolvedValue(undefined),
+      recordAiRequested: jest.fn().mockResolvedValue(undefined),
+      recordAiAccepted: jest.fn().mockResolvedValue(undefined),
+      recordUploaded: jest.fn().mockResolvedValue(undefined),
+      recordDecision: jest.fn().mockResolvedValue(undefined),
+    };
+    const transactionContext = {
+      run: jest.fn((_manager: unknown, fn: () => Promise<unknown>) => fn()),
+    };
+    const domainEventDispatcher = {
+      dispatch: jest.fn().mockResolvedValue(undefined),
+    };
 
     const built = await Test.createTestingModule({
       imports: [
@@ -95,6 +130,10 @@ describeDb('photo-review persistence', () => {
         // none of these tests exercise that path directly, so a fixed dummy
         // key is enough to satisfy PhotoReviewService's constructor.
         { provide: ConfigService, useValue: { get: () => 'test-api-key' } },
+        { provide: ReviewAssignmentService, useValue: reviewAssignments },
+        { provide: ReviewStatsService, useValue: reviewStats },
+        { provide: TransactionContext, useValue: transactionContext },
+        { provide: DomainEventDispatcher, useValue: domainEventDispatcher },
       ],
     }).compile();
 
@@ -436,6 +475,60 @@ describeDb('photo-review persistence', () => {
       expect(
         events.some((e: { action: string }) => e.action === 'APPROVED'),
       ).toBe(true);
+    });
+
+    it('re-approving an already-APPROVED set is idempotent — exactly one APPROVED event and exactly one ReviewStatsService.recordDecision call', async () => {
+      const { setId } = await seedSet({
+        status: PhotoReviewSetStatus.READY,
+        withCurrentVariant: true,
+      });
+      // `ReviewStatsService` is DI-overridden with a plain
+      // `{ recordDecision: jest.fn(), ... }` object (see beforeAll) — same
+      // `moduleRef.get()` real-class-typed-but-actually-a-mock convention
+      // this file already accepts for `sidecar` (a cast through
+      // `{ recordDecision: jest.Mock }` was tried and rejected by
+      // `no-unnecessary-type-assertion`, same as that file's own attempt).
+      const reviewStats = moduleRef.get(ReviewStatsService);
+      // This mock is a single object shared across the whole file's
+      // `beforeAll` — its call count accumulates across every earlier test.
+      // Cleared here so the assertion below reflects only THIS test's own
+      // two approve() calls, not the whole suite's history.
+      reviewStats.recordDecision.mockClear();
+
+      await service.approve(setId, { note: 'first' }, null, apiBaseUrl);
+      const second = await service.approve(
+        setId,
+        { note: 'second (double-click / retry)' },
+        null,
+        apiBaseUrl,
+      );
+
+      expect(second.status).toBe(PhotoReviewSetStatus.APPROVED);
+      const events: Array<{ action: string }> = await dataSource.query(
+        `SELECT action FROM photo_review_events WHERE set_id = $1 AND action = 'APPROVED'`,
+        [setId],
+      );
+      expect(events).toHaveLength(1);
+      expect(reviewStats.recordDecision).toHaveBeenCalledTimes(1);
+    });
+
+    it('re-rejecting an already-REJECTED set is idempotent the same way', async () => {
+      const { setId } = await seedSet({
+        status: PhotoReviewSetStatus.READY,
+        withCurrentVariant: true,
+      });
+      const reviewStats = moduleRef.get(ReviewStatsService);
+      reviewStats.recordDecision.mockClear();
+
+      await service.reject(setId, { note: 'first' }, null, apiBaseUrl);
+      await service.reject(setId, { note: 'second' }, null, apiBaseUrl);
+
+      const events: Array<{ action: string }> = await dataSource.query(
+        `SELECT action FROM photo_review_events WHERE set_id = $1 AND action = 'REJECTED'`,
+        [setId],
+      );
+      expect(events).toHaveLength(1);
+      expect(reviewStats.recordDecision).toHaveBeenCalledTimes(1);
     });
   });
 

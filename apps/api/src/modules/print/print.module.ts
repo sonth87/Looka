@@ -17,6 +17,7 @@ import { PrintResultImport } from './entities/print-result-import.entity';
 import { Printer } from './entities/printer.entity';
 import { PrinterStockEvent } from './entities/printer-stock-event.entity';
 import { PrinterAgentGuard } from './guards/printer-agent.guard';
+import { PhotoSetStatusChangedHandler } from './services/photo-set-status-changed.handler';
 import { PrintBatchService } from './services/print-batch.service';
 import { PrintItemService } from './services/print-item.service';
 import { PrintPackageService } from './services/print-package.service';
@@ -47,6 +48,16 @@ import { PrinterService } from './services/printer.service';
  * actual render engine — see that module's own updated doc comment.
  * `StatsModule` is imported for `PrintStatsService` (lives in `modules/stats`,
  * see that service's own doc comment for why).
+ *
+ * NOT imported, deliberately: `PhotoReviewModule` (its own top doc comment
+ * says the same about this module). `PhotoSetStatusChangedHandler` reacts
+ * to a set entering/leaving APPROVED (auto-attach/withdraw into the
+ * CENTRALIZED print flow) by importing only the plain
+ * `PhotoSetStatusChangedEvent` class and `PhotoReviewSetStatus` enum —
+ * inert data types, not a service or module — wired through the shared
+ * in-process domain-event mechanism (`shared/cqrs`,
+ * `shared/database/transaction-context.ts`) instead of a Nest-level import
+ * either direction. See that handler's own doc comment.
  */
 @Module({
   imports: [
@@ -78,6 +89,12 @@ import { PrinterService } from './services/printer.service';
     PrintPackageService,
     PrintResultImportService,
     PrinterAgentGuard,
+    // `@OnDomainEvent('PhotoSetStatusChanged')` — `DomainEventDispatcher`
+    // (shared/cqrs, `@Global` `FoundationModule`) discovers this via
+    // `DiscoveryService` at boot; it only needs to be registered as a
+    // provider somewhere in the app's module graph, see that class's own
+    // doc comment for why this specific module owns it.
+    PhotoSetStatusChangedHandler,
   ],
 })
 export class PrintModule {}

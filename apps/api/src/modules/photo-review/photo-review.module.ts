@@ -40,6 +40,15 @@ import { VariantUploadWorkerService } from './services/variant-upload-worker.ser
  * `uploadRaw`/`issueViewLink` (already public, unmodified by this task) is
  * exactly what the plan calls for (§3 — "cùng cơ chế virtual_path/fs-core
  * đã có, không phát minh lại").
+ *
+ * `PhotoReviewService` raises `PhotoSetStatusChangedEvent` (see
+ * `domain/event/photo-set-status-changed.event.ts`) on every real
+ * `subject_photo_sets.status` transition, via the shared in-process
+ * domain-event mechanism (`shared/cqrs`, `@Global` `DomainEventDispatcher`)
+ * — NOT a Nest-level import of `PrintModule` (which reacts to it for the
+ * CENTRALIZED print flow's auto-attach/withdraw rule; see that module's own
+ * doc comment). This module still has no knowledge of `PrintModule` or
+ * printing at all — it only ever raises a generic status-change event.
  */
 @Module({
   imports: [

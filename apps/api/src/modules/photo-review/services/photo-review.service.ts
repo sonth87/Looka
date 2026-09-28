@@ -3,6 +3,8 @@ import { toDao } from '@app/shared/http/to-dao.helper';
 import { FileStorageService } from '@app/modules/file-storage/services/file-storage.service';
 import { ReviewStatsService } from '@app/modules/stats/services/review-stats.service';
 import { Pagination } from '@app/shared/http/pagination';
+import { DomainEventDispatcher } from '@app/shared/cqrs/domain-event.dispatcher';
+import { TransactionContext } from '@app/shared/database/transaction-context';
 import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
@@ -17,6 +19,7 @@ import {
   ReviewSetListItemDao,
   UploadVariantResultDao,
 } from '../dao';
+import { PhotoSetStatusChangedEvent } from '../domain/event/photo-set-status-changed.event';
 import {
   AiEditDto,
   ApproveRejectDto,
@@ -150,6 +153,8 @@ export class PhotoReviewService {
     private readonly configService: ConfigService,
     private readonly reviewStats: ReviewStatsService,
     private readonly reviewAssignments: ReviewAssignmentService,
+    private readonly transactionContext: TransactionContext,
+    private readonly domainEventDispatcher: DomainEventDispatcher,
   ) {}
 
   // ── Locking (plan §4) ──────────────────────────────────────────────────
@@ -806,6 +811,38 @@ export class PhotoReviewService {
   }
 
   /**
+   * Raises `PhotoSetStatusChangedEvent` for a real `subject_photo_sets.status`
+   * transition — called from every site in this service that assigns
+   * `.status` on a locked/loaded set, right after the entity save. A no-op
+   * reassignment (`fromStatus === toStatus`, e.g. re-approving an already
+   * APPROVED set) is skipped — this module has nothing else meaningful to
+   * say about it, and it keeps `PrintModule`'s handler from doing redundant
+   * work on every idempotent double-click.
+   *
+   * `manager` MUST be the same one the caller's own `dataSource.transaction`
+   * callback was given — `TransactionContext.run` binds it for the duration
+   * of `dispatcher.dispatch()` so a handler's `TransactionContext.manager()`
+   * resolves to it (see `PhotoSetStatusChangedEvent`'s own doc comment). A
+   * handler that throws propagates out of this call and rolls the caller's
+   * whole transaction back with it — that is intentional dispatcher
+   * behavior, not a bug here.
+   */
+  private async raiseStatusChangeEvent(
+    manager: EntityManager,
+    setId: string,
+    campaignId: string,
+    fromStatus: PhotoReviewSetStatus,
+    toStatus: PhotoReviewSetStatus,
+  ): Promise<void> {
+    if (fromStatus === toStatus) return;
+    await this.transactionContext.run(manager, () =>
+      this.domainEventDispatcher.dispatch([
+        new PhotoSetStatusChangedEvent(setId, campaignId, fromStatus, toStatus),
+      ]),
+    );
+  }
+
+  /**
    * `viewUrl` resolution for one variant, shown to the CMS (plan §5.2's
    * detail page, "Phiên bản"/"Ảnh thẻ hiện tại" panels) — per this task's
    * product ask ("chỉ cần hiển thị ảnh", the review side must never surface
@@ -966,8 +1003,9 @@ export class PhotoReviewService {
         `(s.subject_code ILIKE $${params.length} OR s.subject_name ILIKE $${params.length})`,
       );
     }
-    // plan §5.2, feature 13 — a reviewer with review_assignments rows only
-    // ever sees sets matching at least one of them; zero rows = unrestricted.
+    // plan §5.2, feature 13 (PER-CAMPAIGN pivot 2026-09-28) — a non-admin
+    // reviewer only ever sees sets matching a whole-campaign or group row
+    // they hold; zero rows anywhere means zero results, not unrestricted.
     const scopeFilter = await this.reviewAssignments.buildScopeFilter(
       actorUserId,
       params.length,
@@ -1138,6 +1176,7 @@ export class PhotoReviewService {
       );
     }
     await this.reviewAssignments.assertInScope(actorUserId, {
+      campaignId: row.campaign_id as string,
       className: row.class_name as string | null,
       faculty: row.faculty as string | null,
       major: row.major as string | null,
@@ -1363,6 +1402,7 @@ export class PhotoReviewService {
 
       await this.dataSource.transaction(async (manager) => {
         const lockedSet = await this.lockSet(manager, setId);
+        const fromStatus = lockedSet.status;
         const stored = await this.storeVariantBytesLocalFirst(manager, {
           variantId: variant.id,
           tenantName: sessionContext.tenantName,
@@ -1404,6 +1444,13 @@ export class PhotoReviewService {
           action: PhotoReviewAction.AUTO_GENERATED,
           actorUserId: null,
         });
+        await this.raiseStatusChangeEvent(
+          manager,
+          setId,
+          lockedSet.campaignId,
+          fromStatus,
+          lockedSet.status,
+        );
         return variant;
       });
 
@@ -1433,6 +1480,7 @@ export class PhotoReviewService {
       this.logger.warn(`reprocess failed for set ${setId}: ${message}`);
       await this.dataSource.transaction(async (manager) => {
         const lockedSet = await this.lockSet(manager, setId);
+        const fromStatus = lockedSet.status;
         const repo = manager.getRepository(PhotoVariant);
         variant.status = PhotoVariantStatus.FAILED;
         variant.note = message;
@@ -1452,6 +1500,13 @@ export class PhotoReviewService {
           manager,
           set.campaignId,
           new Date(),
+        );
+        await this.raiseStatusChangeEvent(
+          manager,
+          setId,
+          lockedSet.campaignId,
+          fromStatus,
+          lockedSet.status,
         );
       });
     }
@@ -1551,7 +1606,19 @@ export class PhotoReviewService {
       }
     }
 
-    const kind = await this.photoKindService.findKindEntityOrFail(set.kindId);
+    // Dead-code fix (found during a live-flow audit of this method,
+    // 2026-09-28): a `photoKindService.findKindEntityOrFail(set.kindId)`
+    // fetch used to sit here, assigned to an unused `kind` local. Confirmed
+    // against `PhotoReviewSidecarService.edit`'s own doc comment — unlike
+    // `reprocess`/`uploadVariant` (which both pass `kind.cardSpec` into
+    // `sidecar.cardPhoto()`), the sidecar's `/edit` contract has no
+    // card-spec field at all (`SidecarEditInput` only carries
+    // `imageBase64`/`prompt`/`region`/`fromVariantId`), so this was never
+    // wired to anything — genuinely dead code, not a missing parameter.
+    // Removed rather than left in: it cost an extra DB round trip on every
+    // AI-edit request and, worse, could fail an edit with a spurious
+    // PHOTO_KIND_NOT_FOUND if `set.kindId` were ever bad, for a value this
+    // method never needed in the first place.
     const sessionContext = await this.resolveSessionContext(
       set.sourceSessionId,
     );
@@ -1623,6 +1690,7 @@ export class PhotoReviewService {
       );
       const data = Buffer.from(result.imageBase64, 'base64');
 
+      let appliedToReady = false;
       await this.dataSource.transaction(async (manager) => {
         const stored = await this.storeVariantBytesLocalFirst(manager, {
           variantId: variant.id,
@@ -1633,47 +1701,98 @@ export class PhotoReviewService {
           idempotencyKey: `photo-review:${variant.id}:ai`,
         });
 
-        variant.status = PhotoVariantStatus.READY;
-        // fsFileId intentionally left null — see storeVariantBytesLocalFirst's
-        // own doc comment; VariantUploadWorkerService's cron fills it in once
-        // the push to fs-core actually succeeds.
-        variant.virtualPath = virtualPath;
-        variant.bytes = stored.bytes;
-        variant.sha256 = stored.sha256;
-        variant.width = result.width ?? null;
-        variant.height = result.height ?? null;
-        variant.seed = result.seed ?? null;
-        variant.modelId = result.modelId ?? null;
-        variant.algorithmVersion = result.algorithmVersion ?? null;
-        variant.identitySimilarity = result.identitySimilarity ?? null;
-        await manager.getRepository(PhotoVariant).save(variant);
+        // Guarded UPDATE, not a blind `save(variant)` on the in-memory
+        // entity this method fetched BEFORE the sidecar call above (which
+        // can take up to SIDECAR_TIMEOUT_MS = 30s) — a concurrent
+        // `discardVariant()` on this same PROCESSING variant is legal
+        // (PROCESSING is neither DISCARDED nor the set's current variant,
+        // so nothing blocks it) and, before this fix, would be silently
+        // reverted back to READY the moment this save ran, because the
+        // in-memory object has no idea the row changed underneath it.
+        // `WHERE status = 'PROCESSING'` makes this a no-op once that race
+        // has already happened, instead of overwriting whatever
+        // `discardVariant` wrote.
+        const [readyRows]: [Array<{ id: string }>, number] =
+          await manager.query(
+            `UPDATE photo_variants
+                SET status = $2, virtual_path = $3, bytes = $4, sha256 = $5,
+                    width = $6, height = $7, seed = $8, model_id = $9,
+                    algorithm_version = $10, identity_similarity = $11,
+                    updated_at = now()
+              WHERE id = $1 AND status = $12
+              RETURNING id`,
+            [
+              variant.id,
+              PhotoVariantStatus.READY,
+              virtualPath,
+              stored.bytes,
+              stored.sha256,
+              result.width ?? null,
+              result.height ?? null,
+              result.seed ?? null,
+              result.modelId ?? null,
+              result.algorithmVersion ?? null,
+              result.identitySimilarity ?? null,
+              PhotoVariantStatus.PROCESSING,
+            ],
+          );
+        appliedToReady = readyRows.length > 0;
         // Not set as current — plan §5.3/§6.2: "con người chấp nhận: không bao
         // giờ tự đặt bản AI làm ảnh hiện tại". A reviewer must call
         // POST /v1/review/variants/:id/accept explicitly.
       });
 
-      await this.uploadMetadataBestEffort({
-        tenantName: sessionContext.tenantName,
-        virtualPath: virtualPath.replace(/\.[^.]+$/, '.json'),
-        idempotencyKey: `photo-review:${variant.id}:ai:meta`,
-        metadata: {
-          prompt: dto.prompt,
-          region: dto.region,
-          modelId: result.modelId,
-          seed: result.seed,
-          identitySimilarity: result.identitySimilarity,
-          algorithmVersion: result.algorithmVersion,
-        },
-      });
+      if (!appliedToReady) {
+        this.logger.warn(
+          `aiEdit: variant ${variant.id} was discarded while its sidecar edit was still in flight — result dropped, not resurrected`,
+        );
+      } else {
+        await this.uploadMetadataBestEffort({
+          tenantName: sessionContext.tenantName,
+          virtualPath: virtualPath.replace(/\.[^.]+$/, '.json'),
+          idempotencyKey: `photo-review:${variant.id}:ai:meta`,
+          metadata: {
+            prompt: dto.prompt,
+            region: dto.region,
+            modelId: result.modelId,
+            seed: result.seed,
+            identitySimilarity: result.identitySimilarity,
+            algorithmVersion: result.algorithmVersion,
+          },
+        });
+      }
     } catch (error) {
       const message = extractSidecarFailureMessage(error);
       this.logger.warn(`ai-edit failed for set ${setId}: ${message}`);
-      variant.status = PhotoVariantStatus.FAILED;
-      variant.note = message;
-      await this.variantRepository.save(variant);
+      // Same guarded-UPDATE fix as the success path above — this catch runs
+      // after the same long sidecar await, so the in-memory `variant` can be
+      // just as stale here.
+      const [failedRows]: [Array<{ id: string }>, number] =
+        await this.dataSource.query(
+          `UPDATE photo_variants SET status = $2, note = $3, updated_at = now()
+            WHERE id = $1 AND status = $4
+            RETURNING id`,
+          [
+            variant.id,
+            PhotoVariantStatus.FAILED,
+            message,
+            PhotoVariantStatus.PROCESSING,
+          ],
+        );
+      if (failedRows.length === 0) {
+        this.logger.warn(
+          `aiEdit: variant ${variant.id} was discarded before its failed sidecar edit could be recorded — left DISCARDED`,
+        );
+      }
     }
 
-    return this.toVariantDao(variant, apiBaseUrl, sessionContext.tenantName);
+    // Re-fetched rather than returning the stale in-memory `variant` — the
+    // guarded updates above may have been skipped (discarded mid-flight),
+    // so this is the only way to hand the caller the row's REAL current
+    // state instead of a PROCESSING snapshot that stopped being true
+    // somewhere during the sidecar call.
+    const refreshed = await this.findVariantEntityOrFail(variant.id);
+    return this.toVariantDao(refreshed, apiBaseUrl, sessionContext.tenantName);
   }
 
   // ── GET /v1/review/jobs/:id ──────────────────────────────────────────
@@ -1743,12 +1862,20 @@ export class PhotoReviewService {
 
     await this.dataSource.transaction(async (manager) => {
       const lockedSet = await this.lockSet(manager, set.id);
+      const fromStatus = lockedSet.status;
       const previousCardVariantId = lockedSet.currentCardVariantId ?? null;
       lockedSet.currentCardVariantId = variant.id;
       if (lockedSet.status === PhotoReviewSetStatus.READY) {
         lockedSet.status = PhotoReviewSetStatus.IN_REVIEW;
       }
       await manager.getRepository(SubjectPhotoSet).save(lockedSet);
+      await this.raiseStatusChangeEvent(
+        manager,
+        set.id,
+        lockedSet.campaignId,
+        fromStatus,
+        lockedSet.status,
+      );
 
       const action =
         variant.kind === PhotoVariantKind.CARD_AI
@@ -1949,6 +2076,7 @@ export class PhotoReviewService {
 
     const variant = await this.dataSource.transaction(async (manager) => {
       const lockedSet = await this.lockSet(manager, setId);
+      const fromStatus = lockedSet.status;
       const version = await this.nextVersion(manager, setId);
       const repo = manager.getRepository(PhotoVariant);
 
@@ -2046,6 +2174,13 @@ export class PhotoReviewService {
         set.campaignId,
         actorUserId,
         new Date(),
+      );
+      await this.raiseStatusChangeEvent(
+        manager,
+        setId,
+        lockedSet.campaignId,
+        fromStatus,
+        lockedSet.status,
       );
 
       return created;
@@ -2161,6 +2296,51 @@ export class PhotoReviewService {
 
     await this.dataSource.transaction(async (manager) => {
       const lockedSet = await this.lockSet(manager, setId);
+      const fromStatus = lockedSet.status;
+      // Idempotency guard — same "a retried/double-clicked request must not
+      // double-write" rule this session already applied to
+      // `PrintItemService.statusCallback`/`markPrintedManually`. Decided
+      // under the row lock (`fromStatus`, not the pre-lock `set` read
+      // above, which could already be stale by the time this transaction
+      // starts): re-approving an already-APPROVED set (or re-rejecting an
+      // already-REJECTED one) is a no-op — no duplicate
+      // `photo_review_events` row, no double-counted
+      // `ReviewStatsService.recordDecision`, and no redundant
+      // `raiseStatusChangeEvent` (which already no-ops on
+      // `fromStatus === toStatus`, but skipping the write here closes the
+      // audit-trail/stats side of the same gap, not just the print-side
+      // event).
+      if (fromStatus === status) {
+        return;
+      }
+      // Product decision: a set leaving APPROVED whose active print item has
+      // already moved past the withdrawable window (EXPORTED/PRINTED — the
+      // card has physically left this system, or been handed to a printer)
+      // must not silently flip to REJECTED while the card itself stays
+      // "Chờ in"/"Đã in". `onSetLeftApproved` (print module) already leaves
+      // an EXPORTED/PRINTED item untouched on this exact transition — this
+      // check turns that "untouched" outcome into a hard block instead,
+      // decided inside the SAME transaction/manager as the status write for
+      // consistency with a concurrent export. Only fires leaving APPROVED
+      // (re-approving an already-APPROVED set already returned above, and
+      // every other status pair reaching this method is APPROVED<->REJECTED
+      // only — see `approve`/`reject`); a set with no print item, or only a
+      // PENDING/RENDERED one, is unaffected (still withdrawable as before).
+      if (fromStatus === PhotoReviewSetStatus.APPROVED) {
+        const activePrintItems: Array<{ status: string }> = await manager.query(
+          `SELECT status FROM print_items
+              WHERE set_id = $1 AND status IN ('EXPORTED', 'PRINTED')
+              LIMIT 1`,
+          [setId],
+        );
+        if (activePrintItems.length > 0) {
+          throw new CustomException(
+            'Ảnh đã được đưa vào đợt in (Chờ in/Đã in) — không thể từ chối. Vui lòng gỡ thẻ khỏi đợt in trước.',
+            PHOTO_REVIEW_ERROR_CODE.PRINT_ITEM_ALREADY_EXPORTED,
+            HttpStatus.CONFLICT,
+          );
+        }
+      }
       lockedSet.status = status;
       await manager.getRepository(SubjectPhotoSet).save(lockedSet);
       await this.writeEvent(manager, {
@@ -2176,6 +2356,13 @@ export class PhotoReviewService {
         status === PhotoReviewSetStatus.APPROVED ? 'APPROVED' : 'REJECTED',
         set.createdAt,
         new Date(),
+      );
+      await this.raiseStatusChangeEvent(
+        manager,
+        setId,
+        lockedSet.campaignId,
+        fromStatus,
+        lockedSet.status,
       );
     });
 
@@ -2286,7 +2473,28 @@ export class PhotoReviewService {
     const manifestLines = [
       'subject_code,subject_name,status,updated_at,exported',
     ];
-    const csvField = (value: string) => `"${value.replace(/"/g, '""')}"`;
+    // Quoting alone does not stop Excel/Sheets from evaluating a cell that
+    // STARTS with `=`, `+`, `-`, `@`, a tab or a CR as a formula —
+    // `subject_code`/`subject_name` can carry attacker-controlled text
+    // (kiosk input, roster import, external student API). Prefixing with
+    // `'` neutralizes it, same fix as `PrintPackageService`'s own
+    // `csvField`.
+    const csvField = (value: string) => {
+      const safe = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+      return `"${safe.replace(/"/g, '""')}"`;
+    };
+    // `archiver`'s path normalization only strips a LEADING `../`/`/`, so a
+    // `..` in the MIDDLE of a free-text `subject_code` survives into the
+    // zip entry name unchanged (zip-slip) — same issue and fix as
+    // `PrintPackageService`'s own helper.
+    const safeZipBaseName = (code: string, fallback: string): string => {
+      const cleaned = code
+        .normalize('NFC')
+        .replace(/[\\/]/g, '_')
+        .replace(/[^\p{L}\p{N}._-]/gu, '_')
+        .replace(/^\.+/, '');
+      return cleaned || fallback;
+    };
 
     for (const row of rows) {
       let exported = 'NO_CARD';
@@ -2302,7 +2510,7 @@ export class PhotoReviewService {
             const buf = Buffer.from(await res.arrayBuffer());
             const contentType = res.headers.get('content-type') ?? 'image/jpeg';
             archive.append(buf, {
-              name: `${row.subject_code}.${this.extForMime(contentType)}`,
+              name: `${safeZipBaseName(row.subject_code, row.id)}.${this.extForMime(contentType)}`,
             });
             exported = 'OK';
           } else {
@@ -2470,11 +2678,32 @@ export class PhotoReviewService {
       const hasNewerCapture = Number(newerPhotoRows[0]?.count ?? 0) > 0;
 
       if (hasNewerCapture) {
+        // Unlike the rest of this method (best-effort, outside any
+        // transaction — see this method's own doc comment), THIS branch is
+        // specifically a `APPROVED -> PENDING_AUTO` transition, so it must
+        // raise `PhotoSetStatusChangedEvent` for `PrintModule`'s handler to
+        // withdraw the now-stale active print item (task brief rule 2) —
+        // and that dispatch has to run in the SAME transaction as this
+        // status write, or a crash between the two could leave a print item
+        // referencing a photo that was just retaken. A small dedicated
+        // transaction, scoped to only this one write, is the minimal change
+        // that gets that atomicity without touching this method's other
+        // (still deliberately non-transactional) branches.
+        const fromStatus = existing.status;
         existing.sourceSessionId = sessionId;
         existing.status = PhotoReviewSetStatus.PENDING_AUTO;
         if (subjectName) existing.subjectName = subjectName;
         Object.assign(existing, rosterFields, { dueAt });
-        await this.setRepository.save(existing);
+        await this.dataSource.transaction(async (manager) => {
+          await manager.getRepository(SubjectPhotoSet).save(existing);
+          await this.raiseStatusChangeEvent(
+            manager,
+            existing.id,
+            existing.campaignId,
+            fromStatus,
+            existing.status,
+          );
+        });
         return { setId: existing.id, pendingAuto: true };
       }
 

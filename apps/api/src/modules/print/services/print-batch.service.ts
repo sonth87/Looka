@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
@@ -39,6 +40,8 @@ const EDITABLE_BATCH_STATUSES = ['DRAFT', 'READY'];
  */
 @Injectable()
 export class PrintBatchService {
+  private readonly logger = new Logger(PrintBatchService.name);
+
   constructor(
     @InjectRepository(PrintBatch)
     private readonly batches: Repository<PrintBatch>,
@@ -171,14 +174,32 @@ export class PrintBatchService {
 
     const newlyAdded = items.filter((i) => i.batchId !== id);
     if (newlyAdded.length) {
-      await this.items.update(
-        { id: In(newlyAdded.map((i) => i.id)) },
-        { batchId: id },
-      );
-      batch.itemCount += newlyAdded.length;
-      await this.batches.save(batch);
+      // Guarded `UPDATE ... RETURNING` (not a stale `batch.itemCount +=`
+      // `save(batch)`) — TypeORM 0.3's `save` re-diffs and writes back
+      // EVERY column that differs from the current DB row against the
+      // entity loaded at the top of this method, so a long-running sibling
+      // call (e.g. `render()`, which can take minutes) that saved its own
+      // change to this same batch in the meantime would get silently
+      // reverted here. `itemCount` is only incremented by the rows THIS
+      // call actually claimed, and the `(batch_id IS NULL OR batch_id =
+      // $1)` guard means an item another request claimed for a different
+      // batch in the window between the check above and this write is left
+      // alone rather than stolen.
+      const [movedRows]: [Array<{ id: string }>, number] =
+        await this.dataSource.query(
+          `UPDATE print_items SET batch_id = $1, updated_at = now()
+             WHERE id = ANY($2) AND (batch_id IS NULL OR batch_id = $1)
+           RETURNING id`,
+          [id, newlyAdded.map((i) => i.id)],
+        );
+      if (movedRows.length) {
+        await this.dataSource.query(
+          `UPDATE print_batches SET item_count = item_count + $2, updated_at = now() WHERE id = $1`,
+          [id, movedRows.length],
+        );
+      }
     }
-    return PrintBatchDetailDao.fromDetail(batch);
+    return PrintBatchDetailDao.fromDetail(await this.loadOrFail(id));
   }
 
   async removeItem(id: string, itemId: string): Promise<void> {
@@ -189,8 +210,12 @@ export class PrintBatchService {
       throw new NotFoundException('Item không thuộc đợt in này');
     }
     await this.items.update(itemId, { batchId: null });
-    batch.itemCount = Math.max(0, batch.itemCount - 1);
-    await this.batches.save(batch);
+    // Atomic decrement, not a stale `save(batch)` — same reasoning as
+    // `addItems()`'s own note.
+    await this.dataSource.query(
+      `UPDATE print_batches SET item_count = GREATEST(item_count - 1, 0), updated_at = now() WHERE id = $1`,
+      [id],
+    );
   }
 
   /** `POST /v1/print/batches/:id/items/remove {itemIds}` — bulk mirror of the single-item `DELETE .../items/:itemId` above; same "item stays, only loses batchId" semantics, just for many at once. */
@@ -211,8 +236,12 @@ export class PrintBatchService {
       throw new NotFoundException(`Item ${foreign.id} không thuộc đợt in này`);
     }
     await this.items.update({ id: In(itemIds) }, { batchId: null });
-    batch.itemCount = Math.max(0, batch.itemCount - itemIds.length);
-    await this.batches.save(batch);
+    // Atomic decrement, not a stale `save(batch)` — same reasoning as
+    // `addItems()`'s own note.
+    await this.dataSource.query(
+      `UPDATE print_batches SET item_count = GREATEST(item_count - $2, 0), updated_at = now() WHERE id = $1`,
+      [id, itemIds.length],
+    );
     return { removed: itemIds.length };
   }
 
@@ -254,15 +283,31 @@ export class PrintBatchService {
     const idsToAttach = Array.from(
       new Set([...createdIds, ...unassigned.map((i) => i.id)]),
     );
+    let attached = 0;
     if (idsToAttach.length) {
-      await this.items.update({ id: In(idsToAttach) }, { batchId: id });
-      batch.itemCount += idsToAttach.length;
-      await this.batches.save(batch);
+      // Guarded `UPDATE ... RETURNING` + atomic increment — same reasoning
+      // as `addItems()`'s own note (a stale `batch.itemCount +=`
+      // `save(batch)` here would both lose concurrent increments and risk
+      // clobbering a concurrent unrelated change to this batch row).
+      const [movedRows]: [Array<{ id: string }>, number] =
+        await this.dataSource.query(
+          `UPDATE print_items SET batch_id = $1, updated_at = now()
+             WHERE id = ANY($2) AND (batch_id IS NULL OR batch_id = $1)
+           RETURNING id`,
+          [id, idsToAttach],
+        );
+      attached = movedRows.length;
+      if (attached) {
+        await this.dataSource.query(
+          `UPDATE print_batches SET item_count = item_count + $2, updated_at = now() WHERE id = $1`,
+          [id, attached],
+        );
+      }
     }
 
     return {
       created: createdIds.length,
-      attached: idsToAttach.length,
+      attached,
       skipped,
     };
   }
@@ -328,8 +373,17 @@ export class PrintBatchService {
       }
     }
     if (batch.status === 'DRAFT' && rendered > 0) {
-      batch.status = 'READY';
-      await this.batches.save(batch);
+      // Targeted, guarded `UPDATE` (not `save(batch)`) — this method can
+      // run for minutes over hundreds of items (see its own doc comment).
+      // `batch` was loaded once at the very top, so blind-saving that
+      // in-memory entity back at the end would silently overwrite any
+      // `printerId`/`defaultTemplateId`/status change an operator made
+      // through `PATCH`/`cancel()` while the render was still in flight,
+      // reverting it back to what it was when this call started. The
+      // `WHERE status = 'DRAFT'` guard also means this only ever flips
+      // DRAFT → READY, never re-applies over a batch someone cancelled or
+      // otherwise moved on in the meantime.
+      await this.batches.update({ id, status: 'DRAFT' }, { status: 'READY' });
     }
     return { rendered, failed: errors.length, errors };
   }
@@ -387,10 +441,22 @@ export class PrintBatchService {
         'Chưa có item nào ở trạng thái RENDERED để gửi in',
       );
     }
-    batch.status = 'PRINTING';
-    batch.sentAt = new Date();
-    const saved = await this.batches.save(batch);
-    return PrintBatchDetailDao.fromDetail(saved);
+    // Targeted, guarded `UPDATE` (not `batch.status = ...; save(batch)`) —
+    // same reasoning as this file's other blind-`save`-after-an-async-gap
+    // fixes this session (`addItems`/`removeItem`/`render`'s own doc
+    // comments). `batch` was loaded at the very top of this method, and the
+    // two awaits above it (`assertItemsBelongToBatch`, the items `UPDATE`)
+    // are a real gap in which a concurrent `PATCH .../batches/:id` could
+    // have changed `printerId`/`defaultTemplateId`/`name` on this same row —
+    // a blind `save(batch)` here would silently revert that change back to
+    // what it was when `send()` started. The `status IN (...)` guard means
+    // this only ever moves DRAFT/READY → PRINTING, never re-applies over a
+    // batch someone cancelled in that same window.
+    await this.batches.update(
+      { id, status: In(['DRAFT', 'READY']) },
+      { status: 'PRINTING', sentAt: new Date() },
+    );
+    return PrintBatchDetailDao.fromDetail(await this.loadOrFail(id));
   }
 
   /**
@@ -399,18 +465,28 @@ export class PrintBatchService {
    * `send()`'s old CENTRALIZED branch used to do. Builds the SAME zip
    * `GET .../package` returns (read-only, unchanged, see
    * `PrintPackageService`), but only stamps `exportedAt`/promotes
-   * RENDERED→EXPORTED items AFTER the zip has actually finished building
-   * (plan's own "sau khi zip dựng xong" — a failed zip build must never
-   * stamp anything). Repeatable: re-exporting an already-EXPORTED/PRINTED
-   * item just refreshes its `exportedAt` and appends a new
+   * PENDING/RENDERED→EXPORTED items AFTER the zip has actually finished
+   * building (plan's own "sau khi zip dựng xong" — a failed zip build must
+   * never stamp anything). Repeatable: re-exporting an already-EXPORTED/
+   * PRINTED item just refreshes its `exportedAt` and appends a new
    * `print_item_events` row, never regresses its status ("Xuất lại lần
    * nữa thì cập nhật exported_at thành lần mới nhất").
+   *
+   * 2026-09-25 product decision: the zip no longer carries rendered
+   * card-template PNGs (see `PrintPackageService`'s own doc comment), so
+   * `render()` is no longer a precondition for CENTRALIZED export — an
+   * item may be exported straight from PENDING. `PrintPackageService
+   * .buildPackage` is the one that decides per-item eligibility now (set
+   * still APPROVED + has a current card variant, re-checked live); this
+   * method only narrows by STATUS up front, to keep CANCELLED/FAILED/
+   * REPRINT_REQUESTED/QUEUED/PRINTING items out of the zip and out of any
+   * stamping entirely.
    */
   async exportPackage(
     id: string,
     itemIds: string[] | undefined,
     actorUserId: string | null,
-  ): Promise<{ zip: Buffer; filename: string }> {
+  ): Promise<{ zip: Buffer; filename: string; failedItemIds: string[] }> {
     const batch = await this.loadOrFail(id);
     if (!['DRAFT', 'READY'].includes(batch.status)) {
       throw new ConflictException(
@@ -424,20 +500,18 @@ export class PrintBatchService {
     const where: FindOptionsWhere<PrintItem> = { batchId: id };
     if (itemIds?.length) where.id = In(itemIds);
     const scopedItems = await this.items.find({ where });
-    // Same "not rendered yet" check `PrintPackageService.appendSide` uses
-    // to skip a side — an item with neither PNG contributes nothing to the
-    // zip, so it must not get an `exportedAt` stamp either. Also exclude
-    // anything not in an active print-flow status (CANCELLED,
-    // REPRINT_REQUESTED) even if a stale rendered PNG is still attached —
-    // those must never be zipped, stamped exported_at, or given a false
-    // "re-exported" event.
-    const exportable = scopedItems.filter(
-      (i) =>
-        (i.renderedFrontFsFileId || i.renderedBackFsFileId) &&
-        ['RENDERED', 'EXPORTED', 'PRINTED'].includes(i.status),
+    // PENDING is now a valid starting point for export (see this method's
+    // own doc comment) — CANCELLED/FAILED/REPRINT_REQUESTED/QUEUED/
+    // PRINTING are excluded regardless of what `PrintPackageService` might
+    // otherwise be able to find a photo for; those statuses must never be
+    // zipped, stamped exported_at, or given a false "re-exported" event.
+    const exportable = scopedItems.filter((i) =>
+      ['PENDING', 'RENDERED', 'EXPORTED', 'PRINTED'].includes(i.status),
     );
     if (exportable.length === 0) {
-      throw new BadRequestException('Chưa có item nào được render để xuất gói');
+      throw new BadRequestException(
+        'Chưa có item nào ở trạng thái phù hợp để xuất gói',
+      );
     }
 
     // Build the zip from exactly the same id set that gets stamped below —
@@ -445,51 +519,111 @@ export class PrintBatchService {
     // REPRINT_REQUESTED item (which has a stale rendered PNG but was
     // filtered out of `exportable` above) can never end up in the package.
     const exportableIds = exportable.map((i) => i.id);
-    const zip = await this.packageService.buildPackage(batch, exportableIds);
+    const { zip, includedItemIds, failedItemIds } =
+      await this.packageService.buildPackage(batch, exportableIds);
+
+    // Only items whose image(s) actually made it into the zip may be
+    // stamped as exported/"chờ in" — `buildPackage` can silently drop an
+    // item when its file-service download fails (403/5xx/timeout), and the
+    // doc comment on this method promises stamping only happens "AFTER the
+    // zip has actually finished building" for that item. Stamping a whole
+    // `exportable` set regardless of `failedItemIds` would tell the
+    // operator a card is waiting to print when the print vendor never
+    // received its image.
+    const includedSet = new Set(includedItemIds);
+    const stampable = exportable.filter((i) => includedSet.has(i.id));
+    if (stampable.length === 0) {
+      throw new BadRequestException(
+        'Không thể đóng gói ảnh cho item nào đã chọn — hồ sơ chưa duyệt/chưa có ảnh thẻ đã duyệt, hoặc tải ảnh từ file-service thất bại, vui lòng thử lại',
+      );
+    }
 
     const now = new Date();
     await this.dataSource.transaction(async (manager) => {
-      const toPromoteIds = exportable
-        .filter((i) => i.status === 'RENDERED')
+      // PENDING items are now a valid promote source alongside RENDERED
+      // (see this method's own doc comment — render is no longer a
+      // precondition for CENTRALIZED export).
+      const toPromoteIds = stampable
+        .filter((i) => i.status === 'PENDING' || i.status === 'RENDERED')
         .map((i) => i.id);
-      const toRestampIds = exportable
-        .filter((i) => i.status !== 'RENDERED')
+      const toRestampIds = stampable
+        .filter((i) => i.status !== 'PENDING' && i.status !== 'RENDERED')
         .map((i) => i.id);
+      // Guarded by status (and, implicitly, by only ever touching ids this
+      // request itself just verified belong to this batch and are in the
+      // zip) + `RETURNING id` — `buildPackage` can run for a long time
+      // downloading every item's photos one after another, so a concurrent
+      // result-file upload, `removeItems`, or item cancellation could have
+      // moved one of these ids on since `scopedItems` was read above. Only
+      // rows still actually PENDING/RENDERED (or still EXPORTED/PRINTED,
+      // for the restamp) get touched, and events are written only for what
+      // really changed — never for the stale in-memory snapshot.
+      let promotedIds: string[] = [];
+      let restampedIds: string[] = [];
       if (toPromoteIds.length) {
-        await manager.query(
-          `UPDATE print_items SET status = 'EXPORTED', exported_at = $2, updated_at = now() WHERE id = ANY($1)`,
-          [toPromoteIds, now],
+        // `error_message = NULL` — 2026-09-25 product rule: a PENDING/
+        // RENDERED item can carry a stale error from an earlier
+        // `PrintResultImportService` "In thất bại" regression (see that
+        // service's `resolvePriorStatus`); re-exporting it is the operator
+        // saying "try again", so the old error must not still show once it's
+        // back out "chờ in" — the next result upload's own outcome is what
+        // should set it again, if it fails a second time.
+        const [rows]: [Array<{ id: string }>, number] = await manager.query(
+          `UPDATE print_items SET status = 'EXPORTED', exported_at = $2, error_message = NULL, updated_at = now()
+             WHERE id = ANY($1) AND status IN ('PENDING', 'RENDERED') AND batch_id = $3
+           RETURNING id`,
+          [toPromoteIds, now, id],
         );
+        promotedIds = rows.map((r) => r.id);
       }
       if (toRestampIds.length) {
-        await manager.query(
-          `UPDATE print_items SET exported_at = $2, updated_at = now() WHERE id = ANY($1)`,
-          [toRestampIds, now],
+        const [rows]: [Array<{ id: string }>, number] = await manager.query(
+          `UPDATE print_items SET exported_at = $2, updated_at = now()
+             WHERE id = ANY($1) AND status IN ('EXPORTED', 'PRINTED') AND batch_id = $3
+           RETURNING id`,
+          [toRestampIds, now, id],
         );
+        restampedIds = rows.map((r) => r.id);
       }
-      await manager.save(
-        PrintItemEvent,
-        exportable.map((item) =>
-          this.events.create({
-            itemId: item.id,
-            fromStatus: item.status,
-            toStatus: item.status === 'RENDERED' ? 'EXPORTED' : item.status,
-            source: 'MANUAL',
-            actorUserId,
-            message:
-              item.status === 'RENDERED'
+      const promotedSet = new Set(promotedIds);
+      const restampedSet = new Set(restampedIds);
+      const actuallyStamped = stampable.filter(
+        (i) => promotedSet.has(i.id) || restampedSet.has(i.id),
+      );
+      if (actuallyStamped.length) {
+        await manager.save(
+          PrintItemEvent,
+          actuallyStamped.map((item) =>
+            this.events.create({
+              itemId: item.id,
+              fromStatus: item.status,
+              toStatus: promotedSet.has(item.id) ? 'EXPORTED' : item.status,
+              source: 'MANUAL',
+              actorUserId,
+              message: promotedSet.has(item.id)
                 ? 'Xuất gói'
                 : 'Xuất gói lại (đã EXPORTED/PRINTED trước đó)',
-          }),
-        ),
-      );
+            }),
+          ),
+        );
+      }
       await manager.update(PrintBatch, id, {
         sentAt: now,
         lastExportedAt: now,
       });
     });
 
-    return { zip, filename: `print-batch-${batch.code}.zip` };
+    if (failedItemIds.length > 0) {
+      this.logger.warn(
+        `exportPackage: batch ${id} — ${failedItemIds.length} item(s) could not be packaged and were NOT stamped as exported: ${failedItemIds.join(', ')}`,
+      );
+    }
+
+    return {
+      zip,
+      filename: `print-batch-${batch.code}.zip`,
+      failedItemIds,
+    };
   }
 
   /**
@@ -526,19 +660,58 @@ export class PrintBatchService {
     return PrintBatchDetailDao.fromDetail(saved);
   }
 
-  async cancel(id: string): Promise<PrintBatchDetailDao> {
+  /**
+   * 2026-09-28 product decision (gap live-confirmed in
+   * `print-direct-flow.live.spec.ts`, test "6b"): a DIRECT item still
+   * sitting QUEUED in the agent's queue (`GET /v1/print/queue`) is NOT
+   * stopped by cancelling the batch alone — a real agent would still print
+   * it. This now cascade-cancels QUEUED → CANCELLED. PRINTING is
+   * deliberately left alone: the agent has already claimed it and the
+   * physical print may already be underway, so flipping its DB status at
+   * that point would only desync system state from reality without
+   * stopping anything real (same "can't un-print a page" reasoning as
+   * `patch()`'s own PRINTED-is-terminal guard). Every other status
+   * (PENDING/RENDERED/EXPORTED/PRINTED/etc.) still keeps the old behavior —
+   * untouched, operator can still see/re-add it to another batch.
+   * CENTRALIZED batches never have QUEUED items (only DIRECT `send()` ever
+   * sets that status), so the cascade is a no-op for them.
+   */
+  async cancel(
+    id: string,
+    actorUserId: string | null,
+  ): Promise<PrintBatchDetailDao> {
     const batch = await this.loadOrFail(id);
     if (batch.status === 'DONE' || batch.status === 'CANCELLED') {
       throw new ConflictException(
         `Đợt in đang ở trạng thái ${batch.status}, không thể hủy`,
       );
     }
-    // Items keep their own status/batchId untouched (plan gives no cascade
-    // rule) — an operator can still see/re-add them to another batch;
-    // cancelling the batch only stops IT from being sent/packaged again.
     batch.status = 'CANCELLED';
-    const saved = await this.batches.save(batch);
-    return PrintBatchDetailDao.fromDetail(saved);
+    await this.dataSource.transaction(async (manager) => {
+      await manager.save(batch);
+      const [rows]: [Array<{ id: string }>, number] = await manager.query(
+        `UPDATE print_items SET status = 'CANCELLED', updated_at = now()
+           WHERE batch_id = $1 AND status = 'QUEUED'
+         RETURNING id`,
+        [id],
+      );
+      if (rows.length) {
+        await manager.save(
+          PrintItemEvent,
+          rows.map((row) =>
+            this.events.create({
+              itemId: row.id,
+              fromStatus: 'QUEUED',
+              toStatus: 'CANCELLED',
+              source: 'MANUAL',
+              actorUserId,
+              message: 'Tự hủy theo đợt in bị hủy',
+            }),
+          ),
+        );
+      }
+    });
+    return PrintBatchDetailDao.fromDetail(await this.loadOrFail(id));
   }
 
   /**
@@ -557,7 +730,7 @@ export class PrintBatchService {
     if (itemIds?.length) {
       await this.assertItemsBelongToBatch(id, itemIds);
     }
-    const zip = await this.packageService.buildPackage(batch, itemIds);
+    const { zip } = await this.packageService.buildPackage(batch, itemIds);
     return { zip, filename: `print-batch-${batch.code}.zip` };
   }
 }
