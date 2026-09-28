@@ -5,7 +5,7 @@ import { ReviewStatsService } from '@app/modules/stats/services/review-stats.ser
 import { Pagination } from '@app/shared/http/pagination';
 import { DomainEventDispatcher } from '@app/shared/cqrs/domain-event.dispatcher';
 import { TransactionContext } from '@app/shared/database/transaction-context';
-import { HttpStatus, Injectable, Logger } from '@nestjs/common';
+import { HttpStatus, Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import archiver from 'archiver';
@@ -43,12 +43,17 @@ import {
   PhotoVariantKind,
   PhotoVariantStatus,
 } from '../photo-review.constants';
-import { PhotoKindService } from './photo-kind.service';
 import {
-  PhotoReviewSidecarService,
-  SidecarError,
-} from './photo-review-sidecar.service';
+  PHOTO_AI_PORT,
+  PhotoAiError,
+  unwrapPhotoAi,
+} from '../application/ports/photo-ai.port';
+import type { PhotoAiPort } from '../application/ports/photo-ai.port';
+import { PhotoKindService } from './photo-kind.service';
+import { SidecarError } from './photo-review-sidecar.service';
 import { ReviewAssignmentService } from './review-assignment.service';
+import { WorkflowCatalogReadRepository } from '@app/modules/workflow/infrastructure/read/workflow-catalog.read-repository';
+import type { WorkflowConfig } from '@app/modules/workflow/domain/schema/workflow-config.schema';
 
 /**
  * How long a signed variant `local-content` link stays valid — same value,
@@ -85,12 +90,18 @@ const uploadedFileMimeAllowed = (mimeType: string) =>
   ALLOWED_UPLOAD_MIME_TYPES.includes(mimeType.toLowerCase());
 
 /**
- * Extracts a real diagnostic message from anything this module's sidecar
- * call sites (`reprocess`/`aiEdit`/`uploadVariant`) can catch —
- * `SidecarError` and `CustomException` (e.g. `FileStorageService`'s own
- * throws, hit when `readSourcePhotoBytes`/`fetchBytesFromFileStorage` falls
- * back to fs-core) both carry their real text somewhere OTHER than the
- * plain `.message` a generic `catch` would read.
+ * Extracts a real diagnostic message from anything this module's
+ * `PhotoAiPort` call sites (`reprocess`/`aiEdit`/`uploadVariant`) can catch
+ * — `PhotoAiError` (thrown by `unwrapPhotoAi` for any non-`Success`
+ * `PhotoAiPort` outcome) and `SidecarError` (still thrown directly by this
+ * class's own `readSourcePhotoBytes`/`fetchBytesFromFileStorage`/
+ * `readVariantBytes` for "no bytes available anywhere yet" — unrelated to
+ * `PhotoReviewSidecarService`'s own HTTP calls, but the same error type,
+ * reused rather than duplicated) both already carry their real text on
+ * plain `.message` (explicit here for clarity, though the generic fallback
+ * below would already read it correctly); `CustomException` (e.g.
+ * `FileStorageService`'s own throws, hit when the same two helpers fall
+ * back to fs-core) does NOT — see below.
  *
  * `CustomException.message` specifically is NOT the message it was
  * constructed with, for every `CustomException` anywhere in this app: Nest's
@@ -111,6 +122,7 @@ const uploadedFileMimeAllowed = (mimeType: string) =>
  * reaches an actual HTTP response).
  */
 function extractSidecarFailureMessage(error: unknown): string {
+  if (error instanceof PhotoAiError) return error.message;
   if (error instanceof SidecarError) return error.message;
   if (error instanceof CustomException)
     return error.payload?.error ?? error.message;
@@ -148,13 +160,14 @@ export class PhotoReviewService {
     @InjectDataSource()
     private readonly dataSource: DataSource,
     private readonly fileStorage: FileStorageService,
-    private readonly sidecar: PhotoReviewSidecarService,
+    @Inject(PHOTO_AI_PORT) private readonly photoAi: PhotoAiPort,
     private readonly photoKindService: PhotoKindService,
     private readonly configService: ConfigService,
     private readonly reviewStats: ReviewStatsService,
     private readonly reviewAssignments: ReviewAssignmentService,
     private readonly transactionContext: TransactionContext,
     private readonly domainEventDispatcher: DomainEventDispatcher,
+    private readonly workflowCatalog: WorkflowCatalogReadRepository,
   ) {}
 
   // ── Locking (plan §4) ──────────────────────────────────────────────────
@@ -1317,18 +1330,296 @@ export class PhotoReviewService {
     });
   }
 
+  // ── AI processing pipeline (`ai_pipeline_steps` executor, 2026-09-28) ───
+
+  /**
+   * A campaign's effective AI-processing steps — its pinned workflow
+   * version's `config.aiProcessing`, same "campaign → `workflow_version_id`
+   * → `WorkflowCatalogReadRepository.getVersionRef`" resolution
+   * `CampaignService.toCampaignResponse` already uses for `captureAngles`/
+   * `cardSpec` (`device-management/services/campaign.service.ts`) — read via
+   * plain SQL against `campaigns` (this module owns no entity there, same
+   * cross-boundary-read convention as `sessions`/`photos` elsewhere in this
+   * file), never an entity import. Returns `[]` (meaning: caller should fall
+   * back to today's single hardcoded card-crop) whenever there is no
+   * campaign, no pinned workflow version, or the workflow's own
+   * `aiProcessing.enabled` is `false` — i.e. every campaign that predates
+   * this feature keeps behaving exactly as before, with zero config needed.
+   */
+  private async resolveAiProcessingSteps(
+    campaignId: string | null,
+  ): Promise<WorkflowConfig['aiProcessing']['steps']> {
+    if (!campaignId) return [];
+    const rows: Array<{ workflow_version_id: string | null }> =
+      await this.dataSource.query(
+        `SELECT workflow_version_id FROM campaigns WHERE id = $1`,
+        [campaignId],
+      );
+    const versionId = rows[0]?.workflow_version_id;
+    if (!versionId) return [];
+    const ref = await this.workflowCatalog.getVersionRef(versionId);
+    if (!ref?.config.aiProcessing?.enabled) return [];
+    return ref.config.aiProcessing.steps ?? [];
+  }
+
+  /**
+   * Runs a campaign's configured `ai_pipeline_steps` in order, each step's
+   * output feeding the next — the catalog's own worked example is
+   * CARD_CROP → BACKGROUND_REPLACE → SKIN_SMOOTH → AI_EDIT (see
+   * `1813000000000-CreateAiPipelineSteps.ts`'s seed data). `steps` empty
+   * (the overwhelmingly common case today — see `resolveAiProcessingSteps`)
+   * takes a dedicated fast path: exactly the single `makeCardPhoto` call
+   * this method always made before the executor existed, independent of
+   * whether a `CARD_CROP` catalog row even exists — a campaign with no
+   * opinion about AI processing must keep working even if the catalog is
+   * empty or misconfigured.
+   *
+   * Only `CARD_CROP` (`/card-photo`) and `AI_EDIT` (`/edit`) steps actually
+   * dispatch anywhere real — `BACKGROUND_REPLACE` (`/background`) and
+   * `SKIN_SMOOTH` (`/retouch`) have no `PhotoAiPort` method at all (neither
+   * ever got a real client implementation, and both would target the same
+   * dead `services/python-ai` sidecar `makeCardPhoto`/`identitySimilarity`
+   * already accept as a known gap — see `PhotoAiAdapter`'s own doc
+   * comment). A configured step of either kind is logged and skipped
+   * (pass-through, not a pipeline failure) rather than invented client code
+   * against an endpoint nothing serves.
+   *
+   * `mirror` only applies to the FIRST step that actually touches pixels —
+   * it corrects the raw sensor capture to match what the subject saw in the
+   * live-view mirror (see `SidecarCardPhotoInput.mirror`'s own doc
+   * comment); every later step in the chain is already correctly oriented.
+   */
+  private async runAiProcessingPipeline(input: {
+    steps: WorkflowConfig['aiProcessing']['steps'];
+    initialImageBase64: string;
+    cardSpec: Record<string, unknown>;
+    mirror: boolean;
+  }): Promise<{
+    imageBase64: string;
+    mimeType: string;
+    width: number | null;
+    height: number | null;
+    dpi: number | null;
+    warnings: string[];
+  }> {
+    if (input.steps.length === 0) {
+      const value = unwrapPhotoAi(
+        await this.photoAi.makeCardPhoto({
+          imageBase64: input.initialImageBase64,
+          cardSpec: input.cardSpec,
+          mirror: input.mirror,
+        }),
+      );
+      return { ...value, warnings: value.warnings ?? [] };
+    }
+
+    const catalog = await this.loadAiPipelineStepCatalog(
+      input.steps.map((s) => s.code),
+    );
+
+    let imageBase64 = input.initialImageBase64;
+    let mimeType = 'image/jpeg';
+    let width: number | null = null;
+    let height: number | null = null;
+    let dpi: number | null = null;
+    const warnings: string[] = [];
+    let mirrorNextStep = input.mirror;
+
+    for (const step of input.steps) {
+      const entry = catalog.get(step.code);
+      if (!entry || !entry.active) {
+        this.logger.warn(
+          `AI pipeline step "${step.code}" not found or inactive in ai_pipeline_steps — skipped`,
+        );
+        continue;
+      }
+      switch (entry.sidecarEndpoint) {
+        case '/card-photo': {
+          const value = unwrapPhotoAi(
+            await this.photoAi.makeCardPhoto({
+              imageBase64,
+              cardSpec: input.cardSpec,
+              mirror: mirrorNextStep,
+            }),
+          );
+          imageBase64 = value.imageBase64;
+          mimeType = value.mimeType;
+          width = value.width;
+          height = value.height;
+          dpi = value.dpi;
+          warnings.push(...(value.warnings ?? []));
+          mirrorNextStep = false;
+          break;
+        }
+        case '/edit': {
+          // Step-level `params` (a workflow author's per-step override) wins
+          // over the catalog row's own `default_params` — same precedence
+          // for every one of these five, not just `prompt`.
+          const resolve = <T>(key: string): T | undefined =>
+            (step.params?.[key] as T | undefined) ??
+            (entry.defaultParams?.[key] as T | undefined);
+          // `width`/`height` fall back once more, to `cardSpecToEditDimensions`
+          // — same "always match the configured output format" rule
+          // `aiEdit()` applies (2026-09-28 user decision; see that method's
+          // own comment), so a step that specifies neither still gets a
+          // correctly-sized result rather than the service's own
+          // auto-computed aspect ratio.
+          const cardDimensions = this.cardSpecToEditDimensions(input.cardSpec);
+          const stepPrompt = this.appendBackgroundColorInstruction(
+            resolve<string>('prompt'),
+            input.cardSpec,
+          );
+          const value = unwrapPhotoAi(
+            await this.photoAi.edit({
+              imageBuffer: Buffer.from(imageBase64, 'base64'),
+              mimeType,
+              prompt: stepPrompt,
+              cfg: resolve<number>('cfg'),
+              steps: resolve<number>('steps'),
+              seed: resolve<number>('seed'),
+              width: resolve<number>('width') ?? cardDimensions.width,
+              height: resolve<number>('height') ?? cardDimensions.height,
+            }),
+          );
+          imageBase64 = value.imageBuffer.toString('base64');
+          mimeType = value.mimeType;
+          mirrorNextStep = false;
+          break;
+        }
+        case '/background':
+        case '/retouch':
+          this.logger.warn(
+            `AI pipeline step "${step.code}" (${entry.sidecarEndpoint}) has no PhotoAiPort implementation yet — skipped as a known gap, image passed through unchanged`,
+          );
+          break;
+        default:
+          this.logger.warn(
+            `AI pipeline step "${step.code}" has unknown sidecar_endpoint "${entry.sidecarEndpoint}" — skipped`,
+          );
+      }
+    }
+
+    return { imageBase64, mimeType, width, height, dpi, warnings };
+  }
+
+  /**
+   * Physical card size (`cardSpec.size`, e.g. `'4x6'` — centimeters) + dpi
+   * → the `width`/`height` `PhotoAiPort.edit()` should request, so an
+   * AI-edited image comes out already sized for the target card instead of
+   * whatever aspect ratio the service auto-computes from the input. Same
+   * cm→pixel math `services/python-ai`'s own `CARD_PHOTO_PIXEL_TABLE` used
+   * before its 2026-09-28 removal (`docs/plans/card-photo-export-and-filters-plan-2026-09-17.md`
+   * §F.1's own table: 4x6@300dpi → 472×709, etc.) — computed here instead
+   * of hardcoded, since only two `dpi` values and two `size` values exist
+   * today (`workflow-config.schema.ts`'s `cardSpecSchema`) but the formula
+   * generalizes without needing a new table entry if a third ever does.
+   *
+   * This is NOT a face-aware crop — 2026-09-28, the user was asked
+   * explicitly whether "auto focus vào mặt" should mean real face
+   * detection (no such capability exists anywhere in this backend, client
+   * or server) or just matching the configured output size, and chose the
+   * latter (see this task's own AskUserQuestion). The integration guide's
+   * own "những chỗ dễ nhầm" note still applies: the service reshapes the
+   * canvas to this aspect ratio, it does not locate or center the face
+   * within it.
+   *
+   * Returns `{}` (both fields omitted) when `cardSpec` doesn't carry a
+   * parseable `size`/`dpi` — callers spread the result into `edit()`'s
+   * input, so an empty object just means "let the service pick", the same
+   * fallback as before this feature existed.
+   */
+  private cardSpecToEditDimensions(cardSpec: Record<string, unknown>): {
+    width?: number;
+    height?: number;
+  } {
+    const size = typeof cardSpec.size === 'string' ? cardSpec.size : null;
+    const dpi = typeof cardSpec.dpi === 'number' ? cardSpec.dpi : null;
+    const match = size ? /^(\d+(?:\.\d+)?)x(\d+(?:\.\d+)?)$/i.exec(size) : null;
+    if (!match || !dpi) return {};
+    const CM_PER_INCH = 2.54;
+    const widthCm = Number(match[1]);
+    const heightCm = Number(match[2]);
+    return {
+      width: Math.round((widthCm / CM_PER_INCH) * dpi),
+      height: Math.round((heightCm / CM_PER_INCH) * dpi),
+    };
+  }
+
+  /**
+   * `/edit` has no dedicated background-color field at all (its full
+   * parameter set is `image`/`prompt`/`cfg`/`steps`/`seed`/`width`/`height`
+   * — see the integration guide) — the only way to steer the output's
+   * background is to describe it IN the prompt text itself. Confirmed
+   * working via live testing 2026-09-28: a busy real background (plants,
+   * string lights, signage) was fully replaced by a flat color from a
+   * prompt instruction alone. Not pixel-exact to the given hex (the model
+   * reads "orange #F37320" as a color description, not a strict spec) —
+   * an accepted approximation, not a guarantee.
+   *
+   * Always appended (rather than only when the caller's own prompt is
+   * silent about background) — 2026-09-28 user decision: every AI edit
+   * should push the output toward the configured card background,
+   * regardless of what a reviewer's own free-text prompt says, so the
+   * result stays background-compliant by default.
+   */
+  private appendBackgroundColorInstruction(
+    prompt: string | undefined,
+    cardSpec: Record<string, unknown>,
+  ): string | undefined {
+    const color =
+      typeof cardSpec.backgroundColor === 'string'
+        ? cardSpec.backgroundColor.trim()
+        : null;
+    if (!color) return prompt;
+    const instruction = `Change the background to a solid, flat, evenly lit color, hex ${color}, with no texture, shadows, or objects. Keep the subject unchanged — do not alter the face, expression, hair, or clothing.`;
+    return prompt ? `${prompt}\n\n${instruction}` : instruction;
+  }
+
+  private async loadAiPipelineStepCatalog(codes: string[]): Promise<
+    Map<
+      string,
+      {
+        active: boolean;
+        sidecarEndpoint: string;
+        defaultParams: Record<string, unknown> | null;
+      }
+    >
+  > {
+    if (codes.length === 0) return new Map();
+    const rows: Array<{
+      code: string;
+      active: boolean;
+      sidecar_endpoint: string;
+      default_params: Record<string, unknown> | null;
+    }> = await this.dataSource.query(
+      `SELECT code, active, sidecar_endpoint, default_params
+         FROM ai_pipeline_steps WHERE code = ANY($1)`,
+      [codes],
+    );
+    return new Map(
+      rows.map((r) => [
+        r.code,
+        {
+          active: r.active,
+          sidecarEndpoint: r.sidecar_endpoint,
+          defaultParams: r.default_params,
+        },
+      ]),
+    );
+  }
+
   // ── POST /v1/review/sets/:id/reprocess ──────────────────────────────
 
   /**
    * Allowed even when locked — this is how a set gets OUT of `PENDING_AUTO`
    * (first ever card) or `AUTO_FAILED` (retry), per plan §4/R-Q1.
    *
-   * Defensive by design: the actual image pipeline lives in the Python AI
-   * sidecar (a different agent's module, may not be built/reachable in any
-   * given environment). Any failure — unreachable, non-2xx, timeout — must
-   * resolve to a clean `AUTO_FAILED` state, never an unhandled crash or a
-   * hanging request; `PhotoReviewSidecarService` already caps every call at
-   * `SIDECAR_TIMEOUT_MS` (30s) via `AbortController`.
+   * Defensive by design: the actual image pipeline runs through
+   * `PhotoAiPort` (a campaign-configured `ai_pipeline_steps` sequence when
+   * one exists, else the single hardcoded card-crop this method always did
+   * — see `runAiProcessingPipeline`'s own doc comment). Any failure —
+   * unreachable, non-2xx, timeout — must resolve to a clean `AUTO_FAILED`
+   * state, never an unhandled crash or a hanging request.
    */
   async reprocess(
     setId: string,
@@ -1382,8 +1673,10 @@ export class PhotoReviewService {
         frontPhoto,
         sessionContext.tenantName,
       );
-      const result = await this.sidecar.cardPhoto({
-        imageBase64: sourceBytes.toString('base64'),
+      const aiSteps = await this.resolveAiProcessingSteps(set.campaignId);
+      const result = await this.runAiProcessingPipeline({
+        steps: aiSteps,
+        initialImageBase64: sourceBytes.toString('base64'),
         cardSpec: kind.cardSpec,
         mirror: true,
       });
@@ -1606,19 +1899,14 @@ export class PhotoReviewService {
       }
     }
 
-    // Dead-code fix (found during a live-flow audit of this method,
-    // 2026-09-28): a `photoKindService.findKindEntityOrFail(set.kindId)`
-    // fetch used to sit here, assigned to an unused `kind` local. Confirmed
-    // against `PhotoReviewSidecarService.edit`'s own doc comment — unlike
-    // `reprocess`/`uploadVariant` (which both pass `kind.cardSpec` into
-    // `sidecar.cardPhoto()`), the sidecar's `/edit` contract has no
-    // card-spec field at all (`SidecarEditInput` only carries
-    // `imageBase64`/`prompt`/`region`/`fromVariantId`), so this was never
-    // wired to anything — genuinely dead code, not a missing parameter.
-    // Removed rather than left in: it cost an extra DB round trip on every
-    // AI-edit request and, worse, could fail an edit with a spurious
-    // PHOTO_KIND_NOT_FOUND if `set.kindId` were ever bad, for a value this
-    // method never needed in the first place.
+    // A `photoKindService.findKindEntityOrFail(set.kindId)` fetch used to
+    // sit here and was removed 2026-09-28 as dead code — at the time,
+    // `AiImageEditClient.edit()` had no `width`/`height` fields at all, so
+    // `kind.cardSpec` had nothing to feed. Re-added the same day, a few
+    // hours later, once `width`/`height` were wired up (see
+    // `cardSpecToEditDimensions`'s own doc comment): this time it is
+    // genuinely used, not a repeat of the same mistake.
+    const kind = await this.photoKindService.findKindEntityOrFail(set.kindId);
     const sessionContext = await this.resolveSessionContext(
       set.sourceSessionId,
     );
@@ -1668,15 +1956,73 @@ export class PhotoReviewService {
             sourcePhoto!,
             sessionContext.tenantName,
           );
-      const result = await this.sidecar.edit({
-        imageBase64: sourceBytes.toString('base64'),
-        prompt: dto.prompt,
-        region: dto.region,
-        // Optional on the sidecar's own contract — `undefined` when this
-        // edit's source is an original photo rather than an existing
-        // variant (nothing meaningful to report here in that case).
-        fromVariantId: fromVariant?.id,
+      // `region` (OUTSIDE_FACE/GLASSES/HAIR/FULL) has no equivalent on the
+      // external AI image-edit service's own contract — it edits the whole
+      // image from a prompt, no region mask. Still recorded on the variant
+      // row above (`regionMode`) as descriptive metadata; just not sent
+      // here. `fromVariantId` is likewise not part of that service's
+      // contract (it has no concept of "variant history") — nothing to
+      // forward.
+      //
+      // `width`/`height` are always computed from `kind.cardSpec` (2026-09-28
+      // user decision), never left to the service's own auto-computed
+      // aspect ratio — every AI-edited card photo comes out already sized
+      // to the target card format. This is NOT a face-aware crop (the
+      // service does not detect face position at all — see the integration
+      // guide's own "những chỗ dễ nhầm"); the user explicitly chose this
+      // narrower "match the configured output size" scope over building
+      // real face detection (no such capability exists anywhere in this
+      // backend today) — see `cardSpecToEditDimensions`'s own doc comment.
+      const editDimensions = this.cardSpecToEditDimensions(kind.cardSpec);
+      const editPrompt = this.appendBackgroundColorInstruction(
+        dto.prompt,
+        kind.cardSpec,
+      );
+      const editResult = unwrapPhotoAi(
+        await this.photoAi.edit({
+          imageBuffer: sourceBytes,
+          mimeType: 'image/jpeg',
+          prompt: editPrompt,
+          cfg: dto.cfg,
+          steps: dto.steps,
+          seed: dto.seed,
+          ...editDimensions,
+        }),
+      );
+
+      // Identity-similarity scoring is a separate, best-effort call (not
+      // part of the edit service's own response) — `PhotoAiPort` is kept
+      // for exactly this (see `PhotoAiAdapter`'s own doc comment on why the
+      // underlying sidecar client still exists post `services/python-ai`
+      // removal). A scoring failure must not fail the whole edit — the
+      // pixel result is still valid; a reviewer can judge similarity by eye
+      // when the score is missing, same as this modal already does for a
+      // `null` value. Branches directly on the outcome (no `unwrapPhotoAi`)
+      // — this call was already "swallow the failure, don't throw" before
+      // the port existed, so there is no `try`/`catch` to preserve.
+      let identitySimilarity: number | undefined;
+      const simOutcome = await this.photoAi.identitySimilarity({
+        referenceImageBase64: sourceBytes.toString('base64'),
+        candidateImageBase64: editResult.imageBuffer.toString('base64'),
       });
+      if (simOutcome.kind === 'Success') {
+        identitySimilarity = simOutcome.value.similarity;
+      } else {
+        this.logger.warn(
+          `aiEdit: identity-similarity scoring unavailable for variant ${variant.id}: ${simOutcome.reason}`,
+        );
+      }
+
+      const result = {
+        imageBase64: editResult.imageBuffer.toString('base64'),
+        mimeType: editResult.mimeType,
+        width: undefined as number | undefined,
+        height: undefined as number | undefined,
+        seed: editResult.seed != null ? String(editResult.seed) : undefined,
+        identitySimilarity,
+        modelId: 'ai-image-edit-local',
+        algorithmVersion: undefined as string | undefined,
+      };
 
       const ext = this.extForMime(result.mimeType);
       const virtualPath = this.buildVirtualPath(
@@ -2030,10 +2376,12 @@ export class PhotoReviewService {
         frontPhoto,
         sessionContext.tenantName,
       );
-      const simResult = await this.sidecar.identitySimilarity({
-        referenceImageBase64: referenceBytes.toString('base64'),
-        candidateImageBase64: file.buffer.toString('base64'),
-      });
+      const simResult = unwrapPhotoAi(
+        await this.photoAi.identitySimilarity({
+          referenceImageBase64: referenceBytes.toString('base64'),
+          candidateImageBase64: file.buffer.toString('base64'),
+        }),
+      );
       similarity = simResult.similarity;
     } catch (error) {
       const message = extractSidecarFailureMessage(error);
@@ -2056,23 +2404,22 @@ export class PhotoReviewService {
     }
 
     // The uploaded bytes only exist in memory at this point (not yet on the
-    // file-service), so the sidecar gets them as base64 rather than a URL —
+    // file-service), so the port gets them as base64 rather than a URL —
     // unlike `reprocess`/`aiEdit`, which crop an image that already lives on
     // fs-core and so pass a short-lived view-link URL instead.
-    const cardResult = await this.sidecar
-      .cardPhoto({
-        imageBase64: file.buffer.toString('base64'),
-        cardSpec: kind.cardSpec,
-        mirror: true,
-      })
-      .catch((error) => {
-        const message = extractSidecarFailureMessage(error);
-        throw new CustomException(
-          `Card-photo pipeline failed for the uploaded image: ${message}`,
-          PHOTO_REVIEW_ERROR_CODE.SIDECAR_UNREACHABLE,
-          HttpStatus.SERVICE_UNAVAILABLE,
-        );
-      });
+    const cardOutcome = await this.photoAi.makeCardPhoto({
+      imageBase64: file.buffer.toString('base64'),
+      cardSpec: kind.cardSpec,
+      mirror: true,
+    });
+    if (cardOutcome.kind !== 'Success') {
+      throw new CustomException(
+        `Card-photo pipeline failed for the uploaded image: ${cardOutcome.reason}`,
+        PHOTO_REVIEW_ERROR_CODE.SIDECAR_UNREACHABLE,
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
+    }
+    const cardResult = cardOutcome.value;
 
     const variant = await this.dataSource.transaction(async (manager) => {
       const lockedSet = await this.lockSet(manager, setId);

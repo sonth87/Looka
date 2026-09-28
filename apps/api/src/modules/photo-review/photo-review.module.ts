@@ -1,6 +1,7 @@
 import { SsoAuthGuard } from '@app/shared/auth/index';
 import { FileStorageModule } from '@app/modules/file-storage/file-storage.module';
 import { StatsModule } from '@app/modules/stats/stats.module';
+import { WorkflowModule } from '@app/modules/workflow/workflow.module';
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { PhotoKindController } from './controllers/photo-kind.controller';
@@ -14,6 +15,9 @@ import { ReviewAssignment } from './entities/review-assignment.entity';
 import { SubjectPhotoSet } from './entities/subject-photo-set.entity';
 import { VariantUploadOutboxEntry } from './entities/variant-upload-outbox.entity';
 import { ReviewerRoleGuard } from './guards/reviewer-role.guard';
+import { PHOTO_AI_PORT } from './application/ports/photo-ai.port';
+import { AiImageEditClient } from './services/ai-image-edit.client';
+import { PhotoAiAdapter } from './services/photo-ai.adapter';
 import { PhotoKindService } from './services/photo-kind.service';
 import { PhotoReviewSidecarService } from './services/photo-review-sidecar.service';
 import { PhotoReviewService } from './services/photo-review.service';
@@ -30,6 +34,15 @@ import { VariantUploadWorkerService } from './services/variant-upload-worker.ser
  * table name (see `PhotoReviewService`'s own top comment), and every
  * cross-boundary id (`campaignId`, `sourceSessionId`, `sourcePhotoId`,
  * `actorUserId`) is a plain uuid column with no foreign key.
+ *
+ * `WorkflowModule` is a deliberate exception to that same "no cross-module
+ * dependency" posture (2026-09-28, `ai_pipeline_steps` executor):
+ * `PhotoReviewService.reprocess()` reads a campaign's pinned workflow
+ * version's `config.aiProcessing` via `WorkflowCatalogReadRepository`
+ * (already exported for exactly this kind of cross-module read — see that
+ * class's own doc comment, and `device-management/services/campaign.service.ts`
+ * for the existing precedent this follows). `workflow` has no dependency
+ * back on this module, so this does not create a cycle.
  *
  * `User` (for `SsoAuthGuard`) is provided globally by `SharedModule`
  * (`@Global()`), so it does not need to be imported here — see that
@@ -71,6 +84,9 @@ import { VariantUploadWorkerService } from './services/variant-upload-worker.ser
     // leaf module with no dependency back on this one, see its own doc
     // comment.
     StatsModule,
+    // For `WorkflowCatalogReadRepository.getVersionRef` — see this module's
+    // own top doc comment.
+    WorkflowModule,
   ],
   controllers: [
     ReviewController,
@@ -83,6 +99,8 @@ import { VariantUploadWorkerService } from './services/variant-upload-worker.ser
     ReviewAssignmentService,
     PhotoKindService,
     PhotoReviewSidecarService,
+    AiImageEditClient,
+    { provide: PHOTO_AI_PORT, useClass: PhotoAiAdapter },
     // Drains `variant_upload_outbox` to fs-core in the background — the
     // local-first counterpart of `capture`'s `UploadWorkerService`, kept as
     // a sibling here rather than folded into that one; see this service's
@@ -92,9 +110,13 @@ import { VariantUploadWorkerService } from './services/variant-upload-worker.ser
     SsoAuthGuard,
     ReviewerRoleGuard,
   ],
-  // `PhotoReviewSidecarService` exported for `AppController`'s consolidated
-  // `GET /health` (I-Q9) to ping the AI sidecar's own reachability —
-  // nothing else outside this module calls it directly.
-  exports: [PhotoReviewService, PhotoKindService, PhotoReviewSidecarService],
+  // `PHOTO_AI_PORT` exported for `AppController`'s consolidated `GET
+  // /health` (I-Q9) to ping the AI image-edit service's own reachability/
+  // model-loaded state through the port, same as `PhotoReviewService` does
+  // — `AppController` has no reason to know `PhotoAiAdapter`/
+  // `AiImageEditClient` exist at all. Neither concrete client needs
+  // exporting any more: both are only ever injected inside this module now
+  // (by `PhotoAiAdapter`).
+  exports: [PhotoReviewService, PhotoKindService, PHOTO_AI_PORT],
 })
 export class PhotoReviewModule {}

@@ -56,12 +56,22 @@ const EnvSchema = z.object({
   DESKTOP_INSTALLER_PATH_MAC: z.string().optional(),
   DESKTOP_INSTALLER_PATH_WIN: z.string().optional(),
 
-  PYTHON_AI_BASE_URL: z.string().optional(),
+  // The external "AI photo edit" service (2026-09-28 — replaces the local
+  // `services/python-ai` `/edit` stub, removed the same day) — a
+  // locally-hosted generative image-edit model, per its own integration
+  // guide. Optional here, same posture as every other optional URL below:
+  // `AiImageEditClient` falls back to the guide's own documented address
+  // (`http://10.20.15.25:8000`) rather than requiring this at boot.
+  AI_IMAGE_EDIT_URL: z.string().optional(),
+  // Must stay >= the service's own `REQUEST_TIMEOUT_S` (120s default, 600s
+  // when it runs with `LOW_VRAM=1`) — ask the operator which one applies.
+  // Defaults to 150000 (150s) when unset.
+  AI_IMAGE_EDIT_TIMEOUT_MS: z.string().optional(),
 
   // Backend-owned face-embedding pipeline (2026-09-16 — `EmbeddingWorkerService`
   // now calls this external "Attendance — Face Enrollment API" directly,
   // superseding the old desktop-client path). Optional here, same posture as
-  // PYTHON_AI_BASE_URL above — `EmbeddingWorkerService` falls back to the
+  // AI_IMAGE_EDIT_URL above — `EmbeddingWorkerService` falls back to the
   // same real, network-reachable default the old client used
   // (`apps/desktop/src/main/embeddingEnroll.ts`'s own
   // `DEFAULT_EMBEDDING_SERVER_BASE_URL`) rather than requiring this at boot.
@@ -69,7 +79,7 @@ const EnvSchema = z.object({
 
   // cms-8-screens-api-plan.md §8 I-Q1 — optional here (not every deployment
   // needs citizen-id encryption on day one, same posture as
-  // PYTHON_AI_BASE_URL above); `citizen-id.codec.ts` throws its own clear
+  // AI_IMAGE_EDIT_URL above); `citizen-id.codec.ts` throws its own clear
   // error at the point of use if a caller needs it and it is unset, rather
   // than this schema hard-requiring it for every process that boots.
   CITIZEN_ID_ENCRYPTION_KEY: z.string().optional(),

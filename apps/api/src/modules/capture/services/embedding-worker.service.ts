@@ -54,10 +54,10 @@ export class EmbeddingWorkerService implements OnModuleInit {
     configService: ConfigService,
   ) {
     // Same "read inline via ConfigService, no dedicated registerAs() config
-    // file" convention `PhotoReviewSidecarService` uses for
-    // `PYTHON_AI_BASE_URL` — see that class's own doc comment. Falls back to
-    // the same real, network-reachable server the old desktop client
-    // defaulted to (`DEFAULT_EMBEDDING_SERVER_BASE_URL` in the now-trimmed
+    // file" convention `AiImageEditClient` uses for `AI_IMAGE_EDIT_URL` —
+    // see that class's own doc comment. Falls back to the same real,
+    // network-reachable server the old desktop client defaulted to
+    // (`DEFAULT_EMBEDDING_SERVER_BASE_URL` in the now-trimmed
     // `embeddingEnroll.ts`), now that the backend is the one calling it.
     const baseUrl =
       configService.get<string>('EMBEDDING_SERVER_BASE_URL')?.trim() ||

@@ -1,42 +1,26 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { SIDECAR_TIMEOUT_MS } from '../photo-review.constants';
 
+/** No longer env-configurable — see this class's own doc comment. */
+const SIDECAR_BASE_URL = 'http://127.0.0.1:8321';
+
 export interface SidecarCardPhotoInput {
-  /** Raw image bytes, base64 — no `data:` prefix required (the sidecar tolerates one, but never sends it), matching `services/python-ai/src/models/image_codec.py`'s `decode_image()`. */
+  /** Raw image bytes, base64 — no `data:` prefix required. */
   imageBase64: string;
   cardSpec: Record<string, unknown>;
-  /** Mirrors the input horizontally before face detection (`services/python-ai/src/models/card_photo_pipeline.py`'s `process_card_photo(mirror=...)`) — product decision 2026-09-10: the live kiosk preview is deliberately mirrored, but the captured still is saved unmirrored by design, so callers producing a card photo from that still pass `mirror: true` to make the result match what the subject saw in the mirror rather than the raw sensor image. Defaults to `false` (sidecar default) when omitted. */
+  /** Mirrors the input horizontally before face detection — product decision 2026-09-10: the live kiosk preview is deliberately mirrored, but the captured still is saved unmirrored by design, so callers producing a card photo from that still pass `mirror: true` to make the result match what the subject saw in the mirror rather than the raw sensor image. Defaults to `false` when omitted. */
   mirror?: boolean;
 }
 
 export interface SidecarCardPhotoResult {
   imageBase64: string;
-  /** The sidecar always encodes its output as JPEG (`image_codec.encode_image`) — not part of its response body, so this is a constant, not something read off the wire. */
+  /** The sidecar always encodes its output as JPEG — not part of its response body, so this is a constant, not something read off the wire. */
   mimeType: string;
   width: number;
   height: number;
   dpi: number;
-  /** Non-fatal issues the pipeline noticed (e.g. no face detected, head-ratio out of range) — `services/python-ai/src/api/routes/card_photo.py`'s `CardPhotoResponse.warnings`. */
+  /** Non-fatal issues the pipeline noticed (e.g. no face detected, head-ratio out of range). */
   warnings: string[];
-}
-
-export interface SidecarEditInput {
-  imageBase64: string;
-  prompt: string;
-  region?: string;
-  fromVariantId?: string;
-}
-
-export interface SidecarEditResult {
-  imageBase64: string;
-  mimeType: string;
-  width?: number;
-  height?: number;
-  seed?: string;
-  identitySimilarity?: number;
-  modelId?: string;
-  algorithmVersion?: string;
 }
 
 export interface SidecarIdentitySimilarityInput {
@@ -62,104 +46,59 @@ export class SidecarError extends Error {
 }
 
 /**
- * Thin HTTP client for the Python AI sidecar (plan §6.4) — a different
- * agent's module (`services/python-ai`), possibly not built or not running
- * in any given environment. Every call here is deliberately defensive: a
- * network failure, a non-2xx response, or a timeout all resolve to a
- * `SidecarError` rather than throwing something uncaught or hanging past
- * `SIDECAR_TIMEOUT_MS` — see `PhotoReviewService.reprocess`'s own comment
- * for why a clean `AUTO_FAILED` (not a crash) is the required behaviour
- * when the sidecar is absent.
+ * Thin HTTP client for the Python AI sidecar (plan §6.4). **`services/
+ * python-ai` itself was deleted 2026-09-28** (product decision: its
+ * `/embed`/`/liveness` were a hash-based mock with zero real callers, and
+ * the local card-photo/identity-similarity pipeline is being retired in
+ * favour of real external APIs — the new `/edit` model is already wired
+ * via `AiImageEditClient`). `cardPhoto()`/`identitySimilarity()` below are
+ * kept only because they are themselves just HTTP-calling code (not local
+ * CV) and every caller already treats "sidecar unreachable" as an expected,
+ * gracefully-handled outcome (`SidecarError` → `AUTO_FAILED`/503, never a
+ * crash — see `PhotoReviewService.reprocess`'s own comment) — with nothing
+ * listening at this client's base URL any more, every call now takes that
+ * path. Card-photo generation (crop/background/resize/dpi for printing) and
+ * identity-similarity scoring are therefore a **known, accepted gap** until
+ * a replacement is built in a follow-up task — not a regression introduced
+ * silently here.
  *
- * Base URL: `PYTHON_AI_BASE_URL` env var, default `http://127.0.0.1:8321` —
- * matches how `services/python-ai` is actually run everywhere else in this
- * repo (`apps/desktop/src/main/aiService.ts`, `docs/ROADMAP.md`); the old
- * `:8000` default here never matched anything real. Read directly from
- * `ConfigService` (which falls back to `process.env`) rather than through a
- * dedicated `registerAs('pythonAi', …)` config file under
- * `apps/api/src/config/` — that would be the normal convention here (see
- * `file-service.ts`), but this task is scoped to only touch
- * `apps/api/src/modules/photo-review/**` plus one line in `app.module.ts`,
- * so the env var is read inline instead. A follow-up outside this module's
- * scope could promote it to a proper config file for consistency.
+ * Base URL: hardcoded `http://127.0.0.1:8321` — no longer env-configurable
+ * (the `PYTHON_AI_BASE_URL` knob was removed 2026-09-28; a future
+ * replacement service should have that address wired back in here, or in a
+ * new dedicated env var, rather than reusing this dead name).
  *
- * **Sidecar contract used by this client** — every real FastAPI route is
- * mounted under `/api/v1` (`services/python-ai/src/api/app.py`), and every
- * request/response body below is read straight off that side's own Pydantic
- * models (`card_photo.py`/`edit.py`/`identity.py`), not invented here:
+ * **Contract this client still speaks** (the shape `services/python-ai`
+ * used to implement, kept here as the interface a replacement should match):
  * - `POST /api/v1/card-photo` `{ image_data, card_spec, mirror? }` →
  *   `{ image_data, width, height, dpi, warnings }` — `mirror` (default
  *   `false`) flips the input horizontally before face detection.
- * - `POST /api/v1/edit` `{ image_data, prompt, region?, fromVariantId? }` —
- *   the route validates the prompt and defines the contract but has no
- *   generative model wired in this environment (`services/python-ai/src/api/routes/edit.py`'s
- *   own module doc comment): it always resolves to HTTP 501
- *   `{ error, detail }` today. This client still sends/parses the real
- *   shape so nothing here needs to change once a model is wired in.
  * - `POST /api/v1/identity-similarity` `{ image_data_a, image_data_b }` →
  *   `{ similarity: number | null, error: string | null }` — `similarity`
- *   is `null` (with `error` explaining why) when the sidecar's face-
- *   embedding model genuinely could not produce one (no face detected,
- *   model unavailable), never a fabricated number; `identitySimilarity()`
- *   below turns that into a `SidecarError` so callers don't need to special-
- *   case a null similarity themselves.
+ *   is `null` (with `error` explaining why) when no similarity could be
+ *   produced, never a fabricated number; `identitySimilarity()` below turns
+ *   that into a `SidecarError` so callers don't need to special-case a null
+ *   similarity themselves.
  *
- * None of these three routes accept a URL for the source image — the
- * sidecar has no url-fetching code anywhere (`decode_image()` only ever
- * does `base64.b64decode()`) — so every caller of this client must resolve
- * actual bytes before calling in. See `PhotoReviewService`'s own
- * `readSourcePhotoBytes` helper for how it does that (preferring
- * `upload_outbox.content`, already in this same Postgres instance since
- * Part A of the capture-routing work, over a file-service round trip).
+ * Neither route accepts a URL for the source image, so every caller of
+ * this client must resolve actual bytes before calling in. See
+ * `PhotoReviewService`'s own `readSourcePhotoBytes` helper for how it does
+ * that (preferring `upload_outbox.content`, already in this same Postgres
+ * instance since Part A of the capture-routing work, over a file-service
+ * round trip).
  */
 @Injectable()
 export class PhotoReviewSidecarService {
   private readonly logger = new Logger(PhotoReviewSidecarService.name);
 
-  constructor(private readonly configService: ConfigService) {}
-
   private baseUrl(): string {
-    return (
-      this.configService.get<string>('PYTHON_AI_BASE_URL') ??
-      'http://127.0.0.1:8321'
-    ).replace(/\/$/, '');
+    return SIDECAR_BASE_URL.replace(/\/$/, '');
   }
 
-  /**
-   * `GET /api/v1/health` reachability probe for `AppController`'s
-   * consolidated health check (I-Q9) — deliberately never throws (a down
-   * sidecar is a REPORTED fact, not a request failure) and does not reuse
-   * `postJson` (that helper is POST-only and throws `SidecarError`, the
-   * wrong shape for a check meant to describe rather than propagate a
-   * failure). `modelsLoaded`/raw body are passed through as-is so the I-Q10
-   * mock-vs-real distinction (`model_family`) stays visible in the health
-   * payload without this method needing to know that flag's rules itself.
-   */
-  async health(): Promise<{
-    reachable: boolean;
-    body: unknown;
-    error?: string;
-  }> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), SIDECAR_TIMEOUT_MS);
-    try {
-      const res = await fetch(`${this.baseUrl()}/api/v1/health`, {
-        signal: controller.signal,
-      });
-      if (!res.ok) {
-        return { reachable: false, body: null, error: `HTTP ${res.status}` };
-      }
-      return { reachable: true, body: await res.json().catch(() => null) };
-    } catch (error) {
-      return {
-        reachable: false,
-        body: null,
-        error: (error as Error).message,
-      };
-    } finally {
-      clearTimeout(timer);
-    }
-  }
+  // `health()` removed 2026-09-28 — it existed solely as the reachability
+  // probe `AppController`'s consolidated health check used to call; that
+  // check now calls `AiImageEditClient.health()` instead (see
+  // `AppController.health`'s own comment), leaving this method with no
+  // remaining caller.
 
   async cardPhoto(
     input: SidecarCardPhotoInput,
@@ -185,42 +124,10 @@ export class PhotoReviewSidecarService {
     };
   }
 
-  async edit(input: SidecarEditInput): Promise<SidecarEditResult> {
-    // Response shape is read defensively (camelCase AND snake_case): the
-    // route has no generative model wired in this environment and always
-    // 501s today (see this class's own doc comment) — `postJson` already
-    // turns that into a `SidecarError` before this ever runs — but once a
-    // real model IS wired in, its actual field naming is not yet known, so
-    // this does not assume one convention over the other.
-    const res = await this.postJson<Record<string, unknown>>('/edit', {
-      image_data: input.imageBase64,
-      prompt: input.prompt,
-      region: input.region,
-      fromVariantId: input.fromVariantId,
-    });
-    return {
-      imageBase64:
-        (res.image_data as string | undefined) ??
-        (res.imageBase64 as string | undefined) ??
-        '',
-      mimeType: 'image/jpeg',
-      width: (res.width as number | undefined) ?? undefined,
-      height: (res.height as number | undefined) ?? undefined,
-      seed: (res.seed as string | undefined) ?? undefined,
-      identitySimilarity:
-        (res.identitySimilarity as number | undefined) ??
-        (res.identity_similarity as number | undefined) ??
-        undefined,
-      modelId:
-        (res.modelId as string | undefined) ??
-        (res.model_id as string | undefined) ??
-        undefined,
-      algorithmVersion:
-        (res.algorithmVersion as string | undefined) ??
-        (res.algorithm_version as string | undefined) ??
-        undefined,
-    };
-  }
+  // `edit()` removed 2026-09-28 — the local sidecar's `/edit` stub is gone
+  // along with the rest of `services/python-ai`; AI photo editing now goes
+  // through `AiImageEditClient`, a real external service with its own
+  // multipart/form-data contract (see that class's own doc comment).
 
   async identitySimilarity(
     input: SidecarIdentitySimilarityInput,

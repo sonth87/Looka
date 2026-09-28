@@ -21,7 +21,7 @@ import { slugifyCode } from '../slug';
 // on a value that, here, is always actually present.
 const DEFAULT_SIZE = '4x6';
 const DEFAULT_DPI = 300;
-const DEFAULT_BACKGROUND_COLOR = '#FFFFFF';
+const DEFAULT_BACKGROUND_COLOR = '#F37320';
 const DEFAULT_HEAD_HEIGHT_RATIO: [number, number] = [0.7, 0.8];
 const DEFAULT_EYE_LINE_RATIO: [number, number] = [0.4, 0.45];
 
@@ -246,7 +246,7 @@ function PhotoKindFormModal({
     const cardSpec: CardSpec = {
       size,
       dpi,
-      backgroundColor: backgroundColor.trim() || '#FFFFFF',
+      backgroundColor: backgroundColor.trim() || DEFAULT_BACKGROUND_COLOR,
       headHeightRatio: [headMin, headMax],
       eyeLineRatio: [eyeMin, eyeMax],
       retouch: { enabled: retouchEnabled },

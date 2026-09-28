@@ -18,10 +18,14 @@ import {
   PhotoVariantKind,
   PhotoVariantStatus,
 } from './photo-review.constants';
+import { PHOTO_AI_PORT } from './application/ports/photo-ai.port';
+import { AiImageEditClient } from './services/ai-image-edit.client';
+import { PhotoAiAdapter } from './services/photo-ai.adapter';
 import { PhotoKindService } from './services/photo-kind.service';
 import { PhotoReviewSidecarService } from './services/photo-review-sidecar.service';
 import { PhotoReviewService } from './services/photo-review.service';
 import { ReviewAssignmentService } from './services/review-assignment.service';
+import { WorkflowCatalogReadRepository } from '@app/modules/workflow/infrastructure/read/workflow-catalog.read-repository';
 
 /**
  * Real-Postgres persistence spec for the locking rule (plan §4) and the
@@ -65,7 +69,10 @@ describeDb('photo-review persistence', () => {
       background: jest.fn(),
       retouch: jest.fn(),
       identitySimilarity: jest.fn(),
+    };
+    const aiImageEdit = {
       edit: jest.fn(),
+      health: jest.fn(),
     };
     // `PhotoReviewService` grew 4 more constructor deps after this spec was
     // first written (review-assignment scoping, stats hooks, and the
@@ -98,6 +105,11 @@ describeDb('photo-review persistence', () => {
     const domainEventDispatcher = {
       dispatch: jest.fn().mockResolvedValue(undefined),
     };
+    // No campaign in this suite is workflow-pinned — see the same note in
+    // photo-review-upload-live.spec.ts.
+    const workflowCatalog = {
+      getVersionRef: jest.fn().mockResolvedValue(null),
+    };
 
     const built = await Test.createTestingModule({
       imports: [
@@ -125,6 +137,8 @@ describeDb('photo-review persistence', () => {
         PhotoKindService,
         { provide: FileStorageService, useValue: fileStorage },
         { provide: PhotoReviewSidecarService, useValue: sidecar },
+        { provide: AiImageEditClient, useValue: aiImageEdit },
+        { provide: PHOTO_AI_PORT, useClass: PhotoAiAdapter },
         // Only used by the local-content HMAC helpers
         // (issueLocalVariantViewLink/verifyLocalVariantViewTokenOrFail) —
         // none of these tests exercise that path directly, so a fixed dummy
@@ -134,6 +148,7 @@ describeDb('photo-review persistence', () => {
         { provide: ReviewStatsService, useValue: reviewStats },
         { provide: TransactionContext, useValue: transactionContext },
         { provide: DomainEventDispatcher, useValue: domainEventDispatcher },
+        { provide: WorkflowCatalogReadRepository, useValue: workflowCatalog },
       ],
     }).compile();
 
@@ -426,8 +441,8 @@ describeDb('photo-review persistence', () => {
         status: PhotoReviewSetStatus.READY,
         withCurrentVariant: true,
       });
-      const sidecar = moduleRef.get(PhotoReviewSidecarService);
-      sidecar.edit.mockRejectedValueOnce(
+      const aiImageEdit = moduleRef.get(AiImageEditClient);
+      aiImageEdit.edit.mockRejectedValueOnce(
         new Error('sidecar unreachable (expected in this test)'),
       );
       const variant = await service

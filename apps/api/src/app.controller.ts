@@ -1,6 +1,7 @@
-import { PhotoReviewSidecarService } from '@app/modules/photo-review/services/photo-review-sidecar.service';
+import { PHOTO_AI_PORT } from '@app/modules/photo-review/application/ports/photo-ai.port';
+import type { PhotoAiPort } from '@app/modules/photo-review/application/ports/photo-ai.port';
 import { StatsJobService } from '@app/modules/stats/services/stats-job.service';
-import { Controller, Get } from '@nestjs/common';
+import { Controller, Get, Inject } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
@@ -14,50 +15,62 @@ export class AppController {
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly configService: ConfigService,
-    private readonly sidecar: PhotoReviewSidecarService,
+    @Inject(PHOTO_AI_PORT) private readonly photoAi: PhotoAiPort,
     private readonly statsJobService: StatsJobService,
   ) {}
 
   /**
    * Consolidated health (plan §8 I-Q9 — "Health tổng hợp {db, fileService,
-   * sidecar, sso, statsLag, outboxBacklog} + trạng thái DEGRADED có lý do").
-   * Every dependency check is a real network/DB probe, never a constant —
-   * same "answer honestly, not ONLINE-by-default" principle this endpoint
-   * already followed for `database` alone before this pass. `fileService`/
-   * `sso` are bare reachability pings (no valid request exists to make
-   * without a real file id/user token at hand) — a 4xx/5xx still counts as
-   * "reachable" (the process answered), only a connection-level failure
-   * (timeout, refused, DNS) counts as down; `sidecar` reuses its own real
-   * `/health` route via `PhotoReviewSidecarService.health()`; `statsLag`
-   * reuses `StatsJobService.health()` (already built in P4, not
-   * reimplemented here); `outboxBacklog` is a real `COUNT` across the three
-   * outbox tables, not an estimate.
+   * aiImageEdit, sso, statsLag, outboxBacklog} + trạng thái DEGRADED có lý
+   * do"). Every dependency check is a real network/DB probe, never a
+   * constant — same "answer honestly, not ONLINE-by-default" principle this
+   * endpoint already followed for `database` alone before this pass.
+   * `fileService`/`sso` are bare reachability pings (no valid request exists
+   * to make without a real file id/user token at hand) — a 4xx/5xx still
+   * counts as "reachable" (the process answered), only a connection-level
+   * failure (timeout, refused, DNS) counts as down; `aiImageEdit` reuses its
+   * own real `/health` route via `PhotoAiPort.health()` (2026-09-28 —
+   * replaces the old `PhotoReviewSidecarService.health()` probe, which
+   * pinged the now-removed `services/python-ai` sidecar and would always
+   * report down); `statsLag` reuses `StatsJobService.health()` (already
+   * built in P4, not reimplemented here); `outboxBacklog` is a real `COUNT`
+   * across the three outbox tables, not an estimate.
    *
    * `status` is `DEGRADED` (with each failing check named in `reasons`)
    * whenever ANY dependency is down or health data is stale — never a
-   * single boolean hiding which one broke.
+   * single boolean hiding which one broke. `aiImageEdit` counts as a
+   * problem both when unreachable and when reachable but still loading its
+   * model (the service rejects `/edit` calls made before `model_loaded`).
    */
   @Get('health')
   async health() {
-    const [database, fileService, sso, sidecar, statsJobHealth, outboxBacklog] =
-      await Promise.all([
-        this.checkDatabase(),
-        this.checkReachable(
-          this.configService.get<string>('fileService.baseUrl'),
-        ),
-        this.checkReachable(
-          this.configService.get<string>('security.ssoBaseUrl'),
-        ),
-        this.sidecar.health(),
-        this.statsJobService.health(),
-        this.outboxBacklog(),
-      ]);
+    const [
+      database,
+      fileService,
+      sso,
+      aiImageEdit,
+      statsJobHealth,
+      outboxBacklog,
+    ] = await Promise.all([
+      this.checkDatabase(),
+      this.checkReachable(
+        this.configService.get<string>('fileService.baseUrl'),
+      ),
+      this.checkReachable(
+        this.configService.get<string>('security.ssoBaseUrl'),
+      ),
+      this.photoAi.health(),
+      this.statsJobService.health(),
+      this.outboxBacklog(),
+    ]);
 
     const reasons: string[] = [];
     if (!database) reasons.push('database unreachable');
     if (fileService.status === 'DOWN') reasons.push('fileService unreachable');
     if (sso.status === 'DOWN') reasons.push('sso unreachable');
-    if (!sidecar.reachable) reasons.push('sidecar unreachable');
+    if (!aiImageEdit.reachable) reasons.push('aiImageEdit unreachable');
+    else if (!aiImageEdit.modelLoaded)
+      reasons.push('aiImageEdit model not loaded');
     if (statsJobHealth.snapshotRefresh.overdue)
       reasons.push('stats snapshotRefresh overdue');
     if (statsJobHealth.dailyRecompute.overdue)
@@ -69,7 +82,7 @@ export class AppController {
       database,
       fileService,
       sso,
-      sidecar,
+      aiImageEdit,
       statsLag: statsJobHealth,
       outboxBacklog,
       appName: this.configService.get<string>('app.appName'),
