@@ -40,6 +40,31 @@ export enum VariantOutboxStatus {
 /** Same cap as `capture`'s `OUTBOX_MAX_RETRY_DELAY_SECONDS` — duplicated rather than imported, see this module's own "no structural dependency on `capture`" rule. */
 export const VARIANT_OUTBOX_MAX_RETRY_DELAY_SECONDS = 300;
 
+/**
+ * The BullMQ `ai-edit` queue's name (`BullModule.registerQueue`/
+ * `@InjectQueue`/`@Processor` all reference this same string) — 2026-09-29
+ * ("đẩy vào queue, lock lại chỉ cho 1 tiến trình chạy, xử lý concurrence
+ * 10"). Job NAME within that queue doubles as which `PhotoReviewService`
+ * flow created it, so `AiEditProcessor` knows which `process*Job` method to
+ * call — same two values as the old `AiEditJobKind` enum this replaces.
+ */
+export const AI_EDIT_QUEUE_NAME = 'ai-edit';
+export enum AiEditJobKind {
+  REPROCESS = 'reprocess',
+  AI_EDIT = 'ai-edit',
+}
+
+/**
+ * `AiEditProcessor`'s own concurrency (`@Processor(AI_EDIT_QUEUE_NAME, {
+ * concurrency: AI_EDIT_JOB_CONCURRENCY })`) — 2026-09-29 user request ("xử
+ * lý concurrence 10"), sized to match the real `/edit` service's own
+ * documented queue depth (its integration guide: "503 Queue đã đầy (mặc
+ * định 10 job)") rather than an arbitrary number. BullMQ enforces this
+ * per-process, and its own Redis-backed job locking is what gives "chỉ cho
+ * 1 tiến trình chạy" per job — no manual `FOR UPDATE SKIP LOCKED` needed.
+ */
+export const AI_EDIT_JOB_CONCURRENCY = 10;
+
 /** `photo_review_events.action` — plan §2. Written on every state-changing action in this module. */
 export enum PhotoReviewAction {
   AUTO_GENERATED = 'AUTO_GENERATED',

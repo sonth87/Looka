@@ -2,7 +2,8 @@ import { SsoAuthGuard } from '@app/shared/auth/index';
 import { FileStorageModule } from '@app/modules/file-storage/file-storage.module';
 import { StatsModule } from '@app/modules/stats/stats.module';
 import { WorkflowModule } from '@app/modules/workflow/workflow.module';
-import { Module } from '@nestjs/common';
+import { BullModule } from '@nestjs/bullmq';
+import { Module, Provider } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { PhotoKindController } from './controllers/photo-kind.controller';
 import { ReviewAssignmentController } from './controllers/review-assignment.controller';
@@ -15,7 +16,9 @@ import { ReviewAssignment } from './entities/review-assignment.entity';
 import { SubjectPhotoSet } from './entities/subject-photo-set.entity';
 import { VariantUploadOutboxEntry } from './entities/variant-upload-outbox.entity';
 import { ReviewerRoleGuard } from './guards/reviewer-role.guard';
+import { AI_EDIT_QUEUE_NAME } from './photo-review.constants';
 import { PHOTO_AI_PORT } from './application/ports/photo-ai.port';
+import { AiEditProcessor } from './services/ai-edit.processor';
 import { AiImageEditClient } from './services/ai-image-edit.client';
 import { PhotoAiAdapter } from './services/photo-ai.adapter';
 import { PhotoKindService } from './services/photo-kind.service';
@@ -23,6 +26,20 @@ import { PhotoReviewSidecarService } from './services/photo-review-sidecar.servi
 import { PhotoReviewService } from './services/photo-review.service';
 import { ReviewAssignmentService } from './services/review-assignment.service';
 import { VariantUploadWorkerService } from './services/variant-upload-worker.service';
+
+// `AiEditProcessor` actually CONSUMES the `ai-edit` BullMQ queue (real
+// background work, a persistent Redis connection) — only instantiated on
+// `worker`/`all`, matching `ScheduleModule.forRoot()`'s own "only the
+// worker host runs background work" split (see app-query.module.ts's own
+// doc comment, "SERVICE_TYPE=query khởi động được và không đăng ký cron").
+// `command`/`query` still get `BullModule.registerQueue()` below (so
+// `PhotoReviewService.enqueueAiEditJob` can inject the `Queue` and add jobs
+// to it) — they just never run the processor that drains it.
+const aiEditProcessorProvider: Provider[] = ['worker', 'all'].includes(
+  process.env.SERVICE_TYPE ?? 'all',
+)
+  ? [AiEditProcessor]
+  : [];
 
 /**
  * "Duyệt ảnh" (photo review) CMS module —
@@ -87,6 +104,10 @@ import { VariantUploadWorkerService } from './services/variant-upload-worker.ser
     // For `WorkflowCatalogReadRepository.getVersionRef` — see this module's
     // own top doc comment.
     WorkflowModule,
+    // Registers the `ai-edit` queue itself (so `@InjectQueue`/`enqueueAiEditJob`
+    // resolves on every host) — see `aiEditProcessorProvider`'s own comment
+    // above for why the thing that actually DRAINS it is conditional.
+    BullModule.registerQueue({ name: AI_EDIT_QUEUE_NAME }),
   ],
   controllers: [
     ReviewController,
@@ -106,6 +127,11 @@ import { VariantUploadWorkerService } from './services/variant-upload-worker.ser
     // a sibling here rather than folded into that one; see this service's
     // own doc comment for why.
     VariantUploadWorkerService,
+    // Drains the `ai-edit` BullMQ queue — the real `/edit` AI call now runs
+    // here, asynchronously, instead of inline inside `reprocess()`/
+    // `aiEdit()`'s own HTTP request (2026-09-29). Conditional — see this
+    // array's own definition above `@Module`.
+    ...aiEditProcessorProvider,
     // `@UseGuards()` on ReviewController/PhotoKindController.
     SsoAuthGuard,
     ReviewerRoleGuard,

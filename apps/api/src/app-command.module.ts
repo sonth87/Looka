@@ -14,13 +14,14 @@ import { StatsModule } from '@app/modules/stats/stats.module';
 import { CardTemplateModule } from '@app/modules/card-template/card-template.module';
 import { PrintModule } from '@app/modules/print/print.module';
 import { FoundationModule } from '@app/shared/foundation.module';
+import { BullModule } from '@nestjs/bullmq';
 import {
   MiddlewareConsumer,
   Module,
   NestModule,
   RequestMethod,
 } from '@nestjs/common';
-import { ConfigModule } from '@nestjs/config';
+import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AppController } from './app.controller';
 
@@ -41,6 +42,17 @@ import { AppController } from './app.controller';
       load: Object.values(configs),
     }),
     TypeOrmModule.forRootAsync({ useClass: TypeOrmConfigService }),
+    // The `ai-edit` queue's Redis connection — see app-worker.module.ts's
+    // own comment on this same block.
+    BullModule.forRootAsync({
+      useFactory: (config: ConfigService) => ({
+        connection: {
+          host: config.get<string>('REDIS_HOST') ?? '127.0.0.1',
+          port: config.get<number>('REDIS_PORT') ?? 6379,
+        },
+      }),
+      inject: [ConfigService],
+    }),
     FoundationModule,
     SharedModule,
     CaptureModule,

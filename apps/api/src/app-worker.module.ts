@@ -10,8 +10,9 @@ import { StatsModule } from '@app/modules/stats/stats.module';
 import { CardTemplateModule } from '@app/modules/card-template/card-template.module';
 import { PrintModule } from '@app/modules/print/print.module';
 import { FoundationModule } from '@app/shared/foundation.module';
+import { BullModule } from '@nestjs/bullmq';
 import { Module } from '@nestjs/common';
-import { ConfigModule } from '@nestjs/config';
+import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AppController } from './app.controller';
@@ -31,6 +32,13 @@ import { AppController } from './app.controller';
  * later-phase deliverable once each module has its own `-worker.module.ts`
  * that imports only its worker + the command handlers a worker's commands
  * need, per docs/plans/backend-layering-plan.md §3.
+ *
+ * Also the only host `PhotoReviewModule` actually instantiates
+ * `AiEditProcessor` on (2026-09-29, BullMQ `ai-edit` queue) — same
+ * `SERVICE_TYPE` check `AiEditProcessor`'s own module registration uses, for
+ * the same reason as `ScheduleModule` above: `command`/`query` can still
+ * ENQUEUE (`BullModule.forRootAsync` is registered on every host, right
+ * below), they must not also CONSUME.
  */
 @Module({
   imports: [
@@ -40,6 +48,20 @@ import { AppController } from './app.controller';
     }),
     ScheduleModule.forRoot(),
     TypeOrmModule.forRootAsync({ useClass: TypeOrmConfigService }),
+    // The `ai-edit` queue's Redis connection (2026-09-29 — `AiEditProcessor`
+    // in `PhotoReviewModule`). Duplicated identically across all four
+    // `app-*.module.ts` files, same convention `ConfigModule.forRoot()`
+    // already uses here — each is a separate bootstrap, not one shared
+    // process.
+    BullModule.forRootAsync({
+      useFactory: (config: ConfigService) => ({
+        connection: {
+          host: config.get<string>('REDIS_HOST') ?? '127.0.0.1',
+          port: config.get<number>('REDIS_PORT') ?? 6379,
+        },
+      }),
+      inject: [ConfigService],
+    }),
     FoundationModule,
     SharedModule,
     CaptureModule,

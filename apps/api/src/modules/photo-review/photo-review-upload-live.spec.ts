@@ -3,6 +3,7 @@ import { ReviewStatsService } from '@app/modules/stats/services/review-stats.ser
 import { FsError } from '@face/fs-client';
 import { DomainEventDispatcher } from '@app/shared/cqrs/domain-event.dispatcher';
 import { TransactionContext } from '@app/shared/database/transaction-context';
+import { getQueueToken } from '@nestjs/bullmq';
 import { ConfigService } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
 import { TypeOrmModule } from '@nestjs/typeorm';
@@ -16,12 +17,15 @@ import { PhotoReviewEvent } from './entities/photo-review-event.entity';
 import { PhotoVariant } from './entities/photo-variant.entity';
 import { SubjectPhotoSet } from './entities/subject-photo-set.entity';
 import {
+  AI_EDIT_QUEUE_NAME,
+  AiEditJobKind,
   PHOTO_REVIEW_ERROR_CODE,
   PhotoReviewSetStatus,
   PhotoVariantKind,
   PhotoVariantStatus,
 } from './photo-review.constants';
 import { PHOTO_AI_PORT } from './application/ports/photo-ai.port';
+import type { AiEditJobData } from './services/ai-edit.processor';
 import { AiImageEditClient } from './services/ai-image-edit.client';
 import { PhotoAiAdapter } from './services/photo-ai.adapter';
 import { PhotoKindService } from './services/photo-kind.service';
@@ -92,6 +96,7 @@ describeDb('photo-review uploadVariant/acceptVariant (live)', () => {
   let workflowCatalog: {
     getVersionRef: jest.Mock;
   };
+  let aiEditQueue: { add: jest.Mock };
   const apiBaseUrl = 'http://localhost:3100';
 
   const tinyJpeg = () =>
@@ -160,6 +165,7 @@ describeDb('photo-review uploadVariant/acceptVariant (live)', () => {
     workflowCatalog = {
       getVersionRef: jest.fn().mockResolvedValue(null),
     };
+    aiEditQueue = { add: jest.fn().mockResolvedValue(undefined) };
 
     const built = await Test.createTestingModule({
       imports: [
@@ -195,6 +201,10 @@ describeDb('photo-review uploadVariant/acceptVariant (live)', () => {
         { provide: TransactionContext, useValue: transactionContext },
         { provide: DomainEventDispatcher, useValue: domainEventDispatcher },
         { provide: WorkflowCatalogReadRepository, useValue: workflowCatalog },
+        {
+          provide: getQueueToken(AI_EDIT_QUEUE_NAME),
+          useValue: aiEditQueue,
+        },
       ],
     }).compile();
 
@@ -225,6 +235,7 @@ describeDb('photo-review uploadVariant/acceptVariant (live)', () => {
     sidecar.identitySimilarity.mockClear();
     aiImageEdit.edit.mockClear();
     workflowCatalog.getVersionRef.mockClear();
+    aiEditQueue.add.mockClear();
   });
 
   afterEach(async () => {
@@ -253,6 +264,35 @@ describeDb('photo-review uploadVariant/acceptVariant (live)', () => {
       ]);
     }
   });
+
+  /**
+   * `aiEdit()`/`reprocess()` now only enqueue onto the `ai-edit` BullMQ
+   * queue (`aiEditQueue`, mocked above) instead of running the real
+   * `/edit`/sidecar call inline — 2026-09-29 ("đẩy vào queue, lock lại chỉ
+   * cho 1 tiến trình chạy", later "sử dụng bullmq ... tạo 1 processor để
+   * xử lý"). This finds the most recent `.add()` call queued for
+   * `variantId` and runs the same `PhotoReviewService.process*Job` method
+   * `AiEditProcessor` would eventually call, synchronously, so tests can
+   * assert on the FINAL (READY/FAILED) state without a real Redis worker
+   * loop.
+   */
+  async function runQueuedJob(variantId: string): Promise<void> {
+    const calls = aiEditQueue.add.mock.calls as Array<
+      [AiEditJobKind, AiEditJobData]
+    >;
+    const call = [...calls]
+      .reverse()
+      .find(([, data]) => data.variantId === variantId);
+    if (!call) {
+      throw new Error(`no ai-edit queue job found for variant ${variantId}`);
+    }
+    const [kind, data] = call;
+    if (kind === AiEditJobKind.REPROCESS) {
+      await service.processReprocessJob(data.setId, variantId);
+    } else {
+      await service.processAiEditJob(data.setId, variantId, data.payload ?? {});
+    }
+  }
 
   /**
    * Seeds a fully-unlocked set (a READY CARD_AUTO current variant) plus a
@@ -552,11 +592,18 @@ describeDb('photo-review uploadVariant/acceptVariant (live)', () => {
         apiBaseUrl,
       );
 
-      const aiVariant = await service.aiEdit(
+      const queuedAiVariant = await service.aiEdit(
         setId,
         { prompt: 'nen trang deu', fromVariantId: uploadResult.variant.id },
         null,
         apiBaseUrl,
+      );
+      expect(queuedAiVariant.status).toBe(PhotoVariantStatus.PROCESSING);
+      await runQueuedJob(queuedAiVariant.id);
+      const aiVariant = await service.getJob(
+        queuedAiVariant.id,
+        apiBaseUrl,
+        null,
       );
       expect(aiVariant.status).toBe(PhotoVariantStatus.READY);
       expect(aiVariant.kind).toBe(PhotoVariantKind.CARD_AI);
@@ -691,11 +738,17 @@ describeDb('photo-review uploadVariant/acceptVariant (live)', () => {
       cleanup.setIds.push(setId);
       cleanup.sessionIds.push(sessionId);
 
-      const aiVariant = await service.aiEdit(
+      const queuedAiVariant = await service.aiEdit(
         setId,
         { prompt: 'bo bui tren nen' },
         null,
         apiBaseUrl,
+      );
+      await runQueuedJob(queuedAiVariant.id);
+      const aiVariant = await service.getJob(
+        queuedAiVariant.id,
+        apiBaseUrl,
+        null,
       );
       expect(aiVariant.status).toBe(PhotoVariantStatus.READY);
 
@@ -751,7 +804,18 @@ describeDb('photo-review uploadVariant/acceptVariant (live)', () => {
           },
         });
 
-        const detail = await service.reprocess(setId, null, apiBaseUrl);
+        const queuedDetail = await service.reprocess(setId, null, apiBaseUrl);
+        // reprocess() now only enqueues (2026-09-29 queue) — the new
+        // PROCESSING CARD_AUTO variant is already in `variants`, just not
+        // promoted to `currentCardVariantId` yet.
+        const queuedVariant = queuedDetail.variants.find(
+          (v) =>
+            v.kind === PhotoVariantKind.CARD_AUTO &&
+            v.status === PhotoVariantStatus.PROCESSING,
+        );
+        expect(queuedVariant).toBeDefined();
+        await runQueuedJob(queuedVariant!.id);
+        const detail = await service.getSetDetail(setId, apiBaseUrl);
 
         // Both steps actually dispatched, in order — proving this ran the
         // configured 2-step pipeline rather than silently falling back to

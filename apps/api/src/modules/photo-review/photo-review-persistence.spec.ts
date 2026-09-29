@@ -2,6 +2,7 @@ import { FileStorageService } from '@app/modules/file-storage/services/file-stor
 import { ReviewStatsService } from '@app/modules/stats/services/review-stats.service';
 import { DomainEventDispatcher } from '@app/shared/cqrs/domain-event.dispatcher';
 import { TransactionContext } from '@app/shared/database/transaction-context';
+import { getQueueToken } from '@nestjs/bullmq';
 import { ConfigService } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
 import { TypeOrmModule } from '@nestjs/typeorm';
@@ -13,6 +14,7 @@ import { PhotoReviewEvent } from './entities/photo-review-event.entity';
 import { PhotoVariant } from './entities/photo-variant.entity';
 import { SubjectPhotoSet } from './entities/subject-photo-set.entity';
 import {
+  AI_EDIT_QUEUE_NAME,
   PHOTO_REVIEW_ERROR_CODE,
   PhotoReviewSetStatus,
   PhotoVariantKind,
@@ -149,6 +151,15 @@ describeDb('photo-review persistence', () => {
         { provide: TransactionContext, useValue: transactionContext },
         { provide: DomainEventDispatcher, useValue: domainEventDispatcher },
         { provide: WorkflowCatalogReadRepository, useValue: workflowCatalog },
+        // None of these tests need the job to actually run (they only
+        // assert on the immediate PROCESSING/LOCKED state `aiEdit()`/
+        // `reprocess()` leave behind) — just enough for `@InjectQueue` to
+        // resolve, see photo-review-upload-live.spec.ts's `aiEditQueue` for
+        // the sibling suite that DOES need to inspect/run enqueued jobs.
+        {
+          provide: getQueueToken(AI_EDIT_QUEUE_NAME),
+          useValue: { add: jest.fn().mockResolvedValue(undefined) },
+        },
       ],
     }).compile();
 

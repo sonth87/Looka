@@ -5,10 +5,12 @@ import { ReviewStatsService } from '@app/modules/stats/services/review-stats.ser
 import { Pagination } from '@app/shared/http/pagination';
 import { DomainEventDispatcher } from '@app/shared/cqrs/domain-event.dispatcher';
 import { TransactionContext } from '@app/shared/database/transaction-context';
+import { InjectQueue } from '@nestjs/bullmq';
 import { HttpStatus, Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import archiver from 'archiver';
+import type { Queue } from 'bullmq';
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { PassThrough } from 'node:stream';
 import { DataSource, EntityManager, Repository } from 'typeorm';
@@ -31,6 +33,8 @@ import { PhotoReviewEvent } from '../entities/photo-review-event.entity';
 import { PhotoVariant } from '../entities/photo-variant.entity';
 import { SubjectPhotoSet } from '../entities/subject-photo-set.entity';
 import {
+  AI_EDIT_QUEUE_NAME,
+  AiEditJobKind,
   ALLOWED_UPLOAD_MIME_TYPES,
   FORBIDDEN_PROMPT_KEYWORDS,
   IDENTITY_SIMILARITY_REJECT_THRESHOLD,
@@ -49,6 +53,7 @@ import {
   unwrapPhotoAi,
 } from '../application/ports/photo-ai.port';
 import type { PhotoAiPort } from '../application/ports/photo-ai.port';
+import type { AiEditJobData } from './ai-edit.processor';
 import { PhotoKindService } from './photo-kind.service';
 import { SidecarError } from './photo-review-sidecar.service';
 import sharp from 'sharp';
@@ -169,6 +174,8 @@ export class PhotoReviewService {
     private readonly transactionContext: TransactionContext,
     private readonly domainEventDispatcher: DomainEventDispatcher,
     private readonly workflowCatalog: WorkflowCatalogReadRepository,
+    @InjectQueue(AI_EDIT_QUEUE_NAME)
+    private readonly aiEditQueue: Queue<AiEditJobData>,
   ) {}
 
   // ── Locking (plan §4) ──────────────────────────────────────────────────
@@ -1771,6 +1778,31 @@ export class PhotoReviewService {
     );
   }
 
+  /**
+   * Queues the real `/edit`-calling work for `AiEditProcessor` (the `ai-edit`
+   * BullMQ queue, `AI_EDIT_QUEUE_NAME`) instead of running it inline —
+   * 2026-09-29 user request. `job.name` is `input.kind`
+   * (`AiEditJobKind.REPROCESS`/`AI_EDIT`) — `AiEditProcessor.process()`
+   * switches on it to pick `processReprocessJob`/`processAiEditJob`.
+   * `actorUserId` is intentionally NOT part of the job data: neither
+   * `process*Job` method reads it (both were already `actorUserId`-free —
+   * the audit trail for WHO requested the job is the `REPROCESS`/
+   * `AI_REQUESTED` `photo_review_events` row written synchronously above,
+   * before this ever enqueues).
+   */
+  private async enqueueAiEditJob(input: {
+    kind: AiEditJobKind;
+    variantId: string;
+    setId: string;
+    payload?: AiEditJobData['payload'];
+  }): Promise<void> {
+    await this.aiEditQueue.add(input.kind, {
+      setId: input.setId,
+      variantId: input.variantId,
+      payload: input.payload,
+    });
+  }
+
   // ── POST /v1/review/sets/:id/reprocess ──────────────────────────────
 
   /**
@@ -1821,10 +1853,10 @@ export class PhotoReviewService {
       return this.getSetDetail(setId, apiBaseUrl);
     }
 
-    const kind = await this.photoKindService.findKindEntityOrFail(set.kindId);
-    const sessionContext = await this.resolveSessionContext(
-      set.sourceSessionId,
-    );
+    // Only validated here (fail fast, before creating a variant at all) —
+    // `processReprocessJob` re-fetches its own `kind`/`cardSpec` once the
+    // job actually runs, rather than threading it through the queue.
+    await this.photoKindService.findKindEntityOrFail(set.kindId);
     const frontPhoto = await this.findFrontSourcePhoto(set.sourceSessionId);
     if (!frontPhoto) {
       throw new CustomException(
@@ -1833,14 +1865,6 @@ export class PhotoReviewService {
         HttpStatus.NOT_FOUND,
       );
     }
-
-    // Snapshot of "what the set pointed at when this run started" — used
-    // after the (now potentially long) pipeline run below to detect
-    // whether a human action (approve/reject/accept/discard/setCurrent)
-    // moved the set on in the meantime, so this run's result never
-    // silently overwrites something newer than itself. See the two
-    // transactions below.
-    const snapshotCurrentVariantId = set.currentCardVariantId ?? null;
 
     const variant = await this.dataSource.transaction(async (manager) => {
       await this.lockSet(manager, setId);
@@ -1865,7 +1889,69 @@ export class PhotoReviewService {
       return created;
     });
 
+    // 2026-09-29 user request ("đẩy vào queue, lock lại chỉ cho 1 tiến
+    // trình chạy, xử lý concurrence 10") — the actual AI pipeline run (the
+    // slow part, up to minutes) no longer happens inline here. It is
+    // enqueued and picked up by `AiEditProcessor`, which is what fixes the
+    // kiosk-request-blocking bug the 2026-09-29 audit found
+    // (device-event.service.ts awaiting this method inline). The FE polls
+    // `GET /v1/review/jobs/:id` (`getJob`, unchanged) to see the variant
+    // move PROCESSING → READY/FAILED — see `enqueueAiEditJob`'s own doc
+    // comment.
+    await this.enqueueAiEditJob({
+      kind: AiEditJobKind.REPROCESS,
+      variantId: variant.id,
+      setId,
+    });
+
+    return this.getSetDetail(setId, apiBaseUrl);
+  }
+
+  /**
+   * The actual AI pipeline run for one `reprocess()` job — called by
+   * `AiEditJobWorkerService`, never directly by a controller. Extracted
+   * 2026-09-29 out of `reprocess()` itself (see that method's own comment)
+   * so it can run from the queue instead of inline inside the original HTTP
+   * request. Re-resolves `set`/`kind`/`sessionContext`/`frontPhoto` fresh
+   * rather than threading them through the job's `payload` — cheap DB
+   * reads, and guarantees this always sees the CURRENT `photo_kinds`/
+   * `campaigns` config even if the job sat queued for a while before a
+   * worker claimed it. `snapshotCurrentVariantId` is likewise captured HERE
+   * (this method's own first read of `set`), not back when `reprocess()`
+   * first validated and enqueued — narrows the "did a human move the set on
+   * while this ran" race window (see `safeToPromote` below) to just this
+   * pipeline run itself, not however long the job also spent queued.
+   *
+   * Defensive by design, same as `reprocess()` always was: any failure —
+   * missing source photo, unreachable AI service, non-2xx, timeout — must
+   * resolve to a clean `FAILED` variant, never an unhandled rejection that
+   * would leave `AiEditJobWorkerService.process()`'s own outer `catch` as
+   * the only thing marking the JOB row failed while the `photo_variants`
+   * row (what the FE actually polls) stays stuck `PROCESSING` forever.
+   */
+  async processReprocessJob(setId: string, variantId: string): Promise<void> {
+    const set = await this.findSetEntityOrFail(setId);
+    const variant = await this.findVariantEntityOrFail(variantId);
+    const snapshotCurrentVariantId = set.currentCardVariantId ?? null;
+
     try {
+      const kind = await this.photoKindService.findKindEntityOrFail(set.kindId);
+      const sessionContext = await this.resolveSessionContext(
+        set.sourceSessionId,
+      );
+      const frontPhoto = await this.findFrontSourcePhoto(set.sourceSessionId);
+      if (!frontPhoto) {
+        // reprocess() already validated a front photo existed before
+        // enqueuing this job — reaching here means it vanished in the
+        // meantime, which should not happen in practice. Handled as an
+        // ordinary pipeline failure (falls into the catch below) rather
+        // than a special case.
+        throw new PhotoAiError(
+          "No original photo found for this set's source session",
+          'Terminal',
+        );
+      }
+
       const sourceBytes = await this.readSourcePhotoBytes(
         frontPhoto,
         sessionContext.tenantName,
@@ -2002,14 +2088,6 @@ export class PhotoReviewService {
           cardSpec: effectiveCardSpec,
         },
       });
-
-      // Return the whole set (not just the variant) — this route feeds
-      // the CMS's `withBusy()` action chain (approve/reject/setCurrent/
-      // reprocess), which replaces its entire detail view with whatever
-      // this resolves to; a bare `PhotoVariantDao` here used to leave that
-      // view with no `variants`/`originalPhotos`/`events` array to render
-      // (plan B1, 2026-09-18).
-      return this.getSetDetail(setId, apiBaseUrl);
     } catch (error) {
       const message = extractSidecarFailureMessage(error);
       this.logger.warn(`reprocess failed for set ${setId}: ${message}`);
@@ -2074,20 +2152,19 @@ export class PhotoReviewService {
         }
       });
     }
-
-    return this.getSetDetail(setId, apiBaseUrl);
   }
 
   // ── POST /v1/review/sets/:id/ai-edit ────────────────────────────────
 
   /**
-   * Runs synchronously (awaits the sidecar call before returning) rather
-   * than dispatching to a real background job queue — this codebase has no
-   * job-table infrastructure for AI edits yet, and the task brief
-   * explicitly allows `GET /v1/review/jobs/:id` to just read back a
-   * `photo_variants` row's current state (documented there too). A future
-   * async queue can slot in behind the same `PhotoVariantDao` shape without
-   * changing this method's contract.
+   * Creates the `CARD_AI` variant (`PROCESSING`) and enqueues the actual
+   * `/edit` call — returns as soon as that's durable, without waiting for
+   * the AI service (2026-09-29 user request, same queue
+   * `AiEditJobWorkerService` drains for `reprocess()`; see
+   * `enqueueAiEditJob`'s own doc comment). The `PhotoVariantDao` this
+   * returns is a `PROCESSING` snapshot — unchanged contract from before this
+   * queue existed, since `GET /v1/review/jobs/:id` (`getJob`) was already
+   * documented and built for exactly this "poll for the real result" case.
    */
   async aiEdit(
     setId: string,
@@ -2167,14 +2244,10 @@ export class PhotoReviewService {
       }
     }
 
-    // A `photoKindService.findKindEntityOrFail(set.kindId)` fetch used to
-    // sit here and was removed 2026-09-28 as dead code — at the time,
-    // `AiImageEditClient.edit()` had no `width`/`height` fields at all, so
-    // `kind.cardSpec` had nothing to feed. Re-added the same day, a few
-    // hours later, once `width`/`height` were wired up (see
-    // `cardSpecToEditDimensions`'s own doc comment): this time it is
-    // genuinely used, not a repeat of the same mistake.
-    const kind = await this.photoKindService.findKindEntityOrFail(set.kindId);
+    // Validated here only (fail fast, before creating a variant at all) —
+    // `processAiEditJob` re-fetches its own `kind`/`cardSpec` once the job
+    // actually runs (2026-09-29, queue), rather than threading it through.
+    await this.photoKindService.findKindEntityOrFail(set.kindId);
     const sessionContext = await this.resolveSessionContext(
       set.sourceSessionId,
     );
@@ -2219,6 +2292,57 @@ export class PhotoReviewService {
       return created;
     });
 
+    await this.enqueueAiEditJob({
+      kind: AiEditJobKind.AI_EDIT,
+      variantId: variant.id,
+      setId,
+      // Only the fields not already durable on the `variant` row itself —
+      // `processAiEditJob` reads prompt/region/fromVariant/sourcePhoto back
+      // off `variant` (`prompt`, `regionMode`, `derivedFromVariantId`,
+      // `sourcePhotoId`), all already written above.
+      payload: { cfg: dto.cfg, steps: dto.steps, seed: dto.seed },
+    });
+
+    return this.toVariantDao(variant, apiBaseUrl, sessionContext.tenantName);
+  }
+
+  /**
+   * The actual `/edit` call for one `aiEdit()` job — called by
+   * `AiEditJobWorkerService`, never directly by a controller. Extracted
+   * 2026-09-29 out of `aiEdit()` itself (see that method's own comment) so
+   * it can run from the queue instead of inline inside the original HTTP
+   * request. Re-resolves `set`/`kind`/`sessionContext`/`fromVariant`/
+   * `sourcePhoto` fresh from the already-created `variant` row (its
+   * `derivedFromVariantId`/`sourcePhotoId`/`prompt`/`regionMode` columns)
+   * rather than threading them through the job's `payload` — only `cfg`/
+   * `steps`/`seed` actually need `payload`, since nothing else has a column
+   * to live in.
+   */
+  async processAiEditJob(
+    setId: string,
+    variantId: string,
+    payload: { cfg?: number; steps?: number; seed?: number },
+  ): Promise<void> {
+    const set = await this.findSetEntityOrFail(setId);
+    const variant = await this.findVariantEntityOrFail(variantId);
+    const kind = await this.photoKindService.findKindEntityOrFail(set.kindId);
+    const sessionContext = await this.resolveSessionContext(
+      set.sourceSessionId,
+    );
+
+    let fromVariant: PhotoVariant | null = null;
+    let sourcePhoto: FrontSourcePhoto | null = null;
+    if (variant.derivedFromVariantId) {
+      fromVariant = await this.findVariantEntityOrFail(
+        variant.derivedFromVariantId,
+      );
+    } else if (variant.sourcePhotoId) {
+      sourcePhoto = await this.findPhotoOrFail(
+        variant.sourcePhotoId,
+        set.sourceSessionId,
+      );
+    }
+
     try {
       const sourceBytes = fromVariant
         ? await this.readVariantBytes(fromVariant, sessionContext.tenantName)
@@ -2255,7 +2379,7 @@ export class PhotoReviewService {
       );
       const editDimensions = this.cardSpecToEditDimensions(effectiveCardSpec);
       const editPrompt = this.appendBackgroundColorInstruction(
-        dto.prompt,
+        variant.prompt ?? undefined,
         effectiveCardSpec,
       );
       const editResult = unwrapPhotoAi(
@@ -2263,9 +2387,9 @@ export class PhotoReviewService {
           imageBuffer: sourceBytes,
           mimeType: 'image/jpeg',
           prompt: editPrompt,
-          cfg: dto.cfg,
-          steps: dto.steps,
-          seed: dto.seed,
+          cfg: payload.cfg,
+          steps: payload.steps,
+          seed: payload.seed,
           ...editDimensions,
         }),
       );
@@ -2399,17 +2523,17 @@ export class PhotoReviewService {
           virtualPath: virtualPath.replace(/\.[^.]+$/, '.json'),
           idempotencyKey: `photo-review:${variant.id}:ai:meta`,
           metadata: {
-            prompt: dto.prompt,
+            prompt: variant.prompt,
             // The prompt ACTUALLY sent to /edit differs from the reviewer's
-            // raw `dto.prompt` whenever the kind's cardSpec has a
+            // raw prompt whenever the kind's cardSpec has a
             // `backgroundColor` (`appendBackgroundColorInstruction` appends
             // an instruction to it) — recorded separately here (plan §6.2
             // #6 traceability) rather than overwriting `prompt` above, so
             // existing readers of the raw prompt field are unaffected.
             effectivePrompt: editPrompt,
-            cfg: dto.cfg,
-            steps: dto.steps,
-            region: dto.region,
+            cfg: payload.cfg,
+            steps: payload.steps,
+            region: variant.regionMode,
             modelId: result.modelId,
             seed: result.seed,
             identitySimilarity: result.identitySimilarity,
@@ -2441,14 +2565,6 @@ export class PhotoReviewService {
         );
       }
     }
-
-    // Re-fetched rather than returning the stale in-memory `variant` — the
-    // guarded updates above may have been skipped (discarded mid-flight),
-    // so this is the only way to hand the caller the row's REAL current
-    // state instead of a PROCESSING snapshot that stopped being true
-    // somewhere during the sidecar call.
-    const refreshed = await this.findVariantEntityOrFail(variant.id);
-    return this.toVariantDao(refreshed, apiBaseUrl, sessionContext.tenantName);
   }
 
   // ── GET /v1/review/jobs/:id ──────────────────────────────────────────

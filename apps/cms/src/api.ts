@@ -34,6 +34,7 @@ export interface CardSpec {
   size?: string;
   dpi?: number;
   backgroundColor?: string;
+  nameBackgroundColor?: string;
   /** `[min, max]` fraction of frame height the head should occupy. */
   headHeightRatio?: [number, number];
   /** `[min, max]` fraction of frame height the eye line should sit at, from the top. */

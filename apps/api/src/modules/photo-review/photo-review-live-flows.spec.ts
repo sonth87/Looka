@@ -11,6 +11,7 @@ import { PrintItemService } from '@app/modules/print/services/print-item.service
 import { ReviewStatsService } from '@app/modules/stats/services/review-stats.service';
 import { STATS_UNKNOWN_UUID } from '@app/modules/stats/stats.constants';
 import { FoundationModule } from '@app/shared/foundation.module';
+import { getQueueToken } from '@nestjs/bullmq';
 import { ConfigService } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
 import { TypeOrmModule } from '@nestjs/typeorm';
@@ -22,6 +23,7 @@ import { PhotoReviewEvent } from './entities/photo-review-event.entity';
 import { PhotoVariant } from './entities/photo-variant.entity';
 import { SubjectPhotoSet } from './entities/subject-photo-set.entity';
 import {
+  AI_EDIT_QUEUE_NAME,
   PHOTO_REVIEW_ERROR_CODE,
   PhotoReviewSetStatus,
   PhotoVariantKind,
@@ -156,6 +158,14 @@ describeDb(
           { provide: ConfigService, useValue: { get: () => 'test-api-key' } },
           { provide: ReviewAssignmentService, useValue: reviewAssignments },
           { provide: WorkflowCatalogReadRepository, useValue: workflowCatalog },
+          // `aiEdit()`/`reprocess()` only need this to resolve `.add()` — the
+          // tests below call `processAiEditJob`/`processReprocessJob`
+          // directly (what `AiEditProcessor` would eventually call), so
+          // nothing here needs to inspect what was actually enqueued.
+          {
+            provide: getQueueToken(AI_EDIT_QUEUE_NAME),
+            useValue: { add: jest.fn().mockResolvedValue(undefined) },
+          },
           // `onSetApproved`/`onSetLeftApproved` are pure `manager`-driven (see
           // their own doc comments) — every OTHER constructor dep is
           // irrelevant here, same `undefined as never` convention
@@ -655,39 +665,43 @@ describeDb(
             ),
         );
 
-        const aiEditPromise = service.aiEdit(
+        // aiEdit() itself is fast now (2026-09-29 queue — it only creates the
+        // PROCESSING variant and enqueues, it no longer awaits the sidecar
+        // call inline), so it already hands back the variant id directly —
+        // no polling needed to find it the way the old synchronous version
+        // required. The "long async gap" this test exercises has moved to
+        // `processAiEditJob` (what `AiEditProcessor` actually calls,
+        // simulated here the same way `photo-review-upload-live.spec.ts`'s
+        // own `runQueuedJob` helper does) — started but deliberately NOT
+        // awaited yet, so it is still in flight when the concurrent discard
+        // below lands, exactly like the original bug scenario.
+        const aiVariant = await service.aiEdit(
           setId,
           { prompt: 'nen trang deu' },
           null,
           apiBaseUrl,
         );
+        expect(aiVariant.status).toBe(PhotoVariantStatus.PROCESSING);
+        const aiVariantId = aiVariant.id;
 
-        // Poll for the PROCESSING CARD_AI variant aiEdit's own first
-        // (already-committed) transaction creates before it ever calls the
-        // sidecar — this is exactly the row a second reviewer polling
-        // GET /v1/review/sets/:id mid-flight would also see and could act on.
-        let aiVariantId: string | null = null;
-        for (let i = 0; i < 20 && !aiVariantId; i++) {
-          const rows: Array<{ id: string }> = await dataSource.query(
-            `SELECT id FROM photo_variants WHERE set_id = $1 AND kind = 'CARD_AI' AND status = 'PROCESSING'`,
-            [setId],
-          );
-          aiVariantId = rows[0]?.id ?? null;
-          if (!aiVariantId) await new Promise((r) => setTimeout(r, 20));
-        }
-        expect(aiVariantId).not.toBeNull();
+        const processingPromise = service.processAiEditJob(
+          setId,
+          aiVariantId,
+          {},
+        );
 
-        // A second reviewer discards it while aiEdit() is still awaiting the
-        // sidecar — legal per discardVariant()'s own rules (it only refuses a
-        // DISCARDED variant or the set's current one; PROCESSING is neither).
-        await service.discardVariant(aiVariantId as string, null, apiBaseUrl);
+        // A second reviewer discards it while processAiEditJob() is still
+        // awaiting the (deliberately delayed) sidecar mock — legal per
+        // discardVariant()'s own rules (it only refuses a DISCARDED variant
+        // or the set's current one; PROCESSING is neither).
+        await service.discardVariant(aiVariantId, null, apiBaseUrl);
         const afterDiscard: Array<{ status: string }> = await dataSource.query(
           `SELECT status FROM photo_variants WHERE id = $1`,
           [aiVariantId],
         );
         expect(afterDiscard[0].status).toBe(PhotoVariantStatus.DISCARDED);
 
-        await aiEditPromise;
+        await processingPromise;
 
         const afterAiEdit: Array<{ status: string }> = await dataSource.query(
           `SELECT status FROM photo_variants WHERE id = $1`,

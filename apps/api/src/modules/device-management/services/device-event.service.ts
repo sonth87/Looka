@@ -173,22 +173,19 @@ export class DeviceEventService extends CommonService<DeviceEvent> {
         // passed rather than threading `ConfigService`/a request object into
         // this service for a value nothing consumes.
         //
-        // NOT awaited (2026-09-29, fixed): with the `ai_pipeline_steps`
-        // executor wired up, `reprocess()` can now spend several minutes in
-        // an `AI_EDIT` step's `/edit` call. This method (`recordBatch`) is
-        // itself awaited by `DeviceSelfController`'s `POST
-        // /v1/devices/events` handler, so awaiting `reprocess()` here used
-        // to hold that kiosk request open for the same several minutes.
-        // The kiosk's own stats-push loop has no in-flight guard and no
-        // request timeout, so it would re-POST the same un-acked batch
-        // every ~15s while the first request was still hanging, each
-        // resend re-entering this exact loop and queuing yet another
-        // `reprocess()` run (see `reprocess()`'s own single-flight guard,
-        // added the same day, which now also protects against that).
-        // Firing this in the background lets `recordBatch` return — and the
-        // kiosk's request complete — immediately after the (fast, DB-only)
-        // work above commits.
-        void this.photoReview
+        // Awaited again (2026-09-29): briefly (same day) made fire-and-forget
+        // to work around `reprocess()` spending several minutes inline in an
+        // `AI_EDIT` step's `/edit` call, which held this method's caller
+        // (`DeviceSelfController`'s `POST /v1/devices/events` handler) open
+        // for that whole time. The real fix landed the same day instead:
+        // `reprocess()` now only creates the `PROCESSING` variant and
+        // enqueues the actual AI work onto `ai_edit_jobs`
+        // (`AiEditJobWorkerService` drains it) — it returns in normal
+        // request time regardless of how long the AI call itself takes, so
+        // awaiting it here is fast and safe again, with `.catch()` kept for
+        // the same best-effort reasoning as `ensureSetForApprovedSession`
+        // above (a DB hiccup here must not fail the whole batch write).
+        await this.photoReview
           .reprocess(result.setId, null, 'http://localhost')
           .catch((err) => {
             this.logger.warn(

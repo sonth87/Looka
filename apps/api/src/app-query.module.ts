@@ -14,13 +14,14 @@ import { StatsModule } from '@app/modules/stats/stats.module';
 import { CardTemplateModule } from '@app/modules/card-template/card-template.module';
 import { PrintModule } from '@app/modules/print/print.module';
 import { FoundationModule } from '@app/shared/foundation.module';
+import { BullModule } from '@nestjs/bullmq';
 import {
   MiddlewareConsumer,
   Module,
   NestModule,
   RequestMethod,
 } from '@nestjs/common';
-import { ConfigModule } from '@nestjs/config';
+import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AppController } from './app.controller';
 
@@ -48,6 +49,22 @@ import { AppController } from './app.controller';
       load: Object.values(configs),
     }),
     TypeOrmModule.forRootAsync({ useClass: TypeOrmConfigService }),
+    // The `ai-edit` queue's Redis connection — needed here too so this host
+    // can still ENQUEUE (`PhotoReviewService.enqueueAiEditJob`, e.g. a CMS
+    // read-side action that also triggers an edit); `AiEditProcessor`
+    // itself (the part that actually CONSUMES/runs jobs — real background
+    // work) is registered only on `worker`/`all` inside
+    // `PhotoReviewModule`, matching this host's own "không đăng ký cron"
+    // invariant above — see that module's own comment.
+    BullModule.forRootAsync({
+      useFactory: (config: ConfigService) => ({
+        connection: {
+          host: config.get<string>('REDIS_HOST') ?? '127.0.0.1',
+          port: config.get<number>('REDIS_PORT') ?? 6379,
+        },
+      }),
+      inject: [ConfigService],
+    }),
     FoundationModule,
     SharedModule,
     CaptureModule,
