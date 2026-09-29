@@ -65,7 +65,9 @@ const EnvSchema = z.object({
   AI_IMAGE_EDIT_URL: z.string().optional(),
   // Must stay >= the service's own `REQUEST_TIMEOUT_S` (120s default, 600s
   // when it runs with `LOW_VRAM=1`) — ask the operator which one applies.
-  // Defaults to 150000 (150s) when unset.
+  // Defaults to 600000 (600s, matching AiImageEditClient's own
+  // DEFAULT_TIMEOUT_MS — corrected 2026-09-29; this comment previously said
+  // 150000/150s, which was stale even when it was written) when unset.
   AI_IMAGE_EDIT_TIMEOUT_MS: z.string().optional(),
 
   // Backend-owned face-embedding pipeline (2026-09-16 — `EmbeddingWorkerService`

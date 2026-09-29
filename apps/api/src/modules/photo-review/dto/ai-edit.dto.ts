@@ -7,7 +7,9 @@ import {
   IsOptional,
   IsString,
   IsUUID,
+  Max,
   MaxLength,
+  Min,
 } from 'class-validator';
 
 /** Body of `POST /v1/review/sets/:id/ai-edit` — plan §5.3/§7. */
@@ -22,7 +24,10 @@ export class AiEditDto {
 
   @ApiPropertyOptional({
     description:
-      'Vùng được sửa: OUTSIDE_FACE (mặc định) | GLASSES | HAIR | FULL',
+      'Vùng được sửa: OUTSIDE_FACE (mặc định) | GLASSES | HAIR | FULL. ' +
+      'Ghi chú: chỉ lưu làm metadata mô tả trên photo_variants, KHÔNG được ' +
+      'gửi cho hay áp dụng bởi service AI edit (service không có khái niệm ' +
+      'vùng/mask) — mọi lựa chọn ở đây đều sửa toàn bộ ảnh theo prompt.',
   })
   @IsOptional()
   @IsString()
@@ -62,8 +67,14 @@ export class AiEditDto {
     description:
       'Mức bám prompt (1.0–8.0) gửi cho service AI edit. Bỏ trống → mặc định của app (2.0), không phải mặc định của service (3.0).',
   })
+  // Bounded to the service's own documented range (see the description
+  // above) — the service itself clamps out-of-range values rather than
+  // rejecting them (per AiImageEditInput's own doc comment), so this is a
+  // request-shape safeguard, not something the service depended on.
   @IsOptional()
   @IsNumber()
+  @Min(1.0)
+  @Max(8.0)
   cfg?: number;
 
   @ApiPropertyOptional({
@@ -72,6 +83,8 @@ export class AiEditDto {
   })
   @IsOptional()
   @IsInt()
+  @Min(10)
+  @Max(50)
   steps?: number;
 
   @ApiPropertyOptional({

@@ -51,6 +51,7 @@ import {
 import type { PhotoAiPort } from '../application/ports/photo-ai.port';
 import { PhotoKindService } from './photo-kind.service';
 import { SidecarError } from './photo-review-sidecar.service';
+import sharp from 'sharp';
 import { ReviewAssignmentService } from './review-assignment.service';
 import { WorkflowCatalogReadRepository } from '@app/modules/workflow/infrastructure/read/workflow-catalog.read-repository';
 import type { WorkflowConfig } from '@app/modules/workflow/domain/schema/workflow-config.schema';
@@ -1363,6 +1364,47 @@ export class PhotoReviewService {
   }
 
   /**
+   * Effective cardSpec for a set's photo pipeline — same override
+   * precedence `CampaignService.toCampaignResponse` already documents and
+   * applies for `GET /campaigns` ("an explicit campaign-level value always
+   * wins"): the campaign's own `card_spec` column, else the pinned workflow
+   * version's `config.output.cardSpec`, else the given photo kind's own
+   * `cardSpec` (this module's long-standing fallback before this method
+   * existed — kept as the last resort so a campaign with no opinion at all,
+   * or no campaign at all, keeps working exactly as before). Without this,
+   * `reprocess()`/`aiEdit()`/`uploadVariant()` all silently ignored a
+   * campaign's own card_spec override and the pinned workflow's
+   * `output.cardSpec`, always sizing/coloring the card from the hardcoded
+   * `STUDENT_CARD` kind alone. Raw SQL against `campaigns`, same
+   * cross-module-boundary convention as `resolveAiProcessingSteps` above.
+   */
+  private async resolveEffectiveCardSpec(
+    campaignId: string | null,
+    kindCardSpec: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    if (!campaignId) return kindCardSpec;
+    const rows: Array<{
+      card_spec: Record<string, unknown> | null;
+      workflow_version_id: string | null;
+    }> = await this.dataSource.query(
+      `SELECT card_spec, workflow_version_id FROM campaigns WHERE id = $1`,
+      [campaignId],
+    );
+    const row = rows[0];
+    if (!row) return kindCardSpec;
+    if (row.card_spec) return row.card_spec;
+    if (row.workflow_version_id) {
+      const ref = await this.workflowCatalog.getVersionRef(
+        row.workflow_version_id,
+      );
+      const versionCardSpec = ref?.config.output?.cardSpec as
+        Record<string, unknown> | undefined;
+      if (versionCardSpec) return versionCardSpec;
+    }
+    return kindCardSpec;
+  }
+
+  /**
    * Runs a campaign's configured `ai_pipeline_steps` in order, each step's
    * output feeding the next — the catalog's own worked example is
    * CARD_CROP → BACKGROUND_REPLACE → SKIN_SMOOTH → AI_EDIT (see
@@ -1424,13 +1466,21 @@ export class PhotoReviewService {
     let dpi: number | null = null;
     const warnings: string[] = [];
     let mirrorNextStep = input.mirror;
+    // How many steps actually touched pixels (`/card-photo` or `/edit`) —
+    // an inactive/missing/unimplemented step is a documented pass-through,
+    // but a NON-EMPTY `steps` list that ends up executing ZERO of them
+    // (every step inactive/unknown, or only `/background`/`/retouch`,
+    // neither of which is implemented) must not silently succeed with the
+    // untouched original capture as if it were a real result — see the
+    // throw below.
+    let executedSteps = 0;
 
     for (const step of input.steps) {
       const entry = catalog.get(step.code);
       if (!entry || !entry.active) {
-        this.logger.warn(
-          `AI pipeline step "${step.code}" not found or inactive in ai_pipeline_steps — skipped`,
-        );
+        const warning = `AI pipeline step "${step.code}" not found or inactive in ai_pipeline_steps — skipped`;
+        this.logger.warn(warning);
+        warnings.push(warning);
         continue;
       }
       switch (entry.sidecarEndpoint) {
@@ -1449,9 +1499,23 @@ export class PhotoReviewService {
           dpi = value.dpi;
           warnings.push(...(value.warnings ?? []));
           mirrorNextStep = false;
+          executedSteps += 1;
           break;
         }
         case '/edit': {
+          // The external /edit service has no `mirror` parameter at all
+          // (see this method's own doc comment on `mirrorNextStep` and
+          // `aiEdit()`'s identical note) — when `/edit` is the FIRST step to
+          // actually touch pixels, the mirror this pipeline still owes the
+          // subject (2026-09-10 product decision: the live-view preview is
+          // mirrored, the raw capture is not) would otherwise be silently
+          // dropped. Applied locally with `sharp` instead of being lost.
+          if (mirrorNextStep) {
+            imageBase64 = await sharp(Buffer.from(imageBase64, 'base64'))
+              .flop()
+              .toBuffer()
+              .then((buf) => buf.toString('base64'));
+          }
           // Step-level `params` (a workflow author's per-step override) wins
           // over the catalog row's own `default_params` — same precedence
           // for every one of these five, not just `prompt`.
@@ -1465,8 +1529,30 @@ export class PhotoReviewService {
           // correctly-sized result rather than the service's own
           // auto-computed aspect ratio.
           const cardDimensions = this.cardSpecToEditDimensions(input.cardSpec);
+          const requestedWidth =
+            resolve<number>('width') ?? cardDimensions.width;
+          const requestedHeight =
+            resolve<number>('height') ?? cardDimensions.height;
+          const rawStepPrompt = resolve<string>('prompt');
+          // 2026-09-29 user decision — a catalog/workflow-configured prompt
+          // reaches the real generative model exactly like a reviewer's own
+          // free-text prompt does (aiEdit()), so it gets the exact same
+          // FORBIDDEN_PROMPT_KEYWORDS guard; this path had none before.
+          // Checked on the RAW resolved prompt, before the background-color
+          // instruction is appended below — that instruction is app-written,
+          // not user/workflow-author input, so it can never itself trip the
+          // filter and does not need re-checking.
+          if (rawStepPrompt) {
+            const hit = this.findForbiddenPromptKeyword(rawStepPrompt);
+            if (hit) {
+              throw new PhotoAiError(
+                `AI pipeline step "${step.code}" prompt contains a forbidden keyword ("${hit}") — see plan §6.3`,
+                'Terminal',
+              );
+            }
+          }
           const stepPrompt = this.appendBackgroundColorInstruction(
-            resolve<string>('prompt'),
+            rawStepPrompt,
             input.cardSpec,
           );
           const value = unwrapPhotoAi(
@@ -1477,26 +1563,66 @@ export class PhotoReviewService {
               cfg: resolve<number>('cfg'),
               steps: resolve<number>('steps'),
               seed: resolve<number>('seed'),
-              width: resolve<number>('width') ?? cardDimensions.width,
-              height: resolve<number>('height') ?? cardDimensions.height,
+              width: requestedWidth,
+              height: requestedHeight,
             }),
           );
           imageBase64 = value.imageBuffer.toString('base64');
           mimeType = value.mimeType;
+          // The service rounds its output down to a multiple of 16 (its own
+          // documented behavior — see AiImageEditClient) and returns a plain
+          // JPEG with no dpi metadata at all. Any width/height/dpi carried
+          // over from an earlier `/card-photo` step no longer describes
+          // this image, so it is replaced with the requested dimensions
+          // (the closest known approximation — off by at most 15px) rather
+          // than left stale, and dpi is cleared since `/edit` has none.
+          width = requestedWidth ?? null;
+          height = requestedHeight ?? null;
+          dpi = null;
           mirrorNextStep = false;
+          executedSteps += 1;
+          // 2026-09-29 user decision (kept auto-promoting the pipeline's
+          // result as the set's current card, rather than requiring a
+          // separate human accept like aiEdit()'s CARD_AI does — see the
+          // authz-trust-boundary audit finding on this method) — the one
+          // thing that must not stay silent is that a GENERATIVE step ran:
+          // unlike a deterministic `/card-photo` crop, this pixel content
+          // was regenerated by a model with no identity check of its own.
+          // Surfaced into `warnings` (→ `variant.qualityReport`, visible in
+          // the CMS review panel), not just the server log.
+          warnings.push(
+            `Step "${step.code}" applied a generative AI edit (/edit) — no automated identity check ran on this result; review the face carefully before Duyệt.`,
+          );
           break;
         }
         case '/background':
-        case '/retouch':
-          this.logger.warn(
-            `AI pipeline step "${step.code}" (${entry.sidecarEndpoint}) has no PhotoAiPort implementation yet — skipped as a known gap, image passed through unchanged`,
-          );
+        case '/retouch': {
+          const warning = `AI pipeline step "${step.code}" (${entry.sidecarEndpoint}) has no PhotoAiPort implementation yet — skipped as a known gap, image passed through unchanged`;
+          this.logger.warn(warning);
+          warnings.push(warning);
           break;
-        default:
-          this.logger.warn(
-            `AI pipeline step "${step.code}" has unknown sidecar_endpoint "${entry.sidecarEndpoint}" — skipped`,
-          );
+        }
+        default: {
+          const warning = `AI pipeline step "${step.code}" has unknown sidecar_endpoint "${entry.sidecarEndpoint}" — skipped`;
+          this.logger.warn(warning);
+          warnings.push(warning);
+        }
       }
+    }
+
+    if (executedSteps === 0) {
+      // A configured, non-empty pipeline that never actually touches the
+      // image (every step inactive/unknown, or only the unimplemented
+      // `/background`/`/retouch`) used to return the untouched original
+      // capture — uncropped, unmirrored, null width/height/dpi — as if it
+      // were a successful result, which `reprocess()` would then save as
+      // the set's READY current card. Failing loudly here routes it through
+      // the exact same AUTO_FAILED path a real sidecar failure already
+      // takes, instead of silently promoting a raw capture as a finished
+      // "4x6 card".
+      throw new SidecarError(
+        `AI pipeline configured with ${input.steps.length} step(s) but none of them executed (inactive/unknown/unimplemented) — ${warnings.join('; ')}`,
+      );
     }
 
     return { imageBase64, mimeType, width, height, dpi, warnings };
@@ -1575,6 +1701,43 @@ export class PhotoReviewService {
     return prompt ? `${prompt}\n\n${instruction}` : instruction;
   }
 
+  /**
+   * Strips Vietnamese diacritics (both combining-mark forms and the
+   * dedicated `đ`/`Đ` letter, which does not decompose under NFD) — used
+   * only for `FORBIDDEN_PROMPT_KEYWORDS` matching, so a prompt without
+   * diacritics or encoded in NFD still matches the same keyword an
+   * NFC-with-diacritics prompt would. The caller is expected to have
+   * already called `.normalize('NFC')` first (see the one call site).
+   */
+  private stripDiacriticsForPromptFilter(text: string): string {
+    return text
+      .normalize('NFD')
+      .replace(/[̀-ͯ]/g, '')
+      .replace(/đ/g, 'd')
+      .replace(/Đ/g, 'D');
+  }
+
+  /**
+   * Normalized (NFC, diacritics stripped, lowercased) `FORBIDDEN_PROMPT_KEYWORDS`
+   * match — factored out of `aiEdit()` so `runAiProcessingPipeline`'s
+   * `/edit` step can apply the exact same guard (2026-09-29 user decision:
+   * a catalog `default_params.prompt`/workflow `step.params.prompt` reaches
+   * the real generative model exactly like a reviewer's own free-text
+   * prompt does, and had no filter at all before this — see the
+   * authz-trust-boundary audit finding on this pipeline). Returns the
+   * matched keyword, or `undefined` when clean.
+   */
+  private findForbiddenPromptKeyword(prompt: string): string | undefined {
+    const normalizedPrompt = this.stripDiacriticsForPromptFilter(
+      prompt.normalize('NFC'),
+    ).toLowerCase();
+    return FORBIDDEN_PROMPT_KEYWORDS.find((kw) =>
+      normalizedPrompt.includes(
+        this.stripDiacriticsForPromptFilter(kw.normalize('NFC')).toLowerCase(),
+      ),
+    );
+  }
+
   private async loadAiPipelineStepCatalog(codes: string[]): Promise<
     Map<
       string,
@@ -1632,6 +1795,32 @@ export class PhotoReviewService {
     // otherwise a scoped-out reviewer could bypass every other restriction
     // through this one route.
     await this.reviewAssignments.assertInScope(actorUserId, set);
+
+    // Single-flight guard (2026-09-29): with the `ai_pipeline_steps`
+    // executor wired up, one run can now take minutes (an `AI_EDIT` step's
+    // `/edit` call queues on a single-worker GPU service). Before this
+    // guard, two overlapping runs for the same set — the kiosk's own
+    // no-in-flight-guard resend loop re-POSTing the same un-acked
+    // SESSION_REPORT batch every ~15s is one source, a reviewer's manual
+    // "Tạo lại ảnh 4x6" click landing mid-auto-run is another — would each
+    // create their own PROCESSING `CARD_AUTO` variant and queue their own
+    // AI request on top of whatever is already running. A variant already
+    // `PROCESSING` for this set means a run is already in flight; skip
+    // starting a second one rather than stacking work on the AI service.
+    const alreadyProcessing = await this.variantRepository.findOne({
+      where: {
+        setId,
+        kind: PhotoVariantKind.CARD_AUTO,
+        status: PhotoVariantStatus.PROCESSING,
+      },
+    });
+    if (alreadyProcessing) {
+      this.logger.warn(
+        `reprocess: set ${setId} already has a PROCESSING CARD_AUTO variant (${alreadyProcessing.id}) — skipping duplicate run`,
+      );
+      return this.getSetDetail(setId, apiBaseUrl);
+    }
+
     const kind = await this.photoKindService.findKindEntityOrFail(set.kindId);
     const sessionContext = await this.resolveSessionContext(
       set.sourceSessionId,
@@ -1644,6 +1833,14 @@ export class PhotoReviewService {
         HttpStatus.NOT_FOUND,
       );
     }
+
+    // Snapshot of "what the set pointed at when this run started" — used
+    // after the (now potentially long) pipeline run below to detect
+    // whether a human action (approve/reject/accept/discard/setCurrent)
+    // moved the set on in the meantime, so this run's result never
+    // silently overwrites something newer than itself. See the two
+    // transactions below.
+    const snapshotCurrentVariantId = set.currentCardVariantId ?? null;
 
     const variant = await this.dataSource.transaction(async (manager) => {
       await this.lockSet(manager, setId);
@@ -1674,10 +1871,14 @@ export class PhotoReviewService {
         sessionContext.tenantName,
       );
       const aiSteps = await this.resolveAiProcessingSteps(set.campaignId);
+      const effectiveCardSpec = await this.resolveEffectiveCardSpec(
+        set.campaignId,
+        kind.cardSpec,
+      );
       const result = await this.runAiProcessingPipeline({
         steps: aiSteps,
         initialImageBase64: sourceBytes.toString('base64'),
-        cardSpec: kind.cardSpec,
+        cardSpec: effectiveCardSpec,
         mirror: true,
       });
 
@@ -1705,31 +1906,48 @@ export class PhotoReviewService {
           idempotencyKey: `photo-review:${variant.id}:auto`,
         });
 
-        const repo = manager.getRepository(PhotoVariant);
-        variant.status = PhotoVariantStatus.READY;
-        // fsFileId intentionally left null here — VariantUploadWorkerService's
-        // cron sets it once the push to fs-core actually succeeds (see
-        // storeVariantBytesLocalFirst's own doc comment for why this no
-        // longer uploads to fs-core synchronously).
-        variant.virtualPath = virtualPath;
-        variant.bytes = stored.bytes;
-        variant.sha256 = stored.sha256;
-        variant.width = result.width ?? null;
-        variant.height = result.height ?? null;
-        variant.dpi = result.dpi ?? null;
-        // The sidecar does not version its own pipeline output today (see
-        // SidecarCardPhotoResult's own doc comment) — left null rather than
-        // a made-up constant, matching "never a fabricated value" elsewhere
-        // in this module's own sidecar-result handling.
-        variant.qualityReport = result.warnings.length
-          ? { warnings: result.warnings }
-          : null;
-        variant.algorithmVersion = null;
-        await repo.save(variant);
-
-        lockedSet.currentCardVariantId = variant.id;
-        lockedSet.status = PhotoReviewSetStatus.READY;
-        await manager.getRepository(SubjectPhotoSet).save(lockedSet);
+        // Guarded UPDATE, not a blind `save(variant)` on the in-memory
+        // entity fetched BEFORE the (now potentially minutes-long) pipeline
+        // run above — same stale-entity fix `aiEdit()` already uses (see
+        // its own comment): a concurrent `discardVariant()` on this same
+        // PROCESSING variant is legal, and without `WHERE status =
+        // 'PROCESSING'` this would silently revert it back to READY.
+        const [readyRows]: [Array<{ id: string }>, number] =
+          await manager.query(
+            `UPDATE photo_variants
+                SET status = $2, virtual_path = $3, bytes = $4, sha256 = $5,
+                    width = $6, height = $7, dpi = $8, quality_report = $9,
+                    algorithm_version = $10, updated_at = now()
+              WHERE id = $1 AND status = $11
+              RETURNING id`,
+            [
+              variant.id,
+              PhotoVariantStatus.READY,
+              virtualPath,
+              stored.bytes,
+              stored.sha256,
+              result.width ?? null,
+              result.height ?? null,
+              result.dpi ?? null,
+              // The sidecar does not version its own pipeline output today
+              // (see SidecarCardPhotoResult's own doc comment) — algorithm
+              // version left null rather than a made-up constant, matching
+              // "never a fabricated value" elsewhere in this module's own
+              // sidecar-result handling.
+              result.warnings.length
+                ? JSON.stringify({ warnings: result.warnings })
+                : null,
+              null,
+              PhotoVariantStatus.PROCESSING,
+            ],
+          );
+        const appliedToReady = readyRows.length > 0;
+        if (!appliedToReady) {
+          this.logger.warn(
+            `reprocess: variant ${variant.id} was discarded while its pipeline run was still in flight — result dropped, not resurrected`,
+          );
+          return;
+        }
 
         await this.writeEvent(manager, {
           setId,
@@ -1737,14 +1955,38 @@ export class PhotoReviewService {
           action: PhotoReviewAction.AUTO_GENERATED,
           actorUserId: null,
         });
-        await this.raiseStatusChangeEvent(
-          manager,
-          setId,
-          lockedSet.campaignId,
-          fromStatus,
-          lockedSet.status,
-        );
-        return variant;
+
+        // Only promote this run's output to the set's current card / READY
+        // when nothing else moved the set on while this run was in flight —
+        // a human approve/reject/accept/discard/setCurrent landing mid-run
+        // must win, never be silently overwritten by a now-stale auto
+        // result (this method's own past bug: it used to force
+        // `currentCardVariantId`/`status` unconditionally here). "Nothing
+        // else moved it on" means both: the set still points at the same
+        // current variant it did when this run started (an accept/discard/
+        // setCurrent since then would have changed that), AND it has not
+        // been explicitly approved or rejected by a reviewer (which leaves
+        // `currentCardVariantId` untouched, so needs its own check).
+        const safeToPromote =
+          lockedSet.currentCardVariantId === snapshotCurrentVariantId &&
+          lockedSet.status !== PhotoReviewSetStatus.APPROVED &&
+          lockedSet.status !== PhotoReviewSetStatus.REJECTED;
+        if (safeToPromote) {
+          lockedSet.currentCardVariantId = variant.id;
+          lockedSet.status = PhotoReviewSetStatus.READY;
+          await manager.getRepository(SubjectPhotoSet).save(lockedSet);
+          await this.raiseStatusChangeEvent(
+            manager,
+            setId,
+            lockedSet.campaignId,
+            fromStatus,
+            lockedSet.status,
+          );
+        } else {
+          this.logger.warn(
+            `reprocess: set ${setId} moved on (status=${lockedSet.status}) while this run was in flight — new variant ${variant.id} saved READY but left out of review, not made current`,
+          );
+        }
       });
 
       // Best-effort, direct-to-fs-core (see uploadMetadataBestEffort's own
@@ -1757,7 +1999,7 @@ export class PhotoReviewService {
         idempotencyKey: `photo-review:${variant.id}:auto:meta`,
         metadata: {
           warnings: result.warnings,
-          cardSpec: kind.cardSpec,
+          cardSpec: effectiveCardSpec,
         },
       });
 
@@ -1774,13 +2016,19 @@ export class PhotoReviewService {
       await this.dataSource.transaction(async (manager) => {
         const lockedSet = await this.lockSet(manager, setId);
         const fromStatus = lockedSet.status;
-        const repo = manager.getRepository(PhotoVariant);
-        variant.status = PhotoVariantStatus.FAILED;
-        variant.note = message;
-        await repo.save(variant);
-
-        lockedSet.status = PhotoReviewSetStatus.AUTO_FAILED;
-        await manager.getRepository(SubjectPhotoSet).save(lockedSet);
+        // Guarded UPDATE — same stale-entity reasoning as the success path
+        // above: a concurrent discardVariant() on this PROCESSING variant
+        // is legal while the pipeline was running.
+        await manager.query(
+          `UPDATE photo_variants SET status = $2, note = $3, updated_at = now()
+             WHERE id = $1 AND status = $4`,
+          [
+            variant.id,
+            PhotoVariantStatus.FAILED,
+            message,
+            PhotoVariantStatus.PROCESSING,
+          ],
+        );
 
         await this.writeEvent(manager, {
           setId,
@@ -1789,18 +2037,41 @@ export class PhotoReviewService {
           actorUserId: null,
           payload: { error: message },
         });
-        await this.reviewStats.recordAutoFailed(
-          manager,
-          set.campaignId,
-          new Date(),
-        );
-        await this.raiseStatusChangeEvent(
-          manager,
-          setId,
-          lockedSet.campaignId,
-          fromStatus,
-          lockedSet.status,
-        );
+
+        // Only demote the SET to AUTO_FAILED when it has no valid current
+        // card to fall back on (a first-ever run, or an already-failed
+        // retry) — this method's own past bug: it used to force
+        // `AUTO_FAILED` unconditionally here, which (since `AUTO_FAILED` is
+        // a LOCKED status) could silently destroy an APPROVED/READY/
+        // IN_REVIEW/REJECTED set's existing, still-valid card the moment a
+        // reprocess attempt failed for any reason (including the makeCardPhoto
+        // sidecar being permanently unreachable). When the set already has a
+        // current card, only the failed variant is recorded; the set's
+        // status and current card are left exactly as they were.
+        const safeToFail =
+          lockedSet.status === PhotoReviewSetStatus.PENDING_AUTO ||
+          lockedSet.status === PhotoReviewSetStatus.AUTO_FAILED ||
+          !lockedSet.currentCardVariantId;
+        if (safeToFail) {
+          lockedSet.status = PhotoReviewSetStatus.AUTO_FAILED;
+          await manager.getRepository(SubjectPhotoSet).save(lockedSet);
+          await this.reviewStats.recordAutoFailed(
+            manager,
+            set.campaignId,
+            new Date(),
+          );
+          await this.raiseStatusChangeEvent(
+            manager,
+            setId,
+            lockedSet.campaignId,
+            fromStatus,
+            lockedSet.status,
+          );
+        } else {
+          this.logger.warn(
+            `reprocess: set ${setId} already has a valid current card (status=${lockedSet.status}) — leaving it alone despite this run's failure (${message})`,
+          );
+        }
       });
     }
 
@@ -1828,10 +2099,7 @@ export class PhotoReviewService {
     await this.reviewAssignments.assertInScope(actorUserId, set);
     this.assertUnlocked(set);
 
-    const lowerPrompt = dto.prompt.toLowerCase();
-    const hit = FORBIDDEN_PROMPT_KEYWORDS.find((kw) =>
-      lowerPrompt.includes(kw),
-    );
+    const hit = this.findForbiddenPromptKeyword(dto.prompt);
     if (hit) {
       throw new CustomException(
         `Yêu cầu bị từ chối: chứa từ khóa không được phép sửa ("${hit}") — xem plan §6.3 (AI không được đổi biểu cảm, mở mắt, bỏ kính, gầy mặt, trẻ hóa, làm đẹp, đổi mắt/mũi/miệng)`,
@@ -1935,6 +2203,8 @@ export class PhotoReviewService {
         actorUserId,
         payload: {
           prompt: dto.prompt,
+          cfg: dto.cfg ?? null,
+          steps: dto.steps ?? null,
           region: dto.region,
           fromVariantId: fromVariant?.id ?? null,
           sourcePhotoId: sourcePhoto?.id ?? null,
@@ -1973,10 +2243,20 @@ export class PhotoReviewService {
       // narrower "match the configured output size" scope over building
       // real face detection (no such capability exists anywhere in this
       // backend today) — see `cardSpecToEditDimensions`'s own doc comment.
-      const editDimensions = this.cardSpecToEditDimensions(kind.cardSpec);
+      //
+      // `cardSpec` itself is the campaign's effective one (its own
+      // `card_spec` override, else its pinned workflow version's
+      // `output.cardSpec`, else this kind's own default) — see
+      // `resolveEffectiveCardSpec`'s own doc comment; using `kind.cardSpec`
+      // alone here ignored both overrides.
+      const effectiveCardSpec = await this.resolveEffectiveCardSpec(
+        set.campaignId,
+        kind.cardSpec,
+      );
+      const editDimensions = this.cardSpecToEditDimensions(effectiveCardSpec);
       const editPrompt = this.appendBackgroundColorInstruction(
         dto.prompt,
-        kind.cardSpec,
+        effectiveCardSpec,
       );
       const editResult = unwrapPhotoAi(
         await this.photoAi.edit({
@@ -2000,9 +2280,30 @@ export class PhotoReviewService {
       // `null` value. Branches directly on the outcome (no `unwrapPhotoAi`)
       // — this call was already "swallow the failure, don't throw" before
       // the port existed, so there is no `try`/`catch` to preserve.
+      //
+      // The reference image is the set's own enrolled FRONT capture — same
+      // reference `uploadVariant()` uses — NOT `sourceBytes` (the edit's own
+      // input, which can itself be a prior CARD_AI variant or any session
+      // angle via `sourcePhotoId`). Scoring each edit only against its own
+      // immediate predecessor lets a chain of edits drift the face away
+      // from the real captured person one small, individually-passing step
+      // at a time. Falls back to `sourceBytes` only if this set genuinely
+      // has no FRONT photo on file (should not happen in practice — every
+      // set is seeded from a session that has one — but this call must
+      // never throw for a missing reference).
+      const frontPhotoForIdentity = await this.findFrontSourcePhoto(
+        set.sourceSessionId,
+      );
+      const identityReferenceBytes = frontPhotoForIdentity
+        ? await this.readSourcePhotoBytes(
+            frontPhotoForIdentity,
+            sessionContext.tenantName,
+          ).catch(() => sourceBytes)
+        : sourceBytes;
+
       let identitySimilarity: number | undefined;
       const simOutcome = await this.photoAi.identitySimilarity({
-        referenceImageBase64: sourceBytes.toString('base64'),
+        referenceImageBase64: identityReferenceBytes.toString('base64'),
         candidateImageBase64: editResult.imageBuffer.toString('base64'),
       });
       if (simOutcome.kind === 'Success') {
@@ -2099,6 +2400,15 @@ export class PhotoReviewService {
           idempotencyKey: `photo-review:${variant.id}:ai:meta`,
           metadata: {
             prompt: dto.prompt,
+            // The prompt ACTUALLY sent to /edit differs from the reviewer's
+            // raw `dto.prompt` whenever the kind's cardSpec has a
+            // `backgroundColor` (`appendBackgroundColorInstruction` appends
+            // an instruction to it) — recorded separately here (plan §6.2
+            // #6 traceability) rather than overwriting `prompt` above, so
+            // existing readers of the raw prompt field are unaffected.
+            effectivePrompt: editPrompt,
+            cfg: dto.cfg,
+            steps: dto.steps,
             region: dto.region,
             modelId: result.modelId,
             seed: result.seed,
@@ -2227,11 +2537,24 @@ export class PhotoReviewService {
         variant.kind === PhotoVariantKind.CARD_AI
           ? PhotoReviewAction.AI_ACCEPTED
           : PhotoReviewAction.UPLOAD_REPLACED;
+      // 2026-09-29 user decision (fail-open, not fail-closed — the identity
+      // backend is permanently down, see `photoAi.identitySimilarity`'s own
+      // doc comment): a `null` score still allows accept, but the fact that
+      // NO automated identity check actually ran must be visible in the
+      // audit trail, not silently indistinguishable from "checked and
+      // passed" the way a bare accept event was before this.
       await this.writeEvent(manager, {
         setId: set.id,
         variantId: variant.id,
         action,
         actorUserId,
+        payload:
+          variant.identitySimilarity == null
+            ? { identityVerified: false }
+            : {
+                identityVerified: true,
+                identitySimilarity: variant.identitySimilarity,
+              },
       });
       if (action === PhotoReviewAction.AI_ACCEPTED) {
         await this.reviewStats.recordAiAccepted(
@@ -2407,9 +2730,13 @@ export class PhotoReviewService {
     // file-service), so the port gets them as base64 rather than a URL —
     // unlike `reprocess`/`aiEdit`, which crop an image that already lives on
     // fs-core and so pass a short-lived view-link URL instead.
+    const effectiveCardSpec = await this.resolveEffectiveCardSpec(
+      set.campaignId,
+      kind.cardSpec,
+    );
     const cardOutcome = await this.photoAi.makeCardPhoto({
       imageBase64: file.buffer.toString('base64'),
-      cardSpec: kind.cardSpec,
+      cardSpec: effectiveCardSpec,
       mirror: true,
     });
     if (cardOutcome.kind !== 'Success') {
@@ -2994,7 +3321,36 @@ export class PhotoReviewService {
     });
 
     if (existing) {
+      // Whether genuinely NEW photo bytes landed for this session since the
+      // set was last updated — the same signal the (pre-existing) APPROVED
+      // branch below already uses to tell an explicit retake apart from a
+      // benign duplicate delivery of the same SESSION_REPORT (2026-09-21,
+      // "chụp lại ghi đè ảnh cũ"). Computed once here and reused by both
+      // branches (2026-09-29): without this, EVERY non-APPROVED status
+      // (READY, IN_REVIEW, REJECTED — not just PENDING_AUTO/AUTO_FAILED)
+      // was reset back to PENDING_AUTO on every delivery carrying the same
+      // sessionId, even a benign resend with nothing new. The kiosk has no
+      // in-flight guard on its own stats-push loop, so it resends an
+      // un-acked batch every ~15s — each resend used to re-lock an
+      // already-processed set and re-trigger a full (and, with an AI_EDIT
+      // pipeline step, potentially multi-minute) reprocess() for no reason
+      // at all.
+      const newerPhotoRows: Array<{ count: string }> =
+        await this.dataSource.query(
+          `SELECT count(*) FROM photos WHERE session_id = $1 AND created_at > $2`,
+          [sessionId, existing.updatedAt],
+        );
+      const hasNewerCapture = Number(newerPhotoRows[0]?.count ?? 0) > 0;
+
       if (existing.status !== PhotoReviewSetStatus.APPROVED) {
+        const isBenignDuplicateDelivery =
+          existing.sourceSessionId === sessionId &&
+          existing.status !== PhotoReviewSetStatus.PENDING_AUTO &&
+          existing.status !== PhotoReviewSetStatus.AUTO_FAILED &&
+          !hasNewerCapture;
+        if (isBenignDuplicateDelivery) {
+          return { setId: existing.id, pendingAuto: false };
+        }
         existing.sourceSessionId = sessionId;
         existing.status = PhotoReviewSetStatus.PENDING_AUTO;
         if (subjectName) existing.subjectName = subjectName;
@@ -3017,13 +3373,6 @@ export class PhotoReviewService {
       // session id might show up here (a different kind of reprocessing,
       // not this feature) — this only narrows R-Q10 for the one case the
       // product decision explicitly asked to change, not replace it.
-      const newerPhotoRows: Array<{ count: string }> =
-        await this.dataSource.query(
-          `SELECT count(*) FROM photos WHERE session_id = $1 AND created_at > $2`,
-          [sessionId, existing.updatedAt],
-        );
-      const hasNewerCapture = Number(newerPhotoRows[0]?.count ?? 0) > 0;
-
       if (hasNewerCapture) {
         // Unlike the rest of this method (best-effort, outside any
         // transaction — see this method's own doc comment), THIS branch is
