@@ -152,7 +152,14 @@ export function ReviewDetailContent({ id, onClose }: { id: string; onClose?: () 
   if (!set) return <p className="text-gray-500">Đang tải...</p>;
 
   const locked = isReviewSetLocked(set);
-  const canReprocess = set.status === 'AUTO_FAILED';
+  // Also offered for `PENDING_AUTO`, not just `AUTO_FAILED` (2026-09-29,
+  // fixed) — the backend's own `reprocess()` doc comment already says it is
+  // "allowed even when locked" for BOTH statuses (it is how a set gets OUT
+  // of either one), but this screen used to show only a "chờ ảnh 4x6 tự
+  // động" message with no button for `PENDING_AUTO`, so a set stuck there
+  // (an interrupted first run, or one from before the kiosk's own
+  // auto-trigger existed) had no recovery path in the CMS at all.
+  const canReprocess = set.status === 'AUTO_FAILED' || set.status === 'PENDING_AUTO';
 
   // Layer 2 of the 2026-09-18 white-screen fix (plan §1.1): reload the
   // detail from `getReviewSet` after an action succeeds, rather than
@@ -266,8 +273,20 @@ export function ReviewDetailContent({ id, onClose }: { id: string; onClose?: () 
               ))}
             </div>
           )}
-          {currentVariant?.identitySimilarity != null && (
+          {currentVariant?.identitySimilarity != null ? (
             <p className="text-xs text-gray-500 mt-1">Độ giống với gốc: {currentVariant.identitySimilarity.toFixed(2)}</p>
+          ) : (
+            // 2026-09-29 user decision — same fail-open-with-warning rule as
+            // AiEditModal: a CARD_AI/CARD_UPLOAD variant with no similarity
+            // score means the check never ran (identity backend is
+            // permanently down), not that it passed. A plain CARD_AUTO crop
+            // never had a score to begin with, so it stays silent here —
+            // only warn when verification was actually expected.
+            (currentVariant?.kind === 'CARD_AI' || currentVariant?.kind === 'CARD_UPLOAD') && (
+              <p className="text-xs text-amber-600 font-medium mt-1">
+                ⚠ Chưa xác minh được danh tính — tự kiểm tra bằng mắt trước khi Duyệt.
+              </p>
+            )
           )}
         </div>
 
@@ -323,14 +342,16 @@ export function ReviewDetailContent({ id, onClose }: { id: string; onClose?: () 
             <button
               type="button"
               onClick={() => setAiModalOpen(true)}
-              className="px-3 py-2 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 text-sm font-medium"
+              disabled={busy}
+              className="px-3 py-2 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 text-sm font-medium disabled:opacity-50"
             >
               Sửa bằng AI
             </button>
             <button
               type="button"
               onClick={() => setUploadModalOpen(true)}
-              className="px-3 py-2 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 text-sm font-medium"
+              disabled={busy}
+              className="px-3 py-2 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 text-sm font-medium disabled:opacity-50"
             >
               Thay bằng ảnh tải lên
             </button>

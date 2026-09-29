@@ -128,6 +128,21 @@ export function AiEditModal({
 
   const selectedSource = sourceOptions.find((o) => o.key === sourceKey) ?? null;
 
+  // Guarded close (2026-09-29, fixed): `POST .../ai-edit` now runs a real
+  // generative model and can take minutes. Closing this modal (backdrop,
+  // ✕, or "Hủy") while `running` used to unmount it with the request still
+  // in flight on the server — reopening it then showed a fresh `running:
+  // false`/`job: null` state, inviting a second "Chạy" click that queued a
+  // second job behind the first on the same single-worker AI service, with
+  // the first run's result never shown anywhere. The request itself is not
+  // cancelled (there is no cancellation endpoint), so this only stops the
+  // person from losing track of it — see `run()`'s own comment for what
+  // happens to that first result once it lands.
+  function handleClose() {
+    if (running) return;
+    onClose();
+  }
+
   function addChip(chip: string) {
     setPrompt((prev) => (prev.trim() ? `${prev.trim()}, ${chip}` : chip));
   }
@@ -190,7 +205,7 @@ export function AiEditModal({
   const canAccept = job?.status === 'READY' && (similarity == null || similarity >= 0.7);
 
   return (
-    <ModalShell title="Sửa bằng AI" onClose={onClose}>
+    <ModalShell title="Sửa bằng AI" onClose={handleClose}>
       <div className="space-y-4">
         <div>
           <label className="block text-sm text-gray-500 mb-1">Ảnh nguồn</label>
@@ -247,11 +262,20 @@ export function AiEditModal({
               </label>
             ))}
           </div>
-          {region === 'FULL' && (
-            <p className="text-xs text-gray-400 mt-1">
-              Toàn ảnh: vùng mắt–mũi–miệng vẫn được dán lại từ ảnh gốc.
-            </p>
-          )}
+          {/* Fixed 2026-09-29: this used to claim (only for FULL) that the
+              eye-nose-mouth region is "still pasted back from the original" —
+              false today. The backend's own AI-edit service has no region
+              mask at all; it edits the whole image from the prompt text and
+              this field is recorded on the variant as descriptive metadata
+              only, never actually sent to or enforced by that service (see
+              PhotoReviewService.aiEdit's own comment on `region`). Shown for
+              every option, not only FULL, since none of them limit what the
+              model can change — the forbidden-keyword prompt filter is the
+              only real guard today. */}
+          <p className="text-xs text-gray-400 mt-1">
+            Lưu ý: đây chỉ là ghi chú mô tả — service AI hiện sửa toàn bộ ảnh
+            theo yêu cầu, không giới hạn theo vùng đã chọn.
+          </p>
         </div>
 
         <div className="grid grid-cols-2 gap-3">
@@ -277,10 +301,20 @@ export function AiEditModal({
 
         {job?.status === 'READY' && (
           <div className="text-sm space-y-0.5">
-            {similarity != null && tone && (
+            {similarity != null && tone ? (
               <div>
                 Độ giống với gốc:{' '}
                 <span className={`font-semibold ${SIMILARITY_TONE_CLASS[tone]}`}>{similarity.toFixed(2)}</span>
+              </div>
+            ) : (
+              // 2026-09-29 user decision (fail-open, not fail-closed — the
+              // identity backend is permanently down): accept still stays
+              // allowed with a null score, but this must never look the
+              // same as "checked and passed" — explicit, visible warning
+              // instead of silently showing nothing.
+              <div className="text-amber-600 text-xs font-medium">
+                ⚠ Chưa xác minh được danh tính (dịch vụ kiểm tra hiện không hoạt động) — tự kiểm tra bằng mắt trước
+                khi chấp nhận.
               </div>
             )}
             <div className="text-xs text-gray-500">
@@ -301,7 +335,13 @@ export function AiEditModal({
         {error && <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">{error}</div>}
 
         <div className="flex justify-end gap-2 pt-1">
-          <button type="button" onClick={onClose} className="px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-100">
+          <button
+            type="button"
+            onClick={handleClose}
+            disabled={running}
+            title={running ? 'Yêu cầu vẫn đang chạy trên máy chủ — không thể đóng' : undefined}
+            className="px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-100 disabled:opacity-50"
+          >
             Hủy
           </button>
           <button

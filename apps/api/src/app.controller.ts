@@ -80,9 +80,23 @@ export class AppController {
       status: reasons.length === 0 ? 'ONLINE' : 'DEGRADED',
       reasons,
       database,
-      fileService,
-      sso,
-      aiImageEdit,
+      // Redacted before returning (2026-09-29, fixed) — this route has no
+      // auth guard at all (an uptime probe/load balancer must not need a
+      // key), so its response reaches anyone who can hit the API, not just
+      // an operator. `fileService`/`sso` used to include the raw `error`
+      // string from a failed `fetch` (a stack-trace-adjacent message, not
+      // meant for an anonymous caller), and `aiImageEdit` used to include
+      // the EXTERNAL GPU service's own raw, unfiltered `/health` response
+      // body (model name/path, device/VRAM, queue state, version — whatever
+      // that service chooses to report) plus the same raw fetch error text.
+      // Only the already-non-sensitive boolean/status fields this route's
+      // own `reasons` computation needs are kept.
+      fileService: { status: fileService.status },
+      sso: { status: sso.status },
+      aiImageEdit: {
+        reachable: aiImageEdit.reachable,
+        modelLoaded: aiImageEdit.modelLoaded,
+      },
       statsLag: statsJobHealth,
       outboxBacklog,
       appName: this.configService.get<string>('app.appName'),

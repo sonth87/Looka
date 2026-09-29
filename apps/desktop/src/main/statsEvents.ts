@@ -31,6 +31,20 @@ let authRejectedUntil = 0;
 /** So the warning below logs once per rejection window, not every skipped tick. */
 let authRejectedWarned = false;
 
+/**
+ * In-flight guard (2026-09-29, fixed) — `tick()` used to have none, so if
+ * one `pushEvents` call took longer than `tickMs` (15s) to resolve or
+ * reject — the server's `POST /v1/devices/events` handler could, for a
+ * campaign with an AI_EDIT pipeline step, take several minutes — the next
+ * `setInterval` firing started ANOTHER `tick()` on the exact same still-
+ * `PENDING` rows (`claimPending` only reads; it does not claim/lock them),
+ * re-POSTing the same un-acked batch. Each duplicate re-entered the
+ * server's own SESSION_REPORT handling a second (third, fourth…) time.
+ * Skipping a tick while the previous one is still in flight fixes that at
+ * the source, independent of how long the server takes to answer.
+ */
+let tickInFlight = false;
+
 function getRepo(): StatsEventRepository {
   if (!repo) repo = new StatsEventRepository(getDatabase());
   return repo;
@@ -66,45 +80,50 @@ const AUTH_REJECTED_BACKOFF_MS = 10 * 60_000;
 
 async function tick(client: DeviceApiClient): Promise<void> {
   if (Date.now() < authRejectedUntil) return;
+  if (tickInFlight) return;
+  tickInFlight = true;
+  try {
+    // Capped at 50: a batch this size keeps one push request small and fast
+    // even after a long offline stretch fills the local queue, while still
+    // draining it within a handful of ticks once connectivity returns — see
+    // startStatsEventPush's own doc comment for the tick cadence this pairs
+    // with.
+    const pending = getRepo().claimPending(50);
+    if (pending.length === 0) return;
 
-  // Capped at 50: a batch this size keeps one push request small and fast
-  // even after a long offline stretch fills the local queue, while still
-  // draining it within a handful of ticks once connectivity returns — see
-  // startStatsEventPush's own doc comment for the tick cadence this pairs
-  // with.
-  const pending = getRepo().claimPending(50);
-  if (pending.length === 0) return;
-
-  const result = await client.pushEvents(
-    pending.map((e) => ({
-      type: e.type,
-      occurredAt: new Date(e.occurredAt).toISOString(),
-      metadata: e.metadata ?? undefined,
-    }))
-  );
-  if (result === 'ok') {
-    // Rows stay PENDING until markSent; a rejection window from an earlier,
-    // now-fixed activation package is over the moment a push actually lands.
-    authRejectedUntil = 0;
-    authRejectedWarned = false;
-    getRepo().markSent(pending.map((e) => e.id));
-    return;
-  }
-  if (result === 'unauthorized') {
-    authRejectedUntil = Date.now() + AUTH_REJECTED_BACKOFF_MS;
-    if (!authRejectedWarned) {
-      console.warn(
-        '[statsEvents] device rejected (401) — pausing stats push for ' +
-          `${AUTH_REJECTED_BACKOFF_MS / 60_000} minutes; load a fresh activation package to clear this.`
-      );
-      authRejectedWarned = true;
+    const result = await client.pushEvents(
+      pending.map((e) => ({
+        type: e.type,
+        occurredAt: new Date(e.occurredAt).toISOString(),
+        metadata: e.metadata ?? undefined,
+      }))
+    );
+    if (result === 'ok') {
+      // Rows stay PENDING until markSent; a rejection window from an earlier,
+      // now-fixed activation package is over the moment a push actually lands.
+      authRejectedUntil = 0;
+      authRejectedWarned = false;
+      getRepo().markSent(pending.map((e) => e.id));
+      return;
     }
-    // Falls through with rows left PENDING, same as every other failure —
-    // no partial-batch bookkeeping: the whole batch either lands or is
-    // retried whole next time the backoff window has elapsed.
+    if (result === 'unauthorized') {
+      authRejectedUntil = Date.now() + AUTH_REJECTED_BACKOFF_MS;
+      if (!authRejectedWarned) {
+        console.warn(
+          '[statsEvents] device rejected (401) — pausing stats push for ' +
+            `${AUTH_REJECTED_BACKOFF_MS / 60_000} minutes; load a fresh activation package to clear this.`
+        );
+        authRejectedWarned = true;
+      }
+      // Falls through with rows left PENDING, same as every other failure —
+      // no partial-batch bookkeeping: the whole batch either lands or is
+      // retried whole next time the backoff window has elapsed.
+    }
+    // 'failed' (network error, no device identity, other non-2xx): rows stay
+    // PENDING untouched — picked up again next tick, no backoff counter.
+  } finally {
+    tickInFlight = false;
   }
-  // 'failed' (network error, no device identity, other non-2xx): rows stay
-  // PENDING untouched — picked up again next tick, no backoff counter.
 }
 
 /** Starts the periodic push. A no-op to call more than once — `stopStatsEventPush` must be called before restarting. */
@@ -119,4 +138,5 @@ export function stopStatsEventPush(): void {
   timer = null;
   authRejectedUntil = 0;
   authRejectedWarned = false;
+  tickInFlight = false;
 }

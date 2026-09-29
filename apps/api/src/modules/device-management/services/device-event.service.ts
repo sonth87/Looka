@@ -172,7 +172,23 @@ export class DeviceEventService extends CommonService<DeviceEvent> {
         // from (unlike `ReviewController`'s own routes), so a placeholder is
         // passed rather than threading `ConfigService`/a request object into
         // this service for a value nothing consumes.
-        await this.photoReview
+        //
+        // NOT awaited (2026-09-29, fixed): with the `ai_pipeline_steps`
+        // executor wired up, `reprocess()` can now spend several minutes in
+        // an `AI_EDIT` step's `/edit` call. This method (`recordBatch`) is
+        // itself awaited by `DeviceSelfController`'s `POST
+        // /v1/devices/events` handler, so awaiting `reprocess()` here used
+        // to hold that kiosk request open for the same several minutes.
+        // The kiosk's own stats-push loop has no in-flight guard and no
+        // request timeout, so it would re-POST the same un-acked batch
+        // every ~15s while the first request was still hanging, each
+        // resend re-entering this exact loop and queuing yet another
+        // `reprocess()` run (see `reprocess()`'s own single-flight guard,
+        // added the same day, which now also protects against that).
+        // Firing this in the background lets `recordBatch` return — and the
+        // kiosk's request complete — immediately after the (fast, DB-only)
+        // work above commits.
+        void this.photoReview
           .reprocess(result.setId, null, 'http://localhost')
           .catch((err) => {
             this.logger.warn(
