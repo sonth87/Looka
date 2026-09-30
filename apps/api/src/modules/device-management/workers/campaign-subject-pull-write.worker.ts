@@ -147,8 +147,8 @@ export class CampaignSubjectPullWriteWorker {
    * `import_id = EXCLUDED.import_id` re-points an existing row at this
    * import — exactly the plan's "Cập nhật lại" semantics table entry
    * "Dòng đã có... import_id trỏ sang lần kéo mới." `printed_at`/
-   * `printed_batch_id` are never mentioned in the UPDATE SET — a pull must
-   * never clear or guess a real print confirmation (feature 6).
+   * `printed_batch_id`/`card_code` are never mentioned in the UPDATE SET — a
+   * pull must never clear or guess a real print confirmation (feature 6).
    */
   private async upsertValidRows(
     manager: EntityManager,

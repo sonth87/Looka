@@ -1,3 +1,4 @@
+export * from './bulk-review-decision.dao';
 export * from './photo-kind.dao';
 export * from './photo-variant.dao';
 export * from './review-assignment.dao';

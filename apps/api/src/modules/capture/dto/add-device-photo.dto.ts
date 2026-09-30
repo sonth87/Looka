@@ -8,6 +8,8 @@ import {
   IsString,
   IsUUID,
   Matches,
+  Max,
+  MaxLength,
   Min,
 } from 'class-validator';
 
@@ -23,8 +25,20 @@ import {
  * intended prefix. Every real `stepId` this platform generates is a plain
  * workflow-step slug (`FRONT`, `step-front`, `step-0-FRONT`, …) — letters,
  * digits, `-`/`_` only — so this is not a functional restriction.
+ *
+ * The length cap is `photos.step_id`'s own column width (`varchar(50)`), not
+ * an arbitrary number: a longer value used to pass validation and then fail
+ * the INSERT with SQLSTATE 22001, which the batch path reported as a
+ * retryable 500 (see `describeBulkItemError`). The same reasoning gives
+ * `stepType` (`varchar(20)`), `cameraRole` (`varchar(255)`), `userCode`
+ * (`embedding_jobs.user_code`, `varchar(100)`) and `attempt` (`integer`)
+ * their limits below — every bounded column a request field lands in is
+ * rejected as a 400 at validation instead of surfacing as a DB error.
  */
-const STEP_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+const STEP_ID_PATTERN = /^[A-Za-z0-9_-]{1,50}$/;
+
+/** `photos.attempt` is a Postgres `integer`. */
+const MAX_ATTEMPT = 2_147_483_647;
 
 /** `@face/core`'s `CaptureTriggerSource` — same list `AddPhotoDto` validates against. */
 const TRIGGER_SOURCES: CaptureTriggerSource[] = [
@@ -83,6 +97,7 @@ export class AddDevicePhotoDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(100)
   userCode?: string;
 
   /**
@@ -111,11 +126,13 @@ export class AddDevicePhotoDto {
   @ApiPropertyOptional({ description: 'Loại bước (FRONT/LEFT/RIGHT…), nếu có' })
   @IsOptional()
   @IsString()
+  @MaxLength(20)
   stepType?: string;
 
   @ApiPropertyOptional({ description: 'Camera đã chụp ảnh này, nếu có' })
   @IsOptional()
   @IsString()
+  @MaxLength(255)
   cameraRole?: string;
 
   @ApiProperty({
@@ -124,6 +141,7 @@ export class AddDevicePhotoDto {
   })
   @IsInt()
   @Min(1)
+  @Max(MAX_ATTEMPT)
   attempt: number;
 
   @ApiProperty({

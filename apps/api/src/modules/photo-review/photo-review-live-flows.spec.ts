@@ -11,6 +11,7 @@ import { PrintItemService } from '@app/modules/print/services/print-item.service
 import { ReviewStatsService } from '@app/modules/stats/services/review-stats.service';
 import { STATS_UNKNOWN_UUID } from '@app/modules/stats/stats.constants';
 import { FoundationModule } from '@app/shared/foundation.module';
+import { getQueueToken } from '@nestjs/bullmq';
 import { ConfigService } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
 import { TypeOrmModule } from '@nestjs/typeorm';
@@ -22,6 +23,8 @@ import { PhotoReviewEvent } from './entities/photo-review-event.entity';
 import { PhotoVariant } from './entities/photo-variant.entity';
 import { SubjectPhotoSet } from './entities/subject-photo-set.entity';
 import {
+  AI_EDIT_BACKGROUND_QUEUE_NAME,
+  AI_EDIT_QUEUE_NAME,
   PHOTO_REVIEW_ERROR_CODE,
   PhotoReviewSetStatus,
   PhotoVariantKind,
@@ -74,6 +77,11 @@ describeDb(
     let dataSource: DataSource;
     let moduleRef: TestingModule;
     let kindId: string;
+    // Hoisted out of `beforeAll` (2026-09-29) — see
+    // `photo-review-persistence.spec.ts`'s own identical top comment for why
+    // (`moduleRef.get(AiImageEditClient)` types its return as the real
+    // class, which has no `.mockImplementation`).
+    let aiImageEdit: { edit: jest.Mock; health: jest.Mock };
     const apiBaseUrl = 'http://localhost:3100';
 
     beforeAll(async () => {
@@ -92,7 +100,7 @@ describeDb(
         retouch: jest.fn(),
         identitySimilarity: jest.fn(),
       };
-      const aiImageEdit = {
+      aiImageEdit = {
         edit: jest.fn(),
         health: jest.fn(),
       };
@@ -156,6 +164,30 @@ describeDb(
           { provide: ConfigService, useValue: { get: () => 'test-api-key' } },
           { provide: ReviewAssignmentService, useValue: reviewAssignments },
           { provide: WorkflowCatalogReadRepository, useValue: workflowCatalog },
+          // `aiEdit()`/`reprocess()` only need this to resolve `.add()` — the
+          // tests below call `processAiEditJob`/`processReprocessJob`
+          // directly (what `AiEditProcessor` would eventually call), so
+          // nothing here needs to inspect what was actually enqueued.
+          // `getJob`/`getJobs`/`remove` mocked too (2026-09-29,
+          // priority-preemption rework) — `promoteToUserLane` calls them.
+          {
+            provide: getQueueToken(AI_EDIT_QUEUE_NAME),
+            useValue: {
+              add: jest.fn().mockResolvedValue(undefined),
+              getJob: jest.fn().mockResolvedValue(undefined),
+              getJobs: jest.fn().mockResolvedValue([]),
+              remove: jest.fn().mockResolvedValue(0),
+            },
+          },
+          {
+            provide: getQueueToken(AI_EDIT_BACKGROUND_QUEUE_NAME),
+            useValue: {
+              add: jest.fn().mockResolvedValue(undefined),
+              getJob: jest.fn().mockResolvedValue(undefined),
+              getJobs: jest.fn().mockResolvedValue([]),
+              remove: jest.fn().mockResolvedValue(0),
+            },
+          },
           // `onSetApproved`/`onSetLeftApproved` are pure `manager`-driven (see
           // their own doc comments) — every OTHER constructor dep is
           // irrelevant here, same `undefined as never` convention
@@ -317,7 +349,7 @@ describeDb(
           setId,
           PhotoVariantKind.CARD_AUTO,
           randomUUID(),
-          PhotoVariantStatus.READY,
+          PhotoVariantStatus.DONE,
         ],
       );
       // `aiEdit`'s "is this a usable source variant" gate accepts either
@@ -625,16 +657,8 @@ describeDb(
         cleanup.setIds.push(setId);
         cleanup.sessionIds.push(sessionId);
 
-        // `AiImageEditClient` is DI-overridden with a plain
-        // `{ edit: jest.fn(), ... }` object at construction (see beforeAll)
-        // — `moduleRef.get()` types the return as the real class, whose
-        // `edit` is a plain async method with no `.mockImplementation`, same
-        // `@typescript-eslint/no-unsafe-call` this module's sibling
-        // locking-rule spec already accepts for its own `cardPhoto`/`edit`
-        // mock usage (see that file's own doc comment on this exact
-        // trade-off) rather than fight `no-unnecessary-type-assertion` over
-        // a cast TS considers redundant here.
-        const aiImageEdit = moduleRef.get(AiImageEditClient);
+        // `aiImageEdit` is the hoisted mock object — see this describe
+        // block's own top comment.
         // Long enough for discardVariant() below to land well before this
         // resolves — aiEdit() awaits this synchronously for the whole
         // duration (see that method's own doc comment), which is exactly the
@@ -655,39 +679,48 @@ describeDb(
             ),
         );
 
-        const aiEditPromise = service.aiEdit(
+        // aiEdit() itself is fast now (2026-09-29 queue — it only creates the
+        // PROCESSING variant and enqueues, it no longer awaits the sidecar
+        // call inline), so it already hands back the variant id directly —
+        // no polling needed to find it the way the old synchronous version
+        // required. The "long async gap" this test exercises has moved to
+        // `processAiEditJob` (what `AiEditProcessor` actually calls,
+        // simulated here the same way `photo-review-upload-live.spec.ts`'s
+        // own `runQueuedJob` helper does) — started but deliberately NOT
+        // awaited yet, so it is still in flight when the concurrent discard
+        // below lands, exactly like the original bug scenario.
+        const aiVariant = await service.aiEdit(
           setId,
           { prompt: 'nen trang deu' },
           null,
           apiBaseUrl,
         );
+        expect(aiVariant.status).toBe(PhotoVariantStatus.PROCESSING);
+        const aiVariantId = aiVariant.id;
 
-        // Poll for the PROCESSING CARD_AI variant aiEdit's own first
-        // (already-committed) transaction creates before it ever calls the
-        // sidecar — this is exactly the row a second reviewer polling
-        // GET /v1/review/sets/:id mid-flight would also see and could act on.
-        let aiVariantId: string | null = null;
-        for (let i = 0; i < 20 && !aiVariantId; i++) {
-          const rows: Array<{ id: string }> = await dataSource.query(
-            `SELECT id FROM photo_variants WHERE set_id = $1 AND kind = 'CARD_AI' AND status = 'PROCESSING'`,
-            [setId],
-          );
-          aiVariantId = rows[0]?.id ?? null;
-          if (!aiVariantId) await new Promise((r) => setTimeout(r, 20));
-        }
-        expect(aiVariantId).not.toBeNull();
+        // `attempt: 1` — `aiEdit()`'s own `enqueueAiEditJob` claim is this
+        // variant's first-ever claim (DRAFT → PROCESSING, `ai_attempts`
+        // 0 → 1), which `processAiEditJob`'s own attempt guard (2026-09-29,
+        // C1) now checks against `ai_attempts` on the row.
+        const processingPromise = service.processAiEditJob(
+          setId,
+          aiVariantId,
+          {},
+          1,
+        );
 
-        // A second reviewer discards it while aiEdit() is still awaiting the
-        // sidecar — legal per discardVariant()'s own rules (it only refuses a
-        // DISCARDED variant or the set's current one; PROCESSING is neither).
-        await service.discardVariant(aiVariantId as string, null, apiBaseUrl);
+        // A second reviewer discards it while processAiEditJob() is still
+        // awaiting the (deliberately delayed) sidecar mock — legal per
+        // discardVariant()'s own rules (it only refuses a DISCARDED variant
+        // or the set's current one; PROCESSING is neither).
+        await service.discardVariant(aiVariantId, null, apiBaseUrl);
         const afterDiscard: Array<{ status: string }> = await dataSource.query(
           `SELECT status FROM photo_variants WHERE id = $1`,
           [aiVariantId],
         );
         expect(afterDiscard[0].status).toBe(PhotoVariantStatus.DISCARDED);
 
-        await aiEditPromise;
+        await processingPromise;
 
         const afterAiEdit: Array<{ status: string }> = await dataSource.query(
           `SELECT status FROM photo_variants WHERE id = $1`,

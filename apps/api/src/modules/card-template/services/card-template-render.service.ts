@@ -246,6 +246,34 @@ export class CardTemplateRenderService {
    * preview PNG, not failing the request over a transient file-service hiccup.
    */
   private async resolveCardPhoto(variantId: string): Promise<Buffer> {
+    return (
+      (await this.tryResolveCardPhoto(variantId)) ??
+      (await this.placeholderPhoto())
+    );
+  }
+
+  /**
+   * The approved card photo of a set, exactly as the review screen's current
+   * card — remote file-service copy first, then the locally held bytes — or
+   * `null` when the set has no current card or neither copy can be read.
+   * Public because `PrintItemService.preview` uses it as the preview of last
+   * resort when no print template is configured yet (2026-09-30: before
+   * this, "Xem trước" and the per-campaign thumbnails showed nothing at all
+   * without a template, even though the approved photo exists). Unlike
+   * `resolveCardPhoto` it never substitutes a gray placeholder — a preview
+   * that claims to be the student's photo must not be a blank box.
+   */
+  async cardPhotoForSet(setId: string): Promise<Buffer | null> {
+    const rows: Array<{ current_card_variant_id: string | null }> =
+      await this.dataSource.query(
+        `SELECT current_card_variant_id FROM subject_photo_sets WHERE id = $1`,
+        [setId],
+      );
+    const variantId = rows[0]?.current_card_variant_id;
+    return variantId ? this.tryResolveCardPhoto(variantId) : null;
+  }
+
+  private async tryResolveCardPhoto(variantId: string): Promise<Buffer | null> {
     const variantRows: Array<{
       fs_file_id: string | null;
       fs_status: string | null;
@@ -283,7 +311,7 @@ export class CardTemplateRenderService {
     if (localRows[0]?.content) {
       return localRows[0].content;
     }
-    return this.placeholderPhoto();
+    return null;
   }
 
   private async placeholderPhoto(): Promise<Buffer> {

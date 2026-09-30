@@ -2,14 +2,20 @@ import { useEffect, useState } from 'react';
 import { ApiError } from '../api';
 import { ModalShell } from '../components/CampaignDangerActions';
 
+/** What a preview fetch resolves to: a bare object URL, or the URL plus a short note to show under the image (e.g. "showing the approved photo — no template chosen yet"). */
+export type PreviewResult = string | { url: string; note?: string | null };
+
 /**
  * "Xem trước thẻ" popup (in-thẻ mockup) — both the print-item preview
  * (`GET /v1/print/items/:id/preview`) and the card-template preview
- * (`POST /v1/card-templates/:id/preview`) return a raw PNG, not a URL, so
+ * (`POST /v1/card-templates/:id/preview`) return a raw image, not a URL, so
  * the caller resolves an already-authenticated blob object URL via
- * `fetchPreviewPngObjectUrl`/`previewPrintItemUrl`/`previewCardTemplateUrl`
- * (`api.ts`) and hands it here as `fetchUrl` — this component stays generic
- * over which of the two it's previewing.
+ * `previewPrintItem`/`previewCardTemplateUrl` (`api.ts`) and hands it here as
+ * `fetchUrl` — this component stays generic over which of the two it's
+ * previewing. `fetchUrl` may return just the URL, or `{ url, note }` when the
+ * caller has something worth telling the operator about what they're looking
+ * at (2026-09-30: the print-item preview shows the approved card PHOTO when no
+ * print template is configured, and says so).
  *
  * Front/back toggle is local UI state; switching sides re-calls `fetchUrl`
  * with the new side rather than pre-fetching both, since a preview render
@@ -21,11 +27,12 @@ export function CardPreviewModal({
   onClose,
 }: {
   title: string;
-  fetchUrl: (side: 'front' | 'back') => Promise<string>;
+  fetchUrl: (side: 'front' | 'back') => Promise<PreviewResult>;
   onClose: () => void;
 }) {
   const [side, setSide] = useState<'front' | 'back'>('front');
   const [url, setUrl] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -34,14 +41,18 @@ export function CardPreviewModal({
     let objectUrl: string | null = null;
     setLoading(true);
     setError(null);
+    setNote(null);
+    setUrl(null);
     fetchUrl(side)
-      .then((u) => {
+      .then((result) => {
+        const resolvedUrl = typeof result === 'string' ? result : result.url;
         if (cancelled) {
-          URL.revokeObjectURL(u);
+          URL.revokeObjectURL(resolvedUrl);
           return;
         }
-        objectUrl = u;
-        setUrl(u);
+        objectUrl = resolvedUrl;
+        setUrl(resolvedUrl);
+        setNote(typeof result === 'string' ? null : (result.note ?? null));
       })
       .catch((err) => !cancelled && setError(err instanceof ApiError ? err.message : String(err)))
       .finally(() => !cancelled && setLoading(false));
@@ -73,6 +84,7 @@ export function CardPreviewModal({
           {error && <p className="text-sm text-red-600 py-10 px-4 text-center">{error}</p>}
           {url && !loading && !error && <img src={url} alt={title} className="max-w-full max-h-[60vh] rounded-lg shadow-md" />}
         </div>
+        {note && !loading && !error && <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">{note}</p>}
       </div>
     </ModalShell>
   );

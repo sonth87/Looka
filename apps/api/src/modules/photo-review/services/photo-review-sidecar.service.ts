@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { SIDECAR_TIMEOUT_MS } from '../photo-review.constants';
+import { isFetchTimeout } from './ai-image-edit.client';
 
 /** No longer env-configurable — see this class's own doc comment. */
 const SIDECAR_BASE_URL = 'http://127.0.0.1:8321';
@@ -42,6 +43,23 @@ export class SidecarError extends Error {
   ) {
     super(message);
     this.name = 'SidecarError';
+  }
+}
+
+/**
+ * Thrown specifically when a sidecar call timed out (this class's own
+ * `AbortController`, or undici's own lower-level timeout firing first — see
+ * `isFetchTimeout` in `ai-image-edit.client.ts`, reused here rather than
+ * duplicated) — 2026-09-29, so `PhotoAiAdapter` can classify it as `Timeout`
+ * (→ `PENDING`, auto-recovered) instead of `Unavailable` (→ `FAILED`, the
+ * behavior every OTHER sidecar failure keeps, since the sidecar it talks to
+ * is permanently dead — see this class's own top doc comment — so
+ * "unreachable" should stay a hard failure).
+ */
+export class SidecarTimeoutError extends SidecarError {
+  constructor(message: string, cause?: unknown) {
+    super(message, cause);
+    this.name = 'SidecarTimeoutError';
   }
 }
 
@@ -165,6 +183,12 @@ export class PhotoReviewSidecarService {
       this.logger.warn(
         `sidecar call to ${path} failed: ${(error as Error).message}`,
       );
+      if (isFetchTimeout(error, controller.signal)) {
+        throw new SidecarTimeoutError(
+          `Sidecar call to ${path} timed out after ${SIDECAR_TIMEOUT_MS}ms`,
+          error,
+        );
+      }
       throw new SidecarError(`Could not reach the AI sidecar at ${url}`, error);
     } finally {
       clearTimeout(timer);
@@ -180,6 +204,12 @@ export class PhotoReviewSidecarService {
     try {
       return (await res.json()) as T;
     } catch (error) {
+      if (isFetchTimeout(error)) {
+        throw new SidecarTimeoutError(
+          `Sidecar ${path} response body timed out mid-read`,
+          error,
+        );
+      }
       throw new SidecarError(`Sidecar ${path} returned invalid JSON`, error);
     }
   }

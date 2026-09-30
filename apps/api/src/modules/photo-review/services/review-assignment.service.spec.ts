@@ -149,6 +149,82 @@ describe('ReviewAssignmentService — per-campaign scope (2026-09-28 pivot)', ()
     });
   });
 
+  describe('buildScopePredicate (bulk decisions — scope resolved once, checked per set)', () => {
+    it('an admin gets an always-true predicate', async () => {
+      const { service } = makeService([], { isAdmin: true });
+      const allowed = await service.buildScopePredicate('admin1');
+      expect(allowed(TARGET_C1)).toBe(true);
+      expect(allowed({ campaignId: 'anything' })).toBe(true);
+    });
+
+    it('a null actor is unrestricted, with no DB call (same as assertInScope)', async () => {
+      const { service, repo, dataSource } = makeService([]);
+      const allowed = await service.buildScopePredicate(null);
+      expect(allowed(TARGET_C1)).toBe(true);
+      expect(repo.find).not.toHaveBeenCalled();
+      expect(dataSource.query).not.toHaveBeenCalled();
+    });
+
+    it('a whole-campaign row grants every group in that campaign but nothing in another campaign', async () => {
+      const { service } = makeService([
+        { campaignId: 'c1', groupField: null, groupValue: null },
+      ]);
+      const allowed = await service.buildScopePredicate('u1');
+      expect(allowed(TARGET_C1)).toBe(true);
+      expect(allowed({ ...TARGET_C1, faculty: 'Khoa khác' })).toBe(true);
+      expect(allowed({ ...TARGET_C1, campaignId: 'c2' })).toBe(false);
+    });
+
+    it('a group row grants only targets whose field value matches', async () => {
+      const { service } = makeService([
+        { campaignId: 'c1', groupField: 'faculty', groupValue: 'CNTT' },
+      ]);
+      const allowed = await service.buildScopePredicate('u1');
+      expect(allowed(TARGET_C1)).toBe(true);
+      expect(allowed({ ...TARGET_C1, faculty: 'Khoa khác' })).toBe(false);
+      expect(allowed({ ...TARGET_C1, faculty: null })).toBe(false);
+    });
+
+    it('a non-admin with no rows is granted nothing', async () => {
+      const { service } = makeService([]);
+      const allowed = await service.buildScopePredicate('u1');
+      expect(allowed(TARGET_C1)).toBe(false);
+    });
+
+    it('resolves the actor with ONE round trip however many targets are then checked', async () => {
+      const { service, repo, dataSource } = makeService([
+        { campaignId: 'c1', groupField: null, groupValue: null },
+      ]);
+      const allowed = await service.buildScopePredicate('u1');
+      for (let i = 0; i < 50; i++) allowed(TARGET_C1);
+      expect(repo.find).toHaveBeenCalledTimes(1);
+      expect(dataSource.query).toHaveBeenCalledTimes(1);
+    });
+
+    it('agrees with assertInScope on every case above (same rule, not a re-implementation drift)', async () => {
+      const rows = [
+        {
+          campaignId: 'c1',
+          groupField: 'faculty' as const,
+          groupValue: 'CNTT',
+        },
+      ];
+      const { service } = makeService(rows);
+      const allowed = await service.buildScopePredicate('u1');
+      for (const target of [
+        TARGET_C1,
+        { ...TARGET_C1, faculty: 'X' },
+        { ...TARGET_C1, campaignId: 'c2' },
+      ]) {
+        const asserted = await service.assertInScope('u1', target).then(
+          () => true,
+          () => false,
+        );
+        expect(allowed(target)).toBe(asserted);
+      }
+    });
+  });
+
   describe('buildScopeFilter', () => {
     it('returns null for an admin (no SQL filter needed)', async () => {
       const { service } = makeService([], { isAdmin: true });

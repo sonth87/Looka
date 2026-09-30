@@ -24,6 +24,15 @@ export interface ApprovalStepInfo {
   cameraRole: string;
   attempt: number;
   capturedAt?: string;
+  /**
+   * Multi-shot capture: the attempt number of the photo the operator picked
+   * as the best one for this step — only set for the workflow's multi-shot
+   * step. It is the attempt the photo was stored under, so
+   * `RunScopedCaptureSession.approve()` adds the same cross-sitting offset
+   * `savePhoto()` added (see there); the desktop main process turns it into
+   * a `keepAttempts` override of the "highest attempt wins" outbox rule.
+   */
+  selectedAttempt?: number;
 }
 
 /**
@@ -429,7 +438,12 @@ export class ElectronCaptureSink implements CaptureSink {
     if (!result?.ok) {
       throw new Error(result?.error ?? 'approveSessionUpload failed');
     }
-    if (!(result.approved > 0)) {
+    // `superseded > 0` counts as success too: choosing an already-approved
+    // photo again (multi-shot, post-save retake) approves nothing new — the
+    // earlier approval stands — while the freshly staged extras are deleted,
+    // which is a real, complete outcome. A sessionId that matches nothing at
+    // all still reports 0/0 and still throws below.
+    if (!(result.approved > 0 || result.superseded > 0)) {
       throw new Error(
         `Không tìm thấy ảnh nào của phiên này để duyệt — ảnh vẫn được giữ an toàn trên máy, vui lòng thử lại hoặc liên hệ kỹ thuật (session: ${sessionId}).`
       );
@@ -474,6 +488,20 @@ export class RunScopedCaptureSession {
    */
   public get cachedSessionId(): string | null {
     return this.sessionId;
+  }
+
+  /**
+   * A copy of the per-step attempt offsets this run currently applies (see
+   * `resume()`). Empty for every run except a cross-sitting retake or a
+   * post-save reopen of one. Exists so a caller that is about to `reset()`
+   * this run — FaceCaptureApp's `onAccept`, which stashes the finished run so
+   * the same student can reopen it — can hand the same offsets back to
+   * `resume()` later: without them a multi-shot `selectedAttempt` (expressed
+   * in the engine's own numbering) is not shifted onto the attempt actually
+   * stored in the outbox, and the whole approval is refused.
+   */
+  public get attemptOffsetsSnapshot(): Record<string, number> {
+    return { ...this.attemptOffsets };
   }
 
   /**
@@ -670,7 +698,18 @@ export class RunScopedCaptureSession {
         'No active capture session to approve — the app may have hot-reloaded mid-session. Please fully reload and recapture.'
       );
     }
-    await this.sink.approveUpload(sessionId, steps, videoSessionId, this.pendingSubject, operatorUserId);
+    // Same offset `savePhoto()` added to each stored attempt (item 11,
+    // cross-sitting retake) — a multi-shot `selectedAttempt` is expressed in
+    // the engine's own numbering, so it must be shifted the same way to name
+    // the row that was actually queued.
+    const offsetSteps = steps?.some((s) => s.selectedAttempt !== undefined)
+      ? steps.map((s) =>
+          s.selectedAttempt === undefined
+            ? s
+            : { ...s, selectedAttempt: s.selectedAttempt + (this.attemptOffsets[s.stepId] ?? 0) }
+        )
+      : steps;
+    await this.sink.approveUpload(sessionId, offsetSteps, videoSessionId, this.pendingSubject, operatorUserId);
   }
 
   /** The run finished naturally: tell the sink, then drop the cached id. */

@@ -160,7 +160,7 @@ describe('UploadOutbox — attempt de-duplication (phase-11 D5)', () => {
     repo.approveSession('sess_1');
     const second = repo.approveSession('sess_1');
 
-    assert.deepEqual(second, { approved: 0, superseded: [], approvedRows: [] });
+    assert.deepEqual(second, { approved: 0, superseded: [], approvedRows: [], missingKeepAttempts: [] });
     adapter.close();
   });
 
@@ -366,6 +366,243 @@ describe('UploadOutbox — post-save retake (2026-09-08)', () => {
     const superseded = repo.supersedeOlderApprovedAttempts('sess_A', 'face', 'step-front', 'nonexistent-keep-id');
     assert.deepEqual(superseded, [{ id: 'a1', localPath: '/data/a1.jpg', fsFileId: null }]);
     assert.ok(repo.getById('a2'), 'a different step in the same session is untouched');
+    adapter.close();
+  });
+});
+
+describe('UploadOutbox — operator-chosen attempt (multi-shot keepAttempts)', () => {
+  const face = (
+    id: string,
+    stepId: string,
+    attempt: number,
+    over: Partial<Parameters<UploadOutboxRepository['enqueue']>[0]> = {}
+  ) =>
+    job(id, {
+      kind: 'face',
+      stepId,
+      attempt,
+      idemKey: `sess_1:${stepId}:${attempt}:face`,
+      virtualPath: `face/sess_1/${stepId}-${attempt}.jpg`,
+      ...over,
+    });
+
+  test('the chosen attempt wins even when a higher attempt exists, and the rest are deleted', async () => {
+    const { adapter, repo } = await makeRepo();
+    repo.enqueue(face('front-1', 'step-front', 1));
+    repo.enqueue(face('front-2', 'step-front', 2));
+    repo.enqueue(face('front-3', 'step-front', 3));
+    repo.enqueue(face('left-1', 'step-left', 1));
+
+    const result = repo.approveSession('sess_1', { keepAttempts: { 'step-front': 2 } });
+
+    assert.deepEqual(result.missingKeepAttempts, []);
+    assert.equal(result.approved, 2, 'the chosen center attempt plus the untouched corner step');
+    assert.deepEqual(result.superseded.map((s) => s.id).sort(), ['front-1', 'front-3']);
+    assert.deepEqual(repo.claimDue(Date.now()).map((d) => d.id).sort(), ['front-2', 'left-1']);
+    assert.equal(repo.getById('front-1'), null, 'not uploaded, deleted');
+    assert.equal(repo.getById('front-3'), null, 'the newest shot is discarded when the operator chose an older one');
+    adapter.close();
+  });
+
+  test('choosing the highest attempt behaves like the default rule', async () => {
+    const { adapter, repo } = await makeRepo();
+    repo.enqueue(face('front-1', 'step-front', 1));
+    repo.enqueue(face('front-2', 'step-front', 2));
+
+    const result = repo.approveSession('sess_1', { keepAttempts: { 'step-front': 2 } });
+
+    assert.equal(result.approved, 1);
+    assert.deepEqual(result.superseded.map((s) => s.id), ['front-1']);
+    assert.deepEqual(result.approvedRows.map((r) => r.id), ['front-2']);
+    adapter.close();
+  });
+
+  test('a step without an entry keeps the highest-attempt rule', async () => {
+    const { adapter, repo } = await makeRepo();
+    repo.enqueue(face('front-1', 'step-front', 1));
+    repo.enqueue(face('front-2', 'step-front', 2));
+    repo.enqueue(face('left-1', 'step-left', 1));
+    repo.enqueue(face('left-2', 'step-left', 2));
+
+    repo.approveSession('sess_1', { keepAttempts: { 'step-front': 1 } });
+
+    assert.deepEqual(repo.claimDue(Date.now()).map((d) => d.id).sort(), ['front-1', 'left-2']);
+    adapter.close();
+  });
+
+  test('case (b): the chosen attempt is ALREADY approved, so every staged row of that step is deleted and none approved', async () => {
+    const { adapter, repo } = await makeRepo();
+    repo.enqueue(face('front-1', 'step-front', 1));
+    repo.approveSession('sess_1');
+    repo.markSending('front-1');
+    repo.markUploaded('front-1', 'file_1', 'READY');
+
+    // Post-save retake: two extra center shots staged, but the operator goes
+    // back to the photo that was already saved.
+    repo.enqueue(face('front-2', 'step-front', 2));
+    repo.enqueue(face('front-3', 'step-front', 3));
+    const result = repo.approveSession('sess_1', { keepAttempts: { 'step-front': 1 } });
+
+    assert.deepEqual(result.missingKeepAttempts, []);
+    assert.equal(result.approved, 0, 'nothing new to approve, the earlier approval stands');
+    assert.deepEqual(result.approvedRows, []);
+    assert.deepEqual(result.superseded.map((s) => s.id).sort(), ['front-2', 'front-3']);
+    assert.equal(repo.getById('front-2'), null);
+    assert.equal(repo.getById('front-3'), null);
+    assert.equal(repo.getById('front-1')!.status, 'UPLOADED', 'the saved photo is untouched');
+    adapter.close();
+  });
+
+  test('case (b) still works when nothing at all is staged for the session', async () => {
+    const { adapter, repo } = await makeRepo();
+    repo.enqueue(face('front-1', 'step-front', 1));
+    repo.approveSession('sess_1');
+
+    const result = repo.approveSession('sess_1', { keepAttempts: { 'step-front': 1 } });
+
+    assert.deepEqual(result, { approved: 0, superseded: [], approvedRows: [], missingKeepAttempts: [] });
+    adapter.close();
+  });
+
+  test('case (c): a chosen attempt that exists nowhere refuses the WHOLE call and writes nothing', async () => {
+    const { adapter, repo } = await makeRepo();
+    repo.enqueue(face('front-1', 'step-front', 1));
+    repo.enqueue(face('front-2', 'step-front', 2));
+    repo.enqueue(face('left-1', 'step-left', 1));
+
+    const result = repo.approveSession('sess_1', { keepAttempts: { 'step-front': 7 } });
+
+    assert.deepEqual(result, {
+      approved: 0,
+      superseded: [],
+      approvedRows: [],
+      missingKeepAttempts: ['step-front:7'],
+    });
+    // Not even the unrelated corner photo was approved, and nothing was deleted.
+    assert.equal(repo.claimDue(Date.now()).length, 0);
+    for (const id of ['front-1', 'front-2', 'left-1']) {
+      const row = repo.getById(id);
+      assert.ok(row, `${id} still exists`);
+      assert.equal(row!.approvedAt, null, `${id} is still staged`);
+    }
+    adapter.close();
+  });
+
+  test('case (c) is detected even when nothing is staged', async () => {
+    const { adapter, repo } = await makeRepo();
+    const result = repo.approveSession('sess_1', { keepAttempts: { 'step-front': 1 } });
+    assert.deepEqual(result.missingKeepAttempts, ['step-front:1']);
+    assert.equal(result.approved, 0);
+    adapter.close();
+  });
+
+  test('only kind "face" rows can satisfy a choice', async () => {
+    const { adapter, repo } = await makeRepo();
+    // Same step id and attempt, but a different kind, so it must not count.
+    repo.enqueue(job('raw-front-2', { kind: 'raw', stepId: 'step-front', attempt: 2, idemKey: 'sess_1:step-front:2:raw' }));
+
+    const result = repo.approveSession('sess_1', { keepAttempts: { 'step-front': 2 } });
+
+    assert.deepEqual(result.missingKeepAttempts, ['step-front:2']);
+    assert.equal(repo.getById('raw-front-2')!.approvedAt, null);
+    adapter.close();
+  });
+
+  test('a nonsensical attempt number is ignored rather than refusing the call', async () => {
+    const { adapter, repo } = await makeRepo();
+    repo.enqueue(face('front-1', 'step-front', 1));
+    repo.enqueue(face('front-2', 'step-front', 2));
+
+    const result = repo.approveSession('sess_1', { keepAttempts: { 'step-front': 0, 'step-x': 1.5 } });
+
+    assert.deepEqual(result.missingKeepAttempts, []);
+    assert.deepEqual(result.approvedRows.map((r) => r.id), ['front-2'], 'falls back to the highest-attempt rule');
+    adapter.close();
+  });
+
+  test('without options the result is unchanged and reports no missing attempts', async () => {
+    const { adapter, repo } = await makeRepo();
+    repo.enqueue(face('front-1', 'step-front', 1));
+    repo.enqueue(face('front-2', 'step-front', 2));
+
+    const result = repo.approveSession('sess_1');
+
+    assert.deepEqual(result.missingKeepAttempts, []);
+    assert.equal(result.approved, 1);
+    assert.deepEqual(result.superseded.map((s) => s.id), ['front-1']);
+    adapter.close();
+  });
+});
+
+describe('UploadOutbox — discardStaged (abandoned run)', () => {
+  const stagedFace = (id: string, sessionId: string, attempt: number) =>
+    job(id, {
+      sessionId,
+      kind: 'face',
+      stepId: 'step-front',
+      attempt,
+      idemKey: `${sessionId}:step-front:${attempt}:face`,
+      localPath: `/data/${id}.jpg`,
+    });
+
+  test('deletes every unapproved row of the session and returns them so the files can be unlinked', async () => {
+    const { adapter, repo } = await makeRepo();
+    repo.enqueue(stagedFace('front-1', 'sess_1', 1));
+    repo.enqueue(stagedFace('front-2', 'sess_1', 2));
+    repo.enqueue(stagedFace('front-3', 'sess_1', 3));
+
+    const discarded = repo.discardStaged('sess_1');
+
+    assert.deepEqual(
+      discarded.map((d) => [d.id, d.localPath]).sort(),
+      [
+        ['front-1', '/data/front-1.jpg'],
+        ['front-2', '/data/front-2.jpg'],
+        ['front-3', '/data/front-3.jpg'],
+      ]
+    );
+    assert.equal(adapter.exec('SELECT * FROM upload_outbox').length, 0);
+    adapter.close();
+  });
+
+  test('never touches an approved row, so a given-up post-save retake leaves the earlier approval standing', async () => {
+    const { adapter, repo } = await makeRepo();
+    repo.enqueue(stagedFace('front-1', 'sess_1', 1));
+    repo.approveSession('sess_1'); // the saved photo
+    repo.markUploaded('front-1', 'fs-1', 'PENDING_SCAN');
+    repo.enqueue(stagedFace('front-2', 'sess_1', 2)); // a retake, never confirmed
+    repo.enqueue(stagedFace('front-3', 'sess_1', 3));
+
+    const discarded = repo.discardStaged('sess_1');
+
+    assert.deepEqual(discarded.map((d) => d.id).sort(), ['front-2', 'front-3']);
+    const left = adapter.exec<{ id: string }>('SELECT id FROM upload_outbox');
+    assert.deepEqual(left.map((r) => r.id), ['front-1']);
+    assert.notEqual(repo.getById('front-1')!.approvedAt, null);
+    adapter.close();
+  });
+
+  test('leaves other sessions alone and is a harmless no-op when nothing is staged', async () => {
+    const { adapter, repo } = await makeRepo();
+    repo.enqueue(stagedFace('other-1', 'sess_other', 1));
+
+    assert.deepEqual(repo.discardStaged('sess_1'), []);
+    assert.deepEqual(repo.discardStaged('sess_1'), [], 'idempotent');
+    assert.notEqual(repo.getById('other-1'), null);
+    adapter.close();
+  });
+
+  test('a discarded attempt number can be captured again without hitting the old idem_key', async () => {
+    // Cancel / "Chụp lại toàn bộ" on a session whose id is reused (cross-sitting
+    // retake) restarts the engine's attempt counter — the old staged row would
+    // otherwise swallow the new photo through ON CONFLICT(idem_key) DO NOTHING.
+    const { adapter, repo } = await makeRepo();
+    repo.enqueue(stagedFace('front-1', 'sess_1', 1));
+    repo.discardStaged('sess_1');
+
+    repo.enqueue(stagedFace('front-1-again', 'sess_1', 1));
+
+    assert.notEqual(repo.getById('front-1-again'), null);
     adapter.close();
   });
 });

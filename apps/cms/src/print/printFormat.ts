@@ -50,6 +50,31 @@ export function printItemStatusLabel(
   return PRINT_ITEM_STATUS_LABEL[status];
 }
 
+/**
+ * Options for a print-item status filter dropdown — `value` is what goes into
+ * `GET /v1/print/items?status=` (one status, or several comma-separated).
+ *
+ * With `mergeUnprinted` (a CENTRALIZED batch, or the campaign-wide screen)
+ * PENDING and RENDERED collapse into ONE "Chưa in" option (`PENDING,RENDERED`):
+ * `printItemStatusLabel` already shows both as "Chưa in" on every row, so the
+ * dropdown used to list two identically-labelled options, and the second
+ * (RENDERED) matched nothing in a flow that never renders (found in the
+ * 2026-09-30 print browser re-test). DIRECT batches keep them separate —
+ * "Chờ render"/"Đã render" are real, different steps there.
+ */
+export function printItemStatusFilterOptions(mergeUnprinted: boolean): Array<{ value: string; label: string }> {
+  const options: Array<{ value: string; label: string }> = [];
+  for (const status of Object.keys(PRINT_ITEM_STATUS_LABEL) as PrintItemStatus[]) {
+    if (mergeUnprinted && status === 'RENDERED') continue;
+    if (mergeUnprinted && status === 'PENDING') {
+      options.push({ value: 'PENDING,RENDERED', label: 'Chưa in' });
+      continue;
+    }
+    options.push({ value: status, label: PRINT_ITEM_STATUS_LABEL[status] });
+  }
+  return options;
+}
+
 export const PRINT_ITEM_STATUS_BADGE_CLASS: Record<PrintItemStatus, string> = {
   PENDING: 'bg-gray-50 border-gray-200 text-gray-600',
   RENDERED: 'bg-blue-50 border-blue-200 text-blue-700',

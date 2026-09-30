@@ -34,6 +34,7 @@ export interface CardSpec {
   size?: string;
   dpi?: number;
   backgroundColor?: string;
+  nameBackgroundColor?: string;
   /** `[min, max]` fraction of frame height the head should occupy. */
   headHeightRatio?: [number, number];
   /** `[min, max]` fraction of frame height the eye line should sit at, from the top. */
@@ -725,8 +726,7 @@ export async function downloadRosterImportTemplate(): Promise<{ blob: Blob; file
     headers: { ...authHeaders() },
   });
   if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new ApiError(text.slice(0, 300) || res.statusText, res.status);
+    throw await apiErrorFromResponse(res);
   }
   const disposition = res.headers.get('Content-Disposition') ?? '';
   const match = /filename="([^"]+)"/.exec(disposition);
@@ -1010,6 +1010,31 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Builds the `ApiError` for a failed response of a manual `fetch` (the blob/
+ * zip/png endpoints that can't go through `request()`), carrying the server's
+ * own human-readable `message` instead of the raw JSON body — before this,
+ * those helpers threw `ApiError(text.slice(0, 300))`, so operators saw
+ * `{"statusCode":400,"errorCode":400,"message":"…","correlationId":"…"}`
+ * pasted into the UI (export banner, preview dialog, result-template
+ * download). Same parsing `request()` does inline for JSON endpoints, plus
+ * the array form Nest's validation pipe can use for `message`.
+ */
+export async function apiErrorFromResponse(res: Response): Promise<ApiError> {
+  const text = await res.text().catch(() => '');
+  let message = text.slice(0, 300) || res.statusText;
+  let code: number | undefined;
+  try {
+    const parsed = JSON.parse(text) as { message?: string | string[]; error?: string; errorCode?: number };
+    const parsedMessage = Array.isArray(parsed.message) ? parsed.message.join('; ') : parsed.message;
+    message = parsedMessage || parsed.error || message;
+    code = parsed.errorCode;
+  } catch {
+    /* not JSON; the raw text is the best available */
+  }
+  return new ApiError(message, res.status, code);
+}
+
 /** Every JSON response is `{ statusCode, message, data }` — apps/api's global ResponseTransformInterceptor. */
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${baseUrl()}${path}`, {
@@ -1183,8 +1208,7 @@ async function fetchActivationZip(path: string, body: unknown): Promise<{ blob: 
   });
 
   if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new ApiError(text.slice(0, 300) || res.statusText, res.status);
+    throw await apiErrorFromResponse(res);
   }
 
   const disposition = res.headers.get('content-disposition') ?? '';
@@ -1256,8 +1280,33 @@ export const revokeDevice = (deviceId: string) =>
 
 export type ReviewSetStatus = 'PENDING_AUTO' | 'AUTO_FAILED' | 'READY' | 'IN_REVIEW' | 'APPROVED' | 'REJECTED';
 export type PhotoVariantKind = 'CARD_AUTO' | 'CARD_AI' | 'CARD_UPLOAD';
-export type PhotoVariantStatus = 'PROCESSING' | 'READY' | 'FAILED' | 'DISCARDED';
+/**
+ * `photo_variants.status` (2026-09-29, AI-edit queue lifecycle rework —
+ * migration `1841000000000-PhotoVariantAiQueueLifecycle` on the API side;
+ * simplified same-day per a follow-up user request, "bỏ PENDING đi" — there
+ * is no separate PENDING value). `DRAFT`/`DONE` are new; `READY` is kept
+ * ONLY so this type still accepts a response from an API instance
+ * mid-deploy (old code, new/old DB — see the API-side migration's own doc
+ * comment on deploy order: CMS ships first, so it must tolerate both
+ * spellings for a short window). New code should check
+ * `isVariantDone`/`isVariantInFlight` below instead of `=== 'READY'`/
+ * `'PROCESSING'` directly. A retryable failure (AI-service timeout/transient
+ * error) does NOT get its own status — it stays `PROCESSING` (the server's
+ * own recovery sweep re-claims it once stale), so from the CMS's point of
+ * view it looks exactly like "still running".
+ */
+export type PhotoVariantStatus = 'DRAFT' | 'PROCESSING' | 'DONE' | 'READY' | 'FAILED' | 'DISCARDED';
 export type AiEditRegion = 'OUTSIDE_FACE' | 'GLASSES' | 'HAIR' | 'FULL';
+
+/** A variant that finished successfully and can be accepted/set-current/printed — `DONE` is the current name, `READY` the legacy one (see `PhotoVariantStatus`'s own doc comment). */
+export function isVariantDone(status: PhotoVariantStatus): boolean {
+  return status === 'DONE' || status === 'READY';
+}
+
+/** A variant still being (re-)generated, or a retryable failure waiting for the server's own recovery sweep to retry it — not yet claimed (`DRAFT`) or actively queued/running/retrying (`PROCESSING`). */
+export function isVariantInFlight(status: PhotoVariantStatus): boolean {
+  return status === 'DRAFT' || status === 'PROCESSING';
+}
 
 /** One row of `GET /v1/review/sets` — a subject's photo profile within one campaign (§2's `subject_photo_sets`), with the current card photo's view-link already resolved server-side per §7's endpoint doc comment. */
 export interface ReviewSetListItem {
@@ -1415,18 +1464,20 @@ export interface AiEditInput {
 }
 
 /**
- * `POST /v1/review/sets/:id/ai-edit` — runs SYNCHRONOUSLY on the server
- * (`PhotoReviewService.aiEdit`'s own doc comment) and returns the resulting
- * `photo_variants` row directly, already at its FINAL `status`
- * (`READY`/`FAILED`) — there is no separate job/poll contract, `PhotoVariant`
- * is the one shape both this and `getReviewJob` return. A 422 (surfaced as
- * `ApiError`) means the prompt was refused by the keyword filter (§5.3/§6.2
- * rule 4).
+ * `POST /v1/review/sets/:id/ai-edit` — runs ASYNCHRONOUSLY on the server
+ * (2026-09-29, `PhotoReviewService.aiEdit`'s own doc comment: enqueued onto
+ * BullMQ's user-priority lane, not run inline). Returns the resulting
+ * `photo_variants` row immediately at status `PROCESSING` (or, rarely,
+ * already `DONE`/`FAILED` if the guarded claim UPDATE itself failed) — the
+ * caller must poll `getReviewJob` (see `isVariantInFlight`)
+ * to see it reach a final state, same shape both this and `getReviewJob`
+ * return. A 422 (surfaced as `ApiError`) means the prompt was refused by
+ * the keyword filter (§5.3/§6.2 rule 4).
  */
 export const requestAiEdit = (setId: string, input: AiEditInput) =>
   request<PhotoVariant>(`${REVIEW_SETS_PATH}/${setId}/ai-edit`, { method: 'POST', body: JSON.stringify(input) });
 
-/** `GET /v1/review/jobs/:id` — `:id` is actually a `photo_variants.id`; kept as its own endpoint name for a possible future real job queue (server's own doc comment), but today just re-reads that variant's current state. */
+/** `GET /v1/review/jobs/:id` — `:id` is actually a `photo_variants.id`; kept as its own endpoint name for a possible future real job table, but today just re-reads that variant's current state (2026-09-29: this IS the real poll target now that `ai-edit`/`reprocess` are BullMQ-queued — see `requestAiEdit`'s own doc comment). */
 export const getReviewJob = (jobId: string) => request<PhotoVariant>(`${REVIEW_JOBS_PATH}/${jobId}`);
 
 /** Only an explicit accept turns a job's result into a real, addressable version (§5.3) — never auto-applied. */
@@ -1447,6 +1498,52 @@ export const approveReviewSet = (setId: string, note?: string) =>
 
 export const rejectReviewSet = (setId: string, note?: string) =>
   request<ReviewSetDetail>(`${REVIEW_SETS_PATH}/${setId}/reject`, { method: 'POST', body: JSON.stringify({ note }) });
+
+/**
+ * One set's outcome inside a 1-n `approveReviewSets`/`rejectReviewSets` call —
+ * mirrors `BulkReviewDecisionItemDao` (apps/api). `ok: false` carries the
+ * per-set reason (`statusCode` 403 out of scope, 404 missing, 409 locked or
+ * already in a print batch, ...); one failing set never fails the others.
+ */
+export interface BulkReviewDecisionItem {
+  setId: string;
+  ok: boolean;
+  /** Set status after the decision — only when `ok`. */
+  status?: string;
+  /** `false` when the set was already in the requested status (nothing written). */
+  changed?: boolean;
+  statusCode?: number;
+  errorCode?: number | string;
+  message?: string;
+}
+
+/** Response of `POST /v1/review/sets/approve|reject` — `requested` counts DISTINCT ids. */
+export interface BulkReviewDecisionResult {
+  requested: number;
+  succeeded: number;
+  failed: number;
+  results: BulkReviewDecisionItem[];
+}
+
+/**
+ * 1-n approve (`POST /v1/review/sets/approve`) — one id or many, one request
+ * (max 200 per call, one shared `note`). Partial success: the call resolves
+ * with per-set `results` even when some sets failed, so callers must check
+ * `failed`/each `ok` rather than assume everything was approved. The
+ * single-set `approveReviewSet` above is unchanged (the detail modal uses it).
+ */
+export const approveReviewSets = (setIds: string[], note?: string) =>
+  request<BulkReviewDecisionResult>(`${REVIEW_SETS_PATH}/approve`, {
+    method: 'POST',
+    body: JSON.stringify({ setIds, note }),
+  });
+
+/** 1-n reject (`POST /v1/review/sets/reject`) — same contract as `approveReviewSets`; the `note` applies to every set. */
+export const rejectReviewSets = (setIds: string[], note?: string) =>
+  request<BulkReviewDecisionResult>(`${REVIEW_SETS_PATH}/reject`, {
+    method: 'POST',
+    body: JSON.stringify({ setIds, note }),
+  });
 
 /**
  * `GET /v1/review/sets/:id/events` — full paginated audit log (the detail
@@ -1764,8 +1861,7 @@ export async function downloadPrintBatchPackage(id: string, itemIds?: string[]):
     headers: { ...authHeaders() },
   });
   if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new ApiError(text.slice(0, 300) || res.statusText, res.status);
+    throw await apiErrorFromResponse(res);
   }
   const disposition = res.headers.get('Content-Disposition') ?? '';
   const match = /filename="([^"]+)"/.exec(disposition);
@@ -1793,8 +1889,7 @@ export async function exportPrintBatchPackage(id: string, itemIds?: string[]): P
     body: JSON.stringify(itemIds && itemIds.length > 0 ? { itemIds } : {}),
   });
   if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new ApiError(text.slice(0, 300) || res.statusText, res.status);
+    throw await apiErrorFromResponse(res);
   }
   const disposition = res.headers.get('Content-Disposition') ?? '';
   const match = /filename="([^"]+)"/.exec(disposition);
@@ -1874,8 +1969,7 @@ export async function downloadPrintResultTemplate(): Promise<{ blob: Blob; filen
     headers: { ...authHeaders() },
   });
   if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new ApiError(text.slice(0, 300) || res.statusText, res.status);
+    throw await apiErrorFromResponse(res);
   }
   const disposition = res.headers.get('Content-Disposition') ?? '';
   const match = /filename="([^"]+)"/.exec(disposition);
@@ -1897,6 +1991,8 @@ export interface PrintItem {
   status: PrintItemStatus;
   printerId?: string | null;
   printedAt?: string | null;
+  /** "Mã thẻ" — filled by the print shop in the optional `Mã thẻ` column of the result xlsx; null until reported (only ever set on a printed item). */
+  cardCode?: string | null;
   renderedAt?: string | null;
   /** Set/refreshed by "Xuất gói" — when this item was last packaged for print. */
   exportedAt?: string | null;
@@ -1940,7 +2036,8 @@ export function listPrintItems(
   params: {
     campaignId?: string;
     batchId?: string;
-    status?: PrintItemStatus;
+    /** One status, or several comma-separated (`'PENDING,RENDERED'`) — see `printItemStatusFilterOptions`. */
+    status?: string;
     className?: string;
     faculty?: string;
     q?: string;
@@ -2011,8 +2108,7 @@ export async function fetchPreviewPngObjectUrl(path: string, init?: RequestInit)
     headers: { ...authHeaders(), ...(init?.body ? { 'Content-Type': 'application/json' } : {}), ...init?.headers },
   });
   if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new ApiError(text.slice(0, 300) || res.statusText, res.status);
+    throw await apiErrorFromResponse(res);
   }
   const blob = await res.blob();
   return URL.createObjectURL(blob);
@@ -2020,6 +2116,25 @@ export async function fetchPreviewPngObjectUrl(path: string, init?: RequestInit)
 
 export const previewPrintItemUrl = (id: string, side: 'front' | 'back' = 'front') =>
   fetchPreviewPngObjectUrl(`${PRINT_ITEMS_PATH}/${id}/preview?side=${side}`);
+
+/**
+ * Same request as `previewPrintItemUrl`, but also reports WHAT the image is —
+ * the server answers with the student's approved card photo (not a card
+ * layout) when no print template is configured yet, flagged by the
+ * `X-Preview-Kind: card-photo` response header (exposed in the API's CORS
+ * config). `note` is ready-to-show text for that case, `null` for a real
+ * rendered card.
+ */
+export async function previewPrintItem(id: string, side: 'front' | 'back' = 'front'): Promise<{ url: string; note: string | null }> {
+  const res = await fetch(`${baseUrl()}${PRINT_ITEMS_PATH}/${id}/preview?side=${side}`, { headers: { ...authHeaders() } });
+  if (!res.ok) throw await apiErrorFromResponse(res);
+  const url = URL.createObjectURL(await res.blob());
+  const note =
+    res.headers.get('X-Preview-Kind') === 'card-photo'
+      ? 'Chưa chọn phôi in — đang hiển thị ảnh thẻ đã duyệt (chưa có bố cục thẻ). Chọn phôi để xem thẻ hoàn chỉnh.'
+      : null;
+  return { url, note };
+}
 
 const CARD_TEMPLATES_PATH = '/v1/card-templates';
 

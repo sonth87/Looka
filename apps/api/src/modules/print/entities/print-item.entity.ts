@@ -141,6 +141,22 @@ export class PrintItem extends BaseEntity {
   })
   printedAt?: Date | null;
 
+  /**
+   * "Mã thẻ" — the code of THIS printed card, filled in by the print shop
+   * in the optional `Mã thẻ` column of the returned result xlsx (CENTRALIZED
+   * flow, `PrintResultImportService`). Only ever set on a PRINTED item
+   * (a "In thất bại" row never stores one), and only ever by that import —
+   * `null` means "no code reported", not "no data". Deliberately NOT unique:
+   * whether a code must be unique is still an open business question, so
+   * nothing here (column, index, import) enforces it.
+   */
+  @Column('varchar', { length: 64, name: 'card_code', nullable: true })
+  @ApiPropertyOptional({
+    description:
+      'Mã thẻ do xưởng in điền khi trả kết quả in — chỉ có ở item đã in, không bắt buộc, không bắt buộc duy nhất',
+  })
+  cardCode?: string | null;
+
   @Column('text', { name: 'error_message', nullable: true })
   @ApiPropertyOptional({ description: 'Lỗi gần nhất (render hoặc in)' })
   errorMessage?: string | null;

@@ -116,6 +116,28 @@ export interface ApproveSessionResult {
    * doc comment for why a separate pass is needed).
    */
   approvedRows: OutboxItem[];
+  /**
+   * Entries of `ApproveSessionOptions.keepAttempts` this call could not honour
+   * — formatted `<stepId>:<attempt>` — because no staged row, and no
+   * already-approved row, carries that exact attempt for that step. Always
+   * `[]` on success and when no `keepAttempts` were given. A non-empty list
+   * means the whole call was refused: nothing was approved, deleted or
+   * otherwise written, so the caller can report the problem and retry.
+   */
+  missingKeepAttempts: string[];
+}
+
+/** Options for `approveSession()`. */
+export interface ApproveSessionOptions {
+  /**
+   * `step_id` -> the attempt the operator chose to keep for that step (only
+   * meaningful for kind `'face'`, the kind every capture screen photo is
+   * queued under). Overrides the default "highest attempt wins" rule for
+   * exactly those steps — see `approveSession()`'s own doc comment for the
+   * two cases (chosen attempt is staged / chosen attempt is already approved)
+   * and for the all-or-nothing refusal when the chosen attempt exists nowhere.
+   */
+  keepAttempts?: Record<string, number>;
 }
 
 /** Exponential backoff with jitter, capped so a long outage still retries hourly-ish. */
@@ -219,15 +241,38 @@ export class UploadOutboxRepository {
    *
    * A session nobody ever approves — the operator walks away, the app
    * crashes, the run is cancelled — simply never has this called for it. Its
-   * rows stay staged indefinitely: harmless and recoverable, never uploaded
-   * behind the operator's back and never deleted. See FaceCaptureApp's
-   * handleRestart/handleCancelWorkflow for the run-abandonment paths this
-   * relies on never reaching this method.
+   * rows are never uploaded behind the operator's back. What happens to them
+   * instead depends on how the run ended: a run the operator deliberately
+   * abandons (cancel / "Chụp lại toàn bộ" / moving on to the next student)
+   * has its staged rows removed through `discardStaged()` below, so face
+   * photos that will never be sent do not pile up on the kiosk; only a run
+   * cut off without any of those (app quit, crash) leaves them staged. See
+   * FaceCaptureApp's handleRestart/handleCancelWorkflow for the abandonment
+   * paths, which never reach this method.
+   *
+   * `options.keepAttempts` (multi-shot capture) lets the operator's choice
+   * override the "highest attempt wins" rule for specific `kind 'face'`
+   * steps. For each `stepId -> attempt` entry, checked BEFORE anything is
+   * written:
+   *   (a) a staged row carries that attempt — it wins; the group's other
+   *       staged rows are deleted (never uploaded), exactly like a loser
+   *       under the default rule;
+   *   (b) no staged row does, but an already-approved row does (a post-save
+   *       retake where the operator went back to the photo that was already
+   *       saved) — every staged row of that group is deleted and none is
+   *       approved, so the earlier approval simply stands;
+   *   (c) neither — the chosen photo exists nowhere. The WHOLE call is
+   *       refused: nothing is approved or deleted and the entry is reported
+   *       in `missingKeepAttempts`. Silently substituting a different photo
+   *       would upload something the operator did not pick.
+   * This check runs even when nothing is staged at all (case (b)/(c) with an
+   * empty staging area). Steps without an entry keep the default rule; a call
+   * without `options` behaves exactly as it always did.
    *
    * Returns how many rows this call actually moved, so a caller can tell a
    * genuine approval from a no-op repeat.
    */
-  public approveSession(sessionId: string): ApproveSessionResult {
+  public approveSession(sessionId: string, options?: ApproveSessionOptions): ApproveSessionResult {
     return this.db.transaction(() => {
       const staged = this.db
         .exec<Record<string, unknown>>(
@@ -236,7 +281,33 @@ export class UploadOutboxRepository {
         )
         .map(toItem);
 
-      if (staged.length === 0) return { approved: 0, superseded: [], approvedRows: [] };
+      // Only whole, positive attempt numbers are meaningful choices; anything
+      // else is dropped rather than turned into a spurious "missing" refusal.
+      const keepAttempts = new Map<string, number>();
+      for (const [stepId, attempt] of Object.entries(options?.keepAttempts ?? {})) {
+        if (Number.isInteger(attempt) && attempt >= 1) keepAttempts.set(stepId, attempt);
+      }
+
+      // Pre-write check — see the doc comment's cases (a)/(b)/(c).
+      const missing: string[] = [];
+      if (keepAttempts.size > 0) {
+        const approvedFace = this.db
+          .exec<Record<string, unknown>>(
+            `SELECT * FROM upload_outbox WHERE session_id = ? AND kind = 'face' AND approved_at IS NOT NULL`,
+            [sessionId]
+          )
+          .map(toItem);
+        for (const [stepId, attempt] of keepAttempts) {
+          const isStaged = staged.some((i) => i.kind === 'face' && i.stepId === stepId && i.attempt === attempt);
+          const isApproved = approvedFace.some((i) => i.stepId === stepId && i.attempt === attempt);
+          if (!isStaged && !isApproved) missing.push(`${stepId}:${attempt}`);
+        }
+      }
+      if (missing.length > 0) {
+        return { approved: 0, superseded: [], approvedRows: [], missingKeepAttempts: missing };
+      }
+
+      if (staged.length === 0) return { approved: 0, superseded: [], approvedRows: [], missingKeepAttempts: [] };
 
       // Group by (kind, stepId) — see D5 in the phase-11 plan. A stepId that
       // somehow fails to resolve (never observed — see toItem()'s fallback)
@@ -257,6 +328,19 @@ export class UploadOutboxRepository {
       const keep: OutboxItem[] = [];
       const superseded: Array<{ id: string; localPath: string }> = [];
       for (const list of groups.values()) {
+        // A step the operator explicitly chose an attempt for follows that
+        // choice instead of the highest-attempt rule (cases (a)/(b) in the
+        // doc comment above). (c) was already refused before reaching here.
+        const chosenAttempt =
+          list[0].kind === 'face' && list[0].stepId !== null ? keepAttempts.get(list[0].stepId) : undefined;
+        if (chosenAttempt !== undefined) {
+          const chosen = list.find((i) => i.attempt === chosenAttempt);
+          for (const item of list) {
+            if (item === chosen) keep.push(item);
+            else superseded.push({ id: item.id, localPath: item.localPath });
+          }
+          continue;
+        }
         list.sort((a, b) => (b.attempt ?? 0) - (a.attempt ?? 0) || b.createdAt - a.createdAt);
         const [winner, ...losers] = list;
         keep.push(winner);
@@ -264,13 +348,15 @@ export class UploadOutboxRepository {
       }
 
       const now = Date.now();
-      const keepPlaceholders = keep.map(() => '?').join(',');
-      this.db.run(
-        `UPDATE upload_outbox
-            SET approved_at = ?, next_retry_at = NULL
-          WHERE id IN (${keepPlaceholders})`,
-        [now, ...keep.map((i) => i.id)]
-      );
+      if (keep.length > 0) {
+        const keepPlaceholders = keep.map(() => '?').join(',');
+        this.db.run(
+          `UPDATE upload_outbox
+              SET approved_at = ?, next_retry_at = NULL
+            WHERE id IN (${keepPlaceholders})`,
+          [now, ...keep.map((i) => i.id)]
+        );
+      }
 
       // Superseded rows are still unapproved by construction (the SELECT
       // above only ever considered approved_at IS NULL rows), so this can
@@ -284,8 +370,93 @@ export class UploadOutboxRepository {
         this.db.run(`DELETE FROM upload_outbox WHERE id IN (${delPlaceholders})`, superseded.map((s) => s.id));
       }
 
-      return { approved: keep.length, superseded, approvedRows: keep };
+      return { approved: keep.length, superseded, approvedRows: keep, missingKeepAttempts: [] };
     });
+  }
+
+  /**
+   * Deletes every row of `sessionId` that has NOT been approved
+   * (`approved_at IS NULL`) and returns what it deleted so the caller can
+   * unlink the local files — the run behind them was abandoned (cancelled,
+   * retaken from scratch, or left for the next student), so nobody will ever
+   * approve them. Multi-shot capture makes this matter: each extra center
+   * shot is a full-resolution face photo staged the moment it is taken, and
+   * without this an abandoned run leaves every one of them on the kiosk.
+   *
+   * Never touches a row that was approved — released to the worker, uploading
+   * or already uploaded — so it is safe to call for a session that ALSO has
+   * approved photos (a post-save retake that was given up: the earlier
+   * approval stands, only the unsent retakes go). Idempotent: nothing left to
+   * delete returns `[]`.
+   */
+  public discardStaged(sessionId: string): Array<{ id: string; localPath: string }> {
+    return this.db.transaction(() => {
+      const rows = this.db
+        .exec<Record<string, unknown>>(
+          `SELECT id, local_path FROM upload_outbox WHERE session_id = ? AND approved_at IS NULL`,
+          [sessionId]
+        )
+        .map((r) => ({ id: String(r.id), localPath: String(r.local_path) }));
+
+      if (rows.length === 0) return [];
+
+      const placeholders = rows.map(() => '?').join(',');
+      this.db.run(`DELETE FROM upload_outbox WHERE id IN (${placeholders})`, rows.map((r) => r.id));
+      return rows;
+    });
+  }
+
+  /**
+   * Read-only counterpart of `discardStaged()` — the same rows, without
+   * deleting anything. Exists so a caller (uploads.ts's
+   * `discardStagedPhotos()`) can unlink the files FIRST and delete only the
+   * rows whose file is actually gone via `deleteOutboxRows()` below — see the
+   * 2026-09-30 audit finding these two together fix: deleting the row before
+   * the unlink is even attempted means a failed `fs.unlinkSync` (Windows
+   * EBUSY/EPERM from an AV scanner or a thumbnail reader) orphans the file
+   * with no DB reference to it ever again.
+   */
+  public listStaged(sessionId: string): Array<{ id: string; localPath: string }> {
+    return this.db
+      .exec<Record<string, unknown>>(
+        `SELECT id, local_path FROM upload_outbox WHERE session_id = ? AND approved_at IS NULL`,
+        [sessionId]
+      )
+      .map((r) => ({ id: String(r.id), localPath: String(r.local_path) }));
+  }
+
+  /**
+   * Every still-unapproved row older than `cutoffMs` (epoch ms), across ALL
+   * sessions — not just one. Feeds a boot-time sweep (uploads.ts's
+   * `sweepStalePhotos()`) that catches what `discardStaged()`/`listStaged()`
+   * cannot: a run cut off by an app quit or crash before either Save or
+   * Cancel ever ran, which otherwise leaves its staged photos — full-
+   * resolution biometric images, and every extra multi-shot CENTER frame —
+   * on the shared kiosk indefinitely.
+   */
+  public listStagedOlderThan(cutoffMs: number): Array<{ id: string; localPath: string }> {
+    return this.db
+      .exec<Record<string, unknown>>(
+        `SELECT id, local_path FROM upload_outbox WHERE approved_at IS NULL AND created_at < ?`,
+        [cutoffMs]
+      )
+      .map((r) => ({ id: String(r.id), localPath: String(r.local_path) }));
+  }
+
+  /**
+   * Deletes exactly the given rows, still guarded by `approved_at IS NULL` so
+   * a row approved in the gap since it was listed (vanishingly unlikely, but
+   * free to guard against) is never deleted out from under its own upload.
+   * The second half of the unlink-then-delete sequence `listStaged()` /
+   * `listStagedOlderThan()` start — see their own doc comments. A caller
+   * should only pass ids whose file it already confirmed is gone (unlinked,
+   * or already ENOENT); an id left out simply stays staged for the next
+   * sweep to retry.
+   */
+  public deleteOutboxRows(ids: string[]): void {
+    if (ids.length === 0) return;
+    const placeholders = ids.map(() => '?').join(',');
+    this.db.run(`DELETE FROM upload_outbox WHERE approved_at IS NULL AND id IN (${placeholders})`, ids);
   }
 
   /**

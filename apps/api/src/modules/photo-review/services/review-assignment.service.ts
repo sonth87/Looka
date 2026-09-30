@@ -26,6 +26,20 @@ export interface ScopeTarget {
   major?: string | null;
 }
 
+/**
+ * The 403 for a reviewer acting outside their assigned campaign/group. One
+ * factory so the single-set routes (`assertInScope`) and the bulk decision
+ * path (`PhotoReviewService.decideMany`, which evaluates the scope predicate
+ * itself) can never report different text or codes for the same refusal.
+ */
+export function outOfScopeError(): CustomException {
+  return new CustomException(
+    'Bạn không được phân công duyệt đợt/nhóm của hồ sơ này',
+    PHOTO_REVIEW_ERROR_CODE.OUT_OF_SCOPE,
+    HttpStatus.FORBIDDEN,
+  );
+}
+
 /** What `resolveActor` needs to decide access for one caller. */
 interface ActorScope {
   isAdmin: boolean;
@@ -318,16 +332,31 @@ export class ReviewAssignmentService {
     actorUserId: string | null,
     target: ScopeTarget,
   ): Promise<void> {
+    const inScope = await this.buildScopePredicate(actorUserId);
+    if (!inScope(target)) throw outOfScopeError();
+  }
+
+  /**
+   * Same rule as `assertInScope` (which is implemented on top of this, so the
+   * two cannot drift), resolved ONCE for a whole batch: one `resolveActor`
+   * round trip up front, then a synchronous per-target check. Bulk endpoints
+   * (`PhotoReviewService.decideMany`) call this instead of `assertInScope`
+   * per set, which would repeat the `is_admin` + assignments queries N times.
+   * An admin or a null actor (see `assertInScope`) gets an always-true
+   * predicate.
+   *
+   * The predicate is a SNAPSHOT of the actor's assignments taken now. It is
+   * cheap and synchronous, so a long-running caller can (and
+   * `decideMany`'s per-set write does) re-evaluate it against a FRESH copy of
+   * the target under that target's row lock, but it will not notice an
+   * assignment revoked after this call returned.
+   */
+  async buildScopePredicate(
+    actorUserId: string | null,
+  ): Promise<(target: ScopeTarget) => boolean> {
     const { isAdmin, rows } = await this.resolveActor(actorUserId);
-    if (isAdmin) return;
-    const allowed = rows.some((r) => this.rowGrants(r, target));
-    if (!allowed) {
-      throw new CustomException(
-        'Bạn không được phân công duyệt đợt/nhóm của hồ sơ này',
-        PHOTO_REVIEW_ERROR_CODE.OUT_OF_SCOPE,
-        HttpStatus.FORBIDDEN,
-      );
-    }
+    if (isAdmin) return () => true;
+    return (target) => rows.some((r) => this.rowGrants(r, target));
   }
 
   /**

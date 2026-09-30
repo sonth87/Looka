@@ -5,6 +5,7 @@ import {
   hasDeviceCredentials,
   getLastVerifiedDeviceState,
   setLastVerifiedDeviceState,
+  type DeviceCredentials,
 } from './secrets.js';
 import { parseRejectReason, type DeviceRejectReason } from './deviceAuth.js';
 
@@ -36,6 +37,20 @@ export interface DevicePhotoInput {
    * a later `SESSION_REPORT` device-event lands.
    */
   operatorUserId?: string;
+}
+
+/**
+ * One photo's outcome from the batch form of `POST /v1/devices/photos` — see
+ * `DeviceApiClient.pushDevicePhotos`. Mirrors `DevicePhotoBatchItemDao`
+ * server-side; results are matched to inputs by `photoId`, never by index.
+ */
+export interface DevicePhotoPushResult {
+  photoId: string;
+  ok: boolean;
+  /** HTTP status the same photo would have got as a single call — only when `ok` is false. */
+  statusCode?: number;
+  errorCode?: number | string;
+  message?: string;
 }
 
 /**
@@ -116,7 +131,15 @@ function normalizeCampaignConfig(config: CampaignConfig): CampaignConfig {
  * it rather than each caller re-declaring the same shape.
  */
 export class DeviceApiClient {
-  constructor(private readonly fetchImpl: typeof fetch = globalThis.fetch) {}
+  constructor(
+    private readonly fetchImpl: typeof fetch = globalThis.fetch,
+    /**
+     * Where this client reads the device identity from — injectable purely so
+     * tests can run without Electron's encrypted secret store. Every
+     * production call site relies on the default.
+     */
+    private readonly credsProvider: () => DeviceCredentials | null = getDeviceCredentials
+  ) {}
 
   /**
    * Returns `null` when this kiosk has no device identity yet, or when the
@@ -142,7 +165,7 @@ export class DeviceApiClient {
    * policy.
    */
   async fetchCampaignConfigResult(): Promise<ConfigFetchResult> {
-    const creds = getDeviceCredentials();
+    const creds = this.credsProvider();
     if (!creds || !creds.apiBaseUrl) return { status: 'unreachable' };
 
     try {
@@ -191,7 +214,7 @@ export class DeviceApiClient {
   async pushEvents(
     events: { type: string; occurredAt: string; metadata?: Record<string, unknown> }[]
   ): Promise<'ok' | 'unauthorized' | 'failed'> {
-    const creds = getDeviceCredentials();
+    const creds = this.credsProvider();
     if (!creds || !creds.apiBaseUrl) return 'failed';
     if (events.length === 0) return 'ok';
 
@@ -241,37 +264,49 @@ export class DeviceApiClient {
    * for e.g. a validation 400 that will never succeed on retry.
    */
   async pushDevicePhoto(input: DevicePhotoInput): Promise<{ photoId: string }> {
-    const creds = getDeviceCredentials();
-    if (!creds || !creds.apiBaseUrl) {
-      throw new FsError(0, FS_ERROR_CODES.NETWORK, 'No device credentials/apiBaseUrl configured');
-    }
-
-    let res: Response;
-    try {
-      res = await this.fetchImpl(`${creds.apiBaseUrl}/v1/devices/photos`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-device-id': creds.deviceId,
-          'x-device-secret': creds.deviceSecret,
-        },
-        body: JSON.stringify(input),
-      });
-    } catch (err) {
-      throw new FsError(0, FS_ERROR_CODES.NETWORK, (err as Error).message);
-    }
-
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new FsError(
-        res.status,
-        FS_ERROR_CODES.HTTP,
-        `devices/photos ${res.status}: ${text.slice(0, 300)}`
-      );
-    }
-
+    const res = await this.postDevice('/v1/devices/photos', 'devices/photos', input);
     const envelope = (await res.json()) as { data: { photoId: string } };
     return envelope.data;
+  }
+
+  /**
+   * The 1-n form of `pushDevicePhoto`: several photos in ONE
+   * `POST /v1/devices/photos` request (`{ photos: [...] }`). Resolves with
+   * the server's per-photo results — a photo the server rejected (bad data
+   * URL, a session owned by another device, ...) is reported there with its
+   * own `statusCode`, it does not make this call throw.
+   *
+   * Throws `FsError` when the request AS A WHOLE fails, with the same
+   * contract as `pushDevicePhoto`: `httpStatus` 0 for no credentials /
+   * network error / an unreadable success body (all retryable), the real
+   * status otherwise. `UploadWorker` relies on that: a whole-batch 400/404
+   * means an API that predates the batch body shape and makes it fall back
+   * to single sends.
+   */
+  async pushDevicePhotos(inputs: DevicePhotoInput[]): Promise<DevicePhotoPushResult[]> {
+    const res = await this.postDevice('/v1/devices/photos', 'devices/photos batch', {
+      photos: inputs,
+    });
+
+    let envelope: { data?: { results?: unknown } } | null;
+    try {
+      envelope = (await res.json()) as { data?: { results?: unknown } } | null;
+    } catch {
+      envelope = null;
+    }
+    const results = envelope?.data?.results;
+    if (!Array.isArray(results)) {
+      // A 2xx that is not the batch response shape (e.g. an old API that
+      // somehow accepted the body) — treated as retryable rather than as
+      // "every photo is fine", so no photo is ever marked uploaded on a
+      // response this client could not actually read.
+      throw new FsError(
+        0,
+        FS_ERROR_CODES.HTTP,
+        'devices/photos batch: response had no results array'
+      );
+    }
+    return results as DevicePhotoPushResult[];
   }
 
   /**
@@ -282,21 +317,38 @@ export class DeviceApiClient {
    * `FsError` rather than a generic error.
    */
   async pushDeviceVideo(input: DeviceVideoInput): Promise<{ videoId: string }> {
-    const creds = getDeviceCredentials();
+    const res = await this.postDevice('/v1/devices/videos', 'devices/videos', input);
+    const envelope = (await res.json()) as { data: { videoId: string } };
+    return envelope.data;
+  }
+
+  /**
+   * The POST scaffolding every device-authenticated push above shares:
+   * credentials check, the `x-device-id`/`x-device-secret` headers, and the
+   * `FsError` contract (httpStatus 0 = no credentials / network error, the
+   * real status for a non-2xx, with the first 300 chars of its body). Kept in
+   * ONE place so a change to how a device authenticates cannot reach the
+   * single-photo and video routes but miss the batch one (or the reverse) —
+   * `UploadWorker` would treat a batch-only 401/403 as a non-retryable
+   * whole-batch failure and quietly fall back to single sends, hiding it.
+   * `label` only names the request in the error message.
+   */
+  private async postDevice(path: string, label: string, body: unknown): Promise<Response> {
+    const creds = this.credsProvider();
     if (!creds || !creds.apiBaseUrl) {
       throw new FsError(0, FS_ERROR_CODES.NETWORK, 'No device credentials/apiBaseUrl configured');
     }
 
     let res: Response;
     try {
-      res = await this.fetchImpl(`${creds.apiBaseUrl}/v1/devices/videos`, {
+      res = await this.fetchImpl(`${creds.apiBaseUrl}${path}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'x-device-id': creds.deviceId,
           'x-device-secret': creds.deviceSecret,
         },
-        body: JSON.stringify(input),
+        body: JSON.stringify(body),
       });
     } catch (err) {
       throw new FsError(0, FS_ERROR_CODES.NETWORK, (err as Error).message);
@@ -307,12 +359,10 @@ export class DeviceApiClient {
       throw new FsError(
         res.status,
         FS_ERROR_CODES.HTTP,
-        `devices/videos ${res.status}: ${text.slice(0, 300)}`
+        `${label} ${res.status}: ${text.slice(0, 300)}`
       );
     }
-
-    const envelope = (await res.json()) as { data: { videoId: string } };
-    return envelope.data;
+    return res;
   }
 }
 

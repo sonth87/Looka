@@ -282,4 +282,184 @@ describeDb('addDevicePhoto session upsert (PhotoService)', () => {
     );
     expect(photoRows.length).toBe(0);
   });
+
+  describe('addDevicePhotos (1-n, POST /v1/devices/photos batch)', () => {
+    const outboxCount = async (photoId: string): Promise<number> => {
+      const rows: Array<{ count: number }> = await dataSource.query(
+        `SELECT COUNT(*)::int AS count FROM upload_outbox WHERE photo_id = $1`,
+        [photoId],
+      );
+      return rows[0].count;
+    };
+
+    const photoRowCount = async (photoId: string): Promise<number> => {
+      const rows: Array<{ count: number }> = await dataSource.query(
+        `SELECT COUNT(*)::int AS count FROM photos WHERE id = $1`,
+        [photoId],
+      );
+      return rows[0].count;
+    };
+
+    test('two photos of the SAME session in one call both persist, each with its outbox row', async () => {
+      const sessionId = randomUUID();
+      const a = randomUUID();
+      const b = randomUUID();
+
+      const res = await photoService.addDevicePhotos(deviceId, campaignId, [
+        {
+          photoId: a,
+          sessionId,
+          stepId: 'FRONT',
+          attempt: 1,
+          dataUrl: jpegDataUrl(1),
+        },
+        {
+          photoId: b,
+          sessionId,
+          stepId: 'LEFT',
+          attempt: 1,
+          dataUrl: jpegDataUrl(2),
+        },
+      ]);
+
+      expect(res).toMatchObject({ requested: 2, succeeded: 2, failed: 0 });
+      expect(res.results.map((r) => [r.photoId, r.ok])).toEqual([
+        [a, true],
+        [b, true],
+      ]);
+      expect(await photoRowCount(a)).toBe(1);
+      expect(await photoRowCount(b)).toBe(1);
+      expect(await outboxCount(a)).toBe(1);
+      expect(await outboxCount(b)).toBe(1);
+      const sessions: Array<{ count: number }> = await dataSource.query(
+        `SELECT COUNT(*)::int AS count FROM sessions WHERE id = $1`,
+        [sessionId],
+      );
+      expect(sessions[0].count).toBe(1);
+    });
+
+    test('a bad dataUrl next to a good photo gives a per-item 400 while the good one persists', async () => {
+      const sessionId = randomUUID();
+      const bad = randomUUID();
+      const good = randomUUID();
+
+      const res = await photoService.addDevicePhotos(deviceId, campaignId, [
+        {
+          photoId: bad,
+          sessionId,
+          stepId: 'FRONT',
+          attempt: 1,
+          dataUrl: 'not a data url',
+        },
+        {
+          photoId: good,
+          sessionId,
+          stepId: 'LEFT',
+          attempt: 1,
+          dataUrl: jpegDataUrl(2),
+        },
+      ]);
+
+      expect(res).toMatchObject({ requested: 2, succeeded: 1, failed: 1 });
+      expect(res.results[0]).toMatchObject({
+        photoId: bad,
+        ok: false,
+        statusCode: 400,
+      });
+      expect(res.results[1]).toMatchObject({ photoId: good, ok: true });
+      expect(await photoRowCount(bad)).toBe(0);
+      expect(await photoRowCount(good)).toBe(1);
+    });
+
+    test("another device's session gives a per-item 403 and plants nothing, while the caller's own photo in the same call persists", async () => {
+      const foreignSession = randomUUID();
+      await photoService.addDevicePhoto(deviceId, campaignId, {
+        photoId: randomUUID(),
+        sessionId: foreignSession,
+        stepId: 'FRONT',
+        attempt: 1,
+        dataUrl: jpegDataUrl(1),
+      });
+
+      const [otherCampaign]: Array<{ id: string }> = await dataSource.query(
+        `INSERT INTO campaigns (name) VALUES ($1) RETURNING id`,
+        [`add-device-photos-other-${randomUUID()}`],
+      );
+      const [otherDevice]: Array<{ id: string }> = await dataSource.query(
+        `INSERT INTO devices (campaign_id, name, device_secret_hash) VALUES ($1, $2, $3) RETURNING id`,
+        [
+          otherCampaign.id,
+          `add-device-photos-other-${randomUUID()}`,
+          'z'.repeat(64),
+        ],
+      );
+      const hijack = randomUUID();
+      const own = randomUUID();
+
+      const res = await photoService.addDevicePhotos(
+        otherDevice.id,
+        otherCampaign.id,
+        [
+          {
+            photoId: hijack,
+            sessionId: foreignSession,
+            stepId: 'LEFT',
+            attempt: 1,
+            dataUrl: jpegDataUrl(2),
+          },
+          {
+            photoId: own,
+            sessionId: randomUUID(),
+            stepId: 'FRONT',
+            attempt: 1,
+            dataUrl: jpegDataUrl(3),
+          },
+        ],
+      );
+
+      expect(res).toMatchObject({ succeeded: 1, failed: 1 });
+      expect(res.results[0]).toMatchObject({
+        photoId: hijack,
+        ok: false,
+        statusCode: 403,
+      });
+      expect(res.results[1]).toMatchObject({ photoId: own, ok: true });
+      expect(await photoRowCount(hijack)).toBe(0);
+      expect(await outboxCount(hijack)).toBe(0);
+      expect(await photoRowCount(own)).toBe(1);
+    });
+
+    test('re-sending the same batch (kiosk retry after a lost response) is idempotent: still one photo row and one outbox row each', async () => {
+      const sessionId = randomUUID();
+      const items = [
+        {
+          photoId: randomUUID(),
+          sessionId,
+          stepId: 'FRONT',
+          attempt: 1,
+          dataUrl: jpegDataUrl(1),
+        },
+        {
+          photoId: randomUUID(),
+          sessionId,
+          stepId: 'LEFT',
+          attempt: 1,
+          dataUrl: jpegDataUrl(2),
+        },
+      ];
+
+      await photoService.addDevicePhotos(deviceId, campaignId, items);
+      const second = await photoService.addDevicePhotos(
+        deviceId,
+        campaignId,
+        items,
+      );
+
+      expect(second).toMatchObject({ succeeded: 2, failed: 0 });
+      for (const item of items) {
+        expect(await photoRowCount(item.photoId)).toBe(1);
+        expect(await outboxCount(item.photoId)).toBe(1);
+      }
+    });
+  });
 });

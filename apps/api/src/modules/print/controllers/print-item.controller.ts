@@ -124,10 +124,19 @@ export class PrintItemController {
       side === 'back' ? 'back' : side === 'front' || !side ? 'front' : null;
     if (!resolvedSide)
       throw new BadRequestException('side phải là front hoặc back');
-    const png = await this.itemService.preview(id, resolvedSide);
-    res.setHeader('Content-Type', 'image/png');
+    const { buffer, kind } = await this.itemService.preview(id, resolvedSide);
+    // A rendered card is always a PNG; the approved-photo stand-in keeps the
+    // photo's own bytes (usually JPEG), so the type is sniffed rather than
+    // assumed. `X-Preview-Kind` lets the CMS say which one it is showing.
+    const isJpeg =
+      buffer.length > 2 && buffer[0] === 0xff && buffer[1] === 0xd8;
+    res.setHeader('Content-Type', isJpeg ? 'image/jpeg' : 'image/png');
+    res.setHeader(
+      'X-Preview-Kind',
+      kind === 'CARD_PHOTO' ? 'card-photo' : 'rendered',
+    );
     res.setHeader('Cache-Control', 'no-store');
-    res.send(png);
+    res.send(buffer);
   }
 
   @Post(':id/reprint')

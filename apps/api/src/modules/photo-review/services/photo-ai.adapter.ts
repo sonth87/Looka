@@ -4,6 +4,7 @@ import {
   success,
   retryable,
   terminal,
+  timeout,
   unavailable,
 } from '@app/shared/integrations/integration-outcome';
 import {
@@ -20,10 +21,12 @@ import {
   AiImageEditClient,
   AiImageEditError,
   AiImageEditRetryableError,
+  AiImageEditTimeoutError,
 } from './ai-image-edit.client';
 import {
   PhotoReviewSidecarService,
   SidecarError,
+  SidecarTimeoutError,
 } from './photo-review-sidecar.service';
 
 /**
@@ -66,10 +69,16 @@ export class PhotoAiAdapter implements PhotoAiPort {
       const result = await this.sidecar.cardPhoto(input);
       return success(result);
     } catch (error) {
-      // `PhotoReviewSidecarService` has a single error type for every
-      // failure mode (unreachable, non-2xx, timeout, bad JSON) — see
-      // `SidecarError`'s own doc comment — so there is nothing to classify
-      // beyond "the sidecar is not usable right now".
+      // `SidecarTimeoutError` checked first (it extends `SidecarError`) —
+      // 2026-09-29: a timeout classifies as `Timeout` (→ `PENDING`,
+      // auto-recovered by `AiEditRecoveryService`) rather than
+      // `Unavailable` (→ `FAILED`). Every other `SidecarError` (unreachable,
+      // non-2xx, bad JSON) still classifies as `Unavailable` — the sidecar
+      // this talks to is permanently dead (see `PhotoReviewSidecarService`'s
+      // own top doc comment), so those stay a hard, non-retried failure.
+      if (error instanceof SidecarTimeoutError) {
+        return timeout(errorMessage(error));
+      }
       return unavailable(errorMessage(error));
     }
   }
@@ -81,6 +90,9 @@ export class PhotoAiAdapter implements PhotoAiPort {
       const result = await this.sidecar.identitySimilarity(input);
       return success(result);
     } catch (error) {
+      if (error instanceof SidecarTimeoutError) {
+        return timeout(errorMessage(error));
+      }
       return unavailable(errorMessage(error));
     }
   }
@@ -92,6 +104,17 @@ export class PhotoAiAdapter implements PhotoAiPort {
       const result = await this.aiImageEdit.edit(input);
       return success(result);
     } catch (error) {
+      // Checked first (it extends `AiImageEditError`, not
+      // `AiImageEditRetryableError` — see that class's own doc comment):
+      // this app's own call (or undici's own lower ceiling underneath it)
+      // timing out is worth an automatic retry via the AI-edit recovery
+      // sweep (`Timeout` → `PENDING`), same as the service's own 503/504
+      // (`Retryable` → also `PENDING`, see `resolveAiJobFailureStatus`) —
+      // but tracked as a distinct outcome kind since they are different
+      // failure modes (our timeout vs. the service's own signal).
+      if (error instanceof AiImageEditTimeoutError) {
+        return timeout(error.message);
+      }
       if (error instanceof AiImageEditRetryableError) {
         return retryable(error.message);
       }

@@ -17,7 +17,7 @@
  * something to confirm on real hardware, same honesty rule as the rest of
  * that document.
  */
-import { spawn, ChildProcess } from 'node:child_process';
+import { spawn, execFile, execFileSync, ChildProcess } from 'node:child_process';
 import { existsSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { app, shell } from 'electron';
@@ -64,6 +64,67 @@ function gphoto2BinaryPath(): string {
   const devLocal = path.join(__dirname, '../../resources/gphoto2-win/gphoto2.exe');
   if (existsSync(devLocal)) return devLocal;
   return 'gphoto2';
+}
+
+/**
+ * Graceful-stop helper (`gp2-ctrlc.exe`, source `scripts/gp2-ctrlc.cs`,
+ * built next to `gphoto2.exe` by `scripts/setup-gphoto2-windows.ps1`).
+ * Node's `child.kill()` on Windows is always an abrupt `TerminateProcess`;
+ * for the long-running `gphoto2 --capture-movie` live-view process that
+ * leaves the camera's PTP session open with no close handshake, and a Sony
+ * A7 III stops answering PTP entirely after a handful of those kills
+ * (reproduced 2026-09-30 on real hardware: 6 start + hard-kill cycles, then
+ * even `gphoto2 --summary` timed out until the USB cable was physically
+ * replugged). gphoto2 traps SIGINT and closes the session properly, so a
+ * real Ctrl+C event is the graceful stop; this helper is what delivers it.
+ * Returns `undefined` off Windows or when the helper wasn't built — every
+ * caller then falls back to the plain hard kill, exactly the old behavior.
+ */
+function ctrlcHelperPath(): string | undefined {
+  if (process.platform !== 'win32') return undefined;
+  const bin = gphoto2BinaryPath();
+  if (!path.isAbsolute(bin)) return undefined;
+  const helper = path.join(path.dirname(bin), 'gp2-ctrlc.exe');
+  return existsSync(helper) ? helper : undefined;
+}
+
+/**
+ * Set once a graceful stop was requested but gphoto2 ignored it and had to
+ * be hard-killed anyway (e.g. this process inherited "ignore Ctrl+C" from
+ * whatever launched it) — from then on `requestGracefulStop` is skipped so
+ * every later stop doesn't pay the graceful-wait for nothing.
+ */
+let gracefulStopUnavailable = false;
+
+/**
+ * Fire-and-forget request for `child` to shut down on its own. Returns
+ * `false` (caller must hard-kill) when graceful stop isn't possible here.
+ */
+function requestGracefulStop(child: ChildProcess): boolean {
+  if (gracefulStopUnavailable || child.pid === undefined) return false;
+  const helper = ctrlcHelperPath();
+  if (!helper) return false;
+  execFile(helper, [String(child.pid)], { windowsHide: true }, (err) => {
+    if (err) console.warn(`[TetheredCamera] graceful-stop helper failed: ${err.message}`);
+  });
+  return true;
+}
+
+/**
+ * Same Ctrl+C request as `requestGracefulStop`, but blocks (~100ms) until
+ * the helper has actually sent it — for app quit, where an async helper
+ * could still be mid-flight when the process exits.
+ */
+function requestGracefulStopSync(child: ChildProcess): boolean {
+  if (gracefulStopUnavailable || child.pid === undefined) return false;
+  const helper = ctrlcHelperPath();
+  if (!helper) return false;
+  try {
+    execFileSync(helper, [String(child.pid)], { windowsHide: true, timeout: 1500 });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -659,10 +720,50 @@ const MIN_PLAUSIBLE_JPEG_BYTES = 10_000;
  */
 const POST_CAPTURE_COOLDOWN_MS = 3_000;
 
+/**
+ * 2026-09-30 fix (real-hardware field report: "Chụp thử" — `*** Error (-53):
+ * 'Could not claim the USB device' ***" — right after live view had just
+ * stopped). `stopMovieStreamAndWait()` already waits for the killed movie-
+ * stream process's own `close` event (or a 2s safety net) before
+ * `withCameraLock` runs the next queued command, but a live check on the
+ * exact machine reproducing this (`Get-CimInstance Win32_Process`) caught the
+ * OLD `gphoto2.exe --capture-movie` process still alive — and gone a few
+ * seconds later on its own — confirming the Node-level "process closed" event
+ * can fire before Windows' WinUSB driver stack has actually finished
+ * releasing the claimed interface underneath it. A brand new `gphoto2.exe`
+ * invocation racing that tail end of driver cleanup fails this specific way.
+ *
+ * Retried ONLY for this exact, string-matched error — NOT a generic
+ * retry-on-any-failure policy, which `MIN_PLAUSIBLE_JPEG_BYTES`'s own doc
+ * comment above already rules out for a real shutter release (retrying a
+ * capture that may have actually fired risks a silent, unconsented second
+ * shot). "Could not claim the USB device" is provably pre-flight: gphoto2
+ * needs the interface claimed before it can send even the first PTP command,
+ * so the shutter cannot have fired yet — safe to retry the exact same
+ * subprocess call from scratch.
+ */
+const CLAIM_DEVICE_ERROR_PATTERN = /could not claim/i;
+const CLAIM_DEVICE_RETRY_DELAY_MS = 700;
+const CLAIM_DEVICE_MAX_ATTEMPTS = 3;
+
 /** Wrapped in `withCameraLock` — shared by both exported capture functions below, see that helper's own doc comment for why. */
 async function captureViaStdout(args: string[], timeoutMs: number): Promise<Buffer> {
   return withCameraLock(async () => {
-    const { code, stdout, stderr } = await runGphoto2Binary([...pinnedCameraArgs(), ...args, '--stdout'], timeoutMs);
+    let code: number | null = null;
+    let stdout: Buffer = Buffer.alloc(0);
+    let stderr = '';
+    for (let attempt = 1; attempt <= CLAIM_DEVICE_MAX_ATTEMPTS; attempt++) {
+      ({ code, stdout, stderr } = await runGphoto2Binary(
+        [...pinnedCameraArgs(), ...args, '--stdout'],
+        timeoutMs,
+      ));
+      if (code === 0 || !CLAIM_DEVICE_ERROR_PATTERN.test(stderr)) break;
+      if (attempt === CLAIM_DEVICE_MAX_ATTEMPTS) break;
+      console.log(
+        `[TetheredCamera] captureViaStdout: USB claim race (attempt ${attempt}/${CLAIM_DEVICE_MAX_ATTEMPTS}) — retrying in ${CLAIM_DEVICE_RETRY_DELAY_MS}ms`,
+      );
+      await new Promise((r) => setTimeout(r, CLAIM_DEVICE_RETRY_DELAY_MS));
+    }
     // Set before any of the validation throws below so EVERY outcome —
     // success, gphoto2 error exit, or a plausible-but-empty/corrupt result —
     // gives the camera the same real cooldown before the next command.
@@ -932,13 +1033,32 @@ function ensureMovieStream(): Promise<MovieStream> {
   return movieStreamStarting;
 }
 
-/** Kills the movie stream (if running) and waits for the process to actually exit before resolving — `withCameraLock` depends on this to guarantee the camera's PTP session is truly free before any one-shot command (detect/capture/config) runs. Killing a child process on Windows is always an abrupt `TerminateProcess`, not a graceful signal (a Node/Windows platform limitation, not something fixable here) — same abrupt-kill approach `runGphoto2`'s own timeout handler already uses elsewhere in this file. */
+/**
+ * How long a graceful (Ctrl+C) stop gets to finish before falling back to a
+ * hard kill. gphoto2 normally exits well inside this (finishes the current
+ * frame, closes the PTP session, exits).
+ */
+const MOVIE_GRACEFUL_STOP_WAIT_MS = 2_500;
+
+/**
+ * Stops the movie stream (if running) and waits for the process to actually exit before resolving — `withCameraLock` depends on this to guarantee the camera's PTP session is truly free before any one-shot command (detect/capture/config) runs.
+ *
+ * 2026-09-30 fix (real-hardware, Sony A7 III): this used to be ALWAYS an
+ * abrupt `child.kill()` (= `TerminateProcess` on Windows), which leaves the
+ * camera's PTP session open with no close handshake — after ~6 such kills
+ * the Sony stopped answering PTP entirely (every later gphoto2 call timed
+ * out until the USB cable was replugged). It now first asks gphoto2 to stop
+ * itself via a real Ctrl+C (`gp2-ctrlc.exe`, see `ctrlcHelperPath`) so it
+ * closes the session properly, and only hard-kills if that didn't work in
+ * time (or the helper isn't available) — the old behavior remains the
+ * fallback.
+ */
 function stopMovieStreamAndWait(): Promise<void> {
   const stream = movieStream;
   if (!stream) return Promise.resolve();
   if (stream.idleTimer) clearTimeout(stream.idleTimer);
   // 2026-09-24 fix (confirmed audit finding) — see `MovieStream.
-  // intentionalStop`'s own doc comment: this kill is deliberate, not a sign
+  // intentionalStop`'s own doc comment: this stop is deliberate, not a sign
   // the camera disappeared.
   stream.intentionalStop = true;
   return new Promise<void>((resolve) => {
@@ -949,12 +1069,46 @@ function stopMovieStreamAndWait(): Promise<void> {
       resolve();
     };
     stream.child.once('close', done);
-    stream.child.kill();
-    // Safety net — don't let a caller wait forever if 'close' never fires.
-    setTimeout(done, 2000);
+    const startedAt = Date.now();
+    if (requestGracefulStop(stream.child)) {
+      let hardKilled = false;
+      setTimeout(() => {
+        if (settled) return;
+        // gphoto2 ignored the Ctrl+C (or hung) — stop trying for the rest of
+        // this run so every later stop doesn't wait this long for nothing.
+        hardKilled = true;
+        gracefulStopUnavailable = true;
+        console.warn(`[TetheredCamera] graceful stop got no response in ${MOVIE_GRACEFUL_STOP_WAIT_MS}ms — hard-killing and disabling graceful stop`);
+        stream.child.kill();
+      }, MOVIE_GRACEFUL_STOP_WAIT_MS);
+      stream.child.once('close', () => {
+        if (!hardKilled) console.log(`[TetheredCamera] live-view stream stopped gracefully in ${Date.now() - startedAt}ms`);
+      });
+      // Safety net — don't let a caller wait forever if 'close' never fires.
+      setTimeout(done, MOVIE_GRACEFUL_STOP_WAIT_MS + 2000);
+    } else {
+      stream.child.kill();
+      setTimeout(done, 2000);
+    }
   }).then(() => {
     if (movieStream === stream) movieStream = null;
   });
+}
+
+/**
+ * App-quit hook. Without this the live-view `gphoto2` child was simply left
+ * running when Electron exited (Windows doesn't kill children with the
+ * parent) — an orphan still holding the camera's PTP session, so the NEXT
+ * app launch found the camera busy or half-dead. Synchronous best-effort:
+ * sends the graceful Ctrl+C (or a hard kill if that isn't possible) and lets
+ * gphoto2 finish shutting itself down after Electron has gone.
+ */
+export function stopTetheredLiveViewForQuit(): void {
+  const stream = movieStream;
+  if (!stream) return;
+  if (stream.idleTimer) clearTimeout(stream.idleTimer);
+  stream.intentionalStop = true;
+  if (!requestGracefulStopSync(stream.child)) stream.child.kill();
 }
 
 function scheduleMovieIdleStop(): void {

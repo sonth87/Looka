@@ -24,11 +24,15 @@ export class PrintResultImportDao {
       'Số dòng khớp được mã SV trong đợt (dù trạng thái có đọc được hay không)',
   })
   matchedRows: number;
-  @ApiProperty() printedRows: number;
+  @ApiProperty({
+    description:
+      'Số dòng "Đã in" được chấp nhận — gồm cả dòng chỉ cập nhật mã thẻ hoặc liệt kê lại thẻ đã in trước đó (không ghi gì thêm)',
+  })
+  printedRows: number;
   @ApiProperty() failedRows: number;
   @ApiProperty({
     description:
-      'Số dòng không xử lý được — không khớp mã SV, HOẶC khớp mã SV nhưng không hiểu giá trị trạng thái (1 dòng có thể vừa matched vừa unmatched)',
+      'Số dòng không xử lý được — không khớp mã SV, khớp mã SV nhưng không hiểu giá trị trạng thái, HOẶC "Đã in" kèm mã thẻ quá 64 ký tự (1 dòng có thể vừa matched vừa unmatched)',
   })
   unmatchedRows: number;
   @ApiPropertyOptional({ description: 'Link tải file báo cáo lỗi, nếu có' })

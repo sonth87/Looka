@@ -4,6 +4,7 @@ import { CaptureWorkflow } from '@face/core';
 import {
   checkFramesReadiness,
   framesForWorkflow,
+  logicalRolesByStepId,
   isFrameLikelyBlank,
   allSideFramesReady,
   firstNotReadyFrameRole,
@@ -221,4 +222,45 @@ test('firstNotReadyFrameRole is null when the workflow has no side frames at all
     workflow([{ id: 's-front', type: 'FRONT', instruction: 'a', capture: { enabled: true } }])
   );
   assert.equal(firstNotReadyFrameRole(frames, {}), null);
+});
+
+test('logicalRolesByStepId honours cameraRole on CMS-catalog CUSTOM steps instead of collapsing them to CENTER', () => {
+  const wf = workflow([
+    { id: 'step-0-FRONT', type: 'CUSTOM', instruction: 'a', capture: { enabled: true }, cameraRole: 'CENTER' },
+    { id: 'step-1-LEFT_30', type: 'CUSTOM', instruction: 'b', capture: { enabled: true }, cameraRole: 'LEFT' },
+    { id: 'step-2-RIGHT_30', type: 'CUSTOM', instruction: 'c', capture: { enabled: true }, cameraRole: 'RIGHT' },
+  ]);
+
+  const roles = logicalRolesByStepId(wf);
+
+  assert.equal(roles.get('step-0-FRONT'), 'CENTER');
+  assert.equal(roles.get('step-1-LEFT_30'), 'LEFT');
+  assert.equal(roles.get('step-2-RIGHT_30'), 'RIGHT');
+});
+
+test('logicalRolesByStepId falls back to the step type default when no cameraRole is set', () => {
+  const wf = workflow([
+    { id: 's-front', type: 'FRONT', instruction: 'a', capture: { enabled: true } },
+    { id: 's-up', type: 'UP', instruction: 'b', capture: { enabled: true } },
+    { id: 's-custom', type: 'CUSTOM', instruction: 'c', capture: { enabled: true } },
+  ]);
+
+  const roles = logicalRolesByStepId(wf);
+
+  assert.equal(roles.get('s-front'), 'CENTER');
+  assert.equal(roles.get('s-up'), 'UP');
+  assert.equal(roles.get('s-custom'), 'CENTER');
+  assert.equal(roles.get('unknown-step'), undefined);
+});
+
+test('logicalRolesByStepId read from the original workflow survives round planning rewriting cameraRole', () => {
+  const original = workflow([
+    { id: 's-front', type: 'CUSTOM', instruction: 'a', capture: { enabled: true }, cameraRole: 'CENTER' },
+    { id: 's-left', type: 'CUSTOM', instruction: 'b', capture: { enabled: true }, cameraRole: 'LEFT' },
+  ]);
+  // What `buildRoundPlan` produces on a one-camera kiosk: every step baked to CENTER.
+  const baked = workflow(original.steps.map((s) => ({ ...s, cameraRole: 'CENTER' as const })));
+
+  assert.equal(logicalRolesByStepId(baked).get('s-left'), 'CENTER');
+  assert.equal(logicalRolesByStepId(original).get('s-left'), 'LEFT');
 });

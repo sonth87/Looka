@@ -22,11 +22,12 @@ import { slugifyCode } from '../slug';
 const DEFAULT_SIZE = '4x6';
 const DEFAULT_DPI = 300;
 const DEFAULT_BACKGROUND_COLOR = '#F37320';
+const DEFAULT_NAME_BACKGROUND_COLOR = 'Flame Orange'
 const DEFAULT_HEAD_HEIGHT_RATIO: [number, number] = [0.7, 0.8];
 const DEFAULT_EYE_LINE_RATIO: [number, number] = [0.4, 0.45];
 
 function cardSpecSummary(spec: CardSpec): string {
-  return `${spec.size ?? DEFAULT_SIZE} · ${spec.dpi ?? DEFAULT_DPI}dpi · nền ${spec.backgroundColor ?? DEFAULT_BACKGROUND_COLOR}`;
+  return `${spec.size ?? DEFAULT_SIZE} · ${spec.dpi ?? DEFAULT_DPI}dpi · Background color ${spec.backgroundColor ?? DEFAULT_BACKGROUND_COLOR} and name Background color ${spec.nameBackgroundColor ?? DEFAULT_NAME_BACKGROUND_COLOR}`;
 }
 
 

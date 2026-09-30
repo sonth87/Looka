@@ -1,4 +1,5 @@
 import { SsoAuthGuard } from '@app/shared/auth/index';
+import { ApiResponseDecorator } from '@app/shared/http/api-response.decorator';
 import {
   Body,
   Controller,
@@ -24,6 +25,7 @@ import {
 } from '@nestjs/swagger';
 import type { Request } from 'express';
 import {
+  BulkReviewDecisionResultDao,
   MyReviewCampaignDao,
   PhotoVariantDao,
   ReviewEventDao,
@@ -34,6 +36,7 @@ import {
 import {
   AiEditDto,
   ApproveRejectDto,
+  BulkApproveRejectDto,
   ExportQueryDto,
   ListEventsQueryDto,
   ListSetsQueryDto,
@@ -41,6 +44,7 @@ import {
 } from '../dto';
 import { ReviewerRoleGuard } from '../guards/reviewer-role.guard';
 import {
+  AiEditJobOrigin,
   MAX_UPLOAD_BYTES,
   PhotoReviewSetStatus,
 } from '../photo-review.constants';
@@ -185,10 +189,15 @@ export class ReviewController {
     @Param('id') id: string,
     @Req() req: Request,
   ): Promise<ReviewSetDetailDao> {
+    // `AiEditJobOrigin.USER` (2026-09-29, priority-preemption rework) — a
+    // reviewer's own click on this endpoint is exactly the "high-priority,
+    // must jump ahead of background work" case that origin exists to mark;
+    // see `PhotoReviewService.reprocess`'s own doc comment.
     return this.photoReviewService.reprocess(
       id,
       req.user?.id ?? null,
       this.apiBaseUrl(req),
+      AiEditJobOrigin.USER,
     );
   }
 
@@ -303,6 +312,39 @@ export class ReviewController {
       req.user?.id ?? null,
       this.apiBaseUrl(req),
     );
+  }
+
+  /**
+   * 1-n approve: one id or many in `setIds`. Partial success — each set is
+   * its own transaction and reports its own result, so a locked/out-of-scope/
+   * missing set never blocks the others. Declared next to (not instead of)
+   * `sets/:id/approve`, which the CMS detail modal still uses.
+   */
+  @Post('sets/approve')
+  @ApiOperation({
+    summary:
+      'Approve one or many sets (1-n) — per-set results, partial success',
+  })
+  @ApiResponseDecorator(BulkReviewDecisionResultDao)
+  approveMany(
+    @Body() dto: BulkApproveRejectDto,
+    @Req() req: Request,
+  ): Promise<BulkReviewDecisionResultDao> {
+    return this.photoReviewService.approveMany(dto, req.user?.id ?? null);
+  }
+
+  /** 1-n reject — same contract as `approveMany`; one shared `note` for every set. */
+  @Post('sets/reject')
+  @ApiOperation({
+    summary:
+      'Reject one or many sets (1-n), with a shared note — per-set results, partial success',
+  })
+  @ApiResponseDecorator(BulkReviewDecisionResultDao)
+  rejectMany(
+    @Body() dto: BulkApproveRejectDto,
+    @Req() req: Request,
+  ): Promise<BulkReviewDecisionResultDao> {
+    return this.photoReviewService.rejectMany(dto, req.user?.id ?? null);
   }
 
   @Post('sets/:id/approve')

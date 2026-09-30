@@ -88,8 +88,13 @@ describe('WorkflowEngine.recordExternalCapture', () => {
     // `triggerSource: 'EXTERNAL'` is additive plumbing added for the
     // auto-vs-manual capture stats feature (discussion doc §3.7.1) — see
     // TriggerSource.test.ts for full coverage of the mapping.
+    //
+    // `attempt` is the step's `attempts + 1` read at emit time. This path bumps
+    // `attempts` BEFORE emitting, so the first recorded photo carries 2 — the
+    // exact number the capture-trigger listener has always stored it under.
+    // No `shotIndex`: this workflow has no multi-shot step.
     assert.deepEqual(triggers, [
-      { stepId: 'step-front', imagePath: 'img://front', triggerSource: 'EXTERNAL' },
+      { stepId: 'step-front', imagePath: 'img://front', triggerSource: 'EXTERNAL', attempt: 2 },
     ]);
     assert.equal(stepOf(engine, 'step-front').status, 'COMPLETED');
     assert.equal(stepOf(engine, 'step-front').capturedImagePath, 'img://front');

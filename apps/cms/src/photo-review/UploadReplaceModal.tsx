@@ -78,6 +78,20 @@ export function UploadReplaceModal({ setId, onClose, onDone }: { setId: string; 
                 <span className={`font-semibold ${SIMILARITY_TONE_CLASS[tone]}`}>{similarity.toFixed(2)}</span>
               </div>
             )}
+            {/* 2026-09-30: the server now accepts an upload even when the identity
+                check (or the card-photo step) cannot run — say so here instead of
+                the dialog reading like a normal, fully-verified success. */}
+            {similarity == null && (
+              <div className="text-amber-600 font-medium">
+                ⚠ Chưa xác minh được danh tính — tự kiểm tra bằng mắt trước khi Duyệt.
+              </div>
+            )}
+            {Array.isArray(result.variant.qualityReport?.warnings) &&
+              (result.variant.qualityReport.warnings as unknown[]).map((w, i) => (
+                <div key={i} className="text-amber-600 font-medium">
+                  ⚠ {String(w)}
+                </div>
+              ))}
             {result.warning && <div className="text-amber-600">{result.warning}</div>}
             {blocked && <div className="text-red-600 font-medium">Độ giống quá thấp — có thể không phải cùng người.</div>}
             {!blocked && <div className="text-emerald-600">Đã tạo phiên bản mới từ ảnh tải lên.</div>}

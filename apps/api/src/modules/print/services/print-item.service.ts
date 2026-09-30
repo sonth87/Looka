@@ -115,8 +115,8 @@ export class PrintItemService {
     } else if (query.unassigned) {
       qb.andWhere('i.batchId IS NULL');
     }
-    if (query.status)
-      qb.andWhere('i.status = :status', { status: query.status });
+    if (query.status?.length)
+      qb.andWhere('i.status IN (:...statuses)', { statuses: query.status });
     if (query.className)
       qb.andWhere('i.className = :className', { className: query.className });
     if (query.faculty)
@@ -353,6 +353,11 @@ export class PrintItemService {
    * `roster-group-stats.service.ts`'s "đã in" count silently blind to every
    * DIRECT-mode agent callback and every manual "Xác nhận đã in" PATCH —
    * only a CENTRALIZED result-upload ever moved that number.
+   *
+   * `card_code = NULL`: neither of these paths carries a "Mã thẻ" (only the
+   * CENTRALIZED result-upload xlsx does), and `printed_batch_id` is being
+   * re-pointed at THIS card's batch — leaving the previous card's code in
+   * place would attach a stale code to a card it doesn't belong to.
    */
   private async stampRosterPrinted(
     manager: EntityManager,
@@ -361,7 +366,7 @@ export class PrintItemService {
   ): Promise<void> {
     await manager.query(
       `UPDATE campaign_subjects
-          SET printed_at = COALESCE(printed_at, $3), printed_batch_id = $4, updated_at = now()
+          SET printed_at = COALESCE(printed_at, $3), printed_batch_id = $4, card_code = NULL, updated_at = now()
         WHERE campaign_id = $1 AND subject_code = $2 AND status = 'VALID'`,
       [item.campaignId, item.subjectCode, now, item.batchId ?? null],
     );
@@ -552,8 +557,20 @@ export class PrintItemService {
     return this.getDetail(id);
   }
 
-  /** `GET /v1/print/items/:id/preview?side=front|back` — the already-rendered PNG if one exists (what will actually print), else a live preview against the resolved template (same engine `CardTemplateController.preview` uses) so the CMS can review before committing to a real render. */
-  async preview(id: string, side: 'front' | 'back'): Promise<Buffer> {
+  /**
+   * `GET /v1/print/items/:id/preview?side=front|back` — the already-rendered PNG if one exists (what will actually print), else a live preview against the resolved template (same engine `CardTemplateController.preview` uses) so the CMS can review before committing to a real render.
+   *
+   * `kind` says what the bytes are: `RENDERED` (a card layout — stored or
+   * live-rendered) or `CARD_PHOTO` (2026-09-30: no print template is
+   * configured for the item/batch/printer, so the FRONT preview is the
+   * student's approved card photo itself instead of a 400 — templates are
+   * not in use yet, and operators still need to see who each row is). The
+   * back side has no such stand-in and keeps a clear 400.
+   */
+  async preview(
+    id: string,
+    side: 'front' | 'back',
+  ): Promise<{ buffer: Buffer; kind: 'RENDERED' | 'CARD_PHOTO' }> {
     const item = await this.loadOrFail(id);
     const renderedFileId =
       side === 'back' ? item.renderedBackFsFileId : item.renderedFrontFsFileId;
@@ -564,16 +581,41 @@ export class PrintItemService {
       );
       const response = await fetch(link.url);
       if (response.ok) {
-        return Buffer.from(await response.arrayBuffer());
+        return {
+          buffer: Buffer.from(await response.arrayBuffer()),
+          kind: 'RENDERED',
+        };
       }
       // fall through to a live re-render if the stored copy can't be fetched
     }
     const batch = item.batchId
       ? await this.batches.findOne({ where: { id: item.batchId } })
       : null;
-    const templateId = await this.resolveTemplateId(item, batch);
+    let templateId: string;
+    try {
+      templateId = await this.resolveTemplateId(item, batch);
+    } catch (error) {
+      // Only the "no template configured" case (a 400 from
+      // `resolveTemplateId`) is eligible for the photo stand-in.
+      if (!(error instanceof BadRequestException)) throw error;
+      if (side === 'back') {
+        throw new BadRequestException(
+          'Chưa chọn phôi in nên chưa có mặt sau — chọn phôi mặc định cho đợt in để xem mặt sau',
+        );
+      }
+      const photo = await this.renderService.cardPhotoForSet(item.setId);
+      if (photo) return { buffer: photo, kind: 'CARD_PHOTO' };
+      throw new BadRequestException(
+        'Chưa chọn phôi in và chưa đọc được ảnh thẻ đã duyệt của sinh viên này',
+      );
+    }
     const template = await this.templateService.loadTemplateOrFail(templateId);
-    return this.renderService.render(template, side, { setId: item.setId });
+    return {
+      buffer: await this.renderService.render(template, side, {
+        setId: item.setId,
+      }),
+      kind: 'RENDERED',
+    };
   }
 
   /**

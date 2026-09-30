@@ -1,6 +1,9 @@
 import { ERROR_CODE } from '@app/shared/errors/legacy';
 import { FileStorageService } from '@app/modules/file-storage/services/file-storage.service';
 import { PhotoReviewService } from '@app/modules/photo-review/services/photo-review.service';
+import { CaptureStatsService } from '@app/modules/stats/services/capture-stats.service';
+import { WorkflowCatalogReadRepository } from '@app/modules/workflow/infrastructure/read/workflow-catalog.read-repository';
+import { AdvisoryLockService } from '@app/shared/database/advisory-lock.service';
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigModule } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
@@ -102,6 +105,25 @@ describeDb('device management persistence', () => {
             ensureSetForApprovedSession: jest.fn().mockResolvedValue(null),
           },
         },
+        // `CampaignService` grew a `WorkflowCatalogReadRepository` dependency
+        // (workflow-pinned campaigns, P2) after this spec was written, so the
+        // whole suite stopped being able to START (Nest DI error at
+        // `compile()`), silently skipping coverage of every test below. No
+        // campaign in this suite is workflow-pinned — "no version ref" is the
+        // same stub `photo-review-upload-live.spec.ts` already uses.
+        {
+          provide: WorkflowCatalogReadRepository,
+          useValue: { getVersionRef: jest.fn().mockResolvedValue(null) },
+        },
+        // Also new on `CampaignService` since this spec was written; the real
+        // one only needs the `DataSource` this module already has.
+        AdvisoryLockService,
+        // `DeviceEventService` now also takes the stats module's
+        // `CaptureStatsService` (P4 hot-path counters — every recordBatch
+        // writes `stats_daily_captures` through it). It has no constructor
+        // dependencies, so the real class is used: these tests then also
+        // exercise the real counter writes against the real schema.
+        CaptureStatsService,
       ],
     }).compile();
 

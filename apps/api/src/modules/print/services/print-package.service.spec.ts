@@ -269,6 +269,7 @@ describe('PrintPackageService.buildPackage — 2026-09-25 CENTRALIZED export for
       'Khoa',
       'Khóa',
       'Tình trạng',
+      'Mã thẻ',
       'Lý do',
     ]);
     expect(sheet.rowCount).toBe(4); // header + 3 included items
@@ -276,14 +277,23 @@ describe('PrintPackageService.buildPackage — 2026-09-25 CENTRALIZED export for
     expect(codes.sort()).toEqual(['SV001', 'SV001', 'SV002'].sort());
     // Khóa comes from the batched campaigns lookup.
     expect(sheet.getRow(2).getCell(6).value).toBe('K18');
-    // Tình trạng/Lý do left blank for the print shop to fill in.
+    // Tình trạng (G) / Mã thẻ (H) / Lý do (I) left blank for the print shop to fill in.
     expect(sheet.getRow(2).getCell(7).value).toBeFalsy();
     expect(sheet.getRow(2).getCell(8).value).toBeFalsy();
-    // Dropdown present on the Tình trạng column.
+    expect(sheet.getRow(2).getCell(9).value).toBeFalsy();
+    // Dropdown present on the Tình trạng column (G) — and ONLY there: the
+    // new Mã thẻ column (H) sits right after it and must not inherit it.
     const dv = sheet.getCell('G2').dataValidation;
     expect(dv?.type).toBe('list');
     expect(dv?.formulae?.[0]).toContain('Đã in');
     expect(dv?.formulae?.[0]).toContain('In thất bại');
+    expect(sheet.getCell('H2').dataValidation).toBeFalsy();
+    expect(sheet.getCell('I2').dataValidation).toBeFalsy();
+    // Mã thẻ cells are Text-formatted so a code typed with leading zeros is
+    // stored as text and survives the round-trip.
+    for (const r of [2, 3, 4]) {
+      expect(sheet.getCell(`H${r}`).numFmt).toBe('@');
+    }
   });
 
   it('returns an empty-but-valid package (header-only list, no entries) when nothing is eligible', async () => {

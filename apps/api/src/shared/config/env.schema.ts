@@ -91,6 +91,14 @@ const EnvSchema = z.object({
   // directory API spec is still pending from the user).
   USER_DIRECTORY_URL: z.string().optional(),
   USER_DIRECTORY_API_KEY: z.string().optional(),
+
+  // BullMQ's Redis connection (2026-09-29 — the AI-edit job queue,
+  // `AiEditProcessor` in `modules/photo-review`). Optional here, same
+  // posture as `AI_IMAGE_EDIT_URL` above: defaults to the real,
+  // network-reachable local dev instance confirmed during this task
+  // (`127.0.0.1:6379`) rather than requiring this at boot.
+  REDIS_HOST: z.string().optional(),
+  REDIS_PORT: z.coerce.number().int().positive().optional(),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

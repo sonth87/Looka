@@ -1,10 +1,15 @@
+import { PhotoReviewService } from '@app/modules/photo-review/services/photo-review.service';
+import { CaptureStatsService } from '@app/modules/stats/services/capture-stats.service';
 import { ERROR_CODE } from '@app/shared/errors/legacy';
+import { ConfigModule } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { SnakeNamingStrategy } from 'typeorm-naming-strategies';
+import { Photo } from './entities/photo.entity';
 import { Session } from './entities/session.entity';
 import { SessionVideo } from './entities/session-video.entity';
+import { UploadOutboxEntry } from './entities/upload-outbox.entity';
 import { VideoUploadOutboxEntry } from './entities/video-upload-outbox.entity';
 import { SessionService } from './services/session.service';
 import { SessionVideoService } from './services/session-video.service';
@@ -36,10 +41,23 @@ describeDb('video persistence', () => {
   beforeAll(async () => {
     const built = await Test.createTestingModule({
       imports: [
+        // `SessionVideoService` reads its limits through `ConfigService`
+        // (added after this spec was written) — the real, env-backed one.
+        ConfigModule.forRoot({ isGlobal: true }),
         TypeOrmModule.forRoot({
           type: 'postgres',
           url,
-          entities: [Session, SessionVideo, VideoUploadOutboxEntry],
+          // `Photo`/`UploadOutboxEntry` added: `Session` now has a `photos`
+          // relation, and TypeORM refuses to build metadata without its
+          // target entity registered ("Entity metadata for Session#photos was
+          // not found").
+          entities: [
+            Session,
+            SessionVideo,
+            VideoUploadOutboxEntry,
+            Photo,
+            UploadOutboxEntry,
+          ],
           namingStrategy: new SnakeNamingStrategy(),
           synchronize: false,
         }),
@@ -47,9 +65,27 @@ describeDb('video persistence', () => {
           Session,
           SessionVideo,
           VideoUploadOutboxEntry,
+          Photo,
+          UploadOutboxEntry,
         ]),
       ],
-      providers: [SessionService, SessionVideoService],
+      providers: [
+        SessionService,
+        SessionVideoService,
+        // `SessionService` gained `PhotoReviewService` (best-effort review-set
+        // hook) and `CaptureStatsService` (P4 counters) after this spec was
+        // written, so the suite could no longer START (Nest DI error at
+        // `compile()`) and none of its tests were running. Nothing here
+        // touches photo review — a resolved-no-op stub; the stats service has
+        // no constructor dependencies, so the real class is used.
+        {
+          provide: PhotoReviewService,
+          useValue: {
+            ensureSetForApprovedSession: jest.fn().mockResolvedValue(null),
+          },
+        },
+        CaptureStatsService,
+      ],
     }).compile();
 
     moduleRef = built;
@@ -79,8 +115,48 @@ describeDb('video persistence', () => {
   const webmDataUrl = (byte: number) =>
     `data:video/webm;base64,${Buffer.from([byte, byte, byte, byte]).toString('base64')}`;
 
-  test('a video and its upload intent are written together, and is viewable locally before reaching fs-core', async () => {
+  /**
+   * A session owned by this suite's device + campaign, like a real kiosk
+   * session. Since the 2026-09-24 audit fix, `addDeviceVideo` refuses (403,
+   * `SESSION_DEVICE_MISMATCH`) to attach a video to a session that belongs to
+   * any OTHER device/campaign — including one created with no device at all,
+   * which is what `createSession({})` alone produces. These tests used to
+   * pass only because that hole existed.
+   */
+  async function ownedSession() {
     const session = await sessionService.createSession({});
+    await dataSource.query(
+      `UPDATE sessions SET device_id = $1, campaign_id = $2 WHERE id = $3`,
+      [deviceId, campaignId, session.id],
+    );
+    return session;
+  }
+
+  test('a device cannot attach a video to a session it does not own (cross-device hijack guard, 403)', async () => {
+    // Created with no device/campaign — i.e. NOT this device's session.
+    const foreign = await sessionService.createSession({});
+
+    await expect(
+      sessionVideoService.addDeviceVideo(deviceId, campaignId, {
+        videoId: crypto.randomUUID(),
+        sessionId: foreign.id,
+        cameraRole: 'CENTER',
+        dataUrl: webmDataUrl(1),
+      }),
+    ).rejects.toMatchObject({
+      payload: expect.objectContaining({
+        code: ERROR_CODE.SESSION_DEVICE_MISMATCH,
+      }) as unknown,
+    });
+    const rows: unknown[] = await dataSource.query(
+      `SELECT 1 FROM session_videos WHERE session_id = $1`,
+      [foreign.id],
+    );
+    expect(rows).toHaveLength(0);
+  });
+
+  test('a video and its upload intent are written together, and is viewable locally before reaching fs-core', async () => {
+    const session = await ownedSession();
     const videoId = crypto.randomUUID();
 
     const result = await sessionVideoService.addDeviceVideo(
@@ -128,7 +204,7 @@ describeDb('video persistence', () => {
   });
 
   test('addDeviceVideo is idempotent — a retried call does not create a second outbox row', async () => {
-    const session = await sessionService.createSession({});
+    const session = await ownedSession();
     const videoId = crypto.randomUUID();
     const dto = {
       videoId,
@@ -148,7 +224,7 @@ describeDb('video persistence', () => {
   });
 
   test('resolveViewSource prefers the healthy remote copy once fs_file_id/fs_status land', async () => {
-    const session = await sessionService.createSession({});
+    const session = await ownedSession();
     const videoId = crypto.randomUUID();
     await sessionVideoService.addDeviceVideo(deviceId, campaignId, {
       videoId,
@@ -169,7 +245,7 @@ describeDb('video persistence', () => {
   test('resolveViewSource falls back to local when the remote copy is FAILED, even though fs_file_id is set', async () => {
     // The exact 2026-09-09 fix this mirrors from PhotoService.resolveViewSource:
     // fs-core purging a file mid-scan must not strand a video with no way to view it.
-    const session = await sessionService.createSession({});
+    const session = await ownedSession();
     const videoId = crypto.randomUUID();
     await sessionVideoService.addDeviceVideo(deviceId, campaignId, {
       videoId,
@@ -190,7 +266,7 @@ describeDb('video persistence', () => {
     // Live-confirmed 2026-09-09: real session_videos rows already store
     // exactly this shape — see DATA_URL_MARKER's own doc comment for why a
     // naive "match up to the first ;" regex breaks on it.
-    const session = await sessionService.createSession({});
+    const session = await ownedSession();
     const videoId = crypto.randomUUID();
     const dataUrl = `data:video/webm;codecs=vp8;base64,${Buffer.from([1, 2, 3]).toString('base64')}`;
 
@@ -211,7 +287,21 @@ describeDb('video persistence', () => {
   });
 
   test('addDeviceVideo rejects an unsupported mime type', async () => {
-    const session = await sessionService.createSession({});
+    const session = await ownedSession();
+    // A video type outside the allowlist → UNSUPPORTED_MIME_TYPE.
+    await expect(
+      sessionVideoService.addDeviceVideo(deviceId, campaignId, {
+        videoId: crypto.randomUUID(),
+        sessionId: session.id,
+        dataUrl: 'data:video/x-msvideo;base64,AAAA',
+      }),
+    ).rejects.toMatchObject({
+      payload: { code: ERROR_CODE.VIDEO_UNSUPPORTED_MIME_TYPE },
+    });
+    // Not a video data URL at all (an image) → the stricter prefix check
+    // reports INVALID_DATA_URL first. This test used to send this image URL
+    // and expect UNSUPPORTED_MIME_TYPE, before the service checked the
+    // `data:video/` prefix.
     await expect(
       sessionVideoService.addDeviceVideo(deviceId, campaignId, {
         videoId: crypto.randomUUID(),
@@ -219,7 +309,7 @@ describeDb('video persistence', () => {
         dataUrl: 'data:image/jpeg;base64,AAAA',
       }),
     ).rejects.toMatchObject({
-      payload: { code: ERROR_CODE.VIDEO_UNSUPPORTED_MIME_TYPE },
+      payload: { code: ERROR_CODE.VIDEO_INVALID_DATA_URL },
     });
   });
 

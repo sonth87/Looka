@@ -344,9 +344,38 @@ export default function CameraSetupScreen() {
       for (const cam of cams) {
         if (streamsRef.current.has(cam.id)) continue; // never open the same device twice
         try {
-          const stream = await navigator.mediaDevices.getUserMedia({
-            video: { deviceId: { exact: cam.id } },
-          });
+          // 2026-09-30 fix (real-hardware field report — CAM 01 reliably
+          // showing "Camera đang được dùng ở nơi khác" right when this
+          // screen first opens, no other app/window involved): the
+          // label-priming `getUserMedia({video:true})` above this effect
+          // stops its own throwaway stream's tracks right before calling
+          // `refreshDevices()` — but on Windows, `track.stop()` resolving
+          // does not guarantee the OS camera driver (Frame Server) has
+          // actually released the physical device yet, especially for
+          // cheap UVC webcams. If that priming stream happened to land on
+          // the SAME physical device as one of the real per-role opens
+          // below, this exact call can lose that race and fail with
+          // `NotReadableError` even though nothing else is really holding
+          // the camera — the same class of "process/track says closed,
+          // driver hasn't caught up yet" race already confirmed and fixed
+          // for the tethered Canon's USB claim (see `tetheredCamera.ts`'s
+          // `CLAIM_DEVICE_ERROR_PATTERN` retry). Retrying is safe here —
+          // unlike a real shutter release, opening a PREVIEW stream has no
+          // side effect to duplicate.
+          let stream: MediaStream | undefined;
+          for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+              stream = await navigator.mediaDevices.getUserMedia({
+                video: { deviceId: { exact: cam.id } },
+              });
+              break;
+            } catch (err) {
+              const isNotReadable = err instanceof DOMException && err.name === 'NotReadableError';
+              if (!isNotReadable || attempt === 3 || cancelledRef.current) throw err;
+              await new Promise((r) => setTimeout(r, 500));
+            }
+          }
+          if (!stream) continue;
           if (cancelledRef.current) {
             stream.getTracks().forEach((t) => t.stop());
             continue;

@@ -2,6 +2,7 @@ import { FileStorageService } from '@app/modules/file-storage/services/file-stor
 import { ReviewStatsService } from '@app/modules/stats/services/review-stats.service';
 import { DomainEventDispatcher } from '@app/shared/cqrs/domain-event.dispatcher';
 import { TransactionContext } from '@app/shared/database/transaction-context';
+import { getQueueToken } from '@nestjs/bullmq';
 import { ConfigService } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
 import { TypeOrmModule } from '@nestjs/typeorm';
@@ -13,7 +14,10 @@ import { PhotoReviewEvent } from './entities/photo-review-event.entity';
 import { PhotoVariant } from './entities/photo-variant.entity';
 import { SubjectPhotoSet } from './entities/subject-photo-set.entity';
 import {
+  AI_EDIT_BACKGROUND_QUEUE_NAME,
+  AI_EDIT_QUEUE_NAME,
   PHOTO_REVIEW_ERROR_CODE,
+  PhotoReviewAction,
   PhotoReviewSetStatus,
   PhotoVariantKind,
   PhotoVariantStatus,
@@ -47,6 +51,27 @@ describeDb('photo-review persistence', () => {
   let dataSource: DataSource;
   let moduleRef: TestingModule;
   let kindId: string;
+  // Hoisted out of `beforeAll` (2026-09-29) so `it()` blocks below can
+  // reference these mock objects DIRECTLY instead of `moduleRef.get(X)` —
+  // `moduleRef.get(AiImageEditClient)` types its return as the real class
+  // (a plain async method, no `.mockRejectedValueOnce`), while the literal
+  // object this `useValue`-provides keeps its own inferred `jest.Mock`
+  // surface. Avoids fighting `@typescript-eslint/no-unnecessary-type-assertion`
+  // over a cast through the real class that TS/eslint disagree is needed.
+  let sidecar: {
+    cardPhoto: jest.Mock;
+    background: jest.Mock;
+    retouch: jest.Mock;
+    identitySimilarity: jest.Mock;
+  };
+  let aiImageEdit: { edit: jest.Mock; health: jest.Mock };
+  let reviewStats: {
+    recordAutoFailed: jest.Mock;
+    recordAiRequested: jest.Mock;
+    recordAiAccepted: jest.Mock;
+    recordUploaded: jest.Mock;
+    recordDecision: jest.Mock;
+  };
   // Every service method under test now takes the calling browser's origin
   // (for a local-content fallback link — see PhotoReviewService.toVariantDao)
   // as an explicit argument, same as ReviewController's own routes compute
@@ -64,13 +89,13 @@ describeDb('photo-review persistence', () => {
       }),
       deleteFile: jest.fn().mockResolvedValue(undefined),
     };
-    const sidecar = {
+    sidecar = {
       cardPhoto: jest.fn(),
       background: jest.fn(),
       retouch: jest.fn(),
       identitySimilarity: jest.fn(),
     };
-    const aiImageEdit = {
+    aiImageEdit = {
       edit: jest.fn(),
       health: jest.fn(),
     };
@@ -91,8 +116,12 @@ describeDb('photo-review persistence', () => {
       // `ReviewAssignmentService.buildScopeFilter`'s own "unrestricted"
       // return for a null/admin actor, which every call in this suite is.
       buildScopeFilter: jest.fn().mockResolvedValue(null),
+      // `approveMany`/`rejectMany` (1-n) resolve scope once through this —
+      // an always-true predicate matches the real service's own answer for
+      // a null/admin actor, which every call in this suite is.
+      buildScopePredicate: jest.fn().mockResolvedValue(() => true),
     };
-    const reviewStats = {
+    reviewStats = {
       recordAutoFailed: jest.fn().mockResolvedValue(undefined),
       recordAiRequested: jest.fn().mockResolvedValue(undefined),
       recordAiAccepted: jest.fn().mockResolvedValue(undefined),
@@ -149,6 +178,34 @@ describeDb('photo-review persistence', () => {
         { provide: TransactionContext, useValue: transactionContext },
         { provide: DomainEventDispatcher, useValue: domainEventDispatcher },
         { provide: WorkflowCatalogReadRepository, useValue: workflowCatalog },
+        // None of these tests need the job to actually run (they only
+        // assert on the immediate PROCESSING/LOCKED state `aiEdit()`/
+        // `reprocess()` leave behind) — just enough for `@InjectQueue` to
+        // resolve, see photo-review-upload-live.spec.ts's `aiEditQueue` for
+        // the sibling suite that DOES need to inspect/run enqueued jobs.
+        // `getJob`/`getJobs`/`remove` (2026-09-29, priority-preemption
+        // rework) are mocked too — `promoteToUserLane` calls them on a USER
+        // re-claim of an in-flight `CARD_AUTO`, which this suite's locking
+        // tests can hit (a second `reprocess()` call on an already-PROCESSING
+        // set).
+        {
+          provide: getQueueToken(AI_EDIT_QUEUE_NAME),
+          useValue: {
+            add: jest.fn().mockResolvedValue(undefined),
+            getJob: jest.fn().mockResolvedValue(undefined),
+            getJobs: jest.fn().mockResolvedValue([]),
+            remove: jest.fn().mockResolvedValue(0),
+          },
+        },
+        {
+          provide: getQueueToken(AI_EDIT_BACKGROUND_QUEUE_NAME),
+          useValue: {
+            add: jest.fn().mockResolvedValue(undefined),
+            getJob: jest.fn().mockResolvedValue(undefined),
+            getJobs: jest.fn().mockResolvedValue([]),
+            remove: jest.fn().mockResolvedValue(0),
+          },
+        },
       ],
     }).compile();
 
@@ -246,7 +303,7 @@ describeDb('photo-review persistence', () => {
           setId,
           PhotoVariantKind.CARD_AUTO,
           randomUUID(),
-          PhotoVariantStatus.READY,
+          PhotoVariantStatus.DONE,
         ],
       );
       await dataSource.query(
@@ -304,13 +361,10 @@ describeDb('photo-review persistence', () => {
       const { setId } = await seedSet({
         status: PhotoReviewSetStatus.AUTO_FAILED,
       });
-      // `PhotoReviewSidecarService` is DI-overridden with a plain
-      // `{ cardPhoto: jest.fn(), ... }` object above (`useValue: sidecar`),
-      // but `moduleRef.get()` types the return as the real class, whose
-      // methods are plain async functions with no `.mockRejectedValueOnce` —
-      // cast through `jest.Mocked<...>` so TS sees the mock surface that is
-      // actually there at runtime.
-      const sidecar = moduleRef.get(PhotoReviewSidecarService);
+      // `sidecar` is the same hoisted mock object `useValue`-provided for
+      // `PhotoReviewSidecarService` (see this describe block's own top
+      // comment) — referenced directly rather than `moduleRef.get()`, which
+      // would type the return as the real class (no `.mockRejectedValueOnce`).
       sidecar.cardPhoto.mockRejectedValueOnce(
         new Error('sidecar unreachable (expected in this test)'),
       );
@@ -341,7 +395,7 @@ describeDb('photo-review persistence', () => {
           newVariantId,
           setId,
           PhotoVariantKind.CARD_AI,
-          PhotoVariantStatus.READY,
+          PhotoVariantStatus.DONE,
         ],
       );
 
@@ -379,7 +433,7 @@ describeDb('photo-review persistence', () => {
           extraVariantId,
           setId,
           PhotoVariantKind.CARD_UPLOAD,
-          PhotoVariantStatus.READY,
+          PhotoVariantStatus.DONE,
         ],
       );
 
@@ -441,7 +495,8 @@ describeDb('photo-review persistence', () => {
         status: PhotoReviewSetStatus.READY,
         withCurrentVariant: true,
       });
-      const aiImageEdit = moduleRef.get(AiImageEditClient);
+      // `aiImageEdit` is the hoisted mock object — see this describe block's
+      // own top comment.
       aiImageEdit.edit.mockRejectedValueOnce(
         new Error('sidecar unreachable (expected in this test)'),
       );
@@ -497,17 +552,11 @@ describeDb('photo-review persistence', () => {
         status: PhotoReviewSetStatus.READY,
         withCurrentVariant: true,
       });
-      // `ReviewStatsService` is DI-overridden with a plain
-      // `{ recordDecision: jest.fn(), ... }` object (see beforeAll) — same
-      // `moduleRef.get()` real-class-typed-but-actually-a-mock convention
-      // this file already accepts for `sidecar` (a cast through
-      // `{ recordDecision: jest.Mock }` was tried and rejected by
-      // `no-unnecessary-type-assertion`, same as that file's own attempt).
-      const reviewStats = moduleRef.get(ReviewStatsService);
-      // This mock is a single object shared across the whole file's
-      // `beforeAll` — its call count accumulates across every earlier test.
-      // Cleared here so the assertion below reflects only THIS test's own
-      // two approve() calls, not the whole suite's history.
+      // `reviewStats` is the hoisted mock object — see this describe block's
+      // own top comment. It is a single object shared across the whole
+      // file's `beforeAll` — its call count accumulates across every earlier
+      // test. Cleared here so the assertion below reflects only THIS test's
+      // own two approve() calls, not the whole suite's history.
       reviewStats.recordDecision.mockClear();
 
       await service.approve(setId, { note: 'first' }, null, apiBaseUrl);
@@ -532,7 +581,6 @@ describeDb('photo-review persistence', () => {
         status: PhotoReviewSetStatus.READY,
         withCurrentVariant: true,
       });
-      const reviewStats = moduleRef.get(ReviewStatsService);
       reviewStats.recordDecision.mockClear();
 
       await service.reject(setId, { note: 'first' }, null, apiBaseUrl);
@@ -544,6 +592,216 @@ describeDb('photo-review persistence', () => {
       );
       expect(events).toHaveLength(1);
       expect(reviewStats.recordDecision).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('approveMany / rejectMany (1-n)', () => {
+    const readySet = () =>
+      seedSet({
+        status: PhotoReviewSetStatus.READY,
+        withCurrentVariant: true,
+      });
+
+    const statusOf = async (setId: string): Promise<string> => {
+      const rows: Array<{ status: string }> = await dataSource.query(
+        `SELECT status FROM subject_photo_sets WHERE id = $1`,
+        [setId],
+      );
+      return rows[0].status;
+    };
+
+    const eventCount = async (setId: string, action: string) => {
+      const rows: Array<{ count: number }> = await dataSource.query(
+        `SELECT COUNT(*)::int AS count FROM photo_review_events WHERE set_id = $1 AND action = $2`,
+        [setId, action],
+      );
+      return rows[0].count;
+    };
+
+    it('approves two sets in one call: two APPROVED events, two recordDecision calls, both sets APPROVED', async () => {
+      const a = await readySet();
+      const b = await readySet();
+      reviewStats.recordDecision.mockClear();
+
+      const res = await service.approveMany(
+        { setIds: [a.setId, b.setId], note: 'ok cả hai' },
+        null,
+      );
+
+      expect(res).toMatchObject({ requested: 2, succeeded: 2, failed: 0 });
+      expect(res.results.map((r) => [r.setId, r.ok, r.changed])).toEqual([
+        [a.setId, true, true],
+        [b.setId, true, true],
+      ]);
+      expect(await statusOf(a.setId)).toBe(PhotoReviewSetStatus.APPROVED);
+      expect(await statusOf(b.setId)).toBe(PhotoReviewSetStatus.APPROVED);
+      expect(await eventCount(a.setId, 'APPROVED')).toBe(1);
+      expect(await eventCount(b.setId, 'APPROVED')).toBe(1);
+      expect(reviewStats.recordDecision).toHaveBeenCalledTimes(2);
+    });
+
+    it('rejectMany stores the shared note on every set', async () => {
+      const a = await readySet();
+      const b = await readySet();
+
+      await service.rejectMany(
+        { setIds: [a.setId, b.setId], note: 'ảnh mờ' },
+        null,
+      );
+
+      for (const { setId } of [a, b]) {
+        const rows: Array<{ payload: { note?: string } | null }> =
+          await dataSource.query(
+            `SELECT payload FROM photo_review_events WHERE set_id = $1 AND action = 'REJECTED'`,
+            [setId],
+          );
+        expect(rows).toHaveLength(1);
+        expect(rows[0].payload).toEqual({ note: 'ảnh mờ' });
+        expect(await statusOf(setId)).toBe(PhotoReviewSetStatus.REJECTED);
+      }
+    });
+
+    it('a locked set, a missing set and a good set: per-item SET_LOCKED / SET_NOT_FOUND, and the good one is approved', async () => {
+      const locked = await seedSet({
+        status: PhotoReviewSetStatus.PENDING_AUTO,
+      });
+      const good = await readySet();
+      const ghost = randomUUID();
+
+      const res = await service.approveMany(
+        { setIds: [locked.setId, ghost, good.setId] },
+        null,
+      );
+
+      expect(res).toMatchObject({ requested: 3, succeeded: 1, failed: 2 });
+      expect(res.results[0]).toMatchObject({
+        setId: locked.setId,
+        ok: false,
+        statusCode: 409,
+        errorCode: PHOTO_REVIEW_ERROR_CODE.SET_LOCKED,
+      });
+      expect(res.results[1]).toMatchObject({
+        setId: ghost,
+        ok: false,
+        statusCode: 404,
+        errorCode: PHOTO_REVIEW_ERROR_CODE.SET_NOT_FOUND,
+      });
+      expect(res.results[2]).toMatchObject({ setId: good.setId, ok: true });
+      expect(await statusOf(good.setId)).toBe(PhotoReviewSetStatus.APPROVED);
+      expect(await statusOf(locked.setId)).toBe(
+        PhotoReviewSetStatus.PENDING_AUTO,
+      );
+    });
+
+    it('an already-approved set is ok with changed:false — no new event, no extra recordDecision', async () => {
+      const a = await readySet();
+      await service.approve(a.setId, {}, null, apiBaseUrl);
+      reviewStats.recordDecision.mockClear();
+
+      const res = await service.approveMany({ setIds: [a.setId] }, null);
+
+      expect(res.results[0]).toMatchObject({
+        setId: a.setId,
+        ok: true,
+        changed: false,
+      });
+      expect(await eventCount(a.setId, 'APPROVED')).toBe(1);
+      expect(reviewStats.recordDecision).not.toHaveBeenCalled();
+    });
+
+    it('a set an earlier item of the same call already moved stays consistent (duplicate ids are collapsed, not double-written)', async () => {
+      const a = await readySet();
+      reviewStats.recordDecision.mockClear();
+
+      const res = await service.approveMany(
+        { setIds: [a.setId, a.setId, a.setId] },
+        null,
+      );
+
+      expect(res).toMatchObject({ requested: 1, succeeded: 1 });
+      expect(await eventCount(a.setId, 'APPROVED')).toBe(1);
+      expect(reviewStats.recordDecision).toHaveBeenCalledTimes(1);
+    });
+
+    it('a set that became locked AFTER it was read (kiosk retake -> PENDING_AUTO) is refused by the in-transaction recheck, not approved', async () => {
+      const a = await readySet();
+      // Read while still READY — this is the caller's "pre-read".
+      const stale = await dataSource
+        .getRepository(SubjectPhotoSet)
+        .findOneByOrFail({ id: a.setId });
+      expect(stale.status).toBe(PhotoReviewSetStatus.READY);
+
+      // A kiosk retake (ensureSetForSession) flips it back before the write.
+      await dataSource.query(
+        `UPDATE subject_photo_sets SET status = $1 WHERE id = $2`,
+        [PhotoReviewSetStatus.PENDING_AUTO, a.setId],
+      );
+      reviewStats.recordDecision.mockClear();
+
+      await expectLocked(
+        service['applySetDecision'](
+          stale,
+          PhotoReviewSetStatus.APPROVED,
+          PhotoReviewAction.APPROVED,
+          {},
+          null,
+        ),
+      );
+
+      expect(await statusOf(a.setId)).toBe(PhotoReviewSetStatus.PENDING_AUTO);
+      expect(await eventCount(a.setId, 'APPROVED')).toBe(0);
+      expect(reviewStats.recordDecision).not.toHaveBeenCalled();
+    });
+
+    it('the scope predicate is re-evaluated against the ROW-LOCKED set: a set that moved out of scope after the up-front read is refused, not approved', async () => {
+      const a = await readySet();
+      const stale = await dataSource
+        .getRepository(SubjectPhotoSet)
+        .findOneByOrFail({ id: a.setId });
+      // In scope when read up front (className 12A1)...
+      const inScope = (t: { className?: string | null }) =>
+        t.className === '12A1';
+      await dataSource.query(
+        `UPDATE subject_photo_sets SET class_name = '12A1' WHERE id = $1`,
+        [a.setId],
+      );
+      stale.className = '12A1';
+      expect(inScope(stale)).toBe(true);
+      // ...then a retake rewrites the roster field before the write.
+      await dataSource.query(
+        `UPDATE subject_photo_sets SET class_name = '99Z9' WHERE id = $1`,
+        [a.setId],
+      );
+      reviewStats.recordDecision.mockClear();
+
+      await service['applySetDecision'](
+        stale,
+        PhotoReviewSetStatus.APPROVED,
+        PhotoReviewAction.APPROVED,
+        {},
+        null,
+        inScope,
+      ).then(
+        () => {
+          throw new Error('expected an OUT_OF_SCOPE rejection');
+        },
+        (e: { payload?: { code?: number } }) => {
+          expect(e.payload?.code).toBe(PHOTO_REVIEW_ERROR_CODE.OUT_OF_SCOPE);
+        },
+      );
+
+      expect(await statusOf(a.setId)).toBe(PhotoReviewSetStatus.READY);
+      expect(await eventCount(a.setId, 'APPROVED')).toBe(0);
+      expect(reviewStats.recordDecision).not.toHaveBeenCalled();
+    });
+
+    it('the single-set route is unchanged: approve() still returns the set detail and writes one event', async () => {
+      const a = await readySet();
+
+      const detail = await service.approve(a.setId, {}, null, apiBaseUrl);
+
+      expect(detail.status).toBe(PhotoReviewSetStatus.APPROVED);
+      expect(await eventCount(a.setId, 'APPROVED')).toBe(1);
     });
   });
 

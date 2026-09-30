@@ -157,6 +157,27 @@ if ($extraDlls.Count -eq 0) {
     }
 }
 
+# gp2-ctrlc.exe — công cụ nhỏ gửi Ctrl+C cho gphoto2 để DỪNG live view ÊM.
+# `child.kill()` của Node trên Windows luôn là TerminateProcess (giết cứng):
+# phiên PTP của máy ảnh bị bỏ dở, và Sony A7 III ngừng trả lời PTP sau vài
+# lần như vậy (tái hiện thật 2026-09-30: 6 lần start+kill cứng thì mọi lệnh
+# gphoto2 sau đó, kể cả --summary, đều timeout cho tới khi rút cắm lại USB).
+# Không có file này app vẫn chạy, chỉ rơi về kill cứng như cũ. csc.exe có sẵn
+# trong .NET Framework 4.x của Windows — không cần cài SDK.
+Write-Step "Build gp2-ctrlc.exe (dừng live view êm bằng Ctrl+C thay vì kill cứng)"
+$csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+$ctrlcSrc = Join-Path $PSScriptRoot 'gp2-ctrlc.cs'
+if ((Test-Path $csc) -and (Test-Path $ctrlcSrc)) {
+    & $csc /nologo /target:winexe /optimize "/out:$(Join-Path $destDir 'gp2-ctrlc.exe')" $ctrlcSrc
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  gp2-ctrlc.exe"
+    } else {
+        Write-Warn2 "  Build gp2-ctrlc.exe lỗi (exit $LASTEXITCODE) — app sẽ dừng live view bằng kill cứng (dễ làm Sony treo PTP)."
+    }
+} else {
+    Write-Warn2 "  Không thấy csc.exe hoặc gp2-ctrlc.cs — bỏ qua; app sẽ dừng live view bằng kill cứng (dễ làm Sony treo PTP)."
+}
+
 Write-Host "`nXONG phần tự động hoá được." -ForegroundColor Green
 Write-Host "Các bước còn lại BẮT BUỘC làm tay (script không thể làm thay):" -ForegroundColor Yellow
 Write-Host "  1. Cắm máy ảnh Canon vào cổng USB-C của máy kiosk này."

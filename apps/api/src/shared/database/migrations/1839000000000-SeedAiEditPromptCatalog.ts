@@ -36,9 +36,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * effect today, but keeps the catalog's stated default consistent with the
  * rest of the system rather than silently still saying white.
  */
-export class SeedAiEditPromptCatalog1839000000000
-  implements MigrationInterface
-{
+export class SeedAiEditPromptCatalog1839000000000 implements MigrationInterface {
   name = 'SeedAiEditPromptCatalog1839000000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

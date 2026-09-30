@@ -760,3 +760,106 @@ test('ElectronCaptureSink.approveUpload forwards identityNumber (CCCD-scan path)
   const payload = calls[0] as { metadata?: Record<string, unknown> };
   assert.equal(payload.metadata?.identityNumber, '014203003990');
 });
+
+// --- Multi-shot CENTER camera (2026-09-29) ---------------------------------
+//
+// `selectedAttempt` names the outbox row the operator picked, so it has to be
+// shifted by the same cross-sitting offset `savePhoto()` added when it queued
+// that row; and a choice that re-selects an ALREADY-approved photo legitimately
+// approves nothing new (approved 0) while deleting the freshly staged extras.
+
+test('approve() adds the cross-sitting attempt offset to selectedAttempt, exactly like savePhoto() did', async () => {
+  const { sink, approveUploadSteps } = fakeSink();
+  const run = new RunScopedCaptureSession(sink);
+  run.resume('session_prev', { 'step-front': 5 });
+
+  const steps: ApprovalStepInfo[] = [
+    { stepId: 'step-front', stepType: 'FRONT', cameraRole: 'CENTER', attempt: 2, selectedAttempt: 2 },
+    { stepId: 'step-left', stepType: 'LEFT', cameraRole: 'LEFT', attempt: 1 },
+  ];
+  await run.approve(steps);
+
+  assert.deepEqual(approveUploadSteps, [
+    [
+      { stepId: 'step-front', stepType: 'FRONT', cameraRole: 'CENTER', attempt: 2, selectedAttempt: 7 },
+      { stepId: 'step-left', stepType: 'LEFT', cameraRole: 'LEFT', attempt: 1 },
+    ],
+  ]);
+  // The caller's own array is not mutated.
+  assert.equal(steps[0].selectedAttempt, 2);
+});
+
+test('attemptOffsetsSnapshot: a copy of what resume() set, empty after reset()/complete() — so a saved run can be reopened with the same offsets', async () => {
+  const { sink, approveUploadSteps } = fakeSink();
+  const run = new RunScopedCaptureSession(sink);
+  assert.deepEqual(run.attemptOffsetsSnapshot, {});
+
+  run.resume('session_prev', { 'step-front': 3 });
+  const snapshotBeforeReset = run.attemptOffsetsSnapshot;
+  assert.deepEqual(snapshotBeforeReset, { 'step-front': 3 });
+  // A copy: mutating it must not change what the run applies.
+  const scratch = run.attemptOffsetsSnapshot;
+  scratch['step-front'] = 99;
+  assert.deepEqual(run.attemptOffsetsSnapshot, { 'step-front': 3 });
+
+  // Saving a run resets it, which drops the offsets...
+  run.reset();
+  assert.deepEqual(run.attemptOffsetsSnapshot, {});
+
+  // ...so the snapshot taken beforehand is what reopens it: handed back to
+  // resume(), approve() names the row that was actually stored (engine
+  // attempt 1 -> outbox attempt 4) instead of one the outbox never held.
+  run.resume('session_prev', snapshotBeforeReset);
+  await run.approve([{ stepId: 'step-front', stepType: 'FRONT', cameraRole: 'CENTER', attempt: 1, selectedAttempt: 1 }]);
+  assert.equal(approveUploadSteps[0]![0].selectedAttempt, 4);
+});
+
+test('approve() leaves selectedAttempt as-is on a run with no offsets, and a step without one untouched', async () => {
+  const { sink, approveUploadSteps } = fakeSink();
+  const run = new RunScopedCaptureSession(sink);
+  await run.savePhoto({ stepId: 'step-front', attempt: 1, dataUrl: 'data:image/jpeg;base64,aaaa' });
+
+  const steps: ApprovalStepInfo[] = [
+    { stepId: 'step-front', stepType: 'FRONT', cameraRole: 'CENTER', attempt: 3, selectedAttempt: 3 },
+    { stepId: 'step-left', stepType: 'LEFT', cameraRole: 'LEFT', attempt: 1 },
+  ];
+  await run.approve(steps);
+
+  assert.deepEqual(approveUploadSteps, [steps]);
+});
+
+test('ElectronCaptureSink.approveUpload resolves when nothing new was approved but staged extras were deleted', () =>
+  withFakeWindow(
+    { approveSessionUpload: async () => ({ ok: true, approved: 0, superseded: 2 }) },
+    async () => {
+      const sink = new ElectronCaptureSink();
+      await assert.doesNotReject(() => sink.approveUpload('session_reselected'));
+    }
+  ));
+
+test('ElectronCaptureSink.approveUpload still rejects on approved 0 / superseded 0 (no session matched)', () =>
+  withFakeWindow(
+    { approveSessionUpload: async () => ({ ok: true, approved: 0, superseded: 0 }) },
+    async () => {
+      const sink = new ElectronCaptureSink();
+      await assert.rejects(
+        () => sink.approveUpload('session_stuck'),
+        /Không tìm thấy ảnh nào của phiên này để duyệt/
+      );
+    }
+  ));
+
+test('ElectronCaptureSink.approveUpload still rejects when superseded is missing and approved is 0', () =>
+  withFakeWindow({ approveSessionUpload: async () => ({ ok: true, approved: 0 }) }, async () => {
+    const sink = new ElectronCaptureSink();
+    await assert.rejects(() => sink.approveUpload('session_stuck'));
+  }));
+
+test('ElectronCaptureSink.approveUpload surfaces the main process SELECTED_SHOT_NOT_STAGED refusal', () =>
+  withFakeWindow(
+    { approveSessionUpload: async () => ({ ok: false, error: 'SELECTED_SHOT_NOT_STAGED:step-front:7' }) },
+    async () => {
+      const sink = new ElectronCaptureSink();
+      await assert.rejects(() => sink.approveUpload('session_x'), /SELECTED_SHOT_NOT_STAGED/);
+    }
+  ));

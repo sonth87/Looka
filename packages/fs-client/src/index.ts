@@ -6,6 +6,9 @@ export type {
   FileReader,
   UploadWorkerOptions,
   WorkerEvent,
+  BatchUploadClient,
+  BatchUploadOutcome,
+  UploadBatchOptions,
 } from './UploadWorker.js';
 export { FsError, FS_ERROR_CODES, FS_SERVER_CODES } from './types.js';
 export type {

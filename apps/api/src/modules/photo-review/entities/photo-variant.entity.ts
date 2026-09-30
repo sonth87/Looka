@@ -110,7 +110,7 @@ export class PhotoVariant extends BaseEntity {
   @ApiPropertyOptional()
   dpi?: number | null;
 
-  @Column('varchar', { length: 20, default: PhotoVariantStatus.PROCESSING })
+  @Column('varchar', { length: 20, default: PhotoVariantStatus.DRAFT })
   @ApiProperty({
     description: 'Trạng thái phiên bản',
     enum: PhotoVariantStatus,
@@ -160,4 +160,45 @@ export class PhotoVariant extends BaseEntity {
   @Column('text', { nullable: true })
   @ApiPropertyOptional({ description: 'Ghi chú (ví dụ lý do lỗi)' })
   note?: string | null;
+
+  /**
+   * How many times this variant has been claimed onto the `ai-edit`/
+   * `ai-edit-background` BullMQ queue (2026-09-29, migration
+   * `1841000000000-PhotoVariantAiQueueLifecycle`) — bumped by
+   * `PhotoReviewService.enqueueAiEditJob`'s guarded claim UPDATE, and the
+   * single source of truth every terminal write (DONE/FAILED, or a
+   * retry-in-place note update that leaves status at PROCESSING — see
+   * `PhotoVariantStatus`'s own doc comment) and
+   * `runQueuedAiEditJob`'s own stale-job check are guarded against
+   * (`WHERE status = 'PROCESSING' AND ai_attempts = $attempt`), so a
+   * superseded run (a recovery-sweep retry racing a fresh user re-claim)
+   * can never clobber a newer attempt's result. `PhotoVariantDao` does not
+   * `@Expose` this — internal bookkeeping, not something a reviewer needs
+   * to see.
+   */
+  @Column('int', { name: 'ai_attempts', default: 0 })
+  aiAttempts: number;
+
+  /**
+   * Durable copy of whatever a queued AI job needs to reproduce/resume
+   * itself without Redis (2026-09-29, same migration) — an `aiEdit()`
+   * variant stores `{cfg, steps, seed}` (previously ONLY ever lived in the
+   * BullMQ job's own `data.payload`, unrecoverable if the job was lost); a
+   * `reprocess()` (`CARD_AUTO`) variant stores
+   * `{snapshotCurrentVariantId}`, the set's current card at the moment this
+   * run was allowed to start promoting it (see
+   * `PhotoReviewService.processReprocessJob`'s own `safeToPromote` doc
+   * comment) — read back on a retry (`ai_attempts > 1`) instead of
+   * re-snapshotting at that later run's own start, so a reviewer's newer
+   * choice while the set sat `IN_REVIEW` for hours is never silently
+   * overridden by a stale recovery-sweep retry. `PhotoVariantDao` does not
+   * `@Expose` this either.
+   */
+  @Column('jsonb', { name: 'ai_request_params', nullable: true })
+  aiRequestParams?: {
+    cfg?: number;
+    steps?: number;
+    seed?: number;
+    snapshotCurrentVariantId?: string | null;
+  } | null;
 }

@@ -25,6 +25,14 @@ export type PrintResultImportStatus = 'PROCESSING' | 'DONE' | 'FAILED';
  * whole-file failure — see `PrintResultImportService`'s own doc comment
  * for the two-level "từ chối" distinction this table's `status` vs.
  * `unmatchedRows` encodes.
+ *
+ * `printedRows` counts every ACCEPTED "Đã in" row — not only cards that just
+ * transitioned to PRINTED: an already-PRINTED item re-listed as "Đã in" (a
+ * pure idempotent no-op) and one whose only effect was a card-code-only
+ * update (a new "Mã thẻ" on an already-printed item) both count there too,
+ * the code-only case deliberately folded into this existing bucket rather
+ * than getting its own persisted counter. A "Đã in" row rejected for a
+ * too-long card code counts in `unmatchedRows` (and `matchedRows`) instead.
  */
 @Entity('print_result_imports')
 export class PrintResultImport extends BaseEntity {
