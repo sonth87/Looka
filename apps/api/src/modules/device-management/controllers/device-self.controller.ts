@@ -4,9 +4,18 @@ import {
 } from '@app/shared/http/api-response.decorator';
 import { CustomException, ERROR_CODE } from '@app/shared/errors/legacy';
 import { toDao } from '@app/shared/http/to-dao.helper';
-import { AddDevicePhotoDto, AddDeviceVideoDto } from '@app/modules/capture/dto';
+import {
+  AddDevicePhotoDto,
+  AddDevicePhotosDto,
+  AddDeviceVideoDto,
+} from '@app/modules/capture/dto';
 import { ListSessionsQueryDto } from '@app/modules/capture/dto/list-sessions-query.dto';
-import { SessionListItemDao } from '@app/modules/capture/dao';
+import {
+  DevicePhotoBatchResultDao,
+  SessionListItemDao,
+} from '@app/modules/capture/dao';
+import { DevicePhotosBodyPipe } from '@app/modules/capture/pipes/device-photos-body.pipe';
+import type { DevicePhotosBody } from '@app/modules/capture/pipes/device-photos-body.pipe';
 import { PhotoService } from '@app/modules/capture/services/photo.service';
 import { SessionService } from '@app/modules/capture/services/session.service';
 import { SessionVideoService } from '@app/modules/capture/services/session-video.service';
@@ -21,7 +30,13 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
-import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBody,
+  ApiExtraModels,
+  ApiOperation,
+  ApiTags,
+  getSchemaPath,
+} from '@nestjs/swagger';
 import type { Request } from 'express';
 import { CampaignDao } from '../dao';
 import { CreateDeviceEventsDto } from '../dto/create-device-events.dto';
@@ -124,16 +139,40 @@ export class DeviceSelfController {
    * Same nullable-campaignId guard as `getMyConfig`/`pushEvents` above — a
    * self-enrolled device with no campaign of its own has nothing this
    * write could attribute the photo to.
+   *
+   * 1-n (one photo or many per request). Three body shapes, resolved by
+   * `DevicePhotosBodyPipe`:
+   *
+   *  - the legacy single `AddDevicePhotoDto` object — what kiosk builds
+   *    already deployed send. Behaves EXACTLY as before: 201 with
+   *    `{ photoId }`, and any failure throws with its own HTTP status;
+   *  - `{ photos: [...] }` or a bare `[...]` (max
+   *    `MAX_DEVICE_PHOTOS_PER_REQUEST`) — 201 with `{ requested, succeeded,
+   *    failed, results[] }`; partial success, each photo's own outcome
+   *    (including its error status) is in `results`, matched by `photoId`.
+   *
+   * No `@HttpCode` — the status stays Nest's default 201 for both shapes,
+   * so the legacy contract is unchanged.
    */
   @Post('photos')
+  @ApiExtraModels(AddDevicePhotoDto, AddDevicePhotosDto)
+  @ApiBody({
+    schema: {
+      oneOf: [
+        { $ref: getSchemaPath(AddDevicePhotoDto) },
+        { $ref: getSchemaPath(AddDevicePhotosDto) },
+        { type: 'array', items: { $ref: getSchemaPath(AddDevicePhotoDto) } },
+      ],
+    },
+  })
   @ApiOperation({
     summary:
-      "Push one captured photo's actual bytes for durable storage ahead of the file-service",
+      "Push one or many captured photos' actual bytes (1-n) for durable storage ahead of the file-service",
   })
   async pushPhoto(
     @Req() req: Request,
-    @Body() dto: AddDevicePhotoDto,
-  ): Promise<{ photoId: string }> {
+    @Body(DevicePhotosBodyPipe) body: DevicePhotosBody,
+  ): Promise<{ photoId: string } | DevicePhotoBatchResultDao> {
     if (!req.device!.campaignId) {
       throw new CustomException(
         'This device has no campaign (self-enrolled) — photo upload requires a campaign',
@@ -141,10 +180,17 @@ export class DeviceSelfController {
         HttpStatus.CONFLICT,
       );
     }
-    return this.photoService.addDevicePhoto(
+    if (body.mode === 'single') {
+      return this.photoService.addDevicePhoto(
+        req.device!.id,
+        req.device!.campaignId,
+        body.photos[0],
+      );
+    }
+    return this.photoService.addDevicePhotos(
       req.device!.id,
       req.device!.campaignId,
-      dto,
+      body.photos,
     );
   }
 

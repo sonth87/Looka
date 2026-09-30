@@ -1,5 +1,7 @@
 import { FileStorageService } from '@app/modules/file-storage/services/file-storage.service';
 import { PhotoReviewService } from '@app/modules/photo-review/services/photo-review.service';
+import { CaptureStatsService } from '@app/modules/stats/services/capture-stats.service';
+import { ConfigModule } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
@@ -37,6 +39,10 @@ describeDb('capture persistence', () => {
 
     const built = await Test.createTestingModule({
       imports: [
+        // `PhotoService` reads its size limits through `ConfigService` (added
+        // after this spec was written) — the real, env-backed one, same as
+        // `device-management-persistence.spec.ts` already uses.
+        ConfigModule.forRoot({ isGlobal: true }),
         TypeOrmModule.forRoot({
           type: 'postgres',
           url,
@@ -63,6 +69,12 @@ describeDb('capture persistence', () => {
             ensureSetForApprovedSession: jest.fn().mockResolvedValue(null),
           },
         },
+        // `SessionService` gained the stats module's `CaptureStatsService`
+        // (P4 hot-path counters) after this spec was written, which left the
+        // whole suite unable to START (Nest DI error at `compile()`) — so none
+        // of its tests were actually running. No constructor dependencies,
+        // so the real class is used (and the counter writes get exercised).
+        CaptureStatsService,
       ],
     }).compile();
 

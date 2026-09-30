@@ -30,6 +30,11 @@ export class PrintItemListItemDao {
   @ApiProperty() status: string;
   @ApiPropertyOptional() printerId?: string | null;
   @ApiPropertyOptional() printedAt?: Date | null;
+  @ApiPropertyOptional({
+    description:
+      'Mã thẻ do xưởng in điền khi trả kết quả in (CENTRALIZED) — null nếu chưa có',
+  })
+  cardCode?: string | null;
   @ApiPropertyOptional() renderedAt?: Date | null;
   @ApiPropertyOptional() exportedAt?: Date | null;
   @ApiPropertyOptional() errorMessage?: string | null;
@@ -65,6 +70,7 @@ export class PrintItemListItemDao {
     dao.status = item.status;
     dao.printerId = item.printerId ?? null;
     dao.printedAt = item.printedAt ?? null;
+    dao.cardCode = item.cardCode ?? null;
     dao.renderedAt = item.renderedAt ?? null;
     dao.exportedAt = item.exportedAt ?? null;
     dao.errorMessage = item.errorMessage ?? null;

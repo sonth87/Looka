@@ -58,6 +58,12 @@ export class CampaignSnapshotService {
           COALESCE((SELECT COUNT(*) FROM subject_photo_sets sps WHERE sps.campaign_id = c.id AND sps.status = 'APPROVED'), 0) AS processed,
           COALESCE((SELECT COUNT(*) FROM subject_photo_sets sps WHERE sps.campaign_id = c.id AND sps.status IN ('READY', 'IN_REVIEW')), 0) AS pending_review,
           COALESCE((SELECT COUNT(*) FROM subject_photo_sets sps WHERE sps.campaign_id = c.id AND sps.status = 'AUTO_FAILED'), 0) AS capture_errors,
+          -- Cards actually printed, one per student (a reprint creates a second
+          -- print_items row for the same subject_code — count the person once).
+          -- This column used to be hard-coded 0 and was never touched on
+          -- conflict, so the dashboard's "Đã in" tile could never move
+          -- (found in the 2026-09-30 dashboard browser test).
+          COALESCE((SELECT COUNT(DISTINCT pi.subject_code) FROM print_items pi WHERE pi.campaign_id = c.id AND pi.status = 'PRINTED'), 0) AS printed,
           COALESCE((SELECT COUNT(*) FROM subject_photo_sets sps WHERE sps.campaign_id = c.id AND sps.due_at IS NOT NULL AND sps.due_at < now() AND sps.status NOT IN ('APPROVED', 'REJECTED')), 0) AS overdue,
           COALESCE((SELECT COUNT(*) FROM sessions s WHERE s.campaign_id = c.id AND s.status = 'IN_PROGRESS' AND COALESCE(s.captured_at, s.created_at) >= now() - interval '15 minutes'), 0) AS in_progress_now,
           (SELECT MAX(COALESCE(s.captured_at, s.created_at)) FROM sessions s WHERE s.campaign_id = c.id) AS last_capture_at
@@ -74,7 +80,7 @@ export class CampaignSnapshotService {
         COALESCE(quota_planned, NULLIF(roster_valid, 0)),
         roster_valid, sessions, subjects_captured, processed, pending_review, capture_errors,
         CASE WHEN roster_valid = 0 THEN NULL ELSE GREATEST(roster_valid - subjects_captured, 0) END,
-        0, overdue, in_progress_now, last_capture_at, now()
+        printed, overdue, in_progress_now, last_capture_at, now()
       FROM src
       ON CONFLICT (campaign_id) DO UPDATE SET
         quota = EXCLUDED.quota,
@@ -85,6 +91,7 @@ export class CampaignSnapshotService {
         pending_review = EXCLUDED.pending_review,
         capture_errors = EXCLUDED.capture_errors,
         not_captured = EXCLUDED.not_captured,
+        printed = EXCLUDED.printed,
         overdue = EXCLUDED.overdue,
         in_progress_now = EXCLUDED.in_progress_now,
         last_capture_at = EXCLUDED.last_capture_at,

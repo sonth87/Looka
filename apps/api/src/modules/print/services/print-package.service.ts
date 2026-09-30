@@ -227,14 +227,22 @@ export class PrintPackageService {
 
   /**
    * `danh-sach-in.xlsx` — same header names `PrintResultImportService
-   * .HEADER_ALIASES` recognizes (`Mã SV`, `Tình trạng`, `Lý do`), so the
-   * print shop can fill THIS file in and upload it straight back through
-   * `POST /v1/print/batches/:id/result-imports` unchanged. `Tình trạng`/`Lý
-   * do` are left blank for the print shop; a data-validation dropdown on
-   * `Tình trạng` (Đã in / In thất bại) keeps that column's free text
-   * matching `PRINTED_VALUES`/`FAILED_VALUES` there. Only items whose photo
-   * actually made it into the zip are listed — a row with no matching
-   * image in the package would be meaningless for the print shop to mark.
+   * .HEADER_ALIASES` recognizes (`Mã SV`, `Tình trạng`, `Mã thẻ`, `Lý do`), so
+   * the print shop can fill THIS file in and upload it straight back through
+   * `POST /v1/print/batches/:id/result-imports` unchanged. `Tình trạng`/`Mã
+   * thẻ`/`Lý do` are left blank for the print shop; a data-validation
+   * dropdown on `Tình trạng` (Đã in / In thất bại) keeps that column's free
+   * text matching `PRINTED_VALUES`/`FAILED_VALUES` there. `Mã thẻ` is the
+   * card code the print shop reports for a printed card (optional on the
+   * import side — a file without that column still imports); its cells are
+   * pre-formatted as Text so a code typed with leading zeros ("00123") is
+   * stored as text and survives the round-trip instead of being coerced to
+   * the number 123 by Excel. Only items whose photo actually made it into
+   * the zip are listed — a row with no matching image in the package would
+   * be meaningless for the print shop to mark.
+   *
+   * Column layout (letters matter — the dropdown targets `G`): A STT, B Mã
+   * SV, C Họ tên, D Lớp, E Khoa, F Khóa, G Tình trạng, H Mã thẻ, I Lý do.
    */
   private async buildResultListWorkbook(
     includedItems: PrintItem[],
@@ -250,6 +258,7 @@ export class PrintPackageService {
       'Khoa',
       'Khóa',
       'Tình trạng',
+      'Mã thẻ',
       'Lý do',
     ]);
     includedItems.forEach((item, idx) => {
@@ -262,16 +271,19 @@ export class PrintPackageService {
         cohortByCampaignId.get(item.campaignId) ?? '',
         '',
         '',
+        '',
       ]);
     });
     // Dropdown on `Tình trạng` (column G) for every data row — allowBlank so
     // the print shop can leave a row untouched until it's actually printed.
+    // `Mã thẻ` (column H) is pre-formatted as Text ('@') on those same rows.
     for (let row = 2; row <= includedItems.length + 1; row += 1) {
       sheet.getCell(`G${row}`).dataValidation = {
         type: 'list',
         allowBlank: true,
         formulae: ['"Đã in,In thất bại"'],
       };
+      sheet.getCell(`H${row}`).numFmt = '@';
     }
     return Buffer.from(await workbook.xlsx.writeBuffer());
   }

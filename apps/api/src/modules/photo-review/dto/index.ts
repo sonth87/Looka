@@ -1,5 +1,6 @@
 export * from './ai-edit.dto';
 export * from './approve-reject.dto';
+export * from './bulk-approve-reject.dto';
 export * from './create-photo-kind.dto';
 export * from './create-review-assignment.dto';
 export * from './export-query.dto';

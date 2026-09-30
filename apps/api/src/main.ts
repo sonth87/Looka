@@ -112,7 +112,11 @@ async function bootstrap() {
     // `res.headers.get('Content-Disposition' | 'X-Print-Export-Failed-Item-Ids')`
     // silently comes back `null`, indistinguishable from the server simply
     // not having sent it.
-    exposedHeaders: ['Content-Disposition', 'X-Print-Export-Failed-Item-Ids'],
+    exposedHeaders: [
+      'Content-Disposition',
+      'X-Print-Export-Failed-Item-Ids',
+      'X-Preview-Kind',
+    ],
     credentials: true,
   });
 

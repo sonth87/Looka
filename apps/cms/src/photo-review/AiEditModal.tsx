@@ -7,6 +7,8 @@ import {
   ReviewOriginalPhoto,
   acceptVariant,
   getReviewJob,
+  isVariantDone,
+  isVariantInFlight,
   requestAiEdit,
 } from '../api';
 import { ModalShell } from '../components/CampaignDangerActions';
@@ -31,6 +33,8 @@ const REGION_OPTIONS: { value: AiEditRegion; label: string }[] = [
 ];
 
 const POLL_INTERVAL_MS = 1500;
+/** A poll that fails this many times in a row (network blip, brief 5xx) gives up — see `schedulePoll`'s own doc comment. */
+const MAX_CONSECUTIVE_POLL_ERRORS = 3;
 
 /** Fallback label for an original photo with no known camera role — same convention `ReviewDetailContent.originalPhotoLabel` uses. */
 function originalPhotoLabel(photo: ReviewOriginalPhoto): string {
@@ -48,12 +52,21 @@ interface SourceOption {
 
 /**
  * "Sửa bằng AI" modal (§5.3, Giai đoạn 5 §5.1 feature 12) —
- * `POST /v1/review/sets/:id/ai-edit` runs SYNCHRONOUSLY on the server and
- * returns the resulting `photo_variants` row already at its final status
- * (`READY`/`FAILED`); `GET /v1/review/jobs/:id` re-reads that same shape.
- * The poll loop below only ever fires if a future async queue is added
- * behind this same contract (server's own doc comment) — today's request
- * always comes back already settled, so it never actually starts.
+ * `POST /v1/review/sets/:id/ai-edit` runs ASYNCHRONOUSLY on the server
+ * (2026-09-29 — enqueued onto BullMQ's user-priority lane) and returns the
+ * resulting `photo_variants` row at `PROCESSING`; `GET /v1/review/jobs/:id`
+ * re-reads that same shape as it settles. The poll loop below fires
+ * whenever the initial response (or a later poll) is still `isVariantInFlight`
+ * (`DRAFT`/`PROCESSING`) — a user's own click here always jumps ahead of
+ * any already-queued background/kiosk-auto/recovery job (see
+ * `PhotoReviewService.reprocess`/`aiEdit`'s own doc comments on
+ * `AiEditJobOrigin.USER`), so this modal should settle quickly in practice.
+ * A retryable server-side failure (the call to the AI service timed out, or
+ * hit a transient error) does NOT get its own status (2026-09-29, "bỏ
+ * PENDING đi") — the variant just stays `PROCESSING` while the server's own
+ * `AiEditRecoveryService` sweep retries it in the background, so this modal
+ * keeps polling straight through a retry and only ever stops on `DONE`/
+ * `READY`/`FAILED`.
  *
  * Only turns the result into a real version on an explicit "Chấp nhận"
  * (`POST /v1/review/variants/:id/accept`) — never auto-applied, per §6.2
@@ -118,11 +131,18 @@ export function AiEditModal({
   const [running, setRunning] = useState(false);
   const [accepting, setAccepting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const pollRef = useRef<number | null>(null);
+  const pollTimeoutRef = useRef<number | null>(null);
+  /**
+   * Bumped at the start of every `run()` call and on unmount — see
+   * `schedulePoll`'s own doc comment for why every poll response is checked
+   * against this before being applied.
+   */
+  const pollGenerationRef = useRef(0);
 
   useEffect(() => {
     return () => {
-      if (pollRef.current) window.clearInterval(pollRef.current);
+      pollGenerationRef.current += 1;
+      if (pollTimeoutRef.current) window.clearTimeout(pollTimeoutRef.current);
     };
   }, []);
 
@@ -138,8 +158,31 @@ export function AiEditModal({
   // cancelled (there is no cancellation endpoint), so this only stops the
   // person from losing track of it — see `run()`'s own comment for what
   // happens to that first result once it lands.
+  //
+  // 2026-09-30 fix (confirmed audit finding): a RETRYING job (`PROCESSING`
+  // with a `note` — the server keeps it at `PROCESSING` through a
+  // retryable failure instead of a separate status, see this component's
+  // own top doc comment) can now sit behind the recovery sweep's 5-minute
+  // cron and a background-lane queue for tens of minutes, up to
+  // `AI_EDIT_MAX_ATTEMPTS` retries. The guard above trapped the reviewer in
+  // this modal for that whole window with no way out except reloading the
+  // page. Closing here does not touch the server-side job — it keeps
+  // retrying regardless — and reopening this modal and clicking "Chạy"
+  // again WOULD still start a genuinely new job on top of it (unchanged:
+  // `aiEdit()` always creates a fresh variant), same risk the original
+  // 2026-09-29 fix was written to prevent. That risk is deliberately
+  // accepted here, now bounded by `aiEdit()`'s own per-set in-flight cap
+  // (`AI_EDIT_MAX_IN_FLIGHT_PER_SET`) rather than unlimited — a better
+  // trade than leaving the reviewer with no way to close this modal at all
+  // for the entire retry window.
+  const retryPending = job?.status === 'PROCESSING' && !!job.note;
   function handleClose() {
-    if (running) return;
+    if (running && !retryPending) return;
+    if (pollTimeoutRef.current) {
+      window.clearTimeout(pollTimeoutRef.current);
+      pollTimeoutRef.current = null;
+    }
+    pollGenerationRef.current += 1;
     onClose();
   }
 
@@ -147,11 +190,68 @@ export function AiEditModal({
     setPrompt((prev) => (prev.trim() ? `${prev.trim()}, ${chip}` : chip));
   }
 
+  /**
+   * Chains each poll off a `setTimeout` scheduled only once the PREVIOUS
+   * one's own response has been handled (2026-09-30 fix — confirmed audit
+   * finding), instead of an unconditional `setInterval` that let requests
+   * overlap: a slower-but-earlier PROCESSING response could land AFTER a
+   * faster-but-later terminal DONE/FAILED one had already arrived and
+   * stopped polling, overwriting it and leaving the modal stuck on "Đang
+   * xử lý..." forever with nothing left to un-stick it.
+   *
+   * `generation` is captured once per `run()` call (and bumped on unmount/
+   * `handleClose`) and checked before every state update below — a
+   * response that arrives after this run's own poll chain was superseded
+   * or torn down is dropped silently instead of applied.
+   *
+   * A single transient poll error (a network blip, a brief 5xx) used to
+   * stop polling for good even though the job keeps running server-side
+   * for minutes; this retries up to `MAX_CONSECUTIVE_POLL_ERRORS` times
+   * before actually giving up.
+   */
+  function schedulePoll(jobId: string, generation: number, consecutiveErrors = 0) {
+    pollTimeoutRef.current = window.setTimeout(async () => {
+      if (generation !== pollGenerationRef.current) return;
+      try {
+        const polled = await getReviewJob(jobId);
+        if (generation !== pollGenerationRef.current) return;
+        setJob(polled);
+        if (isVariantInFlight(polled.status)) {
+          schedulePoll(jobId, generation, 0);
+        } else {
+          // Stops on DONE/READY/FAILED only — a retryable failure keeps
+          // the variant at PROCESSING (no separate status), so polling
+          // continues straight through the server's own retry.
+          pollTimeoutRef.current = null;
+          setRunning(false);
+        }
+      } catch (err) {
+        if (generation !== pollGenerationRef.current) return;
+        const nextErrors = consecutiveErrors + 1;
+        if (nextErrors >= MAX_CONSECUTIVE_POLL_ERRORS) {
+          pollTimeoutRef.current = null;
+          setRunning(false);
+          setError(err instanceof ApiError ? err.message : String(err));
+        } else {
+          schedulePoll(jobId, generation, nextErrors);
+        }
+      }
+    }, POLL_INTERVAL_MS);
+  }
+
   async function run() {
     if (!prompt.trim() || !selectedSource) return;
     setRunning(true);
     setError(null);
     setJob(null);
+    // New poll chain for this run — invalidates any previous one still
+    // scheduled (defensive: "Chạy"/"Chạy lại" is disabled while `running`,
+    // so this should not normally overlap a live chain).
+    const generation = ++pollGenerationRef.current;
+    if (pollTimeoutRef.current) {
+      window.clearTimeout(pollTimeoutRef.current);
+      pollTimeoutRef.current = null;
+    }
     try {
       const created = await requestAiEdit(setId, {
         prompt: prompt.trim(),
@@ -160,26 +260,15 @@ export function AiEditModal({
         fromVariantId: selectedSource.sourceKind === 'VARIANT' ? selectedSource.id : undefined,
         sourcePhotoId: selectedSource.sourceKind === 'ORIGINAL_PHOTO' ? selectedSource.id : undefined,
       });
+      if (generation !== pollGenerationRef.current) return;
       setJob(created);
-      if (created.status === 'PROCESSING') {
-        pollRef.current = window.setInterval(async () => {
-          try {
-            const polled = await getReviewJob(created.id);
-            setJob(polled);
-            if (polled.status === 'READY' || polled.status === 'FAILED') {
-              if (pollRef.current) window.clearInterval(pollRef.current);
-              setRunning(false);
-            }
-          } catch (err) {
-            if (pollRef.current) window.clearInterval(pollRef.current);
-            setRunning(false);
-            setError(err instanceof ApiError ? err.message : String(err));
-          }
-        }, POLL_INTERVAL_MS);
+      if (isVariantInFlight(created.status)) {
+        schedulePoll(created.id, generation);
       } else {
         setRunning(false);
       }
     } catch (err) {
+      if (generation !== pollGenerationRef.current) return;
       // A 422 here means the prompt was refused by the keyword filter (§5.3/§6.2 rule 4) — ApiError.message carries the server's explanation.
       setError(err instanceof ApiError ? err.message : String(err));
       setRunning(false);
@@ -187,7 +276,7 @@ export function AiEditModal({
   }
 
   async function accept() {
-    if (!job || job.status !== 'READY') return;
+    if (!job || !isVariantDone(job.status)) return;
     setAccepting(true);
     setError(null);
     try {
@@ -202,7 +291,7 @@ export function AiEditModal({
 
   const similarity = job?.identitySimilarity ?? undefined;
   const tone = similarity != null ? similarityTone(similarity) : null;
-  const canAccept = job?.status === 'READY' && (similarity == null || similarity >= 0.7);
+  const canAccept = !!job && isVariantDone(job.status) && (similarity == null || similarity >= 0.7);
 
   return (
     <ModalShell title="Sửa bằng AI" onClose={handleClose}>
@@ -289,7 +378,7 @@ export function AiEditModal({
           <div className="rounded-lg border border-gray-200 bg-gray-50 aspect-[3/4] flex items-center justify-center text-xs text-gray-400 overflow-hidden">
             {!job ? (
               <span>Chưa chạy</span>
-            ) : job.status === 'READY' && job.viewUrl ? (
+            ) : isVariantDone(job.status) && job.viewUrl ? (
               <img src={job.viewUrl} alt="Kết quả AI" className="w-full h-full object-cover" />
             ) : job.status === 'FAILED' ? (
               <span className="text-red-600 px-2 text-center">{job.note ?? 'Xử lý lỗi'}</span>
@@ -299,7 +388,7 @@ export function AiEditModal({
           </div>
         </div>
 
-        {job?.status === 'READY' && (
+        {job && isVariantDone(job.status) && (
           <div className="text-sm space-y-0.5">
             {similarity != null && tone ? (
               <div>
@@ -338,8 +427,14 @@ export function AiEditModal({
           <button
             type="button"
             onClick={handleClose}
-            disabled={running}
-            title={running ? 'Yêu cầu vẫn đang chạy trên máy chủ — không thể đóng' : undefined}
+            disabled={running && !retryPending}
+            title={
+              running && !retryPending
+                ? 'Yêu cầu vẫn đang chạy trên máy chủ — không thể đóng'
+                : retryPending
+                  ? 'Hệ thống sẽ tự chạy lại yêu cầu này ở phía máy chủ — có thể đóng cửa sổ này'
+                  : undefined
+            }
             className="px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-100 disabled:opacity-50"
           >
             Hủy

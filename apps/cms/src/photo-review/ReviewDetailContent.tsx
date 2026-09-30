@@ -7,6 +7,8 @@ import {
   ReviewSetDetail,
   approveReviewSet,
   getReviewSet,
+  isVariantDone,
+  isVariantInFlight,
   issuePhotoViewLink,
   rejectReviewSet,
   reprocessReviewSet,
@@ -16,7 +18,14 @@ import { ModalShell } from '../components/CampaignDangerActions';
 import { classifyLinkError, LinkState } from '../components/SessionDetailDrawer';
 import { AiEditModal } from './AiEditModal';
 import { UploadReplaceModal } from './UploadReplaceModal';
-import { REVIEW_STATUS_BADGE_CLASS, REVIEW_STATUS_LABEL, formatDateTime, isReviewSetLocked } from './reviewFormat';
+import {
+  REVIEW_STATUS_BADGE_CLASS,
+  REVIEW_STATUS_LABEL,
+  formatDateTime,
+  isReviewSetLocked,
+  reviewActionLabel,
+  reviewEventNote,
+} from './reviewFormat';
 
 /** Same fallback used by `SessionDetailDrawer.roleLabel` for a photo with no known camera role - `originalPhotos` has no `angleLabel` (never existed on the real API, see `ReviewOriginalPhotoDao`). */
 function originalPhotoLabel(photo: ReviewOriginalPhoto): string {
@@ -136,6 +145,51 @@ export function ReviewDetailContent({ id, onClose }: { id: string; onClose?: () 
       )
       .catch((err) => setPhotoLinks((prev) => ({ ...prev, [photoId]: classifyLinkError(err) })));
   }
+
+  // 2026-09-30 (found while browser-testing the original-photo fallback):
+  // `reprocess()` has been asynchronous since the 09-29 AI-edit queue
+  // rework, so the `getReviewSet` that `withBusy` runs right after the POST
+  // returns a snapshot with the new variant still `DRAFT`/`PROCESSING` — and
+  // nothing ever refreshed it afterwards, leaving the modal on "Đang xử lý..."
+  // (and the set on its old locked status) until the reviewer reopened it.
+  // Keep re-fetching while any variant is in flight; stops by itself once
+  // every variant has settled, and on unmount/id change.
+  //
+  // Also covers a torn snapshot: `getSetDetail` reads the set row and its
+  // variants in separate queries, so a worker commit landing between them
+  // yields "a finished CARD_AUTO variant, but the set still has no current
+  // card" (seen live: new variant `DONE`, set still `PENDING_AUTO`). That
+  // state is transient, so keep polling through it — capped, since it is
+  // not a legal resting state and must never turn into an endless loop.
+  const variantInFlight = set?.variants.some((v) => isVariantInFlight(v.status)) ?? false;
+  const tornSnapshot =
+    !!set &&
+    !set.currentCardVariantId &&
+    set.variants.some((v) => v.kind === 'CARD_AUTO' && isVariantDone(v.status));
+  const shouldPoll = variantInFlight || tornSnapshot;
+  useEffect(() => {
+    if (!shouldPoll) return;
+    let cancelled = false;
+    let ticks = 0;
+    const timer = setInterval(() => {
+      // A torn snapshot heals within a tick or two; only real in-flight work may poll indefinitely.
+      if (!variantInFlight && ++ticks > 20) {
+        clearInterval(timer);
+        return;
+      }
+      getReviewSet(id)
+        .then((next) => {
+          if (!cancelled) setSet(next);
+        })
+        .catch(() => {
+          // Transient — the next tick retries; a real error surfaces on the next user action.
+        });
+    }, 2500);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [id, shouldPoll, variantInFlight]);
 
   const nestedOverlayOpen = aiModalOpen || uploadModalOpen || decisionModal != null || lightboxUrl != null;
 
@@ -266,11 +320,23 @@ export function ReviewDetailContent({ id, onClose }: { id: string; onClose?: () 
           {currentVariant?.viewUrl && <DownloadLink url={currentVariant.viewUrl} className="mt-2" />}
           {currentVariant?.qualityReport && (
             <div className="mt-2 text-xs text-gray-500 space-y-0.5">
-              {Object.entries(currentVariant.qualityReport).map(([k, v]) => (
-                <div key={k}>
-                  {k}: {String(v)}
-                </div>
-              ))}
+              {Object.entries(currentVariant.qualityReport).map(([k, v]) =>
+                // `warnings` (e.g. the "original photo, unprocessed" fallback
+                // notice, 2026-09-30) is something a reviewer must actually
+                // notice before Duyệt — show it as an amber callout instead of
+                // a raw `warnings: <text>` line like the other metrics.
+                k === 'warnings' && Array.isArray(v) ? (
+                  v.map((w, i) => (
+                    <p key={`${k}-${i}`} className="text-amber-600 font-medium">
+                      ⚠ {String(w)}
+                    </p>
+                  ))
+                ) : (
+                  <div key={k}>
+                    {k}: {String(v)}
+                  </div>
+                )
+              )}
             </div>
           )}
           {currentVariant?.identitySimilarity != null ? (
@@ -310,11 +376,15 @@ export function ReviewDetailContent({ id, onClose }: { id: string; onClose?: () 
             <div className="mt-4 pt-3 border-t border-gray-100">
               <h3 className="text-xs font-medium text-gray-700 mb-1.5">Lịch sử</h3>
               <ul className="space-y-1 text-xs text-gray-500 max-h-40 overflow-y-auto">
-                {set.events.map((ev) => (
-                  <li key={ev.id}>
-                    {formatDateTime(ev.at)} {ev.actorName ?? ''} — {ev.action}
-                  </li>
-                ))}
+                {set.events.map((ev) => {
+                  const note = reviewEventNote(ev.payload);
+                  return (
+                    <li key={ev.id}>
+                      {formatDateTime(ev.at)} {ev.actorName ?? ''} — {reviewActionLabel(ev.action)}
+                      {note && <div className="ml-3 text-gray-600 whitespace-pre-wrap break-words">{note}</div>}
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           )}
@@ -455,8 +525,20 @@ function VariantRow({
         {variant.identitySimilarity != null && `giống ${variant.identitySimilarity.toFixed(2)}`}
         {variant.createdByName ? ` · ${variant.createdByName}` : ''}
       </div>
+      {/* 2026-09-29 — the AI-edit queue rework made DRAFT/PROCESSING real,
+          user-visible states (previously every variant a reviewer could see
+          was already settled) — surfaced here so a variant waiting on the
+          queue doesn't look identical to a finished one. A retryable
+          failure has no status of its own ("bỏ PENDING đi") — it just stays
+          PROCESSING while the server retries it, so it reads as "Đang xử
+          lý..." the same as a normal run. */}
+      {!isVariantDone(variant.status) && variant.status !== 'DISCARDED' && (
+        <div className="text-gray-400 mt-0.5">
+          {variant.status === 'FAILED' ? 'Lỗi' : 'Đang xử lý...'}
+        </div>
+      )}
       <div className="flex gap-3 mt-1.5">
-        {!isCurrent && (
+        {!isCurrent && isVariantDone(variant.status) && (
           <button type="button" onClick={onSetCurrent} disabled={busy} className="text-blue-600 hover:text-blue-800 font-medium disabled:opacity-40">
             Đặt hiện tại
           </button>
@@ -592,6 +674,17 @@ function ReviewDecisionModal({
 
 /** Shared viewer for both original photos and variants — see `DownloadLink`'s own doc comment for what this button does and does not guarantee. */
 function Lightbox({ url, onClose }: { url: string; onClose: () => void }) {
+  // The parent modal's own Escape shortcut is suppressed while any nested
+  // overlay is open (see `nestedOverlayOpen`), so without this Escape did
+  // nothing at all while a photo was enlarged.
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') onClose();
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [onClose]);
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-6" onClick={onClose}>
       <div className="absolute inset-0 bg-black/70" />

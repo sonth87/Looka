@@ -23,6 +23,7 @@ import { PhotoReviewEvent } from './entities/photo-review-event.entity';
 import { PhotoVariant } from './entities/photo-variant.entity';
 import { SubjectPhotoSet } from './entities/subject-photo-set.entity';
 import {
+  AI_EDIT_BACKGROUND_QUEUE_NAME,
   AI_EDIT_QUEUE_NAME,
   PHOTO_REVIEW_ERROR_CODE,
   PhotoReviewSetStatus,
@@ -76,6 +77,11 @@ describeDb(
     let dataSource: DataSource;
     let moduleRef: TestingModule;
     let kindId: string;
+    // Hoisted out of `beforeAll` (2026-09-29) — see
+    // `photo-review-persistence.spec.ts`'s own identical top comment for why
+    // (`moduleRef.get(AiImageEditClient)` types its return as the real
+    // class, which has no `.mockImplementation`).
+    let aiImageEdit: { edit: jest.Mock; health: jest.Mock };
     const apiBaseUrl = 'http://localhost:3100';
 
     beforeAll(async () => {
@@ -94,7 +100,7 @@ describeDb(
         retouch: jest.fn(),
         identitySimilarity: jest.fn(),
       };
-      const aiImageEdit = {
+      aiImageEdit = {
         edit: jest.fn(),
         health: jest.fn(),
       };
@@ -162,9 +168,25 @@ describeDb(
           // tests below call `processAiEditJob`/`processReprocessJob`
           // directly (what `AiEditProcessor` would eventually call), so
           // nothing here needs to inspect what was actually enqueued.
+          // `getJob`/`getJobs`/`remove` mocked too (2026-09-29,
+          // priority-preemption rework) — `promoteToUserLane` calls them.
           {
             provide: getQueueToken(AI_EDIT_QUEUE_NAME),
-            useValue: { add: jest.fn().mockResolvedValue(undefined) },
+            useValue: {
+              add: jest.fn().mockResolvedValue(undefined),
+              getJob: jest.fn().mockResolvedValue(undefined),
+              getJobs: jest.fn().mockResolvedValue([]),
+              remove: jest.fn().mockResolvedValue(0),
+            },
+          },
+          {
+            provide: getQueueToken(AI_EDIT_BACKGROUND_QUEUE_NAME),
+            useValue: {
+              add: jest.fn().mockResolvedValue(undefined),
+              getJob: jest.fn().mockResolvedValue(undefined),
+              getJobs: jest.fn().mockResolvedValue([]),
+              remove: jest.fn().mockResolvedValue(0),
+            },
           },
           // `onSetApproved`/`onSetLeftApproved` are pure `manager`-driven (see
           // their own doc comments) — every OTHER constructor dep is
@@ -327,7 +349,7 @@ describeDb(
           setId,
           PhotoVariantKind.CARD_AUTO,
           randomUUID(),
-          PhotoVariantStatus.READY,
+          PhotoVariantStatus.DONE,
         ],
       );
       // `aiEdit`'s "is this a usable source variant" gate accepts either
@@ -635,16 +657,8 @@ describeDb(
         cleanup.setIds.push(setId);
         cleanup.sessionIds.push(sessionId);
 
-        // `AiImageEditClient` is DI-overridden with a plain
-        // `{ edit: jest.fn(), ... }` object at construction (see beforeAll)
-        // — `moduleRef.get()` types the return as the real class, whose
-        // `edit` is a plain async method with no `.mockImplementation`, same
-        // `@typescript-eslint/no-unsafe-call` this module's sibling
-        // locking-rule spec already accepts for its own `cardPhoto`/`edit`
-        // mock usage (see that file's own doc comment on this exact
-        // trade-off) rather than fight `no-unnecessary-type-assertion` over
-        // a cast TS considers redundant here.
-        const aiImageEdit = moduleRef.get(AiImageEditClient);
+        // `aiImageEdit` is the hoisted mock object — see this describe
+        // block's own top comment.
         // Long enough for discardVariant() below to land well before this
         // resolves — aiEdit() awaits this synchronously for the whole
         // duration (see that method's own doc comment), which is exactly the
@@ -684,10 +698,15 @@ describeDb(
         expect(aiVariant.status).toBe(PhotoVariantStatus.PROCESSING);
         const aiVariantId = aiVariant.id;
 
+        // `attempt: 1` — `aiEdit()`'s own `enqueueAiEditJob` claim is this
+        // variant's first-ever claim (DRAFT → PROCESSING, `ai_attempts`
+        // 0 → 1), which `processAiEditJob`'s own attempt guard (2026-09-29,
+        // C1) now checks against `ai_attempts` on the row.
         const processingPromise = service.processAiEditJob(
           setId,
           aiVariantId,
           {},
+          1,
         );
 
         // A second reviewer discards it while processAiEditJob() is still

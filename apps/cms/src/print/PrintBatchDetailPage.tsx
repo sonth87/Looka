@@ -8,7 +8,6 @@ import {
   PrintBatch,
   PrintItem,
   PrintItemGroup,
-  PrintItemStatus,
   Printer,
   PrintResultImport,
   addItemsToPrintBatch,
@@ -20,6 +19,7 @@ import {
   downloadPrintResultTemplate,
   exportPrintBatchPackage,
   getPrintBatch,
+  getPrintItem,
   listCampaigns,
   listCampaignSubjectDistinctValues,
   listCardTemplates,
@@ -29,7 +29,7 @@ import {
   listPrintResultImports,
   populatePrintBatch,
   previewCardTemplateUrl,
-  previewPrintItemUrl,
+  previewPrintItem,
   removeItemFromPrintBatch,
   removeItemsFromPrintBatch,
   renderPrintBatch,
@@ -46,8 +46,8 @@ import {
   PRINT_BATCH_STATUS_BADGE_CLASS,
   PRINT_BATCH_STATUS_LABEL,
   PRINT_ITEM_STATUS_BADGE_CLASS,
-  PRINT_ITEM_STATUS_LABEL,
   formatDateTime,
+  printItemStatusFilterOptions,
   printItemStatusLabel,
 } from './printFormat';
 
@@ -80,7 +80,9 @@ export function PrintBatchDetailPage() {
   const [batch, setBatch] = useState<PrintBatch | null>(null);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
-  const [statusFilter, setStatusFilter] = useState<PrintItemStatus | ''>('');
+  // One status, or a comma-separated list (`'PENDING,RENDERED'` = the merged
+  // "Chưa in" option of a CENTRALIZED batch) — `printItemStatusFilterOptions`.
+  const [statusFilter, setStatusFilter] = useState('');
   const [classNameFilter, setClassNameFilter] = useState('');
   const [facultyFilter, setFacultyFilter] = useState('');
   const [classNameOptions, setClassNameOptions] = useState<string[]>([]);
@@ -97,6 +99,9 @@ export function PrintBatchDetailPage() {
   const [previewItem, setPreviewItem] = useState<PrintItem | null>(null);
   const [previewingDefaultTemplate, setPreviewingDefaultTemplate] = useState(false);
   const [renderResult, setRenderResult] = useState<string | null>(null);
+  // Set by "Xuất gói" when some students could not be packaged — its own amber
+  // warning (not the blue `renderResult` info box) because it needs action.
+  const [exportWarning, setExportWarning] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [resultImports, setResultImports] = useState<PrintResultImport[]>([]);
   const [uploadResultOpen, setUploadResultOpen] = useState(false);
@@ -265,6 +270,14 @@ export function PrintBatchDetailPage() {
 
       {error && <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm mb-4">{error}</div>}
       {renderResult && <div className="p-3 rounded-lg bg-blue-50 border border-blue-200 text-blue-700 text-sm mb-4">{renderResult}</div>}
+      {exportWarning && (
+        <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-sm mb-4 flex items-start justify-between gap-3">
+          <span>{exportWarning}</span>
+          <button type="button" onClick={() => setExportWarning(null)} className="text-amber-700 hover:text-amber-900 shrink-0" aria-label="Đóng cảnh báo">
+            ✕
+          </button>
+        </div>
+      )}
 
       {groups.length > 0 && (
         <div className="flex flex-wrap gap-2 mb-4">
@@ -277,7 +290,11 @@ export function PrintBatchDetailPage() {
       )}
 
       <div className="flex flex-wrap items-center gap-2 mb-4">
-        {canEdit && (
+        {/* Same `batch.campaignId` rule as "Nạp ảnh đã duyệt" just below and as the
+            modal itself (`addOpen && batch.campaignId`) — without it this button
+            rendered on a campaign-less batch and silently did nothing (found in
+            the 2026-09-30 print browser re-test). */}
+        {canEdit && batch.campaignId && (
           <button
             type="button"
             onClick={() => setAddOpen(true)}
@@ -306,20 +323,25 @@ export function PrintBatchDetailPage() {
             Nạp ảnh đã duyệt
           </button>
         )}
-        <button
-          type="button"
-          disabled={busy || totalItemCount === 0}
-          onClick={() =>
-            void withBusy(async () => {
-              const result = await renderPrintBatch(batch.id);
-              setRenderResult(`Đã render ${result.rendered} thẻ${result.failed > 0 ? `, ${result.failed} lỗi` : ''}.`);
-              reload();
-            })
-          }
-          className="px-3 py-2 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 text-sm font-medium disabled:opacity-50"
-        >
-          Render cả đợt
-        </button>
+        {/* Rendering only makes sense while the batch can still change
+            (DRAFT/READY). It stayed visible on DONE/CANCELLED batches, where it
+            can no longer do anything useful (2026-09-30 print re-test). */}
+        {canEdit && (
+          <button
+            type="button"
+            disabled={busy || totalItemCount === 0}
+            onClick={() =>
+              void withBusy(async () => {
+                const result = await renderPrintBatch(batch.id);
+                setRenderResult(`Đã render ${result.rendered} thẻ${result.failed > 0 ? `, ${result.failed} lỗi` : ''}.`);
+                reload();
+              })
+            }
+            className="px-3 py-2 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 text-sm font-medium disabled:opacity-50"
+          >
+            Render cả đợt
+          </button>
+        )}
         {canEdit && batch.mode === 'DIRECT' && (
           <button
             type="button"
@@ -342,6 +364,7 @@ export function PrintBatchDetailPage() {
             disabled={busy || totalItemCount === 0}
             onClick={() =>
               void withBusy(async () => {
+                setExportWarning(null); // a stale warning from an earlier attempt must not outlive a new one
                 const { blob, filename, failedItemIds } = await exportPrintBatchPackage(batch.id, selectedIds);
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
@@ -352,10 +375,13 @@ export function PrintBatchDetailPage() {
                 // Items with no approved card photo (or a download failure)
                 // were left out of the zip and NOT moved to "Đã xuất, chờ
                 // in" — surfaced here since the download itself always
-                // "succeeds" from the browser's point of view.
-                setRenderResult(
+                // "succeeds" from the browser's point of view. Names WHO
+                // failed (2026-09-30): the banner used to give only a count,
+                // leaving the operator to hunt for the rows still "Chưa in".
+                setRenderResult(null);
+                setExportWarning(
                   failedItemIds.length > 0
-                    ? `${failedItemIds.length} sinh viên không xuất được ảnh (chưa có ảnh thẻ đã duyệt hoặc tải ảnh lỗi) — chưa chuyển sang Chờ in.`
+                    ? `${failedItemIds.length} sinh viên không xuất được ảnh: ${await describeFailedItems(failedItemIds, items)}. Nguyên nhân thường gặp: hồ sơ chưa được Duyệt / chưa có ảnh thẻ, hoặc ảnh chưa tải được từ file-service — các thẻ này chưa chuyển sang "Chờ in".`
                     : null
                 );
                 reload();
@@ -487,15 +513,15 @@ export function PrintBatchDetailPage() {
         <select
           value={statusFilter}
           onChange={(e) => {
-            setStatusFilter(e.target.value as PrintItemStatus | '');
+            setStatusFilter(e.target.value);
             setPage(1);
           }}
           className="bg-white border border-gray-300 rounded-lg px-3 py-1.5 text-sm text-gray-900"
         >
           <option value="">Tất cả trạng thái</option>
-          {(Object.keys(PRINT_ITEM_STATUS_LABEL) as PrintItemStatus[]).map((s) => (
-            <option key={s} value={s}>
-              {printItemStatusLabel(s, batch.mode)}
+          {printItemStatusFilterOptions(batch.mode === 'CENTRALIZED').map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
             </option>
           ))}
         </select>
@@ -519,6 +545,7 @@ export function PrintBatchDetailPage() {
               <th className="text-left px-3 py-2">Họ tên</th>
               <th className="text-left px-3 py-2">Lớp</th>
               <th className="text-left px-3 py-2">Trạng thái</th>
+              <th className="text-left px-3 py-2">Mã thẻ</th>
               <th className="text-left px-3 py-2">Thiếu dữ liệu</th>
               <th />
             </tr>
@@ -556,18 +583,11 @@ export function PrintBatchDetailPage() {
                     <div className="mt-1 text-xs text-red-600">{item.errorMessage}</div>
                   )}
                 </td>
+                <td className="px-3 py-2 text-gray-700">{item.cardCode || '—'}</td>
                 <td className="px-3 py-2 text-amber-600 text-xs">{item.missingFields.length > 0 ? item.missingFields.join(', ') : '—'}</td>
                 <td className="px-3 py-2 text-right whitespace-nowrap">
                   <button type="button" onClick={() => setPreviewItem(item)} className="text-blue-600 hover:text-blue-800 text-xs font-medium mr-3">
                     Xem trước
-                  </button>
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => setApplyTemplateTargets([item.id])}
-                    className="text-gray-600 hover:text-gray-800 text-xs font-medium mr-3 disabled:opacity-40"
-                  >
-                    Áp dụng phôi
                   </button>
                   {canEdit && (
                     <button
@@ -604,7 +624,7 @@ export function PrintBatchDetailPage() {
             ))}
             {items.length === 0 && (
               <tr>
-                <td colSpan={7} className="px-3 py-8 text-center text-gray-400">
+                <td colSpan={8} className="px-3 py-8 text-center text-gray-400">
                   Chưa có sinh viên nào trong đợt in này.
                 </td>
               </tr>
@@ -627,13 +647,17 @@ export function PrintBatchDetailPage() {
       <div className="mt-6 p-4 rounded-2xl border border-gray-200 bg-white shadow-sm space-y-3">
         <div className="flex items-center justify-between">
           <h3 className="text-sm font-semibold text-gray-900">Kết quả in ấn</h3>
-          <button
-            type="button"
-            onClick={() => setUploadResultOpen(true)}
-            className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold"
-          >
-            Tải lên kết quả in
-          </button>
+          {/* The server refuses result uploads on a cancelled batch (409), so
+              don't offer the button there; the history below stays readable. */}
+          {batch.status !== 'CANCELLED' && (
+            <button
+              type="button"
+              onClick={() => setUploadResultOpen(true)}
+              className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold"
+            >
+              Tải lên kết quả in
+            </button>
+          )}
         </div>
 
         {lastUploadResult && <UploadResultBanner result={lastUploadResult} onDismiss={() => setLastUploadResult(null)} />}
@@ -751,7 +775,7 @@ export function PrintBatchDetailPage() {
       {previewItem && (
         <CardPreviewModal
           title={`Xem trước — ${previewItem.subjectCode}`}
-          fetchUrl={(side) => previewPrintItemUrl(previewItem.id, side)}
+          fetchUrl={(side) => previewPrintItem(previewItem.id, side)}
           onClose={() => setPreviewItem(null)}
         />
       )}
@@ -910,11 +934,35 @@ function EditBatchPrinterModal({
 }
 
 /**
- * "Áp dụng phôi" for either the checkbox multi-selection or a single row's
- * own action — `bulkApplyPrintTemplate` (already in `api.ts`, previously
- * unused from any CMS screen) only sets `templateId` on each item, it does
- * not render — same two-step "pick, then render" flow the item table's own
- * "Render" button already exposes separately.
+ * "ZZ001 (Họ tên), …" for the export-failure warning. The export response only
+ * carries item ids, so each id is looked up in the rows already on screen
+ * first; only ids that are NOT there (another page of the batch) cost a
+ * `GET /v1/print/items/:id`. Capped at 8 names — a longer list ends in "và N
+ * sinh viên khác" — and a lookup that fails just drops out of the named list
+ * instead of hiding the warning it belongs to.
+ */
+async function describeFailedItems(ids: string[], known: PrintItem[]): Promise<string> {
+  const MAX_NAMED = 8;
+  const byId = new Map(known.map((item) => [item.id, item]));
+  const labels = await Promise.all(
+    ids.slice(0, MAX_NAMED).map(async (itemId) => {
+      const item = byId.get(itemId) ?? (await getPrintItem(itemId).catch(() => null));
+      return item ? `${item.subjectCode}${item.fullName ? ` (${item.fullName})` : ''}` : null;
+    })
+  );
+  const named = labels.filter((label): label is string => label !== null);
+  const unnamed = ids.length - named.length;
+  if (named.length === 0) return 'xem các dòng còn ở trạng thái "Chưa in"';
+  return unnamed > 0 ? `${named.join(', ')} và ${unnamed} sinh viên khác` : named.join(', ');
+}
+
+/**
+ * "Áp dụng phôi" for the checkbox multi-selection (the per-row button was
+ * removed 2026-09-30 — card templates are not needed yet) —
+ * `bulkApplyPrintTemplate` (already in `api.ts`, previously unused from any
+ * CMS screen) only sets `templateId` on each item, it does not render — same
+ * two-step "pick, then render" flow the item table's own "Render" button
+ * already exposes separately.
  */
 function ApplyTemplateModal({
   templates,
@@ -1196,7 +1244,9 @@ function UploadPrintResultModal({
     <ModalShell title="Tải lên kết quả in" onClose={onClose}>
       <div className="space-y-3">
         <div className="flex items-center justify-between">
-          <span className="text-sm text-gray-500">Chọn file Excel (.xlsx) kết quả in theo đúng mẫu.</span>
+          <span className="text-sm text-gray-500">
+            Chọn file Excel (.xlsx) kết quả in theo đúng mẫu. Cột "Mã thẻ" (mã do xưởng in điền cho thẻ đã in) là tùy chọn — có thể để trống hoặc bỏ cột.
+          </span>
           <button type="button" onClick={() => void downloadTemplate()} className="text-xs text-blue-600 hover:text-blue-800 underline shrink-0">
             Tải file mẫu
           </button>

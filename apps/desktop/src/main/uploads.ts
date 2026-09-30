@@ -12,7 +12,13 @@ import {
   deterministicUuid,
   sha256Hex,
 } from '@face/fs-client';
-import type { FsFileInfo, UploadInput, UploadResult } from '@face/fs-client';
+import type {
+  BatchUploadClient,
+  BatchUploadOutcome,
+  FsFileInfo,
+  UploadInput,
+  UploadResult,
+} from '@face/fs-client';
 import {
   UploadOutboxRepository,
   CaptureStreamRepository,
@@ -23,6 +29,15 @@ import type { OutboxItem, OutboxStatus, CaptureStreamItem } from '@face/database
 import { getDatabase } from './db.js';
 import { recordStatsEvent } from './statsEvents.js';
 import { DeviceApiClient } from './deviceApi.js';
+import type { DevicePhotoInput, DevicePhotoPushResult } from './deviceApi.js';
+import { safeFileToken } from './fileToken.js';
+
+/** What `parseCaptureIdemKey` recovers from an idem_key. */
+interface ParsedCaptureKey {
+  sessionId: string;
+  stepId: string;
+  attempt: number;
+}
 
 /**
  * Recovers `(sessionId, stepId, attempt)` from an idem_key of the shape
@@ -38,9 +53,7 @@ import { DeviceApiClient } from './deviceApi.js';
  * `stepId` here is the recording's own `capture_streams.id` (see
  * `enqueueSessionVideos()`'s own doc comment), not a camera/role name.
  */
-function parseCaptureIdemKey(
-  idemKey: string
-): { sessionId: string; stepId: string; attempt: number } | null {
+function parseCaptureIdemKey(idemKey: string): ParsedCaptureKey | null {
   const parts = idemKey.split(':');
   if (parts.length < 4) return null;
   const sessionId = parts[0];
@@ -117,6 +130,146 @@ function stripLocalFileId(fsFileId: string | null): string | null {
 }
 
 /**
+ * The `POST /v1/devices/photos` body for one photo job — shared by the single
+ * route (`ApiPhotoUploadClient.routeUpload`) and the 1-n route
+ * (`ApiPhotoUploadClient.uploadBatch`) so both send byte-identical per-photo
+ * fields. The optional fields ride along as transport-only values (see
+ * `routeUpload`'s history below): `input.metadata` is otherwise reserved for
+ * real fs-core metadata, safe to read here only because this request goes to
+ * apps/api's own endpoint, never to fs-core.
+ */
+function buildPhotoInput(
+  input: UploadInput,
+  parsed: ParsedCaptureKey,
+  captureId: string,
+  dataUrl: string
+): DevicePhotoInput {
+  return {
+    photoId: captureId,
+    sessionId: parsed.sessionId,
+    stepId: parsed.stepId,
+    attempt: parsed.attempt,
+    dataUrl,
+    // 2026-09-09 ("lưu sang file server sẽ lấy căn cước để lưu ảnh, dễ
+    // truy xuất") — carried purely as a desktop→apps/api transport value
+    // here, NOT as fs-core `X-Metadata` (this call goes to apps/api's own
+    // POST /v1/devices/photos, never to fs-core directly — see
+    // ApiPhotoUploadClient's own doc comment on why capture uploads are
+    // routed this way); `PhotoService.addDevicePhoto` uses it to build the
+    // file-service virtual path this photo eventually lands under.
+    // `input.metadata` is otherwise reserved for real fs-core metadata
+    // (see `UploadInput.metadata`'s own "must not carry personal data"
+    // doc comment) — safe here specifically because it never reaches
+    // that call.
+    identityNumber: input.metadata?.identityNumber,
+    // 2026-09-16 (backend-owned face embedding) — same transport-only
+    // treatment as identityNumber just above; PhotoService.addDevicePhoto
+    // uses it to enqueue an embedding_jobs row.
+    userCode: input.metadata?.userCode,
+    // 2026-09-17 ("theo dõi ai chụp/ai upload") — same transport-only
+    // treatment as identityNumber/userCode above; PhotoService
+    // .addDevicePhoto uses it to set sessions.operator_user_id as early
+    // as possible, instead of only once a later SESSION_REPORT lands.
+    operatorUserId: input.metadata?.operatorUserId,
+  };
+}
+
+/**
+ * Parses a capture job's idempotency key, or throws the `FsError` (status 0)
+ * that BOTH the single route and the 1-n route report for a job they cannot
+ * route. One function so the two paths can never disagree about the key
+ * shape or the message.
+ */
+function requireCaptureKey(input: UploadInput, kind: 'photo' | 'video'): ParsedCaptureKey {
+  const parsed = parseCaptureIdemKey(input.idempotencyKey);
+  if (!parsed) {
+    throw new FsError(
+      0,
+      FS_ERROR_CODES.HTTP,
+      `Cannot route ${kind} upload: idempotencyKey "${input.idempotencyKey}" is not in the expected sessionId:stepId:attempt:kind shape`
+    );
+  }
+  return parsed;
+}
+
+/** `input`'s bytes as the base64 data URL `POST /v1/devices/photos|videos` takes. */
+function toDataUrl(input: UploadInput): string {
+  return `data:${input.mimeType};base64,${Buffer.from(input.data).toString('base64')}`;
+}
+
+/**
+ * Everything the single route (`routeUpload`) and the 1-n route
+ * (`uploadBatch`) need to do to turn one photo job into its
+ * `POST /v1/devices/photos` body — parse the key, derive the capture id,
+ * encode the bytes. Throws the `requireCaptureKey` `FsError` for an
+ * unroutable job. Both routes go through this, so a change to the key format
+ * or the encoding cannot reach one and miss the other.
+ *
+ * `photoId` is deterministic from idemKey — the exact same id
+ * `queueCapture()` already derived for this job (`deterministicUuid(idemKey)`),
+ * and the same id SESSION_REPORT/PHOTO_STATUS report it under — see
+ * `PhotoService.addDevicePhoto`'s own doc comment for why keeping one id
+ * across the whole lifecycle matters.
+ */
+function preparePhoto(input: UploadInput): DevicePhotoInput {
+  const parsed = requireCaptureKey(input, 'photo');
+  return buildPhotoInput(input, parsed, deterministicUuid(input.idempotencyKey), toDataUrl(input));
+}
+
+/**
+ * What `ApiPhotoUploadClient` hands `UploadWorker` once apps/api has accepted
+ * a capture — see the comment inside `routeUpload` for why that acceptance is
+ * reported as an already-`READY` `local:`-prefixed file.
+ */
+function localUploadResult(input: UploadInput, captureId: string): UploadResult {
+  return {
+    fileId: `${LOCAL_FILE_ID_PREFIX}${captureId}`,
+    virtualPath: input.virtualPath,
+    status: 'READY',
+    size: input.data.byteLength,
+    etag: '',
+    version: 1,
+    dedupHit: false,
+    visibility: input.visibility ?? 'private',
+  };
+}
+
+/**
+ * Turns the server's per-photo results for one `POST /v1/devices/photos`
+ * batch into one `BatchUploadOutcome` per input, IN INPUT ORDER (what
+ * `UploadWorker` requires). Results are matched by `photoId`, never by
+ * position — the server's array order is not part of its contract.
+ *
+ * Failure classification deliberately reproduces what the single route does:
+ * a photo the server rejected becomes `FsError(<its own statusCode>)`, so a
+ * 400/403 stays permanent and a 5xx/429 stays retryable, exactly as if that
+ * photo had been sent alone. A result with no `statusCode`, and a photo the
+ * server did not answer for at all, are both status 0 — retryable — never a
+ * silent success and never a permanent loss.
+ */
+export function mapDevicePhotoBatchResults(
+  photoIds: string[],
+  results: DevicePhotoPushResult[],
+  inputs: UploadInput[]
+): BatchUploadOutcome[] {
+  const byPhotoId = new Map(results.map((r) => [r.photoId, r] as const));
+  return photoIds.map((photoId, i): BatchUploadOutcome => {
+    const r = byPhotoId.get(photoId);
+    if (!r) {
+      return { ok: false, error: new FsError(0, FS_ERROR_CODES.NETWORK, 'no result') };
+    }
+    if (!r.ok) {
+      const status = r.statusCode ?? 0;
+      return {
+        ok: false,
+        error: new FsError(status, FS_ERROR_CODES.HTTP, `devices/photos ${status}: ${r.message ?? ''}`),
+      };
+    }
+    return { ok: true, result: localUploadResult(inputs[i], photoId) };
+  });
+}
+
+/**
  * Drop-in `FsClient` substitute for `UploadWorker` — routes EVERY capture,
  * photo or video, to apps/api's own `POST /v1/devices/photos`/
  * `POST /v1/devices/videos` instead of fs-core directly, so a kiosk capture
@@ -158,8 +311,14 @@ function stripLocalFileId(fsFileId: string | null): string | null {
  * and `packages/database` are untouched by this change entirely; this is
  * purely a routing decision made from data already flowing through the
  * existing local queue.
+ *
+ * Also a `BatchUploadClient` (1-n photo upload): `UploadWorker` groups queued
+ * photo jobs and hands them to `uploadBatch()`, which sends them as ONE
+ * `POST /v1/devices/photos` `{ photos: [...] }` request. Videos are never
+ * batched (`canBatch`) — they stay on the single `POST /v1/devices/videos`
+ * route above.
  */
-class ApiPhotoUploadClient extends FsClient {
+export class ApiPhotoUploadClient extends FsClient implements BatchUploadClient {
   constructor(
     fsConfig: { baseUrl: string; apiKey: string },
     private readonly deviceClient: DeviceApiClient,
@@ -185,17 +344,6 @@ class ApiPhotoUploadClient extends FsClient {
   }
 
   private async routeUpload(input: UploadInput): Promise<UploadResult> {
-    const isVideo = input.virtualPath.startsWith('video/');
-
-    const parsed = parseCaptureIdemKey(input.idempotencyKey);
-    if (!parsed) {
-      throw new FsError(
-        0,
-        FS_ERROR_CODES.HTTP,
-        `Cannot route ${isVideo ? 'video' : 'photo'} upload: idempotencyKey "${input.idempotencyKey}" is not in the expected sessionId:stepId:attempt:kind shape`
-      );
-    }
-
     // Deterministic from idemKey — the exact same id queueCapture()/
     // enqueueSessionVideos() already derived for this job
     // (`deterministicUuid(idemKey)`), and for a photo the same id
@@ -203,10 +351,11 @@ class ApiPhotoUploadClient extends FsClient {
     // PhotoService.addDevicePhoto's own doc comment for why keeping one id
     // across the whole lifecycle matters. For video this is
     // `AddDeviceVideoDto.videoId` server-side.
-    const captureId = deterministicUuid(input.idempotencyKey);
-    const dataUrl = `data:${input.mimeType};base64,${Buffer.from(input.data).toString('base64')}`;
+    let captureId: string;
 
-    if (isVideo) {
+    if (input.virtualPath.startsWith('video/')) {
+      const parsed = requireCaptureKey(input, 'video');
+      captureId = deterministicUuid(input.idempotencyKey);
       // `parsed.stepId` is the recording's own `capture_streams.id` (see
       // parseCaptureIdemKey's own doc comment) - looked up here, not carried
       // through UploadInput, since nothing else needs it and CaptureStreamRepository
@@ -217,43 +366,18 @@ class ApiPhotoUploadClient extends FsClient {
         sessionId: parsed.sessionId,
         cameraRole: stream?.cameraId,
         durationMs: stream?.durationMs,
-        dataUrl,
+        dataUrl: toDataUrl(input),
         // 2026-09-09 ("đưa vào cùng folder với ảnh của sinh viên đó, để dễ
         // quản lý") — same transport-only reasoning as the photo branch's
-        // own `identityNumber` above; `SessionVideoService.addDeviceVideo`
-        // uses it to place this video under the exact same
+        // own `identityNumber` (see `buildPhotoInput`); `SessionVideoService
+        // .addDeviceVideo` uses it to place this video under the exact same
         // `students/<CCCD>/` folder its photos already live in.
         identityNumber: input.metadata?.identityNumber,
       });
     } else {
-      await this.deviceClient.pushDevicePhoto({
-        photoId: captureId,
-        sessionId: parsed.sessionId,
-        stepId: parsed.stepId,
-        attempt: parsed.attempt,
-        dataUrl,
-        // 2026-09-09 ("lưu sang file server sẽ lấy căn cước để lưu ảnh, dễ
-        // truy xuất") — carried purely as a desktop→apps/api transport value
-        // here, NOT as fs-core `X-Metadata` (this call goes to apps/api's own
-        // POST /v1/devices/photos, never to fs-core directly — see this
-        // class's own doc comment on why capture uploads are routed this
-        // way); `PhotoService.addDevicePhoto` uses it to build the
-        // file-service virtual path this photo eventually lands under.
-        // `input.metadata` is otherwise reserved for real fs-core metadata
-        // (see `UploadInput.metadata`'s own "must not carry personal data"
-        // doc comment) — safe here specifically because it never reaches
-        // that call.
-        identityNumber: input.metadata?.identityNumber,
-        // 2026-09-16 (backend-owned face embedding) — same transport-only
-        // treatment as identityNumber just above; PhotoService.addDevicePhoto
-        // uses it to enqueue an embedding_jobs row.
-        userCode: input.metadata?.userCode,
-        // 2026-09-17 ("theo dõi ai chụp/ai upload") — same transport-only
-        // treatment as identityNumber/userCode above; PhotoService
-        // .addDevicePhoto uses it to set sessions.operator_user_id as early
-        // as possible, instead of only once a later SESSION_REPORT lands.
-        operatorUserId: input.metadata?.operatorUserId,
-      });
+      const photo = preparePhoto(input);
+      await this.deviceClient.pushDevicePhoto(photo);
+      captureId = photo.photoId;
     }
 
     // apps/api accepting this POST is the durability guarantee this whole
@@ -261,16 +385,61 @@ class ApiPhotoUploadClient extends FsClient {
     // fs-core has them (see the class doc comment). `fileId` is prefixed so
     // `getFile()` below can recognise it, statelessly, even after a process
     // restart - see LOCAL_FILE_ID_PREFIX's own comment.
-    return {
-      fileId: `${LOCAL_FILE_ID_PREFIX}${captureId}`,
-      virtualPath: input.virtualPath,
-      status: 'READY',
-      size: input.data.byteLength,
-      etag: '',
-      version: 1,
-      dedupHit: false,
-      visibility: input.visibility ?? 'private',
-    };
+    return localUploadResult(input, captureId);
+  }
+
+  /** Videos stay on their own single route; everything else is a photo and may ride in a batch. */
+  canBatch(job: { virtualPath: string }): boolean {
+    return !job.virtualPath.startsWith('video/');
+  }
+
+  /**
+   * Sends several photos as ONE `POST /v1/devices/photos` request and
+   * returns one outcome per input, in input order (see
+   * `mapDevicePhotoBatchResults` for how a per-photo server result becomes a
+   * retryable-or-permanent failure).
+   *
+   * An input whose idemKey does not parse gets the same per-item `FsError`
+   * the single route throws for it, and is left OUT of the request. If no
+   * input is left after that, no request is made at all. If the request as a
+   * whole fails, this throws and `UploadWorker.flushChunk` decides what to
+   * do (old-API fallback, or retry every job).
+   */
+  async uploadBatch(inputs: UploadInput[]): Promise<BatchUploadOutcome[]> {
+    const outcomes: Array<BatchUploadOutcome | undefined> = new Array<BatchUploadOutcome | undefined>(
+      inputs.length
+    ).fill(undefined);
+    // The inputs that can be routed, each with its request body and its
+    // position in `inputs`, so results map back by index without keeping
+    // parallel arrays in step.
+    const prepared: Array<{ index: number; input: UploadInput; photo: DevicePhotoInput }> = [];
+
+    inputs.forEach((input, index) => {
+      try {
+        prepared.push({ index, input, photo: preparePhoto(input) });
+      } catch (err) {
+        // Only the "cannot route this job" FsError is a per-item outcome (as
+        // on the single route); anything else is unexpected and fails the call.
+        if (!(err instanceof FsError)) throw err;
+        outcomes[index] = { ok: false, error: err };
+      }
+    });
+
+    if (prepared.length > 0) {
+      const results = await this.deviceClient.pushDevicePhotos(prepared.map((p) => p.photo));
+      // `mapDevicePhotoBatchResults` keeps its (photoIds, results, inputs)
+      // signature — it is exported and covered directly by its own tests.
+      const mapped = mapDevicePhotoBatchResults(
+        prepared.map((p) => p.photo.photoId),
+        results,
+        prepared.map((p) => p.input)
+      );
+      mapped.forEach((outcome, j) => {
+        outcomes[prepared[j].index] = outcome;
+      });
+    }
+
+    return outcomes as BatchUploadOutcome[];
   }
 
   async getFile(fileId: string): Promise<FsFileInfo> {
@@ -283,6 +452,21 @@ class ApiPhotoUploadClient extends FsClient {
     return super.getFile(fileId);
   }
 }
+
+/**
+ * Most photos per batched `POST /v1/devices/photos`. Must stay <=
+ * `MAX_DEVICE_PHOTOS_PER_REQUEST` (20) server-side.
+ */
+const PHOTO_BATCH_MAX_ITEMS = 10;
+
+/**
+ * Most RAW bytes per batched request. Each photo travels as a base64 data
+ * URL (x4/3), and apps/api's JSON body limit is 25 MiB (`main.ts`): 16 MiB
+ * raw is ~21.3 MiB base64 plus under 10 KB of JSON overhead, which fits. A
+ * single photo above this (the server accepts up to 12 MB raw) is sent alone
+ * on the single route by `UploadWorker`, never batched.
+ */
+const PHOTO_BATCH_MAX_BYTES = 16 * 1024 * 1024;
 
 /** Reads captures from local disk for the worker. */
 const diskReader = {
@@ -347,11 +531,12 @@ export function startUploads(config: UploadsConfig | null): boolean {
   // instead of fs-core directly — see ApiPhotoUploadClient's own doc comment
   // for the full routing rule and why video was the one thing left out of
   // the original "Part A" pass.
-  client = new ApiPhotoUploadClient(
+  const apiClient = new ApiPhotoUploadClient(
     { baseUrl: config.baseUrl, apiKey: config.apiKey },
     new DeviceApiClient(),
     streamsForStatus
   );
+  client = apiClient;
 
   // Neither PHOTO_STATUS nor VIDEO_STATUS is emitted from here anymore (see
   // the 'uploaded'/'ready'/'failed'/'quarantined' branches below) — now that
@@ -396,10 +581,20 @@ export function startUploads(config: UploadsConfig | null): boolean {
   };
 
   worker = new UploadWorker({
-    client,
+    client: apiClient,
     outbox,
     files: diskReader,
     backoff: nextRetryDelayMs,
+    // 1-n photo upload: claim up to PHOTO_BATCH_MAX_ITEMS jobs per tick and
+    // send the photo ones as a single `POST /v1/devices/photos` request. The
+    // worker falls back to single sends on its own against an API that
+    // predates the batch body (see `UploadWorker.flushChunk`).
+    batchSize: PHOTO_BATCH_MAX_ITEMS,
+    batch: {
+      client: apiClient,
+      maxItems: PHOTO_BATCH_MAX_ITEMS,
+      maxBytes: PHOTO_BATCH_MAX_BYTES,
+    },
     onEvent: (event) => {
       recentEvents.push(event);
       if (recentEvents.length > 200) recentEvents.shift();
@@ -523,6 +718,98 @@ export function queueCapture(input: QueueCaptureInput): string {
 }
 
 /**
+ * Removes a session's photos that were captured and staged but never
+ * approved, on disk and from the queue — for a run the operator deliberately
+ * abandons (cancel, "Chụp lại toàn bộ", or moving on to the next student
+ * without saving a post-save retake). Nothing else ever reclaims them: staged
+ * rows are never uploaded, and `approveSession()` only deletes the losers of a
+ * session that IS approved. Multi-shot capture makes the leftovers real —
+ * every extra center shot is a full-resolution face photo — so an abandoned
+ * run would otherwise leave up to that many biometric images on a shared
+ * kiosk indefinitely.
+ *
+ * The photo counterpart of streams.ts's `discardSessionVideos()`, and like it
+ * safe by construction: only rows still awaiting approval are considered, so
+ * an approved / uploading / uploaded photo of the same session is untouched.
+ * Best-effort on the files (a failed unlink is logged, never thrown — the
+ * rows are already gone, so a leftover file is a disk-space nag, not a
+ * correctness problem). `repo` is injectable for tests.
+ */
+export function discardStagedPhotos(
+  sessionId: string,
+  repo: Pick<UploadOutboxRepository, 'listStaged' | 'deleteOutboxRows'> = outbox ?? new UploadOutboxRepository(getDatabase())
+): { removed: number } {
+  // 2026-09-30 fix (confirmed audit finding): unlink each file BEFORE
+  // deleting its row, and only delete the rows that actually came off disk
+  // (or were already gone). The old order deleted every row first — a
+  // failed unlink (Windows EBUSY/EPERM from an AV scanner or a thumbnail
+  // reader) then orphaned that file with no DB reference to it ever again.
+  // A row left staged here because its unlink failed is picked up and
+  // retried by the next call for this session, or by `sweepStalePhotos()`
+  // at the next app start once it goes stale.
+  const staged = repo.listStaged(sessionId);
+  const removedIds: string[] = [];
+  for (const row of staged) {
+    try {
+      fs.unlinkSync(row.localPath);
+      removedIds.push(row.id);
+    } catch (err) {
+      // ENOENT is the normal "already gone" case — safe to drop the row too.
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        removedIds.push(row.id);
+      } else {
+        console.warn(
+          `[discardStagedPhotos] failed to remove ${row.localPath}, leaving its row staged for retry:`,
+          (err as Error).message
+        );
+      }
+    }
+  }
+  repo.deleteOutboxRows(removedIds);
+  return { removed: removedIds.length };
+}
+
+/**
+ * Boot-time sweep (2026-09-30 fix — confirmed audit finding: nothing ever
+ * cleaned up a run cut off by an app quit or crash before Save/Cancel ran).
+ * `discardStagedPhotos()` above only ever runs for a session the renderer is
+ * actively abandoning; a session nobody ever got the chance to abandon —
+ * because the kiosk was closed or crashed mid-run — stayed staged forever,
+ * and every extra multi-shot CENTER frame added to the pile of leftover
+ * full-resolution biometric images.
+ *
+ * Only rows older than `maxAgeMs` are touched, so a session genuinely still
+ * in progress right now is never at risk from this running at the wrong
+ * moment. Same unlink-before-delete ordering as `discardStagedPhotos()`, for
+ * the same reason.
+ */
+export function sweepStalePhotos(
+  maxAgeMs: number = 24 * 60 * 60 * 1000,
+  repo: Pick<UploadOutboxRepository, 'listStagedOlderThan' | 'deleteOutboxRows'> = outbox ??
+    new UploadOutboxRepository(getDatabase())
+): { removed: number } {
+  const stale = repo.listStagedOlderThan(Date.now() - maxAgeMs);
+  const removedIds: string[] = [];
+  for (const row of stale) {
+    try {
+      fs.unlinkSync(row.localPath);
+      removedIds.push(row.id);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        removedIds.push(row.id);
+      } else {
+        console.warn(`[sweepStalePhotos] failed to remove ${row.localPath}:`, (err as Error).message);
+      }
+    }
+  }
+  repo.deleteOutboxRows(removedIds);
+  if (removedIds.length > 0) {
+    console.log(`[sweepStalePhotos] removed ${removedIds.length} stale staged photo(s) left by a prior quit/crash`);
+  }
+  return { removed: removedIds.length };
+}
+
+/**
  * Per-step context the renderer sends alongside an approve call — see
  * `packages/ui/src/lib/CaptureSink.ts`'s `ApprovalStepInfo` (same shape,
  * duplicated the same way every other faceAPI payload type is duplicated
@@ -538,6 +825,15 @@ export interface SessionApprovalStepInfo {
   cameraRole: string;
   attempt: number;
   capturedAt?: string;
+  /**
+   * Multi-shot capture: the exact attempt number (as stored in the outbox —
+   * the renderer already added any cross-sitting offset) of the photo the
+   * operator picked as the best one for this step. Only set for the
+   * workflow's multi-shot step. `approveSessionUpload` hands it to
+   * `approveSession()` as a `keepAttempts` override; absent leaves the
+   * default "highest attempt wins" rule.
+   */
+  selectedAttempt?: number;
 }
 
 export interface ApproveSessionUploadOptions {
@@ -751,7 +1047,28 @@ export async function approveSessionUpload(
   streamRepo: ApproveSessionUploadStreamRepo = new CaptureStreamRepository(getDatabase()),
   studentRepo: ApproveSessionUploadStudentRepo = new CapturedStudentRepository(getDatabase())
 ): Promise<{ approved: number; superseded: number; videosEnqueued: number }> {
-  const result = repo.approveSession(sessionId);
+  // Multi-shot: the operator's chosen attempt per step. Keyed by the SAME
+  // sanitised token `session:queueCapture` stored in `upload_outbox.step_id`
+  // (`safeFileToken(stepId, 'step')` — 40 chars max, unusual characters
+  // replaced), not the raw workflow step id, or the lookup would never match
+  // a step whose id is long or contains such characters.
+  const keepAttempts: Record<string, number> = {};
+  for (const step of steps ?? []) {
+    if (typeof step.selectedAttempt === 'number' && Number.isInteger(step.selectedAttempt) && step.selectedAttempt >= 1) {
+      keepAttempts[safeFileToken(step.stepId, 'step')] = step.selectedAttempt;
+    }
+  }
+  const result = repo.approveSession(
+    sessionId,
+    Object.keys(keepAttempts).length > 0 ? { keepAttempts } : undefined
+  );
+  if (result.missingKeepAttempts.length > 0) {
+    // The chosen photo exists neither staged nor already approved — the
+    // repository refused the whole call and wrote nothing, so failing here
+    // (the IPC handler turns a throw into `{ ok: false, error }`) leaves every
+    // staged photo intact for a retry instead of uploading a different one.
+    throw new Error(`SELECTED_SHOT_NOT_STAGED:${result.missingKeepAttempts.join(',')}`);
+  }
 
   // Best-effort: an unlink failure must not undo the approval that already
   // committed, nor stop the report below from going out. A leftover file for

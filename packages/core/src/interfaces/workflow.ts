@@ -37,6 +37,10 @@ export interface WorkflowEngine {
   readonly currentState: GuidanceState;
   /** Step whose photo is being replaced, or null while the workflow runs in order. */
   readonly retakingStepId: string | null;
+  /** The one step of the active workflow that may be shot more than once, or null when multi-shot is off. */
+  readonly multiShotStepId: string | null;
+  /** True while a capture the engine itself started (`triggerManualCapture`) is still resolving. */
+  readonly isCaptureInFlight: boolean;
 
   startSession(workflow: CaptureWorkflow, personId?: string): Promise<CaptureSession>;
   processFrame(faceState: FaceState): Promise<GuidanceState>;
@@ -52,9 +56,24 @@ export interface WorkflowEngine {
    * workflow, or the step is already COMPLETED.
    */
   recordExternalCapture(stepId: string, imagePath: string): boolean;
+  /**
+   * Choose which already-taken photo of the multi-shot step is the one to
+   * keep. Returns false — and changes nothing — when there is no session,
+   * `stepId` is not the multi-shot step, a capture is in flight, or `index`
+   * is outside the shots taken so far.
+   */
+  selectShot(stepId: string, index: number): boolean;
+  /** Drop every shot but the selected one — call once the selection has been saved. */
+  commitShotSelection(stepId: string): void;
+  /**
+   * Abandon a retake that was started but never landed a photo, restoring the
+   * step (and a previously finished session) to how they were. Returns false
+   * — and does nothing — while a capture is in flight or when no retake is pending.
+   */
+  cancelPendingRetake(): boolean;
 
   on(
-    event: 'state-change' | 'capture-trigger' | 'completed' | 'failed' | 'step-retaken',
+    event: 'state-change' | 'capture-trigger' | 'completed' | 'failed' | 'step-retaken' | 'shot-selected',
     listener: (...args: any[]) => void
   ): void;
   off(event: string, listener: (...args: any[]) => void): void;

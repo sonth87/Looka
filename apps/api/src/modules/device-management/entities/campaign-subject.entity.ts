@@ -123,4 +123,19 @@ export class CampaignSubject extends BaseEntity {
   @Column('uuid', { nullable: true, name: 'printed_batch_id' })
   @ApiPropertyOptional({ description: 'Đợt in đã in thẻ này, nếu có' })
   printedBatchId?: string | null;
+
+  /**
+   * "Mã thẻ" of the LATEST card printed for this subject — the print-result
+   * upload (CENTRALIZED, `PrintResultImportService`) writes it in the same
+   * UPDATE that stamps `printedAt`/`printedBatchId`, so it always describes
+   * the same card `printedBatchId` points at (`null` when the print shop
+   * reported no code, or when a DIRECT/manual print overwrote the latest
+   * card — those paths carry no code). Like `printedAt`, NEVER set/cleared
+   * by a roster import or API pull. Not unique — see `print_items.card_code`.
+   */
+  @Column('varchar', { length: 64, nullable: true, name: 'card_code' })
+  @ApiPropertyOptional({
+    description: 'Mã thẻ của thẻ in gần nhất của SV này, nếu có',
+  })
+  cardCode?: string | null;
 }

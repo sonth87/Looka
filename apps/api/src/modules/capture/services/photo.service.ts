@@ -1,8 +1,9 @@
 import { CustomException, ERROR_CODE } from '@app/shared/errors/legacy';
+import { runBulk } from '@app/shared/http/bulk-item-error';
 import { toDao } from '@app/shared/http/to-dao.helper';
 import { CommonService } from '@app/shared/common/common.service';
 import type { Visibility } from '@face/core';
-import { HttpStatus, Injectable } from '@nestjs/common';
+import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
@@ -11,7 +12,7 @@ import {
   ALLOWED_PHOTO_MIME_TYPES,
   MAX_PHOTO_BYTES,
 } from '../capture.constants';
-import { PhotoDao } from '../dao';
+import { DevicePhotoBatchResultDao, PhotoDao } from '../dao';
 import { AddDevicePhotoDto, AddPhotoDto } from '../dto';
 import { Photo } from '../entities/photo.entity';
 import { SessionService } from './session.service';
@@ -23,6 +24,8 @@ const LOCAL_VIEW_TTL_SECONDS = 600;
 
 @Injectable()
 export class PhotoService extends CommonService<Photo> {
+  private readonly logger = new Logger(PhotoService.name);
+
   constructor(
     @InjectRepository(Photo)
     repository: Repository<Photo>,
@@ -466,6 +469,39 @@ export class PhotoService extends CommonService<Photo> {
     return { photoId: dto.photoId };
   }
 
+  /**
+   * The 1-n form of `addDevicePhoto` (`POST /v1/devices/photos` with a
+   * `{ photos: [...] }` body). Each photo goes through the UNCHANGED
+   * `addDevicePhoto` — its own transaction, its own session-hijack check —
+   * so batching adds no new write path. Partial success: one photo failing
+   * (bad data URL, oversize, another device's session, a DB error) is
+   * reported on that photo's own result and never stops the rest.
+   *
+   * Strictly sequential, on purpose: several photos of one session all
+   * upsert the same `sessions` row, and running them concurrently would just
+   * have those transactions contend on it (and could interleave the
+   * `operator_user_id` COALESCE update non-deterministically).
+   */
+  async addDevicePhotos(
+    deviceId: string,
+    campaignId: string,
+    dtos: AddDevicePhotoDto[],
+  ): Promise<DevicePhotoBatchResultDao> {
+    return toDao(
+      DevicePhotoBatchResultDao,
+      await runBulk(dtos, {
+        run: async (dto) => {
+          await this.addDevicePhoto(deviceId, campaignId, dto);
+          return { photoId: dto.photoId };
+        },
+        keyOf: (dto) => ({ photoId: dto.photoId }),
+        logLabel: (dto) =>
+          `Batch photo ${dto.photoId} (session ${dto.sessionId})`,
+        logger: this.logger,
+      }),
+    );
+  }
+
   async listBySession(sessionId: string): Promise<PhotoDao[]> {
     const rows = await this.dataSource.query<
       Array<{
@@ -671,9 +707,11 @@ export class PhotoService extends CommonService<Photo> {
    * `GET :id/local-content` — the local-bytes counterpart of
    * `FileStorageService.issueViewLink`'s fs-core link, for a photo that
    * has not reached fs-core yet (see `resolveViewSource`). Signed with an
-   * HMAC over `photoId:expiry`, keyed by this API's own `API_KEY` (a secret
-   * already required to exist and already never sent to a browser), rather
-   * than a new persisted token table — the same "unguessable, self-
+   * HMAC over `photoId:expiry`, keyed by `security.viewLinkSigningSecret` —
+   * a dedicated, server-only secret (2026-09-30 fix: this used to reuse
+   * `API_KEY`, which apps/web also ships to every browser client, letting
+   * anyone who holds it forge a valid signature for any photo id) — rather
+   * than a new persisted token table, for the same "unguessable, self-
    * expiring, no separate auth header" property a real fs-core link has,
    * without new infrastructure for what is only ever a short transitional
    * window (until the upload worker's next successful send to fs-core).
@@ -705,9 +743,17 @@ export class PhotoService extends CommonService<Photo> {
       'hex',
     );
     const gotBuf = sigRaw ? Buffer.from(sigRaw, 'hex') : Buffer.alloc(0);
+    const now = Math.floor(Date.now() / 1000);
     const valid =
       Number.isFinite(exp) &&
-      exp >= Math.floor(Date.now() / 1000) &&
+      exp >= now &&
+      // 2026-09-30 fix (confirmed audit finding): without this upper bound,
+      // a signature computed for a far-future `exp` (e.g. by whoever holds
+      // `security.apiKey`, since a link's `sig` is only ever checked
+      // against a self-computed HMAC, never against the TTL this class
+      // itself issues) verified as valid forever, defeating the whole
+      // short-TTL design.
+      exp <= now + LOCAL_VIEW_TTL_SECONDS &&
       expectedBuf.length === gotBuf.length &&
       expectedBuf.length > 0 &&
       timingSafeEqual(expectedBuf, gotBuf);
@@ -721,7 +767,12 @@ export class PhotoService extends CommonService<Photo> {
   }
 
   private signLocalViewToken(photoId: string, exp: number): string {
-    const secret = this.configService.get<string>('security.apiKey') ?? '';
+    // 2026-09-30 fix (confirmed audit finding): was `security.apiKey`, the
+    // same static secret apps/web ships to every browser client — anyone
+    // holding it could forge a valid signature for any photo id. See
+    // `security.ts`'s own doc comment on `viewLinkSigningSecret`.
+    const secret =
+      this.configService.get<string>('security.viewLinkSigningSecret') ?? '';
     return createHmac('sha256', secret)
       .update(`${photoId}:${exp}`)
       .digest('hex');

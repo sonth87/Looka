@@ -8,7 +8,8 @@
 //
 //   GET    /healthz
 //   POST   /api/v1/self-service/provision
-//   POST   /api/v1/files                       (direct upload only — every
+//   POST   /api/v1/files                       (multipart `meta`+`file`, direct
+//                                                upload only — every
 //                                                photo in this test suite is
 //                                                well under the 10 MiB direct
 //                                                ceiling, so chunked upload,
@@ -172,13 +173,64 @@ const server = http.createServer(async (req, res) => {
     }
 
     // POST /api/v1/files  (direct upload)
+    //
+    // Speaks fs-core's CURRENT upload contract: multipart/form-data with the
+    // JSON `meta` part FIRST and the bytes in a `file` part. The legacy
+    // header protocol (X-Virtual-Path, X-Visibility, X-Content-SHA256, ...) is
+    // rejected with the same 400 the real service returns, so a client that
+    // regresses to it fails here instead of only against production.
     if (req.method === 'POST' && url.pathname === '/api/v1/files') {
-      const body = await readBody(req);
-      const virtualPath = req.headers['x-virtual-path'] ? String(req.headers['x-virtual-path']) : '';
-      const sha256 = req.headers['x-content-sha256'] ? String(req.headers['x-content-sha256']) : '';
+      const raw = await readBody(req);
+
+      const LEGACY = [
+        'x-virtual-path', 'x-tags', 'x-metadata', 'x-visibility', 'x-org-unit-id',
+        'x-owner-user-id', 'x-on-behalf-of', 'x-content-sha256', 'x-content-length',
+        'x-content-type', 'x-upload-id', 'x-chunk-sha256', 'x-comment', 'content-range',
+      ];
+      const legacyPresent = LEGACY.filter((h) => h in req.headers);
+      if (legacyPresent.length > 0) {
+        return sendJson(
+          res,
+          400,
+          errorEnvelope(
+            'BAD_REQUEST',
+            `Header ${legacyPresent.join(', ')} không còn được hỗ trợ — gửi trong meta của multipart/form-data`,
+            { headers: legacyPresent },
+          ),
+        );
+      }
+
+      let form;
+      try {
+        form = await new Response(raw, { headers: { 'content-type': String(req.headers['content-type'] ?? '') } }).formData();
+      } catch {
+        return sendJson(res, 400, errorEnvelope('BAD_REQUEST', 'multipart/form-data không hợp lệ'));
+      }
+      const partNames = [...form.keys()];
+      if (partNames[0] !== 'meta' || typeof form.get('meta') !== 'string') {
+        return sendJson(res, 400, errorEnvelope('BAD_REQUEST', 'phần đầu tiên phải là meta (JSON)'));
+      }
+      let meta;
+      try {
+        meta = JSON.parse(form.get('meta'));
+      } catch {
+        return sendJson(res, 400, errorEnvelope('BAD_REQUEST', 'meta không phải JSON hợp lệ'));
+      }
+      if (meta.content_range !== undefined) {
+        return sendJson(
+          res,
+          400,
+          errorEnvelope('BAD_REQUEST', 'mock-fs-core không hỗ trợ chunked upload (content_range)'),
+        );
+      }
+      const filePart = form.get('file');
+      const body = filePart ? Buffer.from(await filePart.arrayBuffer()) : Buffer.alloc(0);
+
+      const virtualPath = meta.virtual_path ? String(meta.virtual_path) : '';
+      const sha256 = meta.sha256 ? String(meta.sha256) : '';
       const idemKey = req.headers['idempotency-key'] ? String(req.headers['idempotency-key']) : '';
-      const visibility = req.headers['x-visibility'] === 'private' ? 'private' : 'public';
-      const mimeType = String(req.headers['content-type'] ?? req.headers['x-content-type'] ?? 'application/octet-stream');
+      const visibility = meta.visibility === 'private' ? 'private' : 'public';
+      const mimeType = String(meta.content_type ?? 'application/octet-stream');
 
       // Idempotent replay: same key -> same file, no second object created.
       if (idemKey && idempotencyIndex.has(idemKey)) {

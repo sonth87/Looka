@@ -2,7 +2,6 @@ import {
   ArgumentsHost,
   Catch,
   ExceptionFilter,
-  HttpException,
   HttpStatus,
   Injectable,
   Logger,
@@ -12,7 +11,7 @@ import { QueryFailedError, TypeORMError } from 'typeorm';
 import { ConstraintErrorTranslator } from '../database/constraint-error.translator';
 import { CorrelationContext } from '../cqrs/correlation.context';
 import { ApplicationException } from './application.exception';
-import { CustomException } from './custom.exception';
+import { describeHttpException } from './describe-http-exception';
 
 interface ErrorEnvelope {
   statusCode: number;
@@ -79,21 +78,13 @@ export class AllExceptionsFilter implements ExceptionFilter {
   }
 
   private resolve(exception: unknown): ErrorEnvelope {
-    if (exception instanceof ApplicationException) {
-      return {
-        statusCode: exception.httpStatus,
-        errorCode: exception.errorCode,
-        message: exception.message,
-      };
-    }
-
-    if (exception instanceof CustomException) {
-      return {
-        statusCode: exception.getStatus(),
-        errorCode: exception.payload.code ?? exception.getStatus(),
-        message: exception.payload.error ?? exception.message,
-      };
-    }
+    // Priorities 1, 2 and 4 (`ApplicationException`, `CustomException`, any
+    // other `HttpException`) live in `describeHttpException`, shared with the
+    // bulk endpoints' per-item error mapper. They are disjoint from the
+    // TypeORM branch below (no error is both), so checking them first does
+    // not change which branch wins for any input.
+    const described = describeHttpException(exception);
+    if (described) return described;
 
     if (
       exception instanceof QueryFailedError ||
@@ -114,26 +105,6 @@ export class AllExceptionsFilter implements ExceptionFilter {
         statusCode: HttpStatus.UNPROCESSABLE_ENTITY,
         errorCode: HttpStatus.UNPROCESSABLE_ENTITY,
         message: translated.message,
-      };
-    }
-
-    if (exception instanceof HttpException) {
-      const res = exception.getResponse();
-      const rawMessage: unknown =
-        typeof res === 'string'
-          ? res
-          : ((res as { message?: unknown })?.message ?? exception.message);
-      const message = Array.isArray(rawMessage)
-        ? (rawMessage as unknown[])
-            .map((m) => (typeof m === 'string' ? m : JSON.stringify(m)))
-            .join('; ')
-        : typeof rawMessage === 'string'
-          ? rawMessage
-          : JSON.stringify(rawMessage);
-      return {
-        statusCode: exception.getStatus(),
-        errorCode: exception.getStatus(),
-        message,
       };
     }
 

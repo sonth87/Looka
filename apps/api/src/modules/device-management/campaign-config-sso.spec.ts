@@ -1,6 +1,9 @@
 import { ERROR_CODE } from '@app/shared/errors/legacy';
 import { FileStorageService } from '@app/modules/file-storage/services/file-storage.service';
 import { PhotoReviewService } from '@app/modules/photo-review/services/photo-review.service';
+import { CaptureStatsService } from '@app/modules/stats/services/capture-stats.service';
+import { WorkflowCatalogReadRepository } from '@app/modules/workflow/infrastructure/read/workflow-catalog.read-repository';
+import { AdvisoryLockService } from '@app/shared/database/advisory-lock.service';
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigModule } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
@@ -103,6 +106,19 @@ describeDb('campaign config / SSO membership / self-enroll', () => {
             ensureSetForApprovedSession: jest.fn().mockResolvedValue(null),
           },
         },
+        // Three dependencies added to `CampaignService`/`DeviceEventService`/
+        // `SessionService` after this spec was written (workflow-pinned
+        // campaigns, advisory locks, P4 stats counters) left the whole suite
+        // unable to START (Nest DI error at `compile()`), so none of its tests
+        // were running. No campaign here is workflow-pinned; the other two have
+        // no constructor dependencies beyond the `DataSource`, so the real
+        // classes are used.
+        {
+          provide: WorkflowCatalogReadRepository,
+          useValue: { getVersionRef: jest.fn().mockResolvedValue(null) },
+        },
+        AdvisoryLockService,
+        CaptureStatsService,
       ],
     }).compile();
 

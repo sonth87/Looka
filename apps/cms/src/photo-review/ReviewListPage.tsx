@@ -82,6 +82,11 @@ export function ReviewListPage() {
   // header comment for why). `null` means the grid is showing with nothing
   // open.
   const [openSetId, setOpenSetId] = useState<string | null>(null);
+  // Bumped every time the detail modal closes so the grid re-fetches —
+  // approve/reject/reprocess/set-current all happen INSIDE the modal and
+  // previously left the card behind it showing its old status until a filter
+  // changed or the page was reloaded (found in the 2026-09-30 browser re-test).
+  const [reloadTick, setReloadTick] = useState(0);
 
   useEffect(() => {
     listMyReviewCampaigns()
@@ -135,7 +140,7 @@ export function ReviewListPage() {
     listReviewSets(params)
       .then(setResult)
       .catch((err) => setError(err instanceof ApiError ? err.message : String(err)));
-  }, [campaignId, kindId, status, approved, hasAi, hasUpload, missingCard, overdue, q, className, major, faculty, page]);
+  }, [campaignId, kindId, status, approved, hasAi, hasUpload, missingCard, overdue, q, className, major, faculty, page, reloadTick]);
 
   const sets = result?.items ?? [];
   const meta = result?.meta;
@@ -406,7 +411,15 @@ export function ReviewListPage() {
         </>
       )}
 
-      {openSetId && <ReviewDetailModal id={openSetId} onClose={() => setOpenSetId(null)} />}
+      {openSetId && (
+        <ReviewDetailModal
+          id={openSetId}
+          onClose={() => {
+            setOpenSetId(null);
+            setReloadTick((t) => t + 1);
+          }}
+        />
+      )}
     </div>
   );
 }

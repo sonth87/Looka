@@ -20,6 +20,7 @@ import { MediaPipeGestureEngine } from '@face/hand-gesture';
 import { WorkflowEngine, CaptureTriggerEvaluator } from '@face/workflow-engine';
 import {
   framesForWorkflow,
+  logicalRolesByStepId,
   checkFramesReadiness,
   snapshotVideoFrame,
   allSideFramesReady,
@@ -46,6 +47,21 @@ import {
 } from '../../lib/recordingLiveness.js';
 import { deviceUnauthorizedMessage, type DeviceRejectReason } from '../../lib/deviceBlockMessage.js';
 import { createTetheredCanvasStream } from '../../lib/tetheredCanvasStream.js';
+import {
+  MAX_CENTER_SHOTS,
+  SELECTED_SHOT_NOT_STAGED_MESSAGE,
+  buildCenterShotsPublish,
+  downscaleImageDataUrl,
+  resolveMultiShotStepId,
+  selectedAttemptOf,
+  selectedShotIndexOf,
+  stepShotIndex,
+  stripShotsForPersistence,
+  thumbnailsForSession,
+  withThumbnail,
+  type CenterShotThumbnailSlot,
+  type CenterShotsPublish,
+} from '../../lib/centerShots.js';
 
 /**
  * What a caller that already resolved access some other way (2026-09-08:
@@ -474,6 +490,16 @@ interface CbHelpPublishState {
    */
   cameraRoleMapping?: Record<string, string>;
   connectedDeviceIds?: string[];
+  /**
+   * Multi-shot CENTER camera (desktop kiosk): how many photos the center step
+   * has and which one is currently selected, plus a small thumbnail of each,
+   * so the extended display can show the whole set and highlight the pick.
+   * `stepId` names the workflow step the shots belong to. `thumbnails` is
+   * empty while the CB Help window is closed (nobody could see them). `null`
+   * when the feature is off or the step has no shots yet. See
+   * `buildCenterShotsPublish` (lib/centerShots.ts).
+   */
+  centerShots?: CenterShotsPublish | null;
 }
 
 /**
@@ -525,7 +551,8 @@ function buildCbHelpFrames(
   roleMapping: Record<string, string>,
   currentDeviceId: string,
   connectedDevices: CameraDevice[],
-  cbHelpVisibility: CbHelpVisibilityState
+  cbHelpVisibility: CbHelpVisibilityState,
+  logicalRoles: Map<string, CameraRole>
 ): CbHelpFrame[] {
   // Mapped first, over the workflow's own step order — `idx === currentStepIndex`
   // below indexes into THIS original order, so filtering/sorting must happen
@@ -562,18 +589,20 @@ function buildCbHelpFrames(
     // physical stream, but wrong for "which of the 5 fixed display slots
     // (CENTER/LEFT/RIGHT/UP/DOWN) does this step belong to" — the question
     // `cbHelpVisibility`'s filter/order below, and the operator's saved
-    // `roleMapping`, both actually need answered. `defaultCameraRoleForStepType`
-    // is a pure function of the step's own `type` (FRONT/LEFT/RIGHT/UP/
-    // DOWN), immune to round-planning's fallback substitution, so it is
-    // used here instead as that stable logical identity — deliberately
-    // ignoring a campaign-declared `step.cameraRole` override too, since
-    // there is no way from here to tell that apart from a round-baked one
-    // (both live in the same field); a display-slot mislabel for that rare
-    // case is a acceptable trade for fixing the far more common single/
-    // few-camera-kiosk case. The ACTUAL capture pipeline (`activeWorkflowRef`
-    // itself, `openRoundStreams`, etc.) is untouched by this — only this
-    // function's own `role`/filter/sort logic changes.
-    const logicalRole = defaultCameraRoleForStepType(frame.type);
+    // `roleMapping`, both actually need answered. The answer is read off the
+    // campaign's ORIGINAL workflow (`logicalRoles`, captured by
+    // `runSimultaneousCaptureGate` before round planning rewrote anything —
+    // see `logicalRolesByStepId`'s own doc comment): a campaign-declared
+    // `step.cameraRole` is honoured, and a CMS-catalog step typed `CUSTOM`
+    // (every angle, in that catalog) no longer collapses to CENTER — which
+    // made this window ignore its own per-camera visibility settings and show
+    // every camera whenever CENTER was ticked (2026-09-29 field report:
+    // "chọn cam giữa nhưng vẫn hiển thị toàn bộ cam"). The type default is
+    // only the fallback for a step the map does not know (a workflow that
+    // was set without going through the gate). The ACTUAL capture pipeline
+    // (`activeWorkflowRef` itself, `openRoundStreams`, etc.) is untouched by
+    // this — only this function's own `role`/filter/sort logic changes.
+    const logicalRole = logicalRoles.get(frame.stepId) ?? defaultCameraRoleForStepType(frame.type);
     // A role-mapped device id is only worth forwarding if it's actually
     // connected right now — same check `isFrameMissingDevice` already does
     // for the main window (see this function's own doc comment, 2026-09-09
@@ -1109,6 +1138,15 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   useEffect(() => {
     activeWorkflowRef.current = activeWorkflow;
   }, [activeWorkflow]);
+
+  /**
+   * Each step's LOGICAL camera role (step id → role) as declared by the
+   * campaign's ORIGINAL workflow — refreshed by `runSimultaneousCaptureGate`
+   * on every session start, before `buildRoundPlan` rewrites `cameraRole` on
+   * the workflow `activeWorkflowRef` holds. Read only by the CB Help
+   * (extended display) frame builder; see `logicalRolesByStepId`.
+   */
+  const logicalRolesRef = useRef<Map<string, CameraRole>>(new Map());
 
   /**
    * The capture-trigger config actually in effect for whichever engine
@@ -1742,8 +1780,19 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     workflow: CaptureWorkflow
   ): Promise<CaptureWorkflow | null> => {
     setSimultaneousCapture(simultaneous);
+    logicalRolesRef.current = logicalRolesByStepId(workflow);
 
     const faceAPI = (window as any).faceAPI;
+    // Multi-shot CENTER camera (desktop only): tags the workflow that is about
+    // to run with the one step that may be shot more than once. Gated on the
+    // desktop bridge's `approveSessionUpload` — the web build's HttpCaptureSink
+    // has no local staging area, so it has no way to drop the shots the
+    // operator did not pick and the feature must stay off there.
+    const withMultiShot = (prepared: CaptureWorkflow): CaptureWorkflow => {
+      const isDesktop = typeof faceAPI?.approveSessionUpload === 'function';
+      const multiShotStepId = isDesktop ? resolveMultiShotStepId(workflow, prepared) : null;
+      return multiShotStepId ? { ...prepared, multiShotStepId } : prepared;
+    };
     let mapping: Record<string, string> = {};
     try {
       mapping = (await faceAPI?.getCameraRoleMapping?.()) ?? {};
@@ -1792,7 +1841,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
       // banner naming which role failed, which is enough operator feedback
       // on its own.
       void openFrameStreams(previewFrames);
-      return workflow;
+      return withMultiShot(workflow);
     }
 
     // Per-role physical mounting angle override (§3.9, item 2 2026-09-09) —
@@ -1838,7 +1887,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
 
     const opened = await openRoundStreams(plan, 0, mapping);
     if (!opened) return null;
-    return roundWorkflow;
+    return withMultiShot(roundWorkflow);
   };
 
   /**
@@ -2063,10 +2112,13 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
       // above — not re-set here from `lastCompleted.subject`, so a
       // name/class correction made between the two lookups (however
       // unlikely within one kiosk sitting) is what actually gets approved.
-      runSessionRef.current.resume(lastCompleted.outboxSessionId);
+      // Same offsets the saved run was captured under (empty unless it was a
+      // cross-sitting retake) — see `lastCompletedSessionRef.attemptOffsets`.
+      bumpSessionGeneration(lastCompleted.outboxSessionId);
+      runSessionRef.current.resume(lastCompleted.outboxSessionId, lastCompleted.attemptOffsets);
       setIsWorkflowStarted(true);
       isWorkflowStartedRef.current = true;
-      retookSinceReopenRef.current = false;
+      capturedSinceReopenRef.current = false;
       setIsPostSaveReview(true);
       setSession(lastCompleted.session);
       setShowReviewModal(true);
@@ -2082,9 +2134,15 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     // confirming — without this, this brand-new session's own review
     // would wrongly route "chụp lại toàn bộ" through
     // `handlePostSaveRetakeAll` instead of the normal `handleRestart`.
+    //
+    // The previous student's session may also have staged photos that were
+    // never saved (a post-save "chụp thêm" the operator reopened, shot, and
+    // then walked away from without confirming) — remove them now that they
+    // can no longer be reopened. Approved photos are never touched.
+    if (lastCompleted) await discardStagedPhotosOf(lastCompleted.outboxSessionId);
     lastCompletedSessionRef.current = null;
     setIsPostSaveReview(false);
-    retookSinceReopenRef.current = false;
+    capturedSinceReopenRef.current = false;
     crossSittingRetakeRef.current = null;
 
     // Item 11 ("chụp lại ghi đè ảnh cũ", 2026-09-21) — this student may have
@@ -2106,6 +2164,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
       const retakeContext = await (window as any).faceAPI?.getRetakeContext?.(result.code);
       if (retakeContext?.sessionId) {
         const attemptOffsets = retakeContext.attemptOffsets ?? {};
+        bumpSessionGeneration(retakeContext.sessionId);
         runSessionRef.current.resume(retakeContext.sessionId, attemptOffsets);
         crossSittingRetakeRef.current = {
           sessionId: retakeContext.sessionId,
@@ -2433,6 +2492,75 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   );
 
   /**
+   * Per-outbox-session-id generation counter — see `bumpSessionGeneration`'s
+   * and `discardStagedPhotosOf`'s own doc comments.
+   */
+  const sessionGenerationRef = useRef<Map<string, number>>(new Map());
+
+  /**
+   * A run the operator abandons (cancel, "Chụp lại toàn bộ", or moving on to
+   * the next student without saving a post-save retake) leaves its photos
+   * staged in the kiosk's local outbox — never uploaded, but never deleted
+   * either, and with multi-shot every extra center shot is one more
+   * full-resolution face image kept on a shared machine. Asks the main
+   * process to remove that outbox session's unapproved photos (approved ones
+   * are never touched). The photo counterpart of the `discardSessionVideos`
+   * calls next to it.
+   *
+   * Waits first for `storePhoto` writes still in flight — a shot taken an
+   * instant before the abandon would otherwise land after the delete and stay
+   * behind — and resolves (never rejects) within a bound, so a stuck bridge
+   * can never hold up the restart/cancel that called it. Callers that go on to
+   * REUSE the same outbox session id (a cross-sitting retake's `resume()`)
+   * must `await` it first, or the delete could remove the new run's own
+   * freshly staged photos. No-op on a build without the desktop bridge, or
+   * with no session id (nothing was ever stored).
+   */
+  const discardStagedPhotosOf = async (outboxSessionId: string | null | undefined): Promise<void> => {
+    const faceAPI = (window as any).faceAPI;
+    if (!outboxSessionId || !faceAPI?.discardStagedPhotos) return;
+    const DISCARD_WAIT_MS = 3000;
+    // 2026-09-30 fix (confirmed audit finding): the `Promise.race` below
+    // means a caller that awaits this call and then immediately RESUMES the
+    // same session id (a cross-sitting retake) can already be capturing
+    // under that id while this call's own `work` is still stuck behind a
+    // slow `storePhoto` write (its timeout only stops this function from
+    // waiting any longer — `work` itself keeps running). Snapshot the id's
+    // generation now and re-check it right before the delete actually
+    // fires: if `bumpSessionGeneration` ran for this id in the meantime
+    // (see its own doc comment), the id was reused for a new run and this
+    // now-stale delete must not touch it.
+    const generation = sessionGenerationRef.current.get(outboxSessionId) ?? 0;
+    const work = Promise.allSettled([...pendingStoresRef.current])
+      .then(() => {
+        if ((sessionGenerationRef.current.get(outboxSessionId) ?? 0) !== generation) {
+          console.warn(
+            `[FaceCaptureApp] discardStagedPhotos skipped for ${outboxSessionId} — the session id was reused before this delete ran`
+          );
+          return;
+        }
+        return faceAPI.discardStagedPhotos(outboxSessionId);
+      })
+      .catch((err: unknown) => {
+        console.warn('[FaceCaptureApp] discardStagedPhotos failed:', err);
+      });
+    await Promise.race([work, new Promise<void>((resolve) => setTimeout(resolve, DISCARD_WAIT_MS))]);
+  };
+
+  /**
+   * Bumps `sessionId`'s generation so any `discardStagedPhotosOf` call
+   * already in flight for it — see that function's own doc comment — treats
+   * itself as stale and skips its delete instead of racing a fresh run that
+   * just resumed under the same id. Call this at every place that resumes/
+   * reuses a previously-used outbox session id.
+   */
+  const bumpSessionGeneration = (sessionId: string | null | undefined) => {
+    if (!sessionId) return;
+    const map = sessionGenerationRef.current;
+    map.set(sessionId, (map.get(sessionId) ?? 0) + 1);
+  };
+
+  /**
    * The student `setSubject()` was last given — cached here (not just
    * inside `RunScopedCaptureSession`) so `onAccept` can also stash it on
    * `lastCompletedSessionRef` below without re-deriving it. Cleared whenever
@@ -2462,18 +2590,69 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     outboxSessionId: string;
     videoSessionId: string;
     steps: ApprovalStepInfo[] | undefined;
+    /**
+     * The per-step attempt offsets `runSessionRef` was applying when this run
+     * was saved — non-empty only for a cross-sitting retake (see
+     * `crossSittingRetakeRef`). `runSessionRef.reset()` drops them right after
+     * the save, so they are kept here to be handed back to `resume()` when the
+     * review is reopened: the multi-shot `selectedAttempt` sent on the next
+     * save is shifted by them, and without them it names an attempt the outbox
+     * never held.
+     */
+    attemptOffsets: Record<string, number>;
   } | null>(null);
 
   /**
-   * Set by the post-save-retake handlers below the instant an actual retake
-   * capture happens, so `onAccept` can tell "reopened just to look, then
-   * re-confirmed with nothing changed" (a harmless no-op — there is nothing
-   * new to approve) from "something was genuinely retaken" (approve again
-   * for real). Without this, re-confirming an unchanged reopened session
-   * would call `runSessionRef.current.approve()` with no staged rows behind
-   * it, and `ElectronCaptureSink.approveUpload` throws on `approved: 0`.
+   * Set the instant a photo actually LANDS (the engine's `capture-trigger`)
+   * after a post-save review was reopened, so `onAccept` can tell "reopened
+   * just to look, then re-confirmed with nothing changed" (a harmless no-op —
+   * there is nothing new to approve) from "something was genuinely retaken"
+   * (approve again for real). Without this, re-confirming an unchanged
+   * reopened session would call `runSessionRef.current.approve()` with no
+   * staged rows behind it, and `ElectronCaptureSink.approveUpload` throws on
+   * `approved: 0`.
+   *
+   * Deliberately keyed on a photo landing, NOT on a retake merely having been
+   * started (2026-09-29, multi-shot CENTER): starting a retake / pressing
+   * "chụp thêm" and then giving up without a photo leaves nothing staged, so
+   * counting it as "something was retaken" made re-confirming call `approve()`
+   * with nothing to release and hit the "no photos found" error. Reset
+   * whenever a review is reopened, a different student starts, and after a
+   * save.
    */
-  const retookSinceReopenRef = useRef(false);
+  const capturedSinceReopenRef = useRef(false);
+
+  /**
+   * Multi-shot CENTER camera (desktop kiosk — the CENTER step can be shot
+   * repeatedly, the operator picks the best one with the arrow keys). None of
+   * this is React state on purpose: the engine's own session object (mutated in
+   * place) is the source of truth for the shots; `shotsTick` only exists to
+   * force a re-render when a selection or a thumbnail changes underneath it.
+   */
+  const [, setShotsTick] = useState(0);
+  /**
+   * Small pre-scaled preview per center shot of the engine session in
+   * progress — a single `{ sessionId, byAttempt }` slot (see
+   * `CenterShotThumbnailSlot`). Always read through `thumbnailsForSession`, so
+   * a previous student's previews can never be shown for the next one; the
+   * next session's first preview simply replaces the slot. Which previews are
+   * actually reachable is decided by the engine's `shots[]` (looked up by
+   * attempt), so previews of shots that were dropped are harmless leftovers.
+   */
+  const centerShotThumbsRef = useRef<CenterShotThumbnailSlot | null>(null);
+  /** True while `handleCaptureMoreCenter` is between "asked to retake" and "the shutter it fired has resolved" — the re-entrancy guard for Enter being pressed again inside that window. */
+  const captureMoreInFlightRef = useRef(false);
+  /**
+   * Every `storePhoto` call still in flight. `storePhoto` is fire-and-forget
+   * from the `capture-trigger` handler, so with several center shots in quick
+   * succession a fast "Xác nhận & Lưu hồ sơ" could reach `approve()` before
+   * the last photo finished being written to the local outbox — and the chosen
+   * (newest) photo would then be reported as not staged. `onAccept` waits on
+   * these first (bounded).
+   */
+  const pendingStoresRef = useRef<Set<Promise<void>>>(new Set());
+  /** Always points at the current render's `handleCaptureMoreCenter`, so the window-level key listeners (registered in effects with their own dependency lists) never call a stale copy. */
+  const handleCaptureMoreCenterRef = useRef<() => Promise<void>>(async () => {});
 
   /**
    * Set by `handleLookupResult`'s cross-sitting retake branch (item 11,
@@ -2598,6 +2777,15 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
       return true;
     } catch (err) {
       console.error('[FaceCaptureApp] approveUpload failed:', err);
+      // Multi-shot CENTER: the main process refused the whole approval because
+      // the photo the operator picked is not in the local upload queue
+      // (nothing was uploaded or deleted). A specific, actionable message
+      // beats the generic "could not confirm" one that would quote the raw
+      // `SELECTED_SHOT_NOT_STAGED:<step>:<attempt>` error code.
+      if (String((err as Error)?.message ?? '').includes('SELECTED_SHOT_NOT_STAGED')) {
+        setStoreError(SELECTED_SHOT_NOT_STAGED_MESSAGE);
+        return false;
+      }
       setStoreError(
         `Không xác nhận được lượt tải lên (ảnh vẫn được giữ an toàn trên máy) — vui lòng bấm "Xác nhận & Lưu hồ sơ" để thử lại: ${(err as Error).message}`
       );
@@ -2797,14 +2985,48 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           }
         });
 
-        liveEngine.on('capture-trigger', async (data: { stepId: string; imagePath: string }) => {
+        liveEngine.on('capture-trigger', async (data: { stepId: string; imagePath: string; attempt?: number; shotIndex?: number }) => {
           setLatestCapturedImage({ ...data });
 
           // attempts counts completed retakes, so the wire value is 1-based: a
           // first capture and its first retake must not share a key, or the
           // retake is taken for a duplicate and dropped.
+          //
+          // `data.attempt` (2026-09-29, multi-shot CENTER) is the engine's own
+          // `attempts + 1` read at the instant of the emit — the very value
+          // this line used to re-derive here — and is also what the engine
+          // filed the photo under in the step's `shots[]`, so the number
+          // stored in the outbox and the number `onAccept` later names as the
+          // selected shot can never disagree. The `?? ...` fallback only
+          // covers an engine that predates the field.
           const step = liveEngine.currentSession?.steps.find((st) => st.stepId === data.stepId);
-          void storePhoto(data.stepId, data.imagePath, (step?.attempts ?? 0) + 1);
+          const storedAttempt = data.attempt ?? (step?.attempts ?? 0) + 1;
+          const storing = storePhoto(data.stepId, data.imagePath, storedAttempt);
+          // Tracked so `onAccept` can wait for in-flight writes before approving
+          // (see `pendingStoresRef`). `storePhoto` handles its own errors and
+          // never rejects; the settle handler runs either way.
+          pendingStoresRef.current.add(storing);
+          const forgetStore = () => {
+            pendingStoresRef.current.delete(storing);
+          };
+          void storing.then(forgetStore, forgetStore);
+          // A photo actually landed — see `capturedSinceReopenRef`.
+          capturedSinceReopenRef.current = true;
+
+          // Multi-shot CENTER: a small preview of this shot for the review
+          // modal's strip and the extended display. Generated off the hot path
+          // (the full-size image is already on its way to the local outbox
+          // above); a stale result — the session moved on while it was being
+          // scaled — is discarded.
+          if (data.shotIndex !== undefined) {
+            const shotSessionId = liveEngine.currentSession?.id ?? null;
+            void downscaleImageDataUrl(data.imagePath).then((thumb) => {
+              if (!thumb || !shotSessionId || liveEngine.currentSession?.id !== shotSessionId) return;
+              centerShotThumbsRef.current = withThumbnail(centerShotThumbsRef.current, shotSessionId, storedAttempt, thumb);
+              setShotsTick((t) => t + 1);
+              publishCbHelpState();
+            });
+          }
 
           // Round planning (§3.1.5): the step that just captured feeds every
           // OTHER step of its OWN round at once — not the whole workflow the
@@ -2909,7 +3131,11 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         liveEngine.on('completed', (completedSession: CaptureSession) => {
           setSession(completedSession);
           setShowReviewModal(true);
-          if (repoRef.current) void repoRef.current.saveSession(completedSession);
+          // `stripShotsForPersistence`: the local sql.js cache must not hold every
+          // discarded multi-shot photo (full-resolution base64) — only the
+          // selected one, which `capturedImagePath` already carries. The live
+          // session object itself keeps its shots for the review screen.
+          if (repoRef.current) void repoRef.current.saveSession(stripShotsForPersistence(completedSession));
           // CB Help (§3.5, 2026-09-05 second pass): the finished photos must
           // STAY on the extended display, not drop to idle — `phase:
           // 'review'` publishes a running:false snapshot built from this
@@ -3100,7 +3326,15 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
       // real gphoto2 shutter release is seconds, not instant.
       if (await captureRetakingSideFrame(engine)) return;
 
-      if (faceState?.detected) {
+      // Read from `faceStateRef` AFTER the await above, not from the render's
+      // `faceState`: a caller can hold an old copy of this function across an
+      // await (`handleCaptureMoreCenter` awaits the retake — possibly a
+      // getUserMedia re-open of a side stream — before it fires the shutter),
+      // and a closure-captured face state would then be judged, and handed to
+      // the engine's quality gate, from BEFORE that wait rather than from the
+      // frame about to be snapshotted. Same source the gesture loop uses.
+      const currentFaceState = faceStateRef.current;
+      if (currentFaceState?.detected) {
         const wf = engine as any;
         // Same reasoning as the gesture trigger above: pass the faceState this
         // click was actually decided under so the engine's quality gate has
@@ -3110,12 +3344,12 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         //
         // `{ source: 'SHUTTER' }` — pure additive plumbing (discussion doc
         // §3.7.1), same as the gesture loop's own trigger info above.
-        if (wf.triggerManualCapture) await wf.triggerManualCapture(faceState, { source: 'SHUTTER' });
+        if (wf.triggerManualCapture) await wf.triggerManualCapture(currentFaceState, { source: 'SHUTTER' });
       }
     } finally {
       setShutterBusy(false);
     }
-  }, [faceState]);
+  }, []);
 
   const handleSensitivityChange = useCallback((newSensitivity: CaptureSensitivity) => {
     setSensitivity(newSensitivity);
@@ -3453,15 +3687,15 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    *   AUTO) now routes through instead. See both doc comments for the full
    *   mechanism.
    */
-  const handleRetakeStep = async (stepId: string) => {
+  const handleRetakeStep = async (stepId: string): Promise<boolean> => {
+    // 2026-09-30 fix (confirmed audit finding): `onAccept` has no re-entrancy
+    // protection against a retake started while its own save is still in
+    // flight (recording-finalize / pending-store waits, then the approve
+    // IPC) — the two races corrupt each other. Refuse while a save is
+    // running, same guard `onAccept` itself checks.
+    if (isAcceptingRef.current) return false;
     const engine = liveWorkflowEngineRef.current;
-    if (!engine) return;
-
-    // Post-save retake (2026-09-08): harmless when called from the normal
-    // pre-save review (only read inside onAccept's post-save-review branch)
-    // — marks that a real retake actually happened this time round, so
-    // re-confirming afterwards approves it for real instead of no-op'ing.
-    retookSinceReopenRef.current = true;
+    if (!engine) return false;
 
     // Not gated on `simultaneousCaptureRef` alone anymore (2026-09-22) — a
     // tethered role needs `externalCapture: true` regardless of that
@@ -3475,7 +3709,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     const started = await engine.retakeStep(stepId, {
       externalCapture: isSideFrameRetake || isTetheredRetake,
     });
-    if (!started) return;
+    if (!started) return false;
 
     setShowReviewModal(false);
     setLatestCapturedImage(null);
@@ -3504,9 +3738,99 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     // looked CURRENT from before review opened — publish explicitly rather
     // than rely on the dedupe not eating it.
     publishCbHelpState();
+    // True only once the engine actually re-opened the step — what
+    // `handleCaptureMoreCenter` needs to know before it fires a shutter.
+    return true;
   };
 
+  /**
+   * Whether the camera the main window has open RIGHT NOW is the one that
+   * takes CENTER photos — judged from the real device state (the refs, so it
+   * is safe from any long-lived listener), NOT from `currentStreamRole`, which
+   * is inferred from the step type alone and does not say which device is
+   * actually streaming. True when there is nothing to wait for:
+   * - simultaneous mode (CENTER's stream is always open), a tethered CENTER
+   *   (no shared stream to switch), or no CENTER mapping at all;
+   * - the mapped CENTER webcam is not plugged in right now — the role-switch
+   *   effect skips a camera that is not enumerated, so `selectedDeviceId` can
+   *   never become it and waiting for that would wait forever (the session
+   *   then simply runs on whichever camera is open);
+   * - the shared stream already points at the mapped CENTER webcam.
+   * The single definition behind both `handleCaptureMoreCenter` (fire the
+   * shutter now, or only start the retake) and the Enter/Space gate that holds
+   * the key until the camera has switched back to CENTER.
+   */
+  const isCenterCameraLiveNow = (): boolean => {
+    const mapping = cameraRoleMappingRef.current;
+    const centerDeviceId = mapping.CENTER;
+    return (
+      simultaneousCaptureRef.current ||
+      isRoleEffectivelyTethered(mapping, 'CENTER') ||
+      !centerDeviceId ||
+      !devicesRef.current.some((d) => d.id === centerDeviceId) ||
+      selectedDeviceIdRef.current === centerDeviceId
+    );
+  };
+
+  /**
+   * Multi-shot CENTER camera: "chụp thêm" — take one more photo with the
+   * center camera and keep every earlier one selectable. Reached from Enter /
+   * Space once the session has finished (review modal open or not) and from
+   * the review modal's own "Chụp thêm (Enter)" button.
+   *
+   * It is `handleRetakeStep` on the multi-shot step (the engine re-opens that
+   * one step, the review modal closes, the live view comes back) plus — only
+   * where a shutter press is what should fire the shot — the shutter itself:
+   * - manual-shutter mode (`OFF`), or a tethered Canon CENTER: fire right away,
+   *   exactly what pressing Enter on the live capture screen does;
+   * - AUTO / gesture modes with a webcam: the mode's own trigger takes the
+   *   shot once the subject holds the pose, so nothing is fired here.
+   * And in every case only when the camera the main window has open RIGHT NOW
+   * is the CENTER camera (`centerLiveNow`, judged from the real device state,
+   * NOT from `currentStreamRole`, which is inferred from the step type alone
+   * and does not say which device is actually streaming — in sequential mode
+   * the last step is often a LEFT/RIGHT webcam, and the role-switch effect
+   * only swaps back to CENTER's camera AFTER the retake starts). When it is
+   * not live yet, this just starts the retake; the operator's next Enter (see
+   * the guard in the key handler) captures once the device has switched back.
+   * `centerLiveNow` is computed BEFORE the retake for the same reason: the
+   * retake itself is what triggers the switch.
+   */
+  const handleCaptureMoreCenter = async (): Promise<void> => {
+    const engine = liveWorkflowEngineRef.current;
+    const stepId = engine?.multiShotStepId ?? null;
+    if (!engine || !stepId) return;
+    if (captureMoreInFlightRef.current || isAcceptingRef.current || shutterBusy || engine.isCaptureInFlight) return;
+
+    const shotsSoFar = engine.currentSession?.steps.find((st) => st.stepId === stepId)?.shots?.length ?? 0;
+    if (shotsSoFar >= MAX_CENTER_SHOTS) {
+      setStoreError(`Đã chụp tối đa ${MAX_CENTER_SHOTS} ảnh camera giữa — hãy chọn ảnh đẹp nhất rồi bấm lưu.`);
+      return;
+    }
+
+    captureMoreInFlightRef.current = true;
+    try {
+      const centerTethered = isRoleEffectivelyTethered(cameraRoleMappingRef.current, 'CENTER');
+      // Judged BEFORE the retake — the retake is what triggers the switch.
+      const centerLiveNow = isCenterCameraLiveNow();
+
+      const started = await handleRetakeStep(stepId);
+      if (started && centerLiveNow && (effectiveTriggerConfig.mode === 'OFF' || centerTethered)) {
+        await handleShutterCapture();
+      }
+    } finally {
+      captureMoreInFlightRef.current = false;
+    }
+  };
+  // Refreshed every render — see `handleCaptureMoreCenterRef`.
+  handleCaptureMoreCenterRef.current = handleCaptureMoreCenter;
+
   const handleRestart = async () => {
+    // 2026-09-30 fix (confirmed audit finding): see `handleRetakeStep`'s
+    // matching guard — a "Chụp lại toàn bộ" fired while `onAccept` is still
+    // saving would discard this run's staged photos (and the file/local
+    // reset) out from under the in-flight approve, in either ordering.
+    if (isAcceptingRef.current) return;
     setShowReviewModal(false);
     setLatestCapturedImage(null);
     setIsWorkflowStarted(false);
@@ -3539,6 +3863,12 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     // showing on the extended display — the fresh session started below (if
     // any) re-publishes for real via the engine's own 'state-change'.
     publishCbHelpState({ phase: 'idle' });
+    // The abandoned run's staged photos (never approved, so never uploaded)
+    // go too — same reasoning as the video discard above. Awaited BEFORE the
+    // reset/`resume()` below, not left in flight: a cross-sitting retake
+    // `resume()`s this very session id, and a delete still running when the
+    // restarted run staged its first photo would remove that photo too.
+    await discardStagedPhotosOf(runSessionRef.current.cachedSessionId);
     // "Chụp lại toàn bộ" reaches here before the session has necessarily
     // completed (SessionReviewModal allows reviewing, and retaking
     // everything, from as little as one captured step). Without this, the
@@ -3556,6 +3886,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     // with the SAME id/offsets right after the reset so every subsequent
     // capture in this restarted run still lands under the original session.
     if (crossSittingRetakeRef.current) {
+      bumpSessionGeneration(crossSittingRetakeRef.current.sessionId);
       runSessionRef.current.resume(
         crossSittingRetakeRef.current.sessionId,
         crossSittingRetakeRef.current.attemptOffsets
@@ -3623,6 +3954,9 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
    * session with no video at all if the operator backs out.
    */
   const handlePostSaveRetakeAll = () => {
+    // 2026-09-30 fix (confirmed audit finding): see `handleRetakeStep`'s
+    // matching guard.
+    if (isAcceptingRef.current) return;
     const engine = liveWorkflowEngineRef.current;
     if (!engine) return;
     const started = engine.retakeAllSteps();
@@ -3632,7 +3966,6 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     setLatestCapturedImage(null);
     setIsWorkflowStarted(true);
     isWorkflowStartedRef.current = true;
-    retookSinceReopenRef.current = true;
     reportStatsEvent('RETAKE');
 
     // Re-arms the SAME video session id this run was already keyed under
@@ -3657,6 +3990,8 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
   const activeGuidance = liveGuidance;
   const activeEngine = liveWorkflowEngineRef.current;
   const activeSession = activeEngine?.currentSession;
+  /** The workflow step that may be shot more than once (multi-shot CENTER, desktop only), or null when the feature is off — read from the engine so it always matches the workflow actually running. */
+  const engineMultiShotStepId = activeEngine?.multiShotStepId ?? null;
 
   /**
    * Camera role mapping (§2.1) — which physical camera plays CENTER/LEFT/
@@ -4127,7 +4462,8 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
               cameraRoleMappingRef.current,
               selectedDeviceIdRef.current,
               devicesRef.current,
-              cbHelpVisibilityRef.current
+              cbHelpVisibilityRef.current,
+              logicalRolesRef.current
             ).map((frame) => ({
               ...frame,
               // 2026-09-24 fix (confirmed audit finding — performance): a
@@ -4220,6 +4556,21 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         // doc comment on `CbHelpPublishState` for why.
         cameraRoleMapping: cameraRoleMappingRef.current,
         connectedDeviceIds: devicesRef.current.map((d) => d.id),
+        // Multi-shot CENTER: shot count + which one is selected (+ small
+        // thumbnails) for the extended display. `multiShotStepId` is read off
+        // the engine's getter (this callback is a stable `useCallback([])`, so
+        // it must not close over render-scoped state). Thumbnails ride along
+        // only while the CB Help window is actually open — same gate the
+        // other heavy fields above use — otherwise `null` makes
+        // `buildCenterShotsPublish` send the counts alone.
+        centerShots:
+          showFrames && engine?.multiShotStepId
+            ? buildCenterShotsPublish(
+                session,
+                engine.multiShotStepId,
+                cbHelpWindowOpenRef.current ? thumbnailsForSession(centerShotThumbsRef.current, session?.id) : null
+              )
+            : null,
       };
       void faceAPI.publishCbHelpState(state);
     },
@@ -5075,7 +5426,13 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           // so gating on the WHOLE workflow's frames would permanently
           // disable the shutter the moment a session needs more than one
           // round.
-          allSideFramesReady: allSideFramesReady(currentRoundFrames(), frameReadiness),
+          // Multi-shot CENTER: while the center step is the one being retaken
+          // ("chụp thêm"), the side frames are done and irrelevant — their
+          // streams / readiness must not keep the shutter (and the Enter
+          // shortcut that mirrors it) disabled for a center-only shot.
+          allSideFramesReady:
+            (!!engineMultiShotStepId && activeEngine?.retakingStepId === engineMultiShotStepId) ||
+            allSideFramesReady(currentRoundFrames(), frameReadiness),
           notReadyRoleLabel: (() => {
             const role = firstNotReadyFrameRole(currentRoundFrames(), frameReadiness);
             return role ? CAMERA_ROLE_LABELS_VI[role] : null;
@@ -5173,6 +5530,22 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
       // Auto-repeat while held must never re-fire a capture per tick.
       if (e.repeat) return;
 
+      // Multi-shot CENTER "chụp thêm" (2026-09-29): once the engine's session has
+      // COMPLETED and is not yet saved, Enter/Space takes one MORE center photo
+      // — with the review modal open or closed. Evaluated up here, ahead of the
+      // capture-mode / review-modal gates further down, because none of them
+      // apply to it: the review modal being open is exactly when this is
+      // wanted, and AUTO / gesture modes must be able to add a shot too.
+      const multiShotEngine = liveWorkflowEngineRef.current;
+      const canCaptureMore =
+        !!multiShotEngine?.multiShotStepId &&
+        isWorkflowStartedRef.current &&
+        !awaitingStudentRef.current &&
+        !thankYouStudent &&
+        !isAcceptingRef.current &&
+        !shutterBusy &&
+        multiShotEngine.currentSession?.status === 'COMPLETED';
+
       const active = document.activeElement as HTMLElement | null;
       if (active) {
         // Same "is this a real input" test CccdScanWaitingScreen's own
@@ -5189,9 +5562,30 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
         // Enter/Space — firing `handleShutterCapture` here too would
         // double-fire it.
         if (tag === 'BUTTON') {
-          console.log('[TEMP-KEY] blocked: a <button> is focused (its own click handler fires instead)');
-          return;
+          // ...except, WHILE THE REVIEW MODAL IS OPEN and a "chụp thêm" is
+          // possible, a button that is NOT part of the modal: that is a stale
+          // focus (typically the shutter / "Bắt đầu" button the operator
+          // clicked with the mouse, now hidden behind the modal), whose own
+          // click would do nothing useful — see the modal root's own
+          // focus-on-mount comment. Drop the focus and let the key through. A
+          // button INSIDE the modal keeps its native behaviour, and so does
+          // every button once the modal is closed: it is then visible and was
+          // chosen by the operator (Tab, or a click on a toolbar toggle), so
+          // its own Enter/Space activation must win rather than be cancelled
+          // by an unintended center retake.
+          if (canCaptureMore && showReviewModal && !active.closest('[data-session-review-modal]')) {
+            active.blur();
+          } else {
+            console.log('[TEMP-KEY] blocked: a <button> is focused (its own click handler fires instead)');
+            return;
+          }
         }
+      }
+
+      if (canCaptureMore) {
+        e.preventDefault();
+        void handleCaptureMoreCenterRef.current();
+        return;
       }
 
       // 2026-09-25 fix (confirmed audit finding): follows the CURRENT STEP's
@@ -5230,6 +5624,25 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
       if (shutterBusy) {
         console.log('[TEMP-KEY] blocked: a capture is already in flight');
         return; // re-entrancy guard — see `shutterBusy`'s own doc comment
+      }
+      // Multi-shot CENTER in SEQUENTIAL mode, right after "chụp thêm" was
+      // started while the shared camera was still pointed at a LEFT/RIGHT
+      // webcam: the role-switch effect has not swapped back to CENTER's
+      // camera yet, so a shot fired now would be a LEFT/RIGHT frame filed as a
+      // center photo. Hold the key until the switch has actually happened
+      // (`selectedDeviceId` is the device the shared stream was last pointed
+      // at — set by `handleSelectCamera` right as the switch begins). Uses the
+      // same `isCenterCameraLiveNow` as `handleCaptureMoreCenter`, which also
+      // lets the key through when the mapped CENTER webcam is not plugged in
+      // (the switch can never happen then, so holding the key would hang the
+      // whole "Enter = one more center shot" flow with no message).
+      if (
+        multiShotEngine?.multiShotStepId &&
+        multiShotEngine.retakingStepId === multiShotEngine.multiShotStepId &&
+        !isCenterCameraLiveNow()
+      ) {
+        console.log('[TEMP-KEY] blocked: đang chuyển về camera giữa — chờ camera giữa sẵn sàng rồi bấm lại');
+        return;
       }
 
       // `currentStepIsTethered` (2026-09-25 fix, see its own comment above;
@@ -5270,6 +5683,80 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     cameraRoleMapping,
     shutterBusy,
   ]);
+
+  /**
+   * Multi-shot CENTER: make shot `index` of `stepId` the selected one, and tell
+   * the UI — the review modal re-renders (`shotsTick`; the engine's session is
+   * mutated in place) and the extended display is republished. The one path
+   * both the arrow keys (below) and the review modal's thumbnail strip go
+   * through. False, with nothing changed, when the engine refuses (a capture is
+   * in flight, wrong step, index out of range).
+   */
+  const selectCenterShot = useCallback(
+    (stepId: string, index: number): boolean => {
+      // 2026-09-30 fix (confirmed audit finding): the modal's thumbnail strip
+      // called this with no re-entrancy guard, so a click while a save was
+      // in flight (`isAcceptingRef`) could change the engine's selection
+      // after `onAccept` had already snapshotted `steps[].selectedAttempt`
+      // but before it approved/committed — the uploaded photo and the photo
+      // the kiosk keeps could then end up different. Also refuse while a
+      // capture is in flight, matching the arrow-key handler's own guard.
+      if (isAcceptingRef.current || captureMoreInFlightRef.current) return false;
+      if (!liveWorkflowEngineRef.current?.selectShot(stepId, index)) return false;
+      setShotsTick((t) => t + 1);
+      publishCbHelpState();
+      return true;
+    },
+    [publishCbHelpState]
+  );
+
+  /**
+   * Multi-shot CENTER: left/right (and up/down) arrows move the selection
+   * through the center photos taken so far, so the operator can pick the best
+   * one — with the review modal open or closed. The engine owns the selection
+   * (`engine.selectShot` copies the chosen shot onto the step), so the review
+   * grid, the extended display and the eventual save all follow it; this
+   * handler only forwards the key and asks the UI to redraw. Clamped, not
+   * wrapping (see `stepShotIndex`). Does nothing with fewer than two shots,
+   * while typing into a field, while a capture is resolving (the shot about
+   * to land would auto-select itself and race the key), or outside an active
+   * session — and only then consumes the key.
+   */
+  useEffect(() => {
+    function onArrowKey(e: KeyboardEvent) {
+      const delta =
+        e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? -1 : e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1 : 0;
+      if (delta === 0) return;
+      if (e.repeat || e.altKey || e.ctrlKey || e.metaKey) return;
+
+      const active = document.activeElement as HTMLElement | null;
+      if (active) {
+        const tag = active.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || active.isContentEditable) return;
+      }
+
+      const engine = liveWorkflowEngineRef.current;
+      const stepId = engine?.multiShotStepId ?? null;
+      if (!engine || !stepId) return;
+      if (awaitingStudentRef.current || thankYouStudent || isAcceptingRef.current || shutterBusy || engine.isCaptureInFlight) {
+        return;
+      }
+
+      const stepResult = engine.currentSession?.steps.find((st) => st.stepId === stepId);
+      const count = stepResult?.shots?.length ?? 0;
+      if (count < 2) return;
+
+      // Defined: `count >= 2` above means the step has shots.
+      const current = selectedShotIndexOf(stepResult)!;
+      e.preventDefault();
+      const next = stepShotIndex(current, delta, count);
+      if (next === current) return; // already at that end
+      selectCenterShot(stepId, next);
+    }
+
+    window.addEventListener('keydown', onArrowKey);
+    return () => window.removeEventListener('keydown', onArrowKey);
+  }, [thankYouStudent, shutterBusy, selectCenterShot]);
 
   /*
    * Item 8 (2026-09-09): "Mô phỏng (Simulation)" / "Live Camera" mode-toggle
@@ -5366,6 +5853,10 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
     }
     setRecordingSessionKey(null);
     setLatestCapturedImage(null);
+    // Same for the staged photos: never approved, so never uploaded, and
+    // nothing else will ever remove them — see `discardStagedPhotosOf`.
+    // Before the reset below, which forgets the session id they are filed under.
+    await discardStagedPhotosOf(runSessionRef.current.cachedSessionId);
     // Cancelling abandons a run that has not completed, same as "Chụp lại
     // toàn bộ" in handleRestart — see RunScopedCaptureSession's doc comment
     // for why the next run must not inherit this one's session id.
@@ -5618,6 +6109,31 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
           // without losing anything (the photos stay safely staged either
           // way; see approveUpload's own doc comment).
           isAccepting={isAcceptingSession}
+          // Multi-shot CENTER (desktop only): the center step's shots, which one
+          // is selected, and the controls to add / pick one. Absent (`undefined`)
+          // whenever the feature is off or the step has no shot yet, which
+          // leaves the modal exactly as it always was.
+          multiShot={(() => {
+            const reviewSession = activeSession ?? session;
+            const multiShotResult = engineMultiShotStepId
+              ? reviewSession?.steps.find((st) => st.stepId === engineMultiShotStepId)
+              : undefined;
+            if (!engineMultiShotStepId || !multiShotResult?.shots || multiShotResult.shots.length === 0) return undefined;
+            return {
+              stepId: engineMultiShotStepId,
+              shots: multiShotResult.shots.map((shot) => ({ attempt: shot.attempt, imagePath: shot.imagePath })),
+              thumbnails: thumbnailsForSession(centerShotThumbsRef.current, reviewSession?.id),
+              selectedIndex: selectedShotIndexOf(multiShotResult)!,
+              maxShots: MAX_CENTER_SHOTS,
+              onSelect: (index: number) => {
+                selectCenterShot(engineMultiShotStepId, index);
+              },
+              onCaptureMore: () => {
+                void handleCaptureMoreCenter();
+              },
+            };
+          })()}
+          captureInFlight={shutterBusy}
           onAccept={async () => {
             // Re-entrancy guard (2026-09-09 field bug) — see `isAcceptingRef`'s
             // own doc comment. A second invocation while one is already
@@ -5629,12 +6145,38 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
             // approve and throws a spurious "no photos found" error even
             // though the save already succeeded.
             if (isAcceptingRef.current) return;
+            // Multi-shot CENTER: a shot that is still being taken (shutter press,
+            // or the engine's own AUTO / gesture capture) has not landed in the
+            // session or the outbox yet — approving now would save the run
+            // WITHOUT it (or, worse, with the previous pick while the operator
+            // meant the new one). Ask them to wait instead of guessing.
+            if (shutterBusy || captureMoreInFlightRef.current || liveWorkflowEngineRef.current?.isCaptureInFlight) {
+              setStoreError('Đang chụp, vui lòng đợi ảnh chụp xong rồi lưu');
+              return;
+            }
             isAcceptingRef.current = true;
             setIsAcceptingSession(true);
             try {
+            // A "chụp thêm" whose photo never landed (no face in frame, quality
+            // rejected, operator changed their mind) leaves the engine re-opened
+            // on the center step: session RUNNING, step PENDING. Put it back to
+            // the finished state its previous photo still represents before
+            // reading the session below. No-op when no retake is pending.
+            //
+            // The retake ran the session RUNNING, and every publish while it
+            // was RUNNING cleared the sticky `phase: 'review'` override (see
+            // `publishCbHelpState`). Cancelling emits only `state-change`
+            // (deduped by `lastCbHelpKeyRef`) — never `completed`, which is
+            // what normally re-sets that override — so without restoring it
+            // here the extended display would sit on 'idle' (no frame grid, no
+            // center-shot strip) for the rest of the review, and for good if
+            // the save below then fails and this modal stays open.
+            if (liveWorkflowEngineRef.current?.cancelPendingRetake()) {
+              publishCbHelpState({ phase: 'review' });
+            }
             const completedSession = activeSession ?? session;
             if (completedSession && repoRef.current) {
-              void repoRef.current.saveSession(completedSession);
+              void repoRef.current.saveSession(stripShotsForPersistence(completedSession));
             }
             // Per-step context the outbox row itself cannot supply — see
             // ApprovalStepInfo's own doc comment. framesForWorkflow() already
@@ -5654,6 +6196,13 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
                     cameraRole: frame?.role ?? defaultCameraRoleForStepType(s.stepType),
                     attempt: s.attempts,
                     capturedAt: s.timestamp ? new Date(s.timestamp).toISOString() : undefined,
+                    // Multi-shot CENTER: exactly which of that step's photos the
+                    // operator picked — the main process keeps this attempt
+                    // instead of the highest one. Only ever set for the multi-shot
+                    // step (`undefined` elsewhere, and dropped by JSON/IPC).
+                    ...(engineMultiShotStepId && s.stepId === engineMultiShotStepId
+                      ? { selectedAttempt: selectedAttemptOf(s) }
+                      : {}),
                   };
                 })
               : undefined;
@@ -5665,7 +6214,20 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
             // would reject the call (see `RunScopedCaptureSession.approve`'s
             // own doc comment on why it throws rather than no-op'ing).
             // Simply close out as a genuine no-op instead.
-            if (isPostSaveReview && !retookSinceReopenRef.current) {
+            // Keyed on a photo having actually LANDED since the reopen
+            // (`capturedSinceReopenRef`), not on a retake merely having been
+            // started — a "chụp thêm" / "Chụp lại" that produced no photo has
+            // nothing staged either.
+            if (isPostSaveReview && !capturedSinceReopenRef.current) {
+              // 2026-09-30 fix (confirmed audit finding): `cancelPendingRetake()`
+              // above may have just made the sticky CB Help override 'review'
+              // (to survive the retake's own RUNNING-session publishes). This
+              // no-op branch saves nothing and never reaches the `phase: 'done'`
+              // publish below, so without resetting it here the extended
+              // display would keep showing this student's review frames/strip
+              // — sticky — for the whole walk-up-kiosk wait for the next
+              // student.
+              publishCbHelpState({ phase: 'idle' });
               setShowReviewModal(false);
               setIsPostSaveReview(false);
               setAwaitingStudent(true);
@@ -5690,8 +6252,43 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
                 new Promise<void>((resolve) => setTimeout(resolve, RECORDING_FINALIZE_WAIT_MS)),
               ]);
             }
+            // Multi-shot CENTER: `storePhoto` runs fire-and-forget from the
+            // capture-trigger handler, so the newest shot may still be mid-write
+            // to the local outbox. Approving before it lands would report the
+            // photo the operator picked as not staged. Bounded, like the
+            // recording wait above — a genuinely stuck write must not hold the
+            // save hostage (approve then fails loudly with the not-staged
+            // message, and the operator can retry).
+            if (pendingStoresRef.current.size > 0) {
+              const STORE_SETTLE_WAIT_MS = 8000;
+              await Promise.race([
+                Promise.allSettled([...pendingStoresRef.current]),
+                new Promise<void>((resolve) => setTimeout(resolve, STORE_SETTLE_WAIT_MS)),
+              ]);
+            }
             const approved = await approveUpload(steps, completedSession?.id);
             if (!approved) return;
+            // The choice is saved: drop every shot but the selected one from the
+            // engine's session (a later post-save "chụp thêm" starts from just
+            // the kept photo). The previews of the dropped shots need no
+            // cleanup — they are looked up by the attempts still in `shots[]`,
+            // so they are simply never reached. Runs before
+            // `lastCompletedSessionRef` below captures the session.
+            if (engineMultiShotStepId) {
+              activeEngine?.commitShotSelection(engineMultiShotStepId);
+              setShotsTick((t) => t + 1);
+            }
+            // 2026-09-30 fix (confirmed audit finding): `finishSession()` below
+            // calls `runSessionRef.current.complete()`, which immediately clears
+            // `cachedSessionId` to null and `attemptOffsets` to `{}` — before the
+            // `lastCompletedSessionRef` write further down ever reads them. That
+            // made every post-save reopen resume under the engine's own
+            // `session_...` id (not the outbox UUID the photos were actually
+            // approved under) with empty offsets, breaking a retake of any
+            // non-center step after a re-scan. Snapshot both here, while they
+            // still hold this run's real values.
+            const outboxSessionIdSnapshot = runSessionRef.current.cachedSessionId;
+            const attemptOffsetsSnapshot = runSessionRef.current.attemptOffsetsSnapshot;
             await finishSession();
             // Refresh the "Đã chụp" panel now that this session's row has
             // landed in the local student index (see recentStudents' own
@@ -5723,9 +6320,13 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
                 subjectCode: currentStudentRef.current.subjectCode ?? '',
                 subject: currentStudentRef.current,
                 session: completedSession,
-                outboxSessionId: runSessionRef.current.cachedSessionId ?? completedSession.id,
+                outboxSessionId: outboxSessionIdSnapshot ?? completedSession.id,
                 videoSessionId: completedSession.id,
                 steps,
+                // Read before `finishSession()` above (via `complete()`) and
+                // `runSessionRef.current.reset()` below drop them — see this
+                // field's own doc comment.
+                attemptOffsets: attemptOffsetsSnapshot,
               };
             }
             // Walk-up-kiosk loop (2026-09-07 product request, requirement
@@ -5747,7 +6348,7 @@ export function FaceCaptureApp(props: FaceCaptureAppProps) {
             runSessionRef.current.reset();
             setStudentLookupError(null);
             setIsPostSaveReview(false);
-            retookSinceReopenRef.current = false;
+            capturedSinceReopenRef.current = false;
             // This student's cross-sitting retake (if any) just got approved
             // for real — clear it so a stale sessionId/attemptOffsets can
             // never leak into the next walk-up student's own run.

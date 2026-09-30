@@ -35,6 +35,8 @@ import {
   stopUploads,
   queueCapture,
   approveSessionUpload,
+  discardStagedPhotos,
+  sweepStalePhotos,
   uploadStatus,
   retryFailedUpload,
   pingFileService,
@@ -44,6 +46,7 @@ import {
   downloadPhoto,
 } from './uploads.js';
 import type { SessionApprovalStepInfo } from './uploads.js';
+import { safeFileToken } from './fileToken.js';
 import {
   getFileServiceCredentials,
   setFileServiceCredentials,
@@ -82,6 +85,7 @@ import {
   setTetheredCameraConfigValue,
   getTetheredThermalWarning,
   getTetheredBatteryLevel,
+  stopTetheredLiveViewForQuit,
   TETHERED_DEVICE_ID,
 } from './tetheredCamera.js';
 import {
@@ -341,18 +345,9 @@ function rendererEntry(): string {
   return found;
 }
 
-/**
- * Sanitise a renderer-supplied string before it becomes part of a file name.
- *
- * The renderer is untrusted input: a stepId of '../../../evil' would otherwise
- * place the written file outside the export directory.
- */
-function safeFileToken(raw: unknown, fallback: string): string {
-  const cleaned = String(raw ?? '')
-    .replace(/[^a-zA-Z0-9_-]/g, '_')
-    .slice(0, 40);
-  return cleaned.length > 0 ? cleaned : fallback;
-}
+// `safeFileToken` (sanitises renderer-supplied strings before they become part
+// of a file name or an outbox column) now lives in ./fileToken.ts so uploads.ts
+// can share the exact same transform — see that module's own doc comment.
 
 /**
  * Which display the main kiosk window currently sits on — computed fresh on
@@ -389,6 +384,16 @@ app.whenReady().then(async () => {
   // Background uploading is optional: without a configured server the kiosk
   // still captures and queues, and the backlog drains once one is set up.
   if (dbResult.ok) {
+    // 2026-09-30 fix (confirmed audit finding): a run cut off by a prior quit
+    // or crash — before either Save or Cancel ran — left its staged photos
+    // on disk forever, with nothing to ever clean them up. Best-effort,
+    // never blocks startup on a failure.
+    try {
+      sweepStalePhotos();
+    } catch (err) {
+      console.warn('[main] sweepStalePhotos failed:', (err as Error).message);
+    }
+
     const uploadsRunning = startUploads(await getFileServiceCredentials());
     if (!uploadsRunning) {
       console.warn('[main] file-service not configured; captures will queue locally only');
@@ -1282,6 +1287,23 @@ app.whenReady().then(async () => {
     }
   );
 
+  /**
+   * Remove a session's staged-but-never-approved photos (queue rows and
+   * files) when the operator abandons the run instead of saving it — the photo
+   * counterpart of `stream:discardSession` above; see discardStagedPhotos()'s
+   * own doc comment in uploads.ts. Approved rows are never touched, so this
+   * cannot affect anything the UploadWorker already owns.
+   */
+  ipcMain.handle('session:discardStaged', (_, sessionId: unknown) => {
+    if (typeof sessionId !== 'string' || !sessionId) return { removed: 0 };
+    try {
+      return discardStagedPhotos(sessionId);
+    } catch (err) {
+      console.warn(`[session:discardStaged] sessionId=${sessionId} failed: ${(err as Error).message}`);
+      return { removed: 0 };
+    }
+  });
+
   // Native File Export IPC
   ipcMain.handle(
     'session:exportImages',
@@ -1439,6 +1461,7 @@ app.on('before-quit', () => {
   stopStatsEventPush();
   stopCccdRosterWatcher();
   stopTetheredCameraWatcher();
+  stopTetheredLiveViewForQuit();
   closeDatabase();
   closeLogger();
   globalShortcut.unregisterAll();

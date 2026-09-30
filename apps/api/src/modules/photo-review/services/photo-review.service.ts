@@ -1,4 +1,5 @@
 import { CustomException } from '@app/shared/errors/legacy';
+import { runBulk } from '@app/shared/http/bulk-item-error';
 import { toDao } from '@app/shared/http/to-dao.helper';
 import { FileStorageService } from '@app/modules/file-storage/services/file-storage.service';
 import { ReviewStatsService } from '@app/modules/stats/services/review-stats.service';
@@ -13,8 +14,9 @@ import archiver from 'archiver';
 import type { Queue } from 'bullmq';
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { PassThrough } from 'node:stream';
-import { DataSource, EntityManager, Repository } from 'typeorm';
+import { DataSource, EntityManager, In, Repository } from 'typeorm';
 import {
+  BulkReviewDecisionResultDao,
   PhotoVariantDao,
   ReviewEventDao,
   ReviewSetDetailDao,
@@ -25,6 +27,7 @@ import { PhotoSetStatusChangedEvent } from '../domain/event/photo-set-status-cha
 import {
   AiEditDto,
   ApproveRejectDto,
+  BulkApproveRejectDto,
   ListEventsQueryDto,
   ListSetsQueryDto,
 } from '../dto';
@@ -33,8 +36,16 @@ import { PhotoReviewEvent } from '../entities/photo-review-event.entity';
 import { PhotoVariant } from '../entities/photo-variant.entity';
 import { SubjectPhotoSet } from '../entities/subject-photo-set.entity';
 import {
+  AI_EDIT_BACKGROUND_QUEUE_NAME,
+  AI_EDIT_MAX_ATTEMPTS,
+  AI_EDIT_MAX_IN_FLIGHT_PER_SET,
   AI_EDIT_QUEUE_NAME,
+  AI_EDIT_RECOVERY_BATCH_LIMIT,
+  AI_EDIT_RECOVERY_BOOT_GRACE_MS,
+  AI_EDIT_RECOVERY_MIN_AGE_MS,
+  AI_EDIT_RECOVERY_PROCESSING_STALE_MS,
   AiEditJobKind,
+  AiEditJobOrigin,
   ALLOWED_UPLOAD_MIME_TYPES,
   FORBIDDEN_PROMPT_KEYWORDS,
   IDENTITY_SIMILARITY_REJECT_THRESHOLD,
@@ -53,11 +64,23 @@ import {
   unwrapPhotoAi,
 } from '../application/ports/photo-ai.port';
 import type { PhotoAiPort } from '../application/ports/photo-ai.port';
-import type { AiEditJobData } from './ai-edit.processor';
+import {
+  AI_EDIT_JOB_OPTS,
+  AI_EDIT_LIVE_JOB_STATES,
+  aiEditJobId,
+  aiEditJobKindFor,
+  laneForOrigin,
+} from './ai-edit.job';
+import type { AiEditJobData, AiEditLane } from './ai-edit.job';
+import { resolveAiJobFailureStatus } from './ai-edit-failure.policy';
 import { PhotoKindService } from './photo-kind.service';
 import { SidecarError } from './photo-review-sidecar.service';
 import sharp from 'sharp';
-import { ReviewAssignmentService } from './review-assignment.service';
+import {
+  outOfScopeError,
+  ReviewAssignmentService,
+} from './review-assignment.service';
+import type { ScopeTarget } from './review-assignment.service';
 import { WorkflowCatalogReadRepository } from '@app/modules/workflow/infrastructure/read/workflow-catalog.read-repository';
 import type { WorkflowConfig } from '@app/modules/workflow/domain/schema/workflow-config.schema';
 
@@ -89,6 +112,15 @@ interface SessionContext {
   year: number;
   /** `sessions.metadata->>'identityNumber'` (2026-09-10, "lưu ảnh làm mịn vào thư mục CCCD") — the subject's CCCD, when known, same field `StudentSubjectInfo.identityNumber` rides into `sessions.metadata` under. `undefined` for a session with no student lookup at all (manual entry with no CCCD, or an older session predating this). */
   identityNumber?: string;
+}
+
+/** The 404 for a review set that does not exist — one factory for every lookup path (single-set routes, the row lock, the raw detail query, the bulk decision path). */
+function setNotFoundError(): CustomException {
+  return new CustomException(
+    'Photo review set not found',
+    PHOTO_REVIEW_ERROR_CODE.SET_NOT_FOUND,
+    HttpStatus.NOT_FOUND,
+  );
 }
 
 /** A very small (16-byte) 1x1 JPEG-ish sniff is not attempted — MIME + size only, matching `PhotoService.addPhoto`'s own validation depth for this pass. */
@@ -136,6 +168,24 @@ function extractSidecarFailureMessage(error: unknown): string {
 }
 
 /**
+ * Strips a `host:port`/URL authority out of an infra error message before
+ * it is persisted to `photo_variants.note` — 2026-09-30 fix (confirmed
+ * audit finding, low-impact hardening): `note` is exposed as-is to every
+ * in-scope reviewer (`PhotoVariantDao.note`, `ReviewSetDao.failReason`), and
+ * a raw Redis/ioredis connection error (e.g. `connect ECONNREFUSED
+ * 10.20.15.x:6379`) can name an internal host that has no business
+ * reaching a browser. Deliberately narrow — this only redacts an
+ * authority after `://` or after `@`/before a bare `:<port>`, and leaves
+ * the rest of the message (which this module's reviewers are meant to see,
+ * per `ReviewSetDao.failReason`'s own doc comment) untouched.
+ */
+function redactInternalHost(message: string): string {
+  return message
+    .replace(/(:\/\/)[^\s/]+/g, '$1[redacted-host]')
+    .replace(/\b(?:\d{1,3}\.){3}\d{1,3}:\d{1,5}\b/g, '[redacted-host]');
+}
+
+/**
  * Core service for the "Duyệt ảnh" (photo review) module —
  * docs/plans/cms-photo-review-plan.md. Owns every state-changing action in
  * §7's API table except `photo_kinds` CRUD (see `PhotoKindService`), and
@@ -176,7 +226,17 @@ export class PhotoReviewService {
     private readonly workflowCatalog: WorkflowCatalogReadRepository,
     @InjectQueue(AI_EDIT_QUEUE_NAME)
     private readonly aiEditQueue: Queue<AiEditJobData>,
+    // The background lane (2026-09-29, user-priority-preemption rework) —
+    // kiosk auto-runs and `AiEditRecoveryService` requeues go here instead;
+    // see `AI_EDIT_BACKGROUND_QUEUE_NAME`'s own doc comment.
+    @InjectQueue(AI_EDIT_BACKGROUND_QUEUE_NAME)
+    private readonly aiEditBackgroundQueue: Queue<AiEditJobData>,
   ) {}
+
+  /** `input.origin` (via `laneForOrigin`) → the actual `Queue` to enqueue onto — see `enqueueAiEditJob`'s own doc comment. */
+  private queueForLane(lane: AiEditLane): Queue<AiEditJobData> {
+    return lane === 'user' ? this.aiEditQueue : this.aiEditBackgroundQueue;
+  }
 
   // ── Locking (plan §4) ──────────────────────────────────────────────────
 
@@ -199,13 +259,7 @@ export class PhotoReviewService {
 
   private async findSetEntityOrFail(id: string): Promise<SubjectPhotoSet> {
     const set = await this.setRepository.findOne({ where: { id } });
-    if (!set) {
-      throw new CustomException(
-        'Photo review set not found',
-        PHOTO_REVIEW_ERROR_CODE.SET_NOT_FOUND,
-        HttpStatus.NOT_FOUND,
-      );
-    }
+    if (!set) throw setNotFoundError();
     return set;
   }
 
@@ -283,12 +337,12 @@ export class PhotoReviewService {
   }
 
   /** Batch version of `resolveSessionContext`, tenant only — see that method's own doc comment for why this is always `undefined` now. Kept (rather than deleted outright) so `listSets`/`getSetDetail` don't need to change shape. */
-  private async batchResolveTenants(
+  private batchResolveTenants(
     sessionIds: string[],
   ): Promise<Map<string, string | undefined>> {
     const map = new Map<string, string | undefined>();
     for (const id of sessionIds) map.set(id, undefined);
-    return map;
+    return Promise.resolve(map);
   }
 
   /**
@@ -539,7 +593,48 @@ export class PhotoReviewService {
       idempotencyKey: string;
     },
   ): Promise<StoredVariantBytesResult> {
-    const sha256 = createHash('sha256').update(input.data).digest('hex');
+    const stored = this.hashVariantBytes(input.data);
+    await this.insertVariantOutboxContent(manager, input);
+    return stored;
+  }
+
+  /** Pure size/hash computation, no DB call — split out of `storeVariantBytesLocalFirst` (2026-09-29 fix, see `insertVariantOutboxContent`'s own doc comment) so a caller that needs the hash for an attempt-guarded UPDATE can compute it BEFORE deciding whether the outbox INSERT should happen at all. */
+  private hashVariantBytes(data: Buffer): StoredVariantBytesResult {
+    return {
+      bytes: data.byteLength,
+      sha256: createHash('sha256').update(data).digest('hex'),
+    };
+  }
+
+  /**
+   * The actual `variant_upload_outbox` INSERT, split out of
+   * `storeVariantBytesLocalFirst` (2026-09-29 outbox-idempotency fix).
+   *
+   * `processReprocessJob`/`processAiEditJob` used to call
+   * `storeVariantBytesLocalFirst` (insert unconditionally) BEFORE their own
+   * attempt-guarded `DONE` UPDATE, so a superseded/discarded attempt that
+   * happened to finish its pipeline/`/edit` call first would still win the
+   * fixed `idem_key` (`ON CONFLICT DO NOTHING` silently drops whichever
+   * attempt's insert comes second) even though the LATER attempt's own
+   * UPDATE — the one that actually flips the row to `DONE` — is the one
+   * whose `sha256`/`identity_similarity`/etc the row ends up describing.
+   * Both call sites now run their guarded UPDATE FIRST and only call this
+   * once that UPDATE has confirmed THIS attempt is the one that actually
+   * won the transition — the fixed `idem_key` is then safe again, because
+   * only the winning attempt (status can only move `PROCESSING → DONE`
+   * once) ever reaches this call for a given variant.
+   */
+  private async insertVariantOutboxContent(
+    manager: EntityManager,
+    input: {
+      variantId: string;
+      tenantName?: string;
+      virtualPath: string;
+      mimeType: string;
+      data: Buffer;
+      idempotencyKey: string;
+    },
+  ): Promise<void> {
     await manager.query(
       `INSERT INTO variant_upload_outbox (variant_id, idem_key, virtual_path, mime_type, content, tenant_name)
        VALUES ($1, $2, $3, $4, $5, $6)
@@ -553,7 +648,6 @@ export class PhotoReviewService {
         input.tenantName ?? null,
       ],
     );
-    return { bytes: input.data.byteLength, sha256 };
   }
 
   /**
@@ -617,9 +711,10 @@ export class PhotoReviewService {
    * service for one other caller or reaching into `CaptureModule` from here.
    * A direct, isolated mirror (signing `variant:<id>:<exp>` instead of
    * `<id>:<exp>`, so a link minted for one route can never be replayed
-   * against the other even though both share the same `API_KEY` secret) is
-   * simpler and keeps this module's existing "duplicate small things rather
-   * than couple modules" convention (see `resolveSessionContext` etc.).
+   * against the other even though both share the same
+   * `security.viewLinkSigningSecret`) is simpler and keeps this module's
+   * existing "duplicate small things rather than couple modules" convention
+   * (see `resolveSessionContext` etc.).
    */
   private issueLocalVariantViewLink(
     variantId: string,
@@ -643,9 +738,14 @@ export class PhotoReviewService {
       'hex',
     );
     const gotBuf = sigRaw ? Buffer.from(sigRaw, 'hex') : Buffer.alloc(0);
+    const now = Math.floor(Date.now() / 1000);
     const valid =
       Number.isFinite(exp) &&
-      exp >= Math.floor(Date.now() / 1000) &&
+      exp >= now &&
+      // 2026-09-30 fix (confirmed audit finding): see PhotoService's
+      // matching fix — without this upper bound a far-future `exp` verified
+      // forever, defeating the short-TTL design.
+      exp <= now + LOCAL_VARIANT_VIEW_TTL_SECONDS &&
       expectedBuf.length === gotBuf.length &&
       expectedBuf.length > 0 &&
       timingSafeEqual(expectedBuf, gotBuf);
@@ -659,7 +759,13 @@ export class PhotoReviewService {
   }
 
   private signLocalVariantViewToken(variantId: string, exp: number): string {
-    const secret = this.configService.get<string>('security.apiKey') ?? '';
+    // 2026-09-30 fix (confirmed audit finding): was `security.apiKey`, the
+    // same static secret apps/web ships to every browser client — anyone
+    // holding it could forge a valid signature for any variant id,
+    // bypassing SSO/ReviewerRoleGuard/reviewAssignments scoping entirely.
+    // See `security.ts`'s own doc comment on `viewLinkSigningSecret`.
+    const secret =
+      this.configService.get<string>('security.viewLinkSigningSecret') ?? '';
     return createHmac('sha256', secret)
       .update(`variant:${variantId}:${exp}`)
       .digest('hex');
@@ -773,13 +879,7 @@ export class PhotoReviewService {
       where: { id },
       lock: { mode: 'pessimistic_write' },
     });
-    if (!set) {
-      throw new CustomException(
-        'Photo review set not found',
-        PHOTO_REVIEW_ERROR_CODE.SET_NOT_FOUND,
-        HttpStatus.NOT_FOUND,
-      );
-    }
+    if (!set) throw setNotFoundError();
     return set;
   }
 
@@ -1189,13 +1289,7 @@ export class PhotoReviewService {
       [id],
     );
     const row = rows[0];
-    if (!row) {
-      throw new CustomException(
-        'Photo review set not found',
-        PHOTO_REVIEW_ERROR_CODE.SET_NOT_FOUND,
-        HttpStatus.NOT_FOUND,
-      );
-    }
+    if (!row) throw setNotFoundError();
     await this.reviewAssignments.assertInScope(actorUserId, {
       campaignId: row.campaign_id as string,
       className: row.class_name as string | null,
@@ -1207,18 +1301,13 @@ export class PhotoReviewService {
     const tenantMap = await this.batchResolveTenants([sessionId]);
     const tenantName = tenantMap.get(sessionId);
 
-    const [photoRows, videoRows, variantRows, eventRows]: [
-      Array<Record<string, unknown>>,
-      Array<Record<string, unknown>>,
-      PhotoVariant[],
-      Array<Record<string, unknown>>,
-    ] = await Promise.all([
-      this.dataSource.query(
+    const [photoRows, videoRows, variantRows, eventRows] = await Promise.all([
+      this.dataSource.query<Array<Record<string, unknown>>>(
         `SELECT id, step_id, step_type, camera_role, attempt, mime_type, fs_file_id, fs_status, captured_at
            FROM photos WHERE session_id = $1 ORDER BY step_id, attempt`,
         [sessionId],
       ),
-      this.dataSource.query(
+      this.dataSource.query<Array<Record<string, unknown>>>(
         `SELECT id, camera_role, mime_type, duration_ms, fs_file_id, fs_status
            FROM session_videos WHERE session_id = $1 ORDER BY camera_role`,
         [sessionId],
@@ -1227,7 +1316,7 @@ export class PhotoReviewService {
         where: { setId: id },
         order: { version: 'DESC' },
       }),
-      this.dataSource.query(
+      this.dataSource.query<Array<Record<string, unknown>>>(
         `SELECT e.id, e.set_id, e.variant_id, e.action, e.actor_user_id, e.payload, e.at,
                 COALESCE(u.display_name, u.email) AS actor_name
            FROM photo_review_events e
@@ -1779,27 +1868,225 @@ export class PhotoReviewService {
   }
 
   /**
-   * Queues the real `/edit`-calling work for `AiEditProcessor` (the `ai-edit`
-   * BullMQ queue, `AI_EDIT_QUEUE_NAME`) instead of running it inline —
-   * 2026-09-29 user request. `job.name` is `input.kind`
-   * (`AiEditJobKind.REPROCESS`/`AI_EDIT`) — `AiEditProcessor.process()`
-   * switches on it to pick `processReprocessJob`/`processAiEditJob`.
-   * `actorUserId` is intentionally NOT part of the job data: neither
-   * `process*Job` method reads it (both were already `actorUserId`-free —
-   * the audit trail for WHO requested the job is the `REPROCESS`/
-   * `AI_REQUESTED` `photo_review_events` row written synchronously above,
-   * before this ever enqueues).
+   * Claims a variant (guarded UPDATE: `status` must be one of
+   * `input.claimFrom` — and, when retrying/re-claiming a specific known
+   * attempt, `ai_attempts` must still match `input.expectedAttempts` — see
+   * `promoteToUserLane`'s own use of that guard) onto whichever BullMQ
+   * queue `input.origin` picks (via `laneForOrigin` — see that function's
+   * own doc comment), instead of running the real `/edit`-calling
+   * work inline — 2026-09-29 user request (original), rewritten 2026-09-29
+   * (user-priority-preemption follow-up) to add the lane split, the
+   * `ai_attempts` claim/guard, and a durable "row is the source of truth,
+   * Redis is disposable" story (`AiEditRecoveryService` can always
+   * reconstruct a lost job from the row alone).
+   *
+   * `job.name` is `input.kind` (`AiEditJobKind.REPROCESS`/`AI_EDIT`) —
+   * `AiEditProcessor`/`AiEditBackgroundProcessor` (via
+   * `runQueuedAiEditJob`) switch on it to pick
+   * `processReprocessJob`/`processAiEditJob`. `actorUserId` is still
+   * intentionally NOT part of the job data — the audit trail for WHO
+   * requested the job is the `REPROCESS`/`AI_REQUESTED` `photo_review_events`
+   * row written synchronously before this is ever called.
+   *
+   * Returns `{enqueued: false}` (never throws) when the guarded UPDATE
+   * matched zero rows — the variant already moved on (e.g. a concurrent
+   * caller already claimed it, or it was discarded) — same "no-op, not an
+   * error" contract this module already uses for every other
+   * lost-the-race guarded write (see `processReprocessJob`'s own
+   * `appliedToReady`-style checks).
+   *
+   * If `queue.add` itself throws or hangs (Redis down/slow — bounded to
+   * ~5s here so a caller never hangs indefinitely on this) the claim's OWN
+   * `ai_attempts` bump is undone (`attemptDelta: -1`, attempt-guarded so a
+   * slower-but-eventually-successful `add` racing this walk-back can never
+   * leave the row stuck) and a `note` is recorded, but `status` stays
+   * `PROCESSING` — there is no separate `PENDING`/failed-to-enqueue status
+   * (see `PhotoVariantStatus`'s own doc comment). `AiEditRecoveryService`'s
+   * sweep picks this row up the same way it recovers a crashed run: once it
+   * has been stale (no live job) for `AI_EDIT_RECOVERY_PROCESSING_STALE_MS`.
    */
   private async enqueueAiEditJob(input: {
     kind: AiEditJobKind;
     variantId: string;
     setId: string;
-    payload?: AiEditJobData['payload'];
-  }): Promise<void> {
-    await this.aiEditQueue.add(input.kind, {
-      setId: input.setId,
-      variantId: input.variantId,
-      payload: input.payload,
+    origin: AiEditJobOrigin;
+    claimFrom: PhotoVariantStatus[];
+    expectedAttempts?: number;
+  }): Promise<{ enqueued: boolean; attempt?: number }> {
+    const [claimedRows]: [Array<{ ai_attempts: number }>, number] =
+      await this.dataSource.query(
+        `UPDATE photo_variants
+            SET status = $2, ai_attempts = ai_attempts + 1, updated_at = now()
+          WHERE id = $1 AND status = ANY($3::text[])
+            AND ($4::int IS NULL OR ai_attempts = $4)
+          RETURNING ai_attempts`,
+        [
+          input.variantId,
+          PhotoVariantStatus.PROCESSING,
+          input.claimFrom,
+          input.expectedAttempts ?? null,
+        ],
+      );
+    if (claimedRows.length === 0) {
+      this.logger.warn(
+        `enqueueAiEditJob: variant ${input.variantId} did not match claimFrom=[${input.claimFrom.join(',')}] (expectedAttempts=${input.expectedAttempts ?? 'any'}) — not enqueued`,
+      );
+      return { enqueued: false };
+    }
+    const attempt = claimedRows[0].ai_attempts;
+    // Lane derived from origin (2026-09-29 simplification fix) — see
+    // `laneForOrigin`'s own doc comment for why a separate `input.lane`
+    // field used to be able to disagree with `input.origin`.
+    const lane = laneForOrigin(input.origin);
+
+    const addPromise = this.queueForLane(lane).add(
+      input.kind,
+      {
+        setId: input.setId,
+        variantId: input.variantId,
+        origin: input.origin,
+        attempt,
+      },
+      { jobId: aiEditJobId(input.variantId, attempt), ...AI_EDIT_JOB_OPTS },
+    );
+
+    try {
+      await this.withTimeout(addPromise, 5_000, 'enqueueAiEditJob: queue.add');
+    } catch (error) {
+      const message = (error as Error).message;
+      // 2026-09-30 fix (confirmed audit finding): `withTimeout` never
+      // cancels `addPromise` — it is only this caller that stops waiting.
+      // The old code walked `ai_attempts` back (`attemptDelta: -1`)
+      // unconditionally right here, on a MERE TIMEOUT as much as on a real
+      // failure. If `addPromise` then went on to actually land, its job
+      // (`pv-<variantId>-<attempt>`) already existed in Redis under this
+      // same attempt number — and the very next claim (recovery sweep or a
+      // fresh reprocess/aiEdit call) reuses that SAME walked-back attempt
+      // number for its own `queue.add`, whose job id collides with the
+      // late-landing one. BullMQ silently no-ops a duplicate job id, so
+      // that later, real enqueue attempt was dropped on the floor.
+      //
+      // Only walk the attempt back once we are CERTAIN no job was created
+      // under this attempt's job id. A synchronous/immediate rejection from
+      // `add()` itself gives us that certainty right away. A bare timeout
+      // does not — so for a timeout, defer the walk-back until
+      // `addPromise` itself finally settles: if it resolves, the job is
+      // live and nothing else need happen; if it eventually rejects for
+      // real, walk the attempt back then, when doing so can no longer
+      // collide with anything.
+      const timedOut = message.includes('timed out after');
+      if (timedOut) {
+        this.logger.error(
+          `enqueueAiEditJob: queue.add timed out for variant ${input.variantId} (attempt ${attempt}) — leaving the claim in place until the add itself settles, to avoid reusing this attempt's job id for a still-possibly-pending add: ${message}`,
+        );
+        addPromise.then(
+          () => {
+            this.logger.warn(
+              `enqueueAiEditJob: queue.add for variant ${input.variantId} (attempt ${attempt}) landed after its own timeout — the job is live, no walk-back needed`,
+            );
+          },
+          (bgError: unknown) => {
+            // `attemptDelta: -1` (2026-09-29 fix) — undoes the
+            // `ai_attempts + 1` the claim UPDATE above did. Without this, a
+            // Redis outage that fails every `queue.add` call burns through
+            // `AI_EDIT_MAX_ATTEMPTS` on enqueue failures alone (never an
+            // actual AI run). `to` stays `PROCESSING` (same as `from`) — no
+            // separate PENDING status.
+            void this.transitionVariantStatus(this.dataSource, {
+              variantId: input.variantId,
+              from: PhotoVariantStatus.PROCESSING,
+              to: PhotoVariantStatus.PROCESSING,
+              attempt,
+              note: `enqueue failed: ${redactInternalHost((bgError as Error).message)}`,
+              attemptDelta: -1,
+            }).catch((walkBackError: unknown) => {
+              this.logger.error(
+                `enqueueAiEditJob: deferred walk-back failed for variant ${input.variantId} (attempt ${attempt}): ${(walkBackError as Error).message}`,
+              );
+            });
+          },
+        );
+      } else {
+        this.logger.error(
+          `enqueueAiEditJob: queue.add failed for variant ${input.variantId} (attempt ${attempt}) — walking the attempt back, leaving it PROCESSING for the recovery sweep: ${message}`,
+        );
+        await this.transitionVariantStatus(this.dataSource, {
+          variantId: input.variantId,
+          from: PhotoVariantStatus.PROCESSING,
+          to: PhotoVariantStatus.PROCESSING,
+          attempt,
+          note: `enqueue failed: ${redactInternalHost(message)}`,
+          attemptDelta: -1,
+        });
+      }
+      return { enqueued: false, attempt };
+    }
+    return { enqueued: true, attempt };
+  }
+
+  /**
+   * Shared attempt-guarded status transition for `photo_variants`
+   * (2026-09-29 dedup fix) — every place that walks a claimed row forward
+   * to a terminal/retry status used to copy-paste this same
+   * `WHERE status = $x AND ai_attempts = $y` guarded UPDATE, and the copies
+   * had already drifted (the recovery sweep's CARD_AI attempts-exhausted
+   * branch had silently lost the `ai_attempts` guard its siblings kept).
+   * Returns whether the UPDATE actually matched a row, same contract every
+   * inline `RETURNING id`/`readyRows.length > 0` check already used —
+   * callers must skip any further side effect (event, stats, set
+   * demotion/promotion) when this is `false`, since it means a newer
+   * attempt (or a discard) already moved the row on.
+   */
+  private async transitionVariantStatus(
+    runner: DataSource | EntityManager,
+    input: {
+      variantId: string;
+      from: PhotoVariantStatus;
+      to: PhotoVariantStatus;
+      attempt: number;
+      note?: string | null;
+      /** Added to `ai_attempts` in the same UPDATE — only the enqueue walk-back (undoing its own claim's `+1`) passes a non-zero value here. */
+      attemptDelta?: number;
+    },
+  ): Promise<boolean> {
+    const [rows]: [Array<{ id: string }>, number] = await runner.query(
+      `UPDATE photo_variants
+          SET status = $2, note = $3, ai_attempts = ai_attempts + $6, updated_at = now()
+        WHERE id = $1 AND status = $4 AND ai_attempts = $5
+        RETURNING id`,
+      [
+        input.variantId,
+        input.to,
+        input.note ?? null,
+        input.from,
+        input.attempt,
+        input.attemptDelta ?? 0,
+      ],
+    );
+    return rows.length > 0;
+  }
+
+  /** Rejects with `label` if `promise` has not settled within `ms` — the promise itself is left running (BullMQ's `add` is not cancellable), only this caller stops waiting on it. */
+  private withTimeout<T>(
+    promise: Promise<T>,
+    ms: number,
+    label: string,
+  ): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error(`${label} timed out after ${ms}ms`)),
+        ms,
+      );
+      promise.then(
+        (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        (error) => {
+          clearTimeout(timer);
+          reject(error as Error);
+        },
+      );
     });
   }
 
@@ -1808,6 +2095,13 @@ export class PhotoReviewService {
   /**
    * Allowed even when locked — this is how a set gets OUT of `PENDING_AUTO`
    * (first ever card) or `AUTO_FAILED` (retry), per plan §4/R-Q1.
+   *
+   * `origin` (2026-09-29, user-priority-preemption rework) picks the LANE a
+   * freshly-created variant's job goes to: `USER` (a reviewer's own
+   * "Tạo lại ảnh 4x6" click, via `ReviewController.reprocess`) always uses
+   * the high-priority `ai-edit` queue; `AUTO` (the default — the kiosk's
+   * own best-effort post-approval trigger, `DeviceEventService`) uses
+   * `ai-edit-background`. See `AiEditJobOrigin`'s own doc comment.
    *
    * Defensive by design: the actual image pipeline runs through
    * `PhotoAiPort` (a campaign-configured `ai_pipeline_steps` sequence when
@@ -1820,6 +2114,7 @@ export class PhotoReviewService {
     setId: string,
     actorUserId: string | null,
     apiBaseUrl: string,
+    origin: AiEditJobOrigin = AiEditJobOrigin.AUTO,
   ): Promise<ReviewSetDetailDao> {
     const set = await this.findSetEntityOrFail(setId);
     // Not covered by `assertUnlocked` (deliberately, per R-Q1) but still a
@@ -1828,28 +2123,108 @@ export class PhotoReviewService {
     // through this one route.
     await this.reviewAssignments.assertInScope(actorUserId, set);
 
-    // Single-flight guard (2026-09-29): with the `ai_pipeline_steps`
-    // executor wired up, one run can now take minutes (an `AI_EDIT` step's
-    // `/edit` call queues on a single-worker GPU service). Before this
-    // guard, two overlapping runs for the same set — the kiosk's own
-    // no-in-flight-guard resend loop re-POSTing the same un-acked
-    // SESSION_REPORT batch every ~15s is one source, a reviewer's manual
-    // "Tạo lại ảnh 4x6" click landing mid-auto-run is another — would each
-    // create their own PROCESSING `CARD_AUTO` variant and queue their own
-    // AI request on top of whatever is already running. A variant already
-    // `PROCESSING` for this set means a run is already in flight; skip
-    // starting a second one rather than stacking work on the AI service.
-    const alreadyProcessing = await this.variantRepository.findOne({
-      where: {
-        setId,
-        kind: PhotoVariantKind.CARD_AUTO,
-        status: PhotoVariantStatus.PROCESSING,
-      },
+    // Single-flight guard (2026-09-29, widened in the same-day
+    // priority-preemption follow-up to cover DRAFT too, not just
+    // PROCESSING — a retryable failure awaiting the sweep is also just
+    // `PROCESSING`, see `PhotoVariantStatus`'s own doc comment): with the
+    // `ai_pipeline_steps` executor wired up, one run can now take minutes
+    // (an `AI_EDIT` step's `/edit` call queues on a single-worker GPU
+    // service). Before this guard, two overlapping runs for the same set —
+    // the kiosk's own no-in-flight-guard resend loop re-POSTing the same
+    // un-acked SESSION_REPORT batch every ~15s is one source, a reviewer's
+    // manual "Tạo lại ảnh 4x6" click landing mid-auto-run is another — would
+    // each create their own variant and queue their own AI request on top of
+    // whatever is already running.
+    //
+    // An `AUTO` caller finding one already in flight just skips (unchanged
+    // behavior — F10, only the USER path may re-claim a stuck/retrying row).
+    // A `USER` caller instead RE-CLAIMS the existing variant rather than
+    // creating a new one — see below — which is also what makes "click
+    // gen-by-AI again" able to promote an already-queued background
+    // (kiosk-auto) run into the user lane instead of stacking a second
+    // request behind it.
+    const inFlight = await this.variantRepository.findOne({
+      where: [
+        {
+          setId,
+          kind: PhotoVariantKind.CARD_AUTO,
+          status: PhotoVariantStatus.DRAFT,
+        },
+        {
+          setId,
+          kind: PhotoVariantKind.CARD_AUTO,
+          status: PhotoVariantStatus.PROCESSING,
+        },
+      ],
+      order: { createdAt: 'DESC' },
     });
-    if (alreadyProcessing) {
-      this.logger.warn(
-        `reprocess: set ${setId} already has a PROCESSING CARD_AUTO variant (${alreadyProcessing.id}) — skipping duplicate run`,
-      );
+    if (inFlight) {
+      if (origin !== AiEditJobOrigin.USER) {
+        this.logger.warn(
+          `reprocess: set ${setId} already has an in-flight CARD_AUTO variant (${inFlight.id}, status=${inFlight.status}) — skipping duplicate ${origin} run`,
+        );
+        return this.getSetDetail(setId, apiBaseUrl);
+      }
+      // Refresh the promotion snapshot to the set's CURRENT card at click
+      // time (under the set lock) — a USER re-claim explicitly means "run
+      // this again, right now", so it should promote against whatever a
+      // reviewer has done since the ORIGINAL run started, not that
+      // original run's own stale snapshot. Guarded by `status = ANY(...)`
+      // (2026-09-29 fix) — matching the same statuses `inFlight`'s own
+      // lookup above used — so a variant that settled between that lookup
+      // and this transaction is left alone rather than having its snapshot
+      // rewritten for no reason. Also writes the `REPROCESS` audit event
+      // for this click (2026-09-29 fix): this branch used to record no
+      // event and no actor at all, breaking the module's own "every
+      // state-changing action gets an event" rule — a USER re-claim can
+      // promote a regenerated card over whatever another reviewer has since
+      // chosen as current (see `processReprocessJob`'s `safeToPromote`),
+      // exactly the kind of action this module's audit trail must attribute.
+      const reclaimed = await this.dataSource.transaction(async (manager) => {
+        const lockedSet = await this.lockSet(manager, setId);
+        const [reclaimedRows]: [Array<{ id: string }>, number] =
+          await manager.query(
+            `UPDATE photo_variants
+                SET ai_request_params = coalesce(ai_request_params, '{}'::jsonb)
+                      || jsonb_build_object('snapshotCurrentVariantId', $2::uuid),
+                    updated_at = now()
+              WHERE id = $1 AND status = ANY($3::text[])
+              RETURNING id`,
+            [
+              inFlight.id,
+              lockedSet.currentCardVariantId ?? null,
+              [PhotoVariantStatus.DRAFT, PhotoVariantStatus.PROCESSING],
+            ],
+          );
+        if (reclaimedRows.length === 0) return false;
+        await this.writeEvent(manager, {
+          setId,
+          variantId: inFlight.id,
+          action: PhotoReviewAction.REPROCESS,
+          actorUserId,
+          payload: { reclaim: true, fromStatus: inFlight.status },
+        });
+        return true;
+      });
+
+      if (!reclaimed) {
+        this.logger.warn(
+          `reprocess: variant ${inFlight.id} already settled (no longer DRAFT/PROCESSING) before this USER re-claim could run — no-op`,
+        );
+        return this.getSetDetail(setId, apiBaseUrl);
+      }
+
+      if (inFlight.status === PhotoVariantStatus.PROCESSING) {
+        await this.promoteToUserLane(inFlight);
+      } else {
+        await this.enqueueAiEditJob({
+          kind: AiEditJobKind.REPROCESS,
+          variantId: inFlight.id,
+          setId,
+          origin: AiEditJobOrigin.USER,
+          claimFrom: [PhotoVariantStatus.DRAFT],
+        });
+      }
       return this.getSetDetail(setId, apiBaseUrl);
     }
 
@@ -1867,7 +2242,7 @@ export class PhotoReviewService {
     }
 
     const variant = await this.dataSource.transaction(async (manager) => {
-      await this.lockSet(manager, setId);
+      const lockedSet = await this.lockSet(manager, setId);
       const version = await this.nextVersion(manager, setId);
       const repo = manager.getRepository(PhotoVariant);
       const created = await repo.save(
@@ -1875,9 +2250,20 @@ export class PhotoReviewService {
           setId,
           version,
           kind: PhotoVariantKind.CARD_AUTO,
-          status: PhotoVariantStatus.PROCESSING,
+          status: PhotoVariantStatus.DRAFT,
           sourcePhotoId: frontPhoto.id,
           createdByUserId: actorUserId,
+          // Captured NOW (variant creation), not re-read at job-run time any
+          // more (2026-09-29 priority-preemption follow-up) — a retry
+          // (`ai_attempts > 1`, via the recovery sweep or a USER re-claim
+          // hours later) reads THIS stored value back rather than
+          // re-snapshotting against whatever the set's current card
+          // happens to be by then; see `processReprocessJob`'s own
+          // `safeToPromote` doc comment for why a stale re-snapshot would
+          // be wrong.
+          aiRequestParams: {
+            snapshotCurrentVariantId: lockedSet.currentCardVariantId ?? null,
+          },
         }),
       );
       await this.writeEvent(manager, {
@@ -1890,49 +2276,261 @@ export class PhotoReviewService {
     });
 
     // 2026-09-29 user request ("đẩy vào queue, lock lại chỉ cho 1 tiến
-    // trình chạy, xử lý concurrence 10") — the actual AI pipeline run (the
-    // slow part, up to minutes) no longer happens inline here. It is
-    // enqueued and picked up by `AiEditProcessor`, which is what fixes the
-    // kiosk-request-blocking bug the 2026-09-29 audit found
-    // (device-event.service.ts awaiting this method inline). The FE polls
-    // `GET /v1/review/jobs/:id` (`getJob`, unchanged) to see the variant
-    // move PROCESSING → READY/FAILED — see `enqueueAiEditJob`'s own doc
-    // comment.
+    // trình chạy") — the actual AI pipeline run (the slow part, up to
+    // minutes) no longer happens inline here. It is enqueued and picked up
+    // by `AiEditProcessor`/`AiEditBackgroundProcessor` (lane picked by
+    // `origin`), which is what fixes the kiosk-request-blocking bug the
+    // 2026-09-29 audit found (device-event.service.ts awaiting this method
+    // inline). The FE polls `GET /v1/review/jobs/:id` (`getJob`, unchanged)
+    // to see the variant move PROCESSING → DONE/PENDING/FAILED — see
+    // `enqueueAiEditJob`'s own doc comment.
     await this.enqueueAiEditJob({
       kind: AiEditJobKind.REPROCESS,
       variantId: variant.id,
       setId,
+      origin,
+      claimFrom: [PhotoVariantStatus.DRAFT],
     });
 
     return this.getSetDetail(setId, apiBaseUrl);
   }
 
   /**
+   * Moves an already-`PROCESSING` variant's job from the background lane
+   * to the user lane (2026-09-29, priority-preemption rework) — the "click
+   * gen-by-AI again while the kiosk's own background run is still going"
+   * case `reprocess()`'s single-flight guard routes here. Never touches
+   * `photo_variants.status`/`ai_attempts` (still `PROCESSING` either way —
+   * moving queues is not a new claim) — only which BullMQ queue holds the
+   * job, so `AiEditSlotGate` picks it up ahead of any OTHER still-waiting
+   * background job the next time a slot frees.
+   *
+   * bullmq 6.3.9's `Queue.remove(jobId)` returns 1 only if it actually
+   * removed a job that was `waiting`/`prioritized`/`delayed` (never a job
+   * already `active` — see that method's own doc comment); this is exactly
+   * the race-free check this needs:
+   * - Still waiting in the background queue (`remove` → 1): re-add the SAME
+   *   job data/id to the user queue — nothing was running, nothing lost.
+   * - Already `active` (`remove` → 0, i.e. `AiEditBackgroundProcessor`
+   *   claimed it between this method's own lookup and the `remove` call):
+   *   leave it running there. Its slot is already held; forcibly moving a
+   *   RUNNING job is exactly the "abort a live GPU call" trade-off this
+   *   rework's own plan chose not to attempt (see `AiEditSlotGate`'s doc
+   *   comment) — the user's own new job will still jump every OTHER
+   *   waiting job via the gate once a slot frees.
+   * - Not found in the background queue at all (already completed/failed,
+   *   or this is the FIRST claim — no prior job ever existed): fall back to
+   *   a normal `claimFrom: [PROCESSING]` re-claim, attempt-guarded by
+   *   `expectedAttempts` so a stale/already-superseded call is a safe no-op
+   *   rather than double-claiming.
+   */
+  private async promoteToUserLane(variant: PhotoVariant): Promise<void> {
+    const jobId = aiEditJobId(variant.id, variant.aiAttempts);
+    const kind = aiEditJobKindFor(variant.kind);
+    const job = await this.aiEditBackgroundQueue.getJob(jobId);
+    if (job) {
+      const state = await job.getState();
+      if (state === 'active') {
+        this.logger.log(
+          `promoteToUserLane: variant ${variant.id}'s job ${jobId} is already active in the background lane — leaving it running`,
+        );
+        return;
+      }
+      // Deliberately its own, narrower list — NOT `AI_EDIT_LIVE_JOB_STATES`
+      // — this is the set of states bullmq's `Queue.remove()` can actually
+      // act on (`active` is handled above, `waiting-children` cannot be
+      // removed either).
+      if (
+        state === 'waiting' ||
+        state === 'prioritized' ||
+        state === 'delayed'
+      ) {
+        const removed = await this.aiEditBackgroundQueue.remove(jobId);
+        if (removed === 1) {
+          await this.aiEditQueue.add(
+            kind,
+            {
+              setId: variant.setId,
+              variantId: variant.id,
+              origin: AiEditJobOrigin.USER,
+              attempt: variant.aiAttempts,
+            },
+            { jobId, ...AI_EDIT_JOB_OPTS },
+          );
+          this.logger.log(
+            `promoteToUserLane: moved variant ${variant.id}'s job ${jobId} from background to user lane`,
+          );
+          return;
+        }
+        // `removed === 0` — it became active between `getState()` and
+        // `remove()` (a real, narrow race). Same as the `state === 'active'`
+        // branch above: leave it running.
+        return;
+      }
+      // `completed`/`failed`/`unknown` — fall through to the re-claim below.
+    }
+
+    const userQueueJob = await this.aiEditQueue.getJob(jobId);
+    if (userQueueJob) {
+      const state = await userQueueJob.getState();
+      // 2026-09-29 fix: was missing `delayed`/`waiting-children` — a live
+      // job in either state would have been invisible here, so this method
+      // would fall through and re-claim/re-enqueue a SECOND job for the
+      // same attempt. `AI_EDIT_JOB_OPTS` sets no delay/backoff today so this
+      // was latent, not yet triggered, but the two queue-liveness checks in
+      // this module (this one and the recovery sweep's) must agree on what
+      // "live" means.
+      if ((AI_EDIT_LIVE_JOB_STATES as readonly string[]).includes(state)) {
+        return;
+      }
+    }
+
+    await this.enqueueAiEditJob({
+      kind,
+      variantId: variant.id,
+      setId: variant.setId,
+      origin: AiEditJobOrigin.USER,
+      claimFrom: [PhotoVariantStatus.PROCESSING],
+      expectedAttempts: variant.aiAttempts,
+    });
+  }
+
+  /**
+   * Dispatch shared by both `AiEditProcessor` and `AiEditBackgroundProcessor`
+   * (2026-09-29, priority-preemption rework — previously each processor
+   * called `processReprocessJob`/`processAiEditJob` directly). Re-checks the
+   * row against `data.attempt` BEFORE doing any real work: a job can outlive
+   * its own usefulness (e.g. `promoteToUserLane` re-claimed the same variant
+   * at a new attempt while this exact job was still sitting `waiting`, or a
+   * stale job survived a Redis hiccup) — running it anyway would either
+   * waste a GPU call or, worse, race a newer attempt's own terminal write.
+   * `data.attempt` is `?? 0` for a legacy job enqueued before this field
+   * existed.
+   */
+  async runQueuedAiEditJob(
+    kind: AiEditJobKind,
+    data: AiEditJobData,
+  ): Promise<void> {
+    const attempt = data.attempt ?? 0;
+    const rows: Array<{
+      status: PhotoVariantStatus;
+      ai_attempts: number;
+      set_id: string;
+      kind: PhotoVariantKind;
+    }> = await this.dataSource.query(
+      `SELECT status, ai_attempts, set_id, kind FROM photo_variants WHERE id = $1`,
+      [data.variantId],
+    );
+    const row = rows[0];
+    if (!row) {
+      this.logger.warn(
+        `runQueuedAiEditJob: variant ${data.variantId} no longer exists — skipping`,
+      );
+      return;
+    }
+    if (row.status !== PhotoVariantStatus.PROCESSING) {
+      this.logger.warn(
+        `runQueuedAiEditJob: variant ${data.variantId} is ${row.status}, not PROCESSING — skipping stale job (attempt=${attempt})`,
+      );
+      return;
+    }
+    if (row.ai_attempts !== attempt) {
+      this.logger.warn(
+        `runQueuedAiEditJob: variant ${data.variantId} is now at attempt ${row.ai_attempts}, this job was for attempt ${attempt} — skipping superseded job`,
+      );
+      return;
+    }
+    // 2026-09-30 fix (confirmed audit finding): the trust-boundary rule just
+    // below ("the row is the source of truth, Redis is disposable") used to
+    // stop at `set_id` — `kind` (the BullMQ job name/`AiEditJobKind` this
+    // method's caller passed in) was still taken straight from Redis with
+    // no matching check against `row.kind`. A corrupted/replayed/hand-edited
+    // Redis job whose name disagrees with the variant's actual kind would
+    // run the WRONG pipeline against it — most importantly, a `REPROCESS`
+    // name against a `CARD_AI` variant would run `processReprocessJob`, which
+    // can auto-promote its result to `currentCardVariantId`, bypassing the
+    // "AI output is never auto-set as current, a reviewer must accept it"
+    // rule `processAiEditJob` enforces for real `CARD_AI` variants.
+    if (kind !== aiEditJobKindFor(row.kind)) {
+      this.logger.warn(
+        `runQueuedAiEditJob: variant ${data.variantId} is kind ${row.kind} (expects job name ${aiEditJobKindFor(row.kind)}), but this job is named ${kind} — skipping mismatched job`,
+      );
+      return;
+    }
+
+    // `row.set_id` — the variant's OWN set, read fresh from the row itself
+    // — never `data.setId` (2026-09-29 trust-boundary fix). This rework's
+    // whole design is "the row is the source of truth, Redis is
+    // disposable" (see `enqueueAiEditJob`'s own doc comment); trusting a
+    // job-data field that duplicates what the row already knows means a
+    // corrupted/replayed/hand-edited Redis entry could point a variant's
+    // generated result — and, for `processReprocessJob`, its promotion to
+    // `currentCardVariantId` — at a completely different set.
+    if (kind === AiEditJobKind.REPROCESS) {
+      await this.processReprocessJob(row.set_id, data.variantId, attempt);
+    } else {
+      await this.processAiEditJob(
+        row.set_id,
+        data.variantId,
+        data.payload ?? {},
+        attempt,
+      );
+    }
+  }
+
+  /**
    * The actual AI pipeline run for one `reprocess()` job — called by
-   * `AiEditJobWorkerService`, never directly by a controller. Extracted
+   * `runQueuedAiEditJob` (which `AiEditProcessor`/`AiEditBackgroundProcessor`
+   * both dispatch through), never directly by a controller. Extracted
    * 2026-09-29 out of `reprocess()` itself (see that method's own comment)
    * so it can run from the queue instead of inline inside the original HTTP
    * request. Re-resolves `set`/`kind`/`sessionContext`/`frontPhoto` fresh
    * rather than threading them through the job's `payload` — cheap DB
    * reads, and guarantees this always sees the CURRENT `photo_kinds`/
    * `campaigns` config even if the job sat queued for a while before a
-   * worker claimed it. `snapshotCurrentVariantId` is likewise captured HERE
-   * (this method's own first read of `set`), not back when `reprocess()`
-   * first validated and enqueued — narrows the "did a human move the set on
-   * while this ran" race window (see `safeToPromote` below) to just this
-   * pipeline run itself, not however long the job also spent queued.
+   * worker claimed it.
+   *
+   * `snapshotCurrentVariantId` (2026-09-29, priority-preemption rework;
+   * 2026-09-30 fix — confirmed audit finding): always reads back the value
+   * `reprocess()` (creation, or a USER re-claim) already stored on
+   * `variant.aiRequestParams` under the set lock, whatever the attempt
+   * number. This used to re-snapshot fresh from `set.currentCardVariantId`
+   * for every attempt 1 run instead (`enqueueAiEditJob`'s claim bumps
+   * `ai_attempts` to 1 at claim time, so EVERY first run hit this) — a job
+   * can sit queued behind `AiEditSlotGate` for minutes, and a reviewer's own
+   * `setCurrent()` landing during that wait was silently adopted as "the"
+   * snapshot the instant this pipeline run finally started, letting this
+   * variant clobber that very choice once it finished. Falling back to
+   * `set.currentCardVariantId` only when the field is genuinely absent
+   * (a legacy row predating this feature) keeps old rows working the same
+   * as before.
    *
    * Defensive by design, same as `reprocess()` always was: any failure —
    * missing source photo, unreachable AI service, non-2xx, timeout — must
-   * resolve to a clean `FAILED` variant, never an unhandled rejection that
-   * would leave `AiEditJobWorkerService.process()`'s own outer `catch` as
-   * the only thing marking the JOB row failed while the `photo_variants`
-   * row (what the FE actually polls) stays stuck `PROCESSING` forever.
+   * resolve to a clean `PENDING`/`FAILED` variant (see
+   * `resolveAiJobFailureStatus`), never an unhandled rejection that would
+   * leave the caller's own outer `catch` as the only thing marking the job
+   * failed while the `photo_variants` row (what the FE actually polls)
+   * stays stuck `PROCESSING` forever.
+   *
+   * Every terminal write below is guarded by `AND ai_attempts = $attempt`
+   * as well as `AND status = 'PROCESSING'` (C1) — without the attempt
+   * guard, a stale/superseded run (this exact scenario: a recovery sweep
+   * requeues attempt 1, then a user re-claims to attempt 2 before attempt
+   * 1's own slow pipeline call finally returns) could clobber the NEWER
+   * attempt's own in-progress or already-finished result.
    */
-  async processReprocessJob(setId: string, variantId: string): Promise<void> {
+  async processReprocessJob(
+    setId: string,
+    variantId: string,
+    attempt = 0,
+  ): Promise<void> {
     const set = await this.findSetEntityOrFail(setId);
     const variant = await this.findVariantEntityOrFail(variantId);
-    const snapshotCurrentVariantId = set.currentCardVariantId ?? null;
+    const snapshotCurrentVariantId =
+      variant.aiRequestParams?.snapshotCurrentVariantId !== undefined
+        ? (variant.aiRequestParams.snapshotCurrentVariantId ?? null)
+        : (set.currentCardVariantId ?? null);
 
     try {
       const kind = await this.photoKindService.findKindEntityOrFail(set.kindId);
@@ -1961,12 +2559,69 @@ export class PhotoReviewService {
         set.campaignId,
         kind.cardSpec,
       );
-      const result = await this.runAiProcessingPipeline({
-        steps: aiSteps,
-        initialImageBase64: sourceBytes.toString('base64'),
-        cardSpec: effectiveCardSpec,
-        mirror: true,
-      });
+      // 2026-09-30 (user decision, "Fallback ảnh gốc"): a TERMINAL pipeline
+      // failure — `resolveAiJobFailureStatus` says 'FAILED', i.e. the AI
+      // service is unreachable/unavailable, a non-retryable rejection, or a
+      // retryable failure that already used up `AI_EDIT_MAX_ATTEMPTS` — no
+      // longer demotes the set to the LOCKED `AUTO_FAILED` state. That state
+      // blocked approve/ai-edit/upload entirely, and with `services/python-ai`
+      // deleted (2026-09-28) it is where EVERY campaign without a working
+      // `AI_EDIT` step landed. Instead the untouched original FRONT capture
+      // becomes this variant's image (`READY` set, warning attached) so a
+      // reviewer can still approve it, run "Sửa bằng AI", or upload a
+      // replacement. A `'retry'`-class failure is re-thrown unchanged — the
+      // recovery sweep still gets its chance before this ever applies.
+      //
+      // ONLY when the set had no current card when this run was requested
+      // (`snapshotCurrentVariantId` null — a first-ever run, or a retry out of
+      // `PENDING_AUTO`/`AUTO_FAILED`): a failed regeneration on a set that
+      // already HAS a card (possibly an AI-edited or uploaded one) must keep
+      // its long-standing behavior — variant marked FAILED, set and current
+      // card left exactly as they were (`recordReprocessFailure`'s
+      // `safeToFail`). Without this guard the raw original would be promoted
+      // over a good card whenever a reviewer clicks "Tạo lại ảnh 4x6" while
+      // the AI service is down (found in the 2026-09-30 re-test).
+      let fallbackReason: string | null = null;
+      let result: {
+        imageBase64: string;
+        mimeType: string;
+        width: number | null;
+        height: number | null;
+        dpi: number | null;
+        warnings: string[];
+      };
+      try {
+        result = await this.runAiProcessingPipeline({
+          steps: aiSteps,
+          initialImageBase64: sourceBytes.toString('base64'),
+          cardSpec: effectiveCardSpec,
+          mirror: true,
+        });
+      } catch (pipelineError) {
+        if (
+          resolveAiJobFailureStatus(pipelineError, variant.aiAttempts) !==
+            'FAILED' ||
+          snapshotCurrentVariantId
+        ) {
+          throw pipelineError;
+        }
+        fallbackReason = redactInternalHost(
+          extractSidecarFailureMessage(pipelineError),
+        );
+        this.logger.warn(
+          `reprocess: AI pipeline failed terminally for set ${setId} (attempt ${attempt}) — falling back to the unprocessed original photo: ${fallbackReason}`,
+        );
+        result = {
+          imageBase64: sourceBytes.toString('base64'),
+          mimeType: frontPhoto.mimeType,
+          width: null,
+          height: null,
+          dpi: null,
+          warnings: [
+            'Xử lý ảnh thẻ tự động không khả dụng — đang dùng ẢNH GỐC CHƯA XỬ LÝ (chưa cắt/căn khuôn mặt, chưa lật gương, chưa xử lý nền). Hãy kiểm tra kỹ trước khi Duyệt, hoặc dùng "Sửa bằng AI" / "Thay bằng ảnh tải lên".',
+          ],
+        };
+      }
 
       const ext = this.extForMime(result.mimeType);
       const virtualPath = this.buildVirtualPath(
@@ -1983,32 +2638,36 @@ export class PhotoReviewService {
       await this.dataSource.transaction(async (manager) => {
         const lockedSet = await this.lockSet(manager, setId);
         const fromStatus = lockedSet.status;
-        const stored = await this.storeVariantBytesLocalFirst(manager, {
-          variantId: variant.id,
-          tenantName: sessionContext.tenantName,
-          virtualPath,
-          mimeType: result.mimeType,
-          data,
-          idempotencyKey: `photo-review:${variant.id}:auto`,
-        });
+        // Hash computed up front (pure, no DB call) so the guarded UPDATE
+        // below can run BEFORE the outbox write — see
+        // `insertVariantOutboxContent`'s own doc comment for why this order
+        // matters (2026-09-29 outbox-idempotency fix): only once this
+        // attempt has actually won the `DONE` transition do we write its
+        // bytes to `variant_upload_outbox`.
+        const stored = this.hashVariantBytes(data);
 
         // Guarded UPDATE, not a blind `save(variant)` on the in-memory
         // entity fetched BEFORE the (now potentially minutes-long) pipeline
         // run above — same stale-entity fix `aiEdit()` already uses (see
         // its own comment): a concurrent `discardVariant()` on this same
         // PROCESSING variant is legal, and without `WHERE status =
-        // 'PROCESSING'` this would silently revert it back to READY.
+        // 'PROCESSING'` this would silently revert it back to DONE. `AND
+        // ai_attempts = $12` (2026-09-29, C1) additionally makes this a
+        // no-op if a NEWER attempt has since re-claimed this variant — see
+        // this method's own top doc comment, and `note` is explicitly
+        // cleared so a stale PENDING/FAILED note from an earlier attempt
+        // never lingers on a now-successful row.
         const [readyRows]: [Array<{ id: string }>, number] =
           await manager.query(
             `UPDATE photo_variants
                 SET status = $2, virtual_path = $3, bytes = $4, sha256 = $5,
                     width = $6, height = $7, dpi = $8, quality_report = $9,
-                    algorithm_version = $10, updated_at = now()
-              WHERE id = $1 AND status = $11
+                    algorithm_version = $10, note = NULL, updated_at = now()
+              WHERE id = $1 AND status = $11 AND ai_attempts = $12
               RETURNING id`,
             [
               variant.id,
-              PhotoVariantStatus.READY,
+              PhotoVariantStatus.DONE,
               virtualPath,
               stored.bytes,
               stored.sha256,
@@ -2025,22 +2684,47 @@ export class PhotoReviewService {
                 : null,
               null,
               PhotoVariantStatus.PROCESSING,
+              attempt,
             ],
           );
         const appliedToReady = readyRows.length > 0;
         if (!appliedToReady) {
           this.logger.warn(
-            `reprocess: variant ${variant.id} was discarded while its pipeline run was still in flight — result dropped, not resurrected`,
+            `reprocess: variant ${variant.id} was discarded (or superseded by a newer attempt) while its pipeline run was still in flight — result dropped, not resurrected`,
           );
           return;
         }
+
+        // Only written now that this attempt has confirmed it won the
+        // `DONE` transition above — see this transaction's own top comment.
+        await this.insertVariantOutboxContent(manager, {
+          variantId: variant.id,
+          tenantName: sessionContext.tenantName,
+          virtualPath,
+          mimeType: result.mimeType,
+          data,
+          idempotencyKey: `photo-review:${variant.id}:auto`,
+        });
 
         await this.writeEvent(manager, {
           setId,
           variantId: variant.id,
           action: PhotoReviewAction.AUTO_GENERATED,
           actorUserId: null,
+          payload: fallbackReason
+            ? { fallback: 'ORIGINAL_PHOTO', reason: fallbackReason }
+            : null,
         });
+        if (fallbackReason) {
+          // The AI step still failed — keep counting it in `auto_failed` so
+          // ops can see the failure rate even though the set is no longer
+          // demoted to `AUTO_FAILED` (see the fallback comment above).
+          await this.reviewStats.recordAutoFailed(
+            manager,
+            lockedSet.campaignId,
+            new Date(),
+          );
+        }
 
         // Only promote this run's output to the set's current card / READY
         // when nothing else moved the set on while this run was in flight —
@@ -2086,85 +2770,153 @@ export class PhotoReviewService {
         metadata: {
           warnings: result.warnings,
           cardSpec: effectiveCardSpec,
+          ...(fallbackReason ? { fallback: 'ORIGINAL_PHOTO' } : {}),
         },
       });
     } catch (error) {
       const message = extractSidecarFailureMessage(error);
-      this.logger.warn(`reprocess failed for set ${setId}: ${message}`);
-      await this.dataSource.transaction(async (manager) => {
-        const lockedSet = await this.lockSet(manager, setId);
-        const fromStatus = lockedSet.status;
-        // Guarded UPDATE — same stale-entity reasoning as the success path
-        // above: a concurrent discardVariant() on this PROCESSING variant
-        // is legal while the pipeline was running.
-        await manager.query(
-          `UPDATE photo_variants SET status = $2, note = $3, updated_at = now()
-             WHERE id = $1 AND status = $4`,
-          [
-            variant.id,
-            PhotoVariantStatus.FAILED,
-            message,
-            PhotoVariantStatus.PROCESSING,
-          ],
-        );
-
-        await this.writeEvent(manager, {
-          setId,
-          variantId: variant.id,
-          action: PhotoReviewAction.AUTO_FAILED,
-          actorUserId: null,
-          payload: { error: message },
-        });
-
-        // Only demote the SET to AUTO_FAILED when it has no valid current
-        // card to fall back on (a first-ever run, or an already-failed
-        // retry) — this method's own past bug: it used to force
-        // `AUTO_FAILED` unconditionally here, which (since `AUTO_FAILED` is
-        // a LOCKED status) could silently destroy an APPROVED/READY/
-        // IN_REVIEW/REJECTED set's existing, still-valid card the moment a
-        // reprocess attempt failed for any reason (including the makeCardPhoto
-        // sidecar being permanently unreachable). When the set already has a
-        // current card, only the failed variant is recorded; the set's
-        // status and current card are left exactly as they were.
-        const safeToFail =
-          lockedSet.status === PhotoReviewSetStatus.PENDING_AUTO ||
-          lockedSet.status === PhotoReviewSetStatus.AUTO_FAILED ||
-          !lockedSet.currentCardVariantId;
-        if (safeToFail) {
-          lockedSet.status = PhotoReviewSetStatus.AUTO_FAILED;
-          await manager.getRepository(SubjectPhotoSet).save(lockedSet);
-          await this.reviewStats.recordAutoFailed(
-            manager,
-            set.campaignId,
-            new Date(),
-          );
-          await this.raiseStatusChangeEvent(
-            manager,
-            setId,
-            lockedSet.campaignId,
-            fromStatus,
-            lockedSet.status,
-          );
-        } else {
-          this.logger.warn(
-            `reprocess: set ${setId} already has a valid current card (status=${lockedSet.status}) — leaving it alone despite this run's failure (${message})`,
-          );
-        }
-      });
+      const nextStatus = resolveAiJobFailureStatus(error, variant.aiAttempts);
+      this.logger.warn(
+        `reprocess failed for set ${setId} (attempt ${attempt}, → ${nextStatus}): ${message}`,
+      );
+      await this.recordReprocessFailure(
+        setId,
+        variantId,
+        attempt,
+        message,
+        nextStatus,
+      );
     }
+  }
+
+  /**
+   * Shared failure handler for `processReprocessJob` (2026-09-29,
+   * priority-preemption rework — extracted so the retry-vs-FAILED branch
+   * only needs writing once; simplified same-day per user request "bỏ
+   * PENDING đi"). `nextStatus` is `resolveAiJobFailureStatus`'s own
+   * decision, passed in rather than recomputed here.
+   *
+   * `'retry'`: attempt-guarded variant UPDATE only — `status` stays
+   * `expectedStatus` (normally `PROCESSING`; only `note`/`updated_at`
+   * change) — deliberately does NOT write a `photo_review_events` row, does
+   * NOT call `reviewStats.recordAutoFailed`, and does NOT touch the SET's
+   * own status at all. This is a transient, about-to-be-auto-retried state
+   * (by `AiEditRecoveryService`'s sweep), not a reportable failure —
+   * recording it as one would double-count `AUTO_FAILED` stats/events for
+   * what is, to every human involved, still "in progress".
+   *
+   * `'FAILED'`: unchanged from before this rework — the existing
+   * `AUTO_FAILED` event + "only demote the SET when it has no valid current
+   * card" (`safeToFail`) logic, now inside this shared helper.
+   *
+   * `expectedStatus` (default `PROCESSING`, the normal job-path case) is
+   * what the guarded UPDATE's `WHERE status = …` checks against — also
+   * called from `requeueStuckAiEditVariants` for an attempts-exhausted
+   * `DRAFT` row (never `PROCESSING` there), so it must not be hardcoded.
+   */
+  private async recordReprocessFailure(
+    setId: string,
+    variantId: string,
+    attempt: number,
+    message: string,
+    nextStatus: 'retry' | 'FAILED',
+    expectedStatus: PhotoVariantStatus = PhotoVariantStatus.PROCESSING,
+  ): Promise<void> {
+    if (nextStatus === 'retry') {
+      await this.transitionVariantStatus(this.dataSource, {
+        variantId,
+        from: expectedStatus,
+        to: expectedStatus,
+        attempt,
+        note: message,
+      });
+      return;
+    }
+
+    await this.dataSource.transaction(async (manager) => {
+      const lockedSet = await this.lockSet(manager, setId);
+      const fromStatus = lockedSet.status;
+      // Guarded UPDATE — same stale-entity/attempt reasoning as the success
+      // path above: a concurrent discardVariant() on this PROCESSING
+      // variant is legal while the pipeline was running, and a newer
+      // attempt may have already re-claimed this row. 2026-09-29 fix: the
+      // result is now checked (`updated`) — this used to be fire-and-forget,
+      // so a 0-row match (this attempt already superseded/discarded) still
+      // wrote the `AUTO_FAILED` event and could still demote the SET below,
+      // even while a NEWER attempt was still legitimately running.
+      const updated = await this.transitionVariantStatus(manager, {
+        variantId,
+        from: expectedStatus,
+        to: PhotoVariantStatus.FAILED,
+        attempt,
+        note: message,
+      });
+      if (!updated) {
+        this.logger.warn(
+          `recordReprocessFailure: variant ${variantId} was discarded (or superseded by a newer attempt) before this failure (attempt ${attempt}) could be recorded — skipping event/stats/set-demotion`,
+        );
+        return;
+      }
+
+      await this.writeEvent(manager, {
+        setId,
+        variantId,
+        action: PhotoReviewAction.AUTO_FAILED,
+        actorUserId: null,
+        payload: { error: message },
+      });
+
+      // Only demote the SET to AUTO_FAILED when it has no valid current
+      // card to fall back on (a first-ever run, or an already-failed
+      // retry) — this method's own past bug: it used to force
+      // `AUTO_FAILED` unconditionally here, which (since `AUTO_FAILED` is
+      // a LOCKED status) could silently destroy an APPROVED/READY/
+      // IN_REVIEW/REJECTED set's existing, still-valid card the moment a
+      // reprocess attempt failed for any reason (including the makeCardPhoto
+      // sidecar being permanently unreachable). When the set already has a
+      // current card, only the failed variant is recorded; the set's
+      // status and current card are left exactly as they were.
+      const safeToFail =
+        lockedSet.status === PhotoReviewSetStatus.PENDING_AUTO ||
+        lockedSet.status === PhotoReviewSetStatus.AUTO_FAILED ||
+        !lockedSet.currentCardVariantId;
+      if (safeToFail) {
+        lockedSet.status = PhotoReviewSetStatus.AUTO_FAILED;
+        await manager.getRepository(SubjectPhotoSet).save(lockedSet);
+        await this.reviewStats.recordAutoFailed(
+          manager,
+          lockedSet.campaignId,
+          new Date(),
+        );
+        await this.raiseStatusChangeEvent(
+          manager,
+          setId,
+          lockedSet.campaignId,
+          fromStatus,
+          lockedSet.status,
+        );
+      } else {
+        this.logger.warn(
+          `reprocess: set ${setId} already has a valid current card (status=${lockedSet.status}) — leaving it alone despite this run's failure (${message})`,
+        );
+      }
+    });
   }
 
   // ── POST /v1/review/sets/:id/ai-edit ────────────────────────────────
 
   /**
-   * Creates the `CARD_AI` variant (`PROCESSING`) and enqueues the actual
-   * `/edit` call — returns as soon as that's durable, without waiting for
-   * the AI service (2026-09-29 user request, same queue
-   * `AiEditJobWorkerService` drains for `reprocess()`; see
-   * `enqueueAiEditJob`'s own doc comment). The `PhotoVariantDao` this
-   * returns is a `PROCESSING` snapshot — unchanged contract from before this
-   * queue existed, since `GET /v1/review/jobs/:id` (`getJob`) was already
-   * documented and built for exactly this "poll for the real result" case.
+   * Creates the `CARD_AI` variant (`DRAFT`, then immediately claimed to
+   * `PROCESSING` by `enqueueAiEditJob`) and enqueues the actual `/edit`
+   * call onto the USER lane (always — a reviewer clicking "Sửa bằng AI" in
+   * the CMS is, by definition, the direct-user-action case this whole
+   * priority rework exists for) — returns as soon as that's durable,
+   * without waiting for the AI service (2026-09-29 user request, same
+   * queue split `reprocess()` uses; see `enqueueAiEditJob`'s own doc
+   * comment). The `PhotoVariantDao` this returns is a `PROCESSING`
+   * snapshot — unchanged contract from before this queue existed, since
+   * `GET /v1/review/jobs/:id` (`getJob`) was already documented and built
+   * for exactly this "poll for the real result" case.
    */
   async aiEdit(
     setId: string,
@@ -2254,6 +3006,36 @@ export class PhotoReviewService {
 
     const variant = await this.dataSource.transaction(async (manager) => {
       await this.lockSet(manager, setId);
+
+      // In-flight cap (2026-09-29 hardening, see `AI_EDIT_MAX_IN_FLIGHT_PER_SET`'s
+      // own doc comment; 2026-09-30 fix — confirmed audit finding): moved
+      // inside the transaction, AFTER `lockSet`'s pessimistic write lock on
+      // this set, so the count and the variant insert below are serialised
+      // against every other concurrent `aiEdit()` call for the SAME set.
+      // Checking this before the transaction (the original placement) was a
+      // check-then-act race — every concurrent request read the same
+      // pre-insert count and passed, since nothing yet held any lock; a
+      // scripted/compromised reviewer token firing many requests at once
+      // could blow straight through the cap, which existed specifically to
+      // stop that.
+      const inFlightCountRows: Array<{ count: number }> = await manager.query(
+        `SELECT count(*)::int AS count FROM photo_variants
+          WHERE set_id = $1 AND kind = $2 AND status = ANY($3::text[])`,
+        [
+          setId,
+          PhotoVariantKind.CARD_AI,
+          [PhotoVariantStatus.DRAFT, PhotoVariantStatus.PROCESSING],
+        ],
+      );
+      const inFlightCount = inFlightCountRows[0]?.count ?? 0;
+      if (inFlightCount >= AI_EDIT_MAX_IN_FLIGHT_PER_SET) {
+        throw new CustomException(
+          `Too many AI-edit requests already in flight for this set (max ${AI_EDIT_MAX_IN_FLIGHT_PER_SET}) — wait for one to finish before requesting another`,
+          PHOTO_REVIEW_ERROR_CODE.AI_EDIT_IN_FLIGHT_LIMIT,
+          HttpStatus.TOO_MANY_REQUESTS,
+        );
+      }
+
       const version = await this.nextVersion(manager, setId);
       const repo = manager.getRepository(PhotoVariant);
       const created = await repo.save(
@@ -2261,12 +3043,28 @@ export class PhotoReviewService {
           setId,
           version,
           kind: PhotoVariantKind.CARD_AI,
-          status: PhotoVariantStatus.PROCESSING,
+          status: PhotoVariantStatus.DRAFT,
           derivedFromVariantId: fromVariant?.id ?? null,
           sourcePhotoId: sourcePhoto?.id ?? null,
           prompt: dto.prompt,
           regionMode: dto.region ?? null,
           createdByUserId: actorUserId,
+          // Durable copy (2026-09-29, priority-preemption rework) of what
+          // used to live ONLY in the BullMQ job's own `data.payload` — a
+          // lost/crashed job can now always be reconstructed from this row
+          // alone by `AiEditRecoveryService`. `undefined` fields collapse
+          // to a bare `{}` rather than `{cfg: undefined, ...}` so an
+          // unset field never round-trips as a literal JSON `null`.
+          aiRequestParams:
+            dto.cfg === undefined &&
+            dto.steps === undefined &&
+            dto.seed === undefined
+              ? null
+              : {
+                  ...(dto.cfg !== undefined ? { cfg: dto.cfg } : {}),
+                  ...(dto.steps !== undefined ? { steps: dto.steps } : {}),
+                  ...(dto.seed !== undefined ? { seed: dto.seed } : {}),
+                },
         }),
       );
       await this.writeEvent(manager, {
@@ -2292,36 +3090,50 @@ export class PhotoReviewService {
       return created;
     });
 
-    await this.enqueueAiEditJob({
+    // Always the USER lane — see this method's own top doc comment.
+    const { attempt } = await this.enqueueAiEditJob({
       kind: AiEditJobKind.AI_EDIT,
       variantId: variant.id,
       setId,
-      // Only the fields not already durable on the `variant` row itself —
-      // `processAiEditJob` reads prompt/region/fromVariant/sourcePhoto back
-      // off `variant` (`prompt`, `regionMode`, `derivedFromVariantId`,
-      // `sourcePhotoId`), all already written above.
-      payload: { cfg: dto.cfg, steps: dto.steps, seed: dto.seed },
+      origin: AiEditJobOrigin.USER,
+      claimFrom: [PhotoVariantStatus.DRAFT],
     });
+    // Reflected on the in-memory entity BEFORE `toVariantDao` below (F5:
+    // the CMS's `AiEditModal` only starts polling `GET /v1/review/jobs/:id`
+    // when this response says `PROCESSING`) — `variant` itself still holds
+    // whatever `enqueueAiEditJob`'s own claim UPDATE just changed it to on
+    // the ROW, which this in-memory object has no idea about.
+    variant.status = PhotoVariantStatus.PROCESSING;
+    variant.aiAttempts = attempt ?? variant.aiAttempts;
 
     return this.toVariantDao(variant, apiBaseUrl, sessionContext.tenantName);
   }
 
   /**
    * The actual `/edit` call for one `aiEdit()` job — called by
-   * `AiEditJobWorkerService`, never directly by a controller. Extracted
+   * `runQueuedAiEditJob` (which `AiEditProcessor`/`AiEditBackgroundProcessor`
+   * both dispatch through), never directly by a controller. Extracted
    * 2026-09-29 out of `aiEdit()` itself (see that method's own comment) so
    * it can run from the queue instead of inline inside the original HTTP
    * request. Re-resolves `set`/`kind`/`sessionContext`/`fromVariant`/
    * `sourcePhoto` fresh from the already-created `variant` row (its
-   * `derivedFromVariantId`/`sourcePhotoId`/`prompt`/`regionMode` columns)
-   * rather than threading them through the job's `payload` — only `cfg`/
-   * `steps`/`seed` actually need `payload`, since nothing else has a column
-   * to live in.
+   * `derivedFromVariantId`/`sourcePhotoId`/`prompt`/`regionMode` columns).
+   * `cfg`/`steps`/`seed` come from `variant.aiRequestParams` (durable,
+   * 2026-09-29 priority-preemption rework) with the legacy `payload`
+   * parameter as a fallback ONLY for a job enqueued before that column
+   * existed — every job `enqueueAiEditJob` creates from now on sends no
+   * `payload` at all (see `AiEditJobData`'s own doc comment).
+   *
+   * Every terminal write below is guarded by `AND ai_attempts = $attempt`
+   * as well as `AND status = 'PROCESSING'` (C1) — see
+   * `processReprocessJob`'s own doc comment for the full reasoning (same
+   * stale/superseded-attempt race, same fix).
    */
   async processAiEditJob(
     setId: string,
     variantId: string,
     payload: { cfg?: number; steps?: number; seed?: number },
+    attempt = 0,
   ): Promise<void> {
     const set = await this.findSetEntityOrFail(setId);
     const variant = await this.findVariantEntityOrFail(variantId);
@@ -2329,6 +3141,7 @@ export class PhotoReviewService {
     const sessionContext = await this.resolveSessionContext(
       set.sourceSessionId,
     );
+    const params = variant.aiRequestParams ?? payload ?? {};
 
     let fromVariant: PhotoVariant | null = null;
     let sourcePhoto: FrontSourcePhoto | null = null;
@@ -2387,9 +3200,9 @@ export class PhotoReviewService {
           imageBuffer: sourceBytes,
           mimeType: 'image/jpeg',
           prompt: editPrompt,
-          cfg: payload.cfg,
-          steps: payload.steps,
-          seed: payload.seed,
+          cfg: params.cfg,
+          steps: params.steps,
+          seed: params.seed,
           ...editDimensions,
         }),
       );
@@ -2463,14 +3276,11 @@ export class PhotoReviewService {
 
       let appliedToReady = false;
       await this.dataSource.transaction(async (manager) => {
-        const stored = await this.storeVariantBytesLocalFirst(manager, {
-          variantId: variant.id,
-          tenantName: sessionContext.tenantName,
-          virtualPath,
-          mimeType: result.mimeType,
-          data,
-          idempotencyKey: `photo-review:${variant.id}:ai`,
-        });
+        // Hash computed up front (pure, no DB call) — same reorder as
+        // `processReprocessJob`'s own transaction, see
+        // `insertVariantOutboxContent`'s doc comment (2026-09-29
+        // outbox-idempotency fix).
+        const stored = this.hashVariantBytes(data);
 
         // Guarded UPDATE, not a blind `save(variant)` on the in-memory
         // entity this method fetched BEFORE the sidecar call above (which
@@ -2478,23 +3288,26 @@ export class PhotoReviewService {
         // `discardVariant()` on this same PROCESSING variant is legal
         // (PROCESSING is neither DISCARDED nor the set's current variant,
         // so nothing blocks it) and, before this fix, would be silently
-        // reverted back to READY the moment this save ran, because the
+        // reverted back to DONE the moment this save ran, because the
         // in-memory object has no idea the row changed underneath it.
         // `WHERE status = 'PROCESSING'` makes this a no-op once that race
         // has already happened, instead of overwriting whatever
-        // `discardVariant` wrote.
+        // `discardVariant` wrote. `AND ai_attempts = $13` (2026-09-29, C1)
+        // additionally no-ops this write if a NEWER attempt has since
+        // re-claimed this variant, and `note` is cleared so a stale
+        // PENDING/FAILED note never lingers on a now-successful row.
         const [readyRows]: [Array<{ id: string }>, number] =
           await manager.query(
             `UPDATE photo_variants
                 SET status = $2, virtual_path = $3, bytes = $4, sha256 = $5,
                     width = $6, height = $7, seed = $8, model_id = $9,
                     algorithm_version = $10, identity_similarity = $11,
-                    updated_at = now()
-              WHERE id = $1 AND status = $12
+                    note = NULL, updated_at = now()
+              WHERE id = $1 AND status = $12 AND ai_attempts = $13
               RETURNING id`,
             [
               variant.id,
-              PhotoVariantStatus.READY,
+              PhotoVariantStatus.DONE,
               virtualPath,
               stored.bytes,
               stored.sha256,
@@ -2505,9 +3318,22 @@ export class PhotoReviewService {
               result.algorithmVersion ?? null,
               result.identitySimilarity ?? null,
               PhotoVariantStatus.PROCESSING,
+              attempt,
             ],
           );
         appliedToReady = readyRows.length > 0;
+        if (!appliedToReady) return;
+
+        // Only written now that this attempt has confirmed it won the
+        // `DONE` transition above — see this transaction's own top comment.
+        await this.insertVariantOutboxContent(manager, {
+          variantId: variant.id,
+          tenantName: sessionContext.tenantName,
+          virtualPath,
+          mimeType: result.mimeType,
+          data,
+          idempotencyKey: `photo-review:${variant.id}:ai`,
+        });
         // Not set as current — plan §5.3/§6.2: "con người chấp nhận: không bao
         // giờ tự đặt bản AI làm ảnh hiện tại". A reviewer must call
         // POST /v1/review/variants/:id/accept explicitly.
@@ -2515,7 +3341,7 @@ export class PhotoReviewService {
 
       if (!appliedToReady) {
         this.logger.warn(
-          `aiEdit: variant ${variant.id} was discarded while its sidecar edit was still in flight — result dropped, not resurrected`,
+          `aiEdit: variant ${variant.id} was discarded (or superseded by a newer attempt) while its sidecar edit was still in flight — result dropped, not resurrected`,
         );
       } else {
         await this.uploadMetadataBestEffort({
@@ -2531,8 +3357,8 @@ export class PhotoReviewService {
             // #6 traceability) rather than overwriting `prompt` above, so
             // existing readers of the raw prompt field are unaffected.
             effectivePrompt: editPrompt,
-            cfg: payload.cfg,
-            steps: payload.steps,
+            cfg: params.cfg,
+            steps: params.steps,
             region: variant.regionMode,
             modelId: result.modelId,
             seed: result.seed,
@@ -2543,25 +3369,29 @@ export class PhotoReviewService {
       }
     } catch (error) {
       const message = extractSidecarFailureMessage(error);
-      this.logger.warn(`ai-edit failed for set ${setId}: ${message}`);
+      const decision = resolveAiJobFailureStatus(error, variant.aiAttempts);
+      // `'retry'` stays PROCESSING (only note/updated_at change) — no
+      // separate PENDING status, see `PhotoVariantStatus`'s own doc comment.
+      const nextStatus =
+        decision === 'retry'
+          ? PhotoVariantStatus.PROCESSING
+          : PhotoVariantStatus.FAILED;
+      this.logger.warn(
+        `ai-edit failed for set ${setId} (attempt ${attempt}, → ${decision}): ${message}`,
+      );
       // Same guarded-UPDATE fix as the success path above — this catch runs
       // after the same long sidecar await, so the in-memory `variant` can be
-      // just as stale here.
-      const [failedRows]: [Array<{ id: string }>, number] =
-        await this.dataSource.query(
-          `UPDATE photo_variants SET status = $2, note = $3, updated_at = now()
-            WHERE id = $1 AND status = $4
-            RETURNING id`,
-          [
-            variant.id,
-            PhotoVariantStatus.FAILED,
-            message,
-            PhotoVariantStatus.PROCESSING,
-          ],
-        );
-      if (failedRows.length === 0) {
+      // just as stale here. `AND ai_attempts = $5` (C1) — same reasoning.
+      const updated = await this.transitionVariantStatus(this.dataSource, {
+        variantId: variant.id,
+        from: PhotoVariantStatus.PROCESSING,
+        to: nextStatus,
+        attempt,
+        note: message,
+      });
+      if (!updated) {
         this.logger.warn(
-          `aiEdit: variant ${variant.id} was discarded before its failed sidecar edit could be recorded — left DISCARDED`,
+          `aiEdit: variant ${variant.id} was discarded, or superseded by a newer attempt, before its failed sidecar edit (attempt ${attempt}) could be recorded — no-op`,
         );
       }
     }
@@ -2573,10 +3403,10 @@ export class PhotoReviewService {
    * Simplification, documented per the task brief: there is no separate job
    * table in this pass, so `:id` is treated as a `photo_variants.id` and
    * this just returns that variant's current state. `aiEdit`/`reprocess`
-   * already run synchronously (see their own doc comments), so by the time
-   * a client polls this, the variant is normally already READY/FAILED — a
-   * real async job queue is a reasonable future improvement, not required
-   * now.
+   * enqueue onto BullMQ and return immediately (2026-09-29 — see
+   * `enqueueAiEditJob`'s own doc comment); this is what the CMS's
+   * `AiEditModal` polls to see a `PROCESSING` variant eventually settle
+   * into `DONE`/`PENDING`/`FAILED`.
    */
   async getJob(
     variantId: string,
@@ -2614,9 +3444,9 @@ export class PhotoReviewService {
         HttpStatus.CONFLICT,
       );
     }
-    if (variant.status !== PhotoVariantStatus.READY) {
+    if (variant.status !== PhotoVariantStatus.DONE) {
       throw new CustomException(
-        'Variant is not READY',
+        'Variant is not DONE',
         PHOTO_REVIEW_ERROR_CODE.VARIANT_NOT_READY,
         HttpStatus.CONFLICT,
       );
@@ -2760,10 +3590,18 @@ export class PhotoReviewService {
   // ── POST /v1/review/sets/:id/upload ─────────────────────────────────
 
   /**
-   * Identity check against the set's original FRONT photo is mandatory
-   * (plan §5.4/R-Q8) and, unlike `reprocess`, a sidecar failure here fails
-   * the whole request (503) rather than silently proceeding — this is a
-   * safety check, not a nice-to-have.
+   * Identity check against the set's original FRONT photo (plan §5.4/R-Q8):
+   * a score BELOW `IDENTITY_SIMILARITY_REJECT_THRESHOLD` still rejects the
+   * upload outright. What changed 2026-09-30 (user decision, "Cho phép tải
+   * lên, không chặn"): when the check simply CANNOT RUN — the identity
+   * backend (`services/python-ai`) was deleted 2026-09-28, so every call now
+   * fails — the upload used to be refused with a 503, which made "Thay bằng
+   * ảnh tải lên" unusable for every campaign. It is now fail-open, exactly
+   * like `acceptVariant` already was (2026-09-29): the variant is stored
+   * with a `null` score, the `UPLOAD_REPLACED` event records
+   * `identityVerified: false`, and the CMS shows "chưa xác minh được danh
+   * tính". The same applies to the card-photo step: if it fails, the
+   * uploaded image is used as-is (warning attached) instead of failing.
    */
   async uploadVariant(
     setId: string,
@@ -2803,14 +3641,13 @@ export class PhotoReviewService {
       );
     }
 
-    let similarity: number;
+    let similarity: number | null = null;
     try {
       // readSourcePhotoBytes prefers upload_outbox.content (Part A) over a
       // file-service round trip — resolved here, inside the try, so a photo
       // with no bytes available anywhere yet (not staged locally, not on
-      // fs-core) surfaces through the exact same SIDECAR_UNREACHABLE 503
-      // this catch block already produces, rather than a second bespoke
-      // error path.
+      // fs-core) degrades through the same "check could not run" path as an
+      // unreachable sidecar, rather than a second bespoke error path.
       const referenceBytes = await this.readSourcePhotoBytes(
         frontPhoto,
         sessionContext.tenantName,
@@ -2823,18 +3660,18 @@ export class PhotoReviewService {
       );
       similarity = simResult.similarity;
     } catch (error) {
-      const message = extractSidecarFailureMessage(error);
-      // Unlike reprocess: this check is a safety requirement, not a
-      // best-effort pipeline step — a sidecar outage must fail the request
-      // clearly rather than let an unverified photo through.
-      throw new CustomException(
-        `Could not verify identity (AI sidecar unreachable): ${message}`,
-        PHOTO_REVIEW_ERROR_CODE.SIDECAR_UNREACHABLE,
-        HttpStatus.SERVICE_UNAVAILABLE,
+      // Fail-open (see this method's doc comment): log it, store no score.
+      this.logger.warn(
+        `uploadVariant: identity check could not run for set ${setId} — accepting the upload UNVERIFIED: ${redactInternalHost(
+          extractSidecarFailureMessage(error),
+        )}`,
       );
     }
 
-    if (similarity < IDENTITY_SIMILARITY_REJECT_THRESHOLD) {
+    if (
+      similarity !== null &&
+      similarity < IDENTITY_SIMILARITY_REJECT_THRESHOLD
+    ) {
       throw new CustomException(
         `Identity similarity ${similarity.toFixed(2)} is below the ${IDENTITY_SIMILARITY_REJECT_THRESHOLD} threshold — this may not be the same person`,
         PHOTO_REVIEW_ERROR_CODE.IDENTITY_MISMATCH,
@@ -2855,14 +3692,36 @@ export class PhotoReviewService {
       cardSpec: effectiveCardSpec,
       mirror: true,
     });
-    if (cardOutcome.kind !== 'Success') {
-      throw new CustomException(
-        `Card-photo pipeline failed for the uploaded image: ${cardOutcome.reason}`,
-        PHOTO_REVIEW_ERROR_CODE.SIDECAR_UNREACHABLE,
-        HttpStatus.SERVICE_UNAVAILABLE,
+    // Fail-open (see this method's doc comment): when the card-photo step
+    // fails, the image the operator picked IS the card image — unprocessed
+    // (no crop/background/dpi), with a reviewer-visible warning.
+    let cardFallbackReason: string | null = null;
+    let cardResult: {
+      imageBase64: string;
+      mimeType: string;
+      width: number | null;
+      height: number | null;
+      dpi: number | null;
+      warnings: string[];
+    };
+    if (cardOutcome.kind === 'Success') {
+      cardResult = cardOutcome.value;
+    } else {
+      cardFallbackReason = redactInternalHost(cardOutcome.reason);
+      this.logger.warn(
+        `uploadVariant: card-photo step failed for set ${setId} — using the uploaded image as-is: ${cardFallbackReason}`,
       );
+      cardResult = {
+        imageBase64: file.buffer.toString('base64'),
+        mimeType: file.mimetype,
+        width: null,
+        height: null,
+        dpi: null,
+        warnings: [
+          'Xử lý ảnh thẻ tự động không khả dụng — đang dùng ẢNH TẢI LÊN NGUYÊN BẢN (chưa cắt/căn khuôn mặt, chưa lật gương, chưa xử lý nền). Hãy kiểm tra kỹ trước khi Duyệt.',
+        ],
+      };
     }
-    const cardResult = cardOutcome.value;
 
     const variant = await this.dataSource.transaction(async (manager) => {
       const lockedSet = await this.lockSet(manager, setId);
@@ -2890,7 +3749,12 @@ export class PhotoReviewService {
           setId,
           version,
           kind: PhotoVariantKind.CARD_UPLOAD,
-          status: PhotoVariantStatus.READY,
+          // Never touches the AI-edit queue at all (no `enqueueAiEditJob`
+          // call anywhere in this method) — created directly at its final
+          // status, same as before this rework's DRAFT/PROCESSING claim
+          // dance, which only applies to a variant that actually goes
+          // through `ai-edit`/`ai-edit-background`.
+          status: PhotoVariantStatus.DONE,
           virtualPath,
           width: cardResult.width ?? null,
           height: cardResult.height ?? null,
@@ -2943,6 +3807,7 @@ export class PhotoReviewService {
         metadata: {
           identitySimilarity: similarity,
           originalMimeType: file.mimetype,
+          ...(cardFallbackReason ? { fallback: 'ORIGINAL_UPLOAD' } : {}),
         },
       });
 
@@ -2957,7 +3822,16 @@ export class PhotoReviewService {
         variantId: created.id,
         action: PhotoReviewAction.UPLOAD_REPLACED,
         actorUserId,
-        payload: { identitySimilarity: similarity },
+        // Same audit convention `acceptVariant` uses: an unverified upload
+        // must be distinguishable from "checked and passed".
+        payload: {
+          ...(similarity === null
+            ? { identityVerified: false }
+            : { identityVerified: true, identitySimilarity: similarity }),
+          ...(cardFallbackReason
+            ? { fallback: 'ORIGINAL_UPLOAD', reason: cardFallbackReason }
+            : {}),
+        },
       });
       await this.reviewStats.recordUploaded(
         manager,
@@ -2983,8 +3857,9 @@ export class PhotoReviewService {
     );
     return toDao(UploadVariantResultDao, {
       variant: dao,
-      identitySimilarity: similarity,
-      identityWarning: similarity < IDENTITY_SIMILARITY_WARN_THRESHOLD,
+      identitySimilarity: similarity ?? undefined,
+      identityWarning:
+        similarity !== null && similarity < IDENTITY_SIMILARITY_WARN_THRESHOLD,
     });
   }
 
@@ -3015,9 +3890,9 @@ export class PhotoReviewService {
         HttpStatus.CONFLICT,
       );
     }
-    if (variant.status !== PhotoVariantStatus.READY) {
+    if (variant.status !== PhotoVariantStatus.DONE) {
       throw new CustomException(
-        'Only a READY variant can be set as current',
+        'Only a DONE variant can be set as current',
         PHOTO_REVIEW_ERROR_CODE.VARIANT_NOT_READY,
         HttpStatus.CONFLICT,
       );
@@ -3084,8 +3959,154 @@ export class PhotoReviewService {
     await this.reviewAssignments.assertInScope(actorUserId, set);
     this.assertUnlocked(set);
 
+    await this.applySetDecision(set, status, action, dto, actorUserId);
+
+    return this.getSetDetail(setId, apiBaseUrl);
+  }
+
+  // ── POST /v1/review/sets/approve, /reject (1-n) ──────────────────────
+
+  async approveMany(
+    dto: BulkApproveRejectDto,
+    actorUserId: string | null,
+  ): Promise<BulkReviewDecisionResultDao> {
+    return this.decideMany(
+      dto,
+      PhotoReviewSetStatus.APPROVED,
+      PhotoReviewAction.APPROVED,
+      actorUserId,
+    );
+  }
+
+  async rejectMany(
+    dto: BulkApproveRejectDto,
+    actorUserId: string | null,
+  ): Promise<BulkReviewDecisionResultDao> {
+    return this.decideMany(
+      dto,
+      PhotoReviewSetStatus.REJECTED,
+      PhotoReviewAction.REJECTED,
+      actorUserId,
+    );
+  }
+
+  /**
+   * The 1-n form of `transitionSetStatus`. Deliberately NOT one big
+   * transaction and NOT parallel (`runBulk` runs the items sequentially):
+   *
+   *  - one transaction PER set (`applySetDecision`), so one set failing
+   *    (locked, out of scope, already printed, ...) never rolls back the
+   *    others — partial success with a per-set result is the contract;
+   *  - strictly sequential, because every set's decision has side effects on
+   *    shared rows: `ReviewStatsService.recordDecision` upserts one per-day
+   *    counter row, and the synchronous `PhotoSetStatusChangedEvent` handler
+   *    (print module) increments `print_batches.item_count` — running sets
+   *    concurrently would just have them contend for those same rows.
+   *
+   * Scope is resolved once via `buildScopePredicate` (one query, not N) and
+   * used twice per set: here, against the up-front read (a cheap way to skip
+   * opening a transaction for a set the actor cannot touch), and again inside
+   * `applySetDecision` against the row-locked copy. The lock state is NOT
+   * pre-checked here: this call can run for tens of seconds, so a set that
+   * was still PENDING_AUTO when the batch began may be unlocked by the time
+   * its turn comes — the authoritative `assertUnlocked` runs under the row
+   * lock in `applySetDecision`, on fresh data.
+   *
+   * Ids are compared case-insensitively — Postgres matches a `uuid` column
+   * regardless of case but always returns it lower-case, so a JS `Map`/`Set`
+   * keyed by the caller's spelling would report an existing set as missing
+   * and fail to collapse `ABC..`/`abc..` duplicates. Duplicates are
+   * collapsed (first occurrence keeps its position and its spelling in the
+   * result) and `requested` reports the de-duplicated count. Every per-set
+   * failure — including an unexpected 500 — is caught and reported on that
+   * set's own result; only a failure resolving the actor's scope up front
+   * fails the whole call.
+   */
+  private async decideMany(
+    dto: BulkApproveRejectDto,
+    status: PhotoReviewSetStatus,
+    action: PhotoReviewAction,
+    actorUserId: string | null,
+  ): Promise<BulkReviewDecisionResultDao> {
+    // canonical (lower-case) id -> the caller's spelling of its FIRST occurrence
+    const requested = new Map<string, string>();
+    for (const id of dto.setIds) {
+      const key = id.toLowerCase();
+      if (!requested.has(key)) requested.set(key, id);
+    }
+    const items = [...requested].map(([key, setId]) => ({ key, setId }));
+
+    const sets = await this.setRepository.find({
+      where: { id: In(items.map((i) => i.key)) },
+    });
+    const byId = new Map(sets.map((s) => [s.id, s] as const));
+    const inScope =
+      await this.reviewAssignments.buildScopePredicate(actorUserId);
+
+    return toDao(
+      BulkReviewDecisionResultDao,
+      await runBulk(items, {
+        run: async ({ key, setId }) => {
+          const set = byId.get(key);
+          if (!set) throw setNotFoundError();
+          if (!inScope(set)) throw outOfScopeError();
+          const { changed } = await this.applySetDecision(
+            set,
+            status,
+            action,
+            dto,
+            actorUserId,
+            inScope,
+          );
+          return { setId, status, changed };
+        },
+        keyOf: ({ setId }) => ({ setId }),
+        logLabel: ({ setId }) => `Bulk ${action} of set ${setId}`,
+        logger: this.logger,
+      }),
+    );
+  }
+
+  /**
+   * The shared write for one set's approve/reject — extracted from
+   * `transitionSetStatus` so the single route and `decideMany` run the
+   * IDENTICAL transaction. `set` is the caller's pre-lock read (used for
+   * `campaignId`/`createdAt`, which never change); status is re-read under
+   * the row lock.
+   *
+   * `assertUnlocked` is checked HERE, under the lock (the single route also
+   * pre-checks it as a fast-fail; `decideMany` deliberately does not — see its
+   * doc comment): a kiosk retake (`ensureSetForSession`) can flip a set back
+   * to PENDING_AUTO between the caller's read and this write, and a bulk call
+   * widens that window (sets are read up front, decided one by one). Without
+   * the recheck a set that became locked mid-call would be approved anyway.
+   *
+   * `inScope`, when given (the bulk path), is likewise re-evaluated against
+   * the row-locked copy: the scope-relevant roster columns
+   * (`class_name`/`faculty`/`major`) can be rewritten by a retake between the
+   * up-front read and this write. It is checked BEFORE the lock state so a
+   * reviewer outside the set's scope learns nothing about it. The predicate
+   * is a snapshot of the actor's assignments taken when the bulk call
+   * started, so it does not observe an assignment revoked mid-call (see
+   * `ReviewAssignmentService.buildScopePredicate`).
+   *
+   * Returns `changed: false` for the idempotent no-op (already in the target
+   * status) — nothing was written, no event, no stats.
+   */
+  private async applySetDecision(
+    set: SubjectPhotoSet,
+    status: PhotoReviewSetStatus,
+    action: PhotoReviewAction,
+    dto: { note?: string },
+    actorUserId: string | null,
+    inScope?: (target: ScopeTarget) => boolean,
+  ): Promise<{ changed: boolean }> {
+    const setId = set.id;
+    let changed = true;
     await this.dataSource.transaction(async (manager) => {
-      const lockedSet = await this.lockSet(manager, setId);
+      const lockedSet = await this.lockSet(manager, set.id);
+      if (inScope && !inScope(lockedSet)) throw outOfScopeError();
+      this.assertUnlocked(lockedSet);
       const fromStatus = lockedSet.status;
       // Idempotency guard — same "a retried/double-clicked request must not
       // double-write" rule this session already applied to
@@ -3101,6 +4122,7 @@ export class PhotoReviewService {
       // audit-trail/stats side of the same gap, not just the print-side
       // event).
       if (fromStatus === status) {
+        changed = false;
         return;
       }
       // Product decision: a set leaving APPROVED whose active print item has
@@ -3156,7 +4178,7 @@ export class PhotoReviewService {
       );
     });
 
-    return this.getSetDetail(setId, apiBaseUrl);
+    return { changed };
   }
 
   // ── GET /v1/review/sets/:id/events ──────────────────────────────────
@@ -3614,5 +4636,204 @@ export class PhotoReviewService {
       capturedAt: existing.createdAt,
       viewUrl,
     };
+  }
+
+  // ── AI-edit restart recovery (2026-09-29, priority-preemption rework) ──
+
+  /**
+   * Called by `AiEditRecoveryService`'s sweep (boot + every 5 minutes) —
+   * finds `photo_variants` rows that fell out of BullMQ (crash/restart
+   * between claim and completion, a Redis flush, a job that was never
+   * successfully added — see `enqueueAiEditJob`'s own walk-back branch — or
+   * simply a retryable failure waiting for its next attempt, see
+   * `PhotoVariantStatus`'s own doc comment for why that has no separate
+   * status of its own) and either re-enqueues them (background lane — a
+   * recovery-sweep requeue is never itself the "user just clicked"
+   * priority case, even if the ORIGINAL run was) or, once
+   * `AI_EDIT_MAX_ATTEMPTS` is exhausted, resolves them to `FAILED` instead
+   * of sweeping forever.
+   *
+   * "Fell out of BullMQ" is determined by first listing every job still
+   * live in EITHER queue (`getJobs(['active','waiting','prioritized',
+   * 'delayed','waiting-children'], 0, -1)` — deliberately NOT `'paused'`,
+   * which is not a valid `JobType` in bullmq 6.3.9 and neither queue is
+   * ever paused) and reading each one's OWN `variantId`/`attempt` straight
+   * off `job.data` (2026-09-29 fix) rather than trusting its BullMQ job id
+   * to follow the `pv-<id>-<attempt>` format — a legacy job enqueued before
+   * this rework (auto-generated numeric id, `attempt` absent — see
+   * `AiEditJobData`'s own doc comment on its legacy `payload` field) would
+   * otherwise never be recognised as live, so the very first sweep after
+   * this rework's deploy would re-claim every legacy in-flight job from
+   * scratch, discarding its `cfg`/`steps`/`seed` (only ever carried in that
+   * old job's own `payload`) and possibly racing it with a brand-new
+   * attempt.
+   *
+   * Candidate rows (kind `CARD_AUTO`/`CARD_AI` only — `CARD_UPLOAD` never
+   * touches this queue at all):
+   * - `PROCESSING`: stale for `AI_EDIT_RECOVERY_PROCESSING_STALE_MS` AND not
+   *   `id = ANY(<live variant ids>)` — covers BOTH "actually crashed
+   *   mid-run" AND "a retryable failure (timeout/transient error) is
+   *   sitting here waiting for its next attempt" (there is no separate
+   *   status for the latter, see `PhotoVariantStatus`'s own doc comment —
+   *   at the DB level the two are indistinguishable, and don't need to be:
+   *   both just get re-enqueued). The live-variant exclusion is applied IN
+   *   SQL, before `ORDER BY created_at LIMIT AI_EDIT_RECOVERY_BATCH_LIMIT`
+   *   runs (2026-09-29 fix): a large, entirely-legitimate background
+   *   backlog (`AI_EDIT_BACKGROUND_CONCURRENCY` is 1, so a busy campaign day
+   *   can easily queue hundreds of still-live `PROCESSING` rows older than
+   *   `AI_EDIT_RECOVERY_PROCESSING_STALE_MS`) used to fill the whole
+   *   `LIMIT`-ed batch with rows this loop would immediately skip anyway,
+   *   starving a genuinely stuck newer row from ever being reached until
+   *   the backlog drained below the batch size. The exclusion is
+   *   deliberately broad (any live job for that variant id, any attempt) —
+   *   the loop's own per-attempt check below stays the precise, final
+   *   arbiter for whatever DOES make it into the batch.
+   * - `DRAFT`: stale for `AI_EDIT_RECOVERY_MIN_AGE_MS` — `enqueueAiEditJob`
+   *   itself crashed/never ran between the variant's creation and its own
+   *   claim UPDATE.
+   *
+   * `ORDER BY created_at LIMIT AI_EDIT_RECOVERY_BATCH_LIMIT` bounds one
+   * sweep tick to a fixed amount of work; a backlog beyond that limit is
+   * simply picked up by the NEXT tick (5 minutes later) instead of making
+   * one tick run unboundedly long. The `getJobs(..., 0, -1)` listing itself
+   * stays unbounded (a per-candidate `queue.getJob(deterministicId)` lookup
+   * would be cheaper, but would reintroduce the exact legacy-job blind spot
+   * this fix closes, since a legacy job's real id is not derivable from the
+   * variant/attempt alone) — `aiEdit()`'s own new per-set in-flight cap
+   * (`AI_EDIT_MAX_IN_FLIGHT_PER_SET`) is this module's actual answer to an
+   * unbounded queue backlog, rather than optimising this listing.
+   */
+  async requeueStuckAiEditVariants(options: {
+    onBoot: boolean;
+  }): Promise<{ requeued: number; failed: number }> {
+    const liveJobs = await Promise.all([
+      this.aiEditQueue.getJobs([...AI_EDIT_LIVE_JOB_STATES], 0, -1),
+      this.aiEditBackgroundQueue.getJobs([...AI_EDIT_LIVE_JOB_STATES], 0, -1),
+    ]);
+    // Keyed by `variantId` (from each job's own `data`, not its BullMQ job
+    // id) — see this method's own top doc comment for why.
+    const liveAttemptByVariant = new Map<string, number>();
+    for (const job of [...liveJobs[0], ...liveJobs[1]]) {
+      if (job.data?.variantId) {
+        liveAttemptByVariant.set(job.data.variantId, job.data.attempt ?? 0);
+      }
+    }
+    const liveVariantIds = [...liveAttemptByVariant.keys()];
+
+    // At boot, use `AI_EDIT_RECOVERY_BOOT_GRACE_MS` for both branches instead
+    // of the normal, much longer grace periods (2026-09-29, folded in from
+    // the removed PENDING branch's own boot handling) — nothing from a
+    // PREVIOUS process can still be genuinely in flight right after a fresh
+    // start, and anything actually still live shows up in `liveVariantIds`
+    // (read fresh from Redis above) regardless of age, so there is no need
+    // to wait out the FULL normal grace period here. This still makes a
+    // genuine crash recover promptly at boot instead of waiting up to
+    // `AI_EDIT_RECOVERY_PROCESSING_STALE_MS`/`AI_EDIT_RECOVERY_MIN_AGE_MS`.
+    //
+    // NOT age 0, though (2026-09-30 fix — confirmed audit finding): this
+    // app's split `command`/`worker` `SERVICE_TYPE` deployment means a
+    // `command` host can claim a row (or create a fresh DRAFT one) via
+    // `POST .../reprocess`/`ai-edit` at any moment while a `worker` host is
+    // still booting — including in the gap between this sweep's own
+    // `getJobs` listing above and its candidate SELECT below. Age 0 let the
+    // boot sweep re-claim that row as `RECOVERY` before the `command`
+    // host's own `queue.add` (bounded to 5s — see `enqueueAiEditJob`) had
+    // even landed, stealing it onto the background lane out from under the
+    // request that just claimed it. See `AI_EDIT_RECOVERY_BOOT_GRACE_MS`'s
+    // own doc comment for why this value is safely past that window.
+    const processingStaleMs = options.onBoot
+      ? AI_EDIT_RECOVERY_BOOT_GRACE_MS
+      : AI_EDIT_RECOVERY_PROCESSING_STALE_MS;
+    const draftMinAgeMs = options.onBoot
+      ? AI_EDIT_RECOVERY_BOOT_GRACE_MS
+      : AI_EDIT_RECOVERY_MIN_AGE_MS;
+    const candidates: Array<{
+      id: string;
+      set_id: string;
+      kind: PhotoVariantKind;
+      status: PhotoVariantStatus;
+      ai_attempts: number;
+    }> = await this.dataSource.query(
+      `SELECT id, set_id, kind, status, ai_attempts
+         FROM photo_variants
+        WHERE kind IN ($1, $2)
+          AND (
+            (
+              status = $3 AND updated_at < now() - ($4::text || ' milliseconds')::interval
+              AND NOT (id = ANY($8::uuid[]))
+            )
+            OR (status = $5 AND updated_at < now() - ($6::text || ' milliseconds')::interval)
+          )
+        ORDER BY created_at ASC
+        LIMIT $7`,
+      [
+        PhotoVariantKind.CARD_AUTO,
+        PhotoVariantKind.CARD_AI,
+        PhotoVariantStatus.PROCESSING,
+        processingStaleMs,
+        PhotoVariantStatus.DRAFT,
+        draftMinAgeMs,
+        AI_EDIT_RECOVERY_BATCH_LIMIT,
+        liveVariantIds,
+      ],
+    );
+
+    let requeued = 0;
+    let failed = 0;
+    for (const row of candidates) {
+      // Precise, per-attempt safety net behind the broader SQL exclusion
+      // above — see this method's own top doc comment.
+      if (
+        row.status === PhotoVariantStatus.PROCESSING &&
+        liveAttemptByVariant.get(row.id) === row.ai_attempts
+      ) {
+        // Genuinely still running/queued in BullMQ — not actually stuck,
+        // just old (a slow AI call can legitimately take minutes).
+        continue;
+      }
+
+      if (row.ai_attempts >= AI_EDIT_MAX_ATTEMPTS) {
+        const message = `AI-edit recovery: variant ${row.id} exhausted ${row.ai_attempts} attempts — giving up`;
+        this.logger.warn(message);
+        if (row.kind === PhotoVariantKind.CARD_AUTO) {
+          await this.recordReprocessFailure(
+            row.set_id,
+            row.id,
+            row.ai_attempts,
+            message,
+            'FAILED',
+            row.status,
+          );
+        } else {
+          // 2026-09-29 fix (reuse/drift): this branch had silently lost the
+          // `ai_attempts` guard `transitionVariantStatus`'s other callers
+          // all keep — a USER re-claim (`promoteToUserLane`) bumping this
+          // row's attempt between this method's own SELECT above and this
+          // UPDATE could have its now-running newer attempt overwritten to
+          // FAILED by this stale one.
+          await this.transitionVariantStatus(this.dataSource, {
+            variantId: row.id,
+            from: row.status,
+            to: PhotoVariantStatus.FAILED,
+            attempt: row.ai_attempts,
+            note: message,
+          });
+        }
+        failed += 1;
+        continue;
+      }
+
+      const result = await this.enqueueAiEditJob({
+        kind: aiEditJobKindFor(row.kind),
+        variantId: row.id,
+        setId: row.set_id,
+        origin: AiEditJobOrigin.RECOVERY,
+        claimFrom: [row.status],
+        expectedAttempts: row.ai_attempts,
+      });
+      if (result.enqueued) requeued += 1;
+    }
+
+    return { requeued, failed };
   }
 }

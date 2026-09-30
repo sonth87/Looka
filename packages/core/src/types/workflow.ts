@@ -134,6 +134,16 @@ export interface CaptureWorkflow {
   sensitivity?: CaptureSensitivity;
   steps: CaptureStep[];
   globalQuality?: QualityRequirement;
+  /**
+   * The (at most one) step of this run whose photo may be shot more than once
+   * — every successful capture for it accumulates in
+   * `CaptureStepResult.shots` and the operator picks the best one before
+   * saving. Set by the desktop kiosk right before `startSession()` (see
+   * `packages/ui`'s `resolveMultiShotStepId`); never part of a
+   * campaign/server-side workflow definition. Absent (the default) leaves the
+   * engine on its original "one photo per step" behaviour.
+   */
+  multiShotStepId?: string;
 }
 
 export type GuidanceStatus =
@@ -192,6 +202,20 @@ export interface GuidanceState {
   countdownValue?: number;
 }
 
+/**
+ * One successful capture of a multi-shot step (see
+ * `CaptureWorkflow.multiShotStepId`). `attempt` is the exact 1-based number
+ * the photo was (or will be) stored under — the capture-trigger payload's own
+ * `attempt` — so it identifies this shot in the local upload outbox too.
+ */
+export interface CaptureShot {
+  attempt: number;
+  imagePath: string;
+  timestamp: number;
+  pose?: FacePose;
+  quality?: FaceQualityResult;
+}
+
 export interface CaptureStepResult {
   stepId: string;
   stepType: StepType;
@@ -201,6 +225,14 @@ export interface CaptureStepResult {
   pose?: FacePose;
   quality?: FaceQualityResult;
   timestamp?: number;
+  /**
+   * Every photo taken for this step so far — only ever populated for the
+   * workflow's `multiShotStepId` step. `capturedImagePath` (and
+   * pose/quality/timestamp) always mirror `shots[selectedShotIndex]`.
+   */
+  shots?: CaptureShot[];
+  /** Index into `shots` of the photo currently chosen as the best one. */
+  selectedShotIndex?: number;
 }
 
 export interface CaptureSession {

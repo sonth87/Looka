@@ -41,7 +41,14 @@ export function deterministicUuid(key: string): string {
 }
 
 /**
- * Encode metadata as fs-core's `X-Metadata` header value.
+ * @deprecated fs-core no longer accepts the `X-Metadata` header at all — a
+ * request carrying it is rejected with `400 BAD_REQUEST` ("Header X-Metadata
+ * không còn được hỗ trợ — gửi trong meta.metadata của multipart/form-data").
+ * Metadata now travels as a plain JSON object in the multipart `meta` part,
+ * which `FsClient` builds itself; nothing here calls this any more. Kept
+ * exported only so an external caller that imported it does not break.
+ *
+ * Encode metadata as fs-core's (former) `X-Metadata` header value.
  *
  * Since fs-engine v0.2.10 (2026-09-09) this is `encodeURIComponent(JSON.stringify(obj))`
  * — a url-encoded, flat JSON object. The previous `k1=v1;k2=v2` string-join
@@ -102,16 +109,31 @@ export class FsClient {
     return this.upload(input);
   }
 
-  /** Small derived artefact (thumbnail, card photo). Single request. */
+  /**
+   * Small derived artefact (thumbnail, card photo). Single request.
+   *
+   * fs-core only accepts `multipart/form-data` here (2026-09-30 discovery —
+   * the old `X-Virtual-Path`/`X-Content-SHA256`/`X-Visibility`/… headers are
+   * rejected with 400 the moment any one of them is present): a leading
+   * `meta` text part holding JSON, then the bytes as a `file` part. The
+   * request `Content-Type` (with its boundary) and `Content-Length` are
+   * produced by `fetch` from the `FormData` — setting either by hand would
+   * break the boundary. `Idempotency-Key` stays a real header.
+   */
   public async uploadDirect(input: UploadInput): Promise<UploadResult> {
     const res = await this.request('/api/v1/files', {
       method: 'POST',
-      headers: {
-        ...this.uploadHeaders(input),
-        'Content-Type': input.mimeType,
-        'Content-Length': String(input.data.byteLength),
-      },
-      body: toBody(input.data),
+      headers: { 'Idempotency-Key': input.idempotencyKey },
+      body: multipartBody(
+        {
+          ...this.uploadMeta(input),
+          // A non-empty file part must declare a size ≥ 1 (and never above the
+          // request's Content-Length, which it cannot exceed: the multipart
+          // envelope only adds bytes).
+          ...(input.data.byteLength > 0 ? { size: input.data.byteLength } : {}),
+        },
+        { name: 'file', data: input.data, mimeType: input.mimeType, filename: fileNameOf(input.virtualPath) }
+      ),
     });
     return toUploadResult(await res.json());
   }
@@ -154,23 +176,27 @@ export class FsClient {
     const total = input.data.byteLength;
     const uploadId = input.uploadId ?? deterministicUuid(input.idempotencyKey);
 
-    let offset = await this.probeOffset(uploadId, total, input);
+    let offset = await this.probeOffset(uploadId, total);
 
     while (offset < total) {
       const end = Math.min(offset + this.cfg.chunkSize, total) - 1;
       const chunk = input.data.subarray(offset, end + 1);
 
+      // File attributes are read only from the chunk that OPENS the session
+      // (offset 0); every later chunk needs just the session id, its range and
+      // its own checksum. A resume at offset > 0 continues a session the server
+      // already holds (it told us the offset), so it sends only the latter.
       const res = await this.request('/api/v1/files', {
         method: 'POST',
-        headers: {
-          ...this.uploadHeaders(input),
-          'X-Upload-ID': uploadId,
-          'X-Content-Type': input.mimeType,
-          'X-Chunk-SHA256': sha256Hex(chunk),
-          'Content-Range': `bytes ${offset}-${end}/${total}`,
-          'Content-Type': 'application/octet-stream',
-        },
-        body: toBody(chunk),
+        body: multipartBody(
+          {
+            ...(offset === 0 ? this.uploadMeta(input) : {}),
+            upload_id: uploadId,
+            content_range: `bytes ${offset}-${end}/${total}`,
+            chunk_sha256: sha256Hex(chunk),
+          },
+          { name: 'chunk', data: chunk, mimeType: input.mimeType, filename: fileNameOf(input.virtualPath) }
+        ),
       });
 
       // 201 closes the file; anything else means the server wants more bytes.
@@ -197,16 +223,17 @@ export class FsClient {
     );
   }
 
-  /** Ask how much the server already holds. A missing session simply starts at 0. */
-  private async probeOffset(uploadId: string, total: number, input: UploadInput): Promise<number> {
+  /**
+   * Ask how much the server already holds. A missing session simply starts at 0.
+   * The question is a `meta`-only multipart request — just the session id and
+   * a `content_range` of the form "bytes STAR/total" (no file attributes, no
+   * bytes part).
+   */
+  private async probeOffset(uploadId: string, total: number): Promise<number> {
     try {
       const res = await this.request('/api/v1/files', {
         method: 'POST',
-        headers: {
-          ...this.uploadHeaders(input),
-          'X-Upload-ID': uploadId,
-          'Content-Range': `bytes */${total}`,
-        },
+        body: multipartBody({ upload_id: uploadId, content_range: `bytes */${total}` }),
       });
       const reported = res.headers.get('Upload-Offset');
       const offset = reported !== null ? Number(reported) : 0;
@@ -504,19 +531,25 @@ export class FsClient {
   ): Promise<UpdateResult> {
     const res = await this.request(`/api/v1/files/${encodeURIComponent(fileId)}`, {
       method: 'PUT',
-      headers: {
-        // Sent verbatim, quotes included — the service compares the whole token.
-        'If-Match': input.etag,
-        'Content-Type': input.mimeType,
-        'Content-Length': String(input.data.byteLength),
-        // Read before the body is touched, so identical content is recognised
-        // without transferring it — and it is what lets the service answer
-        // "unchanged" instead of storing a version that differs from its
-        // predecessor in nothing at all.
-        'X-Content-SHA256': sha256Hex(input.data),
-        ...(input.comment ? { 'X-Comment': input.comment } : {}),
-      },
-      body: toBody(input.data),
+      // Sent verbatim, quotes included — the service compares the whole token.
+      // `If-Match` is the one condition that stays a real header (it is
+      // required on EVERY request of a PUT, including each chunk).
+      headers: { 'If-Match': input.etag },
+      // Same multipart contract as POST (2026-09-30): `meta` first, then the
+      // bytes. The content hash is declared up front so identical content is
+      // recognised without transferring it — it is what lets the service
+      // answer "unchanged" instead of storing a version that differs from its
+      // predecessor in nothing at all. `X-Comment`/`X-Content-SHA256` headers
+      // are rejected with 400; both now live in `meta`.
+      body: multipartBody(
+        {
+          content_type: input.mimeType,
+          sha256: sha256Hex(input.data),
+          ...(input.data.byteLength > 0 ? { size: input.data.byteLength } : {}),
+          ...(input.comment ? { comment: input.comment } : {}),
+        },
+        { name: 'file', data: input.data, mimeType: input.mimeType, filename: 'content' }
+      ),
     });
 
     const b = (await res.json()) as Record<string, unknown>;
@@ -622,16 +655,25 @@ export class FsClient {
 
   // ── Internals ─────────────────────────────────────────────────────────────
 
-  private uploadHeaders(input: UploadInput): Record<string, string> {
-    const headers: Record<string, string> = {
-      'X-Virtual-Path': input.virtualPath,
-      'X-Content-SHA256': sha256Hex(input.data),
-      'Idempotency-Key': input.idempotencyKey,
+  /**
+   * The file's attributes for fs-core's `meta` part. Only read on a whole-file
+   * upload or on the chunk that opens a chunked session. fs-core rejects any
+   * field it does not know (400 with `detail.field`), so this lists exactly the
+   * documented ones (`UploadMeta` in fs-core's openapi.yaml) and nothing more.
+   */
+  private uploadMeta(input: UploadInput): Record<string, unknown> {
+    const meta: Record<string, unknown> = {
+      virtual_path: input.virtualPath,
+      content_type: input.mimeType,
+      // Hash of the WHOLE file, also for a chunked upload: the server checks
+      // it when the session closes (mismatch → 460).
+      sha256: sha256Hex(input.data),
     };
-    if (input.tags?.length) headers['X-Tags'] = input.tags.join(',');
-    if (input.metadata) headers['X-Metadata'] = encodeMetadata(input.metadata);
-    if (input.visibility) headers['X-Visibility'] = input.visibility;
-    return headers;
+    if (input.tags?.length) meta.tags = input.tags;
+    // A plain JSON object now — no URL-encoding (that was the X-Metadata header).
+    if (input.metadata) meta.metadata = input.metadata;
+    if (input.visibility) meta.visibility = input.visibility;
+    return meta;
   }
 
   private async request(path: string, init: RequestInit, timeoutMs?: number): Promise<Response> {
@@ -703,7 +745,7 @@ function toUploadResult(body: unknown): UploadResult {
     // Known gap (2026-09-24, low impact — nothing in this codebase reads
     // UploadResult.visibility today): fs-core can also return 'department'
     // for a file whose file_type_rule sets force_visibility, or one
-    // uploaded with X-Visibility: department + an org unit. The shared
+    // uploaded with meta.visibility: department + an org unit. The shared
     // `Visibility` type (@face/core) is only 'public' | 'private', so a
     // 'department' response is reported here as 'public' rather than
     // widening that type across the whole monorepo for a value nothing
@@ -714,12 +756,35 @@ function toUploadResult(body: unknown): UploadResult {
 }
 
 /**
- * A Uint8Array is a valid fetch body at runtime, but the DOM lib's BodyInit
- * union does not cover the generic form TypeScript infers for a subarray.
- * Casting keeps the zero-copy view instead of duplicating megabytes per chunk.
+ * The `multipart/form-data` body fs-core requires on `POST /api/v1/files` and
+ * `PUT /api/v1/files/{id}`: a `meta` text part holding JSON — ALWAYS FIRST
+ * (the server rejects a request whose first part is not `meta`) — then at most
+ * one bytes part, named `file` (whole file) or `chunk` (one chunk). A request
+ * that only asks a question (declare-a-hash, ask-for-offset) sends `meta` alone.
+ *
+ * Append order is the wire order, so `meta` is appended before anything else.
+ * The part's `Content-Type` is the server's fallback MIME when `meta` omits
+ * `content_type`; its filename is the fallback path when `meta` omits
+ * `virtual_path` (and must be non-empty, or an empty-looking part is treated
+ * as "not sent").
  */
-function toBody(data: Uint8Array): BodyInit {
-  return data as unknown as BodyInit;
+function multipartBody(
+  meta: Record<string, unknown>,
+  bytes?: { name: 'file' | 'chunk'; data: Uint8Array; mimeType: string; filename: string }
+): FormData {
+  const form = new FormData();
+  form.append('meta', JSON.stringify(meta));
+  if (bytes) {
+    // A Uint8Array is a valid Blob source at runtime, but TypeScript's
+    // BlobPart union does not cover the generic form it infers for a subarray.
+    form.append(bytes.name, new Blob([bytes.data as unknown as BlobPart], { type: bytes.mimeType }), bytes.filename);
+  }
+  return form;
+}
+
+/** Last path segment of a virtual path — used only as the multipart part's filename (fs-core's fallback path; `meta.virtual_path` is what actually names the file). */
+function fileNameOf(virtualPath: string): string {
+  return virtualPath.split('/').filter(Boolean).pop() ?? 'file';
 }
 
 function delay(ms: number, signal?: AbortSignal): Promise<void> {

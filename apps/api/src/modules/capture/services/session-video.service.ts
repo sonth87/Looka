@@ -439,9 +439,14 @@ export class SessionVideoService extends CommonService<SessionVideo> {
       'hex',
     );
     const gotBuf = sigRaw ? Buffer.from(sigRaw, 'hex') : Buffer.alloc(0);
+    const now = Math.floor(Date.now() / 1000);
     const valid =
       Number.isFinite(exp) &&
-      exp >= Math.floor(Date.now() / 1000) &&
+      exp >= now &&
+      // 2026-09-30 fix (confirmed audit finding): see PhotoService's
+      // matching fix — without this upper bound a far-future `exp` verified
+      // forever, defeating the short-TTL design.
+      exp <= now + LOCAL_VIEW_TTL_SECONDS &&
       expectedBuf.length === gotBuf.length &&
       expectedBuf.length > 0 &&
       timingSafeEqual(expectedBuf, gotBuf);
@@ -455,7 +460,12 @@ export class SessionVideoService extends CommonService<SessionVideo> {
   }
 
   private signLocalViewToken(videoId: string, exp: number): string {
-    const secret = this.configService.get<string>('security.apiKey') ?? '';
+    // 2026-09-30 fix (confirmed audit finding): was `security.apiKey`, the
+    // same static secret apps/web ships to every browser client — anyone
+    // holding it could forge a valid signature for any video id. See
+    // `security.ts`'s own doc comment on `viewLinkSigningSecret`.
+    const secret =
+      this.configService.get<string>('security.viewLinkSigningSecret') ?? '';
     return createHmac('sha256', secret)
       .update(`video:${videoId}:${exp}`)
       .digest('hex');

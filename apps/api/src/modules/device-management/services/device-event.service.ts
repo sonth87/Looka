@@ -3,6 +3,7 @@ import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import { CaptureReportService } from '@app/modules/capture/services/capture-report.service';
 import { PhotoReviewService } from '@app/modules/photo-review/services/photo-review.service';
+import { AiEditJobOrigin } from '@app/modules/photo-review/photo-review.constants';
 import { CaptureStatsService } from '@app/modules/stats/services/capture-stats.service';
 import { CommonService } from '@app/shared/common/common.service';
 import {
@@ -178,15 +179,29 @@ export class DeviceEventService extends CommonService<DeviceEvent> {
         // `AI_EDIT` step's `/edit` call, which held this method's caller
         // (`DeviceSelfController`'s `POST /v1/devices/events` handler) open
         // for that whole time. The real fix landed the same day instead:
-        // `reprocess()` now only creates the `PROCESSING` variant and
-        // enqueues the actual AI work onto `ai_edit_jobs`
-        // (`AiEditJobWorkerService` drains it) — it returns in normal
-        // request time regardless of how long the AI call itself takes, so
-        // awaiting it here is fast and safe again, with `.catch()` kept for
-        // the same best-effort reasoning as `ensureSetForApprovedSession`
-        // above (a DB hiccup here must not fail the whole batch write).
+        // `reprocess()` now only creates the `DRAFT` variant and enqueues
+        // the actual AI work onto the `ai-edit`/`ai-edit-background` BullMQ
+        // queues (`AiEditProcessor`/`AiEditBackgroundProcessor` drain them —
+        // see `PhotoReviewService.enqueueAiEditJob`'s own doc comment) — it
+        // returns in normal request time regardless of how long the AI call
+        // itself takes, so awaiting it here is fast and safe again, with
+        // `.catch()` kept for the same best-effort reasoning as
+        // `ensureSetForApprovedSession` above (a DB hiccup here must not
+        // fail the whole batch write).
+        //
+        // `AiEditJobOrigin.AUTO` (2026-09-29, priority-preemption rework) —
+        // this is the kiosk's own best-effort post-approval trigger, never a
+        // direct user click, so its job always goes to the low-priority
+        // background lane (`ai-edit-background`) rather than jumping ahead
+        // of a reviewer's own "gen bằng AI" click — see
+        // `PhotoReviewService.reprocess`'s own doc comment.
         await this.photoReview
-          .reprocess(result.setId, null, 'http://localhost')
+          .reprocess(
+            result.setId,
+            null,
+            'http://localhost',
+            AiEditJobOrigin.AUTO,
+          )
           .catch((err) => {
             this.logger.warn(
               `best-effort auto CARD_AUTO reprocess failed for set ${result.setId} (session ${sessionId}): ${(err as Error).message}`,

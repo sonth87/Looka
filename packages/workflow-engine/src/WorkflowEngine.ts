@@ -31,19 +31,31 @@ export interface CaptureTriggerInfo {
   gesture?: string;
 }
 
-/** Payload emitted on `capture-trigger` by `triggerManualCapture()`. */
+/**
+ * Payload emitted on `capture-trigger` by `triggerManualCapture()`.
+ *
+ * `attempt` is the step's `attempts + 1` at the moment of the emit — the exact
+ * 1-based number a listener must store this photo under (see
+ * `FaceCaptureApp`'s capture-trigger handler, which used to re-derive the same
+ * value itself). `shotIndex` is only present for the workflow's multi-shot
+ * step: this photo's position in that step's `shots[]`.
+ */
 export interface CaptureTriggerEventPayload {
   stepId: string;
   imagePath: string;
   triggerSource: CaptureTriggerSource;
   gesture?: string;
+  attempt: number;
+  shotIndex?: number;
 }
 
-/** Payload emitted on `capture-trigger` by `recordExternalCapture()`. */
+/** Payload emitted on `capture-trigger` by `recordExternalCapture()`. Same `attempt`/`shotIndex` meaning as `CaptureTriggerEventPayload`. */
 export interface ExternalCaptureTriggerEventPayload {
   stepId: string;
   imagePath: string;
   triggerSource: 'EXTERNAL';
+  attempt: number;
+  shotIndex?: number;
 }
 
 export class WorkflowEngine implements IWorkflowEngine {
@@ -107,6 +119,16 @@ export class WorkflowEngine implements IWorkflowEngine {
   public get retakingStepId(): string | null {
     if (this.retakeReturnIdx === null || !this.activeWorkflow) return null;
     return this.activeWorkflow.steps[this.currentStepIdx]?.id ?? null;
+  }
+
+  /** The one step of the active workflow whose photo may be shot more than once — `null` while multi-shot is off (the default). */
+  public get multiShotStepId(): string | null {
+    return this.activeWorkflow?.multiShotStepId ?? null;
+  }
+
+  /** True while `triggerManualCapture` is mid-way through taking/validating/animating a shot. */
+  public get isCaptureInFlight(): boolean {
+    return this.isCapturing;
   }
 
   /**
@@ -383,6 +405,15 @@ export class WorkflowEngine implements IWorkflowEngine {
         // advanceToNextStep clears the retake, so the flag is read while it still stands.
         const wasRetake = this.retakeReturnIdx !== null;
         this.updateStepStatus(currentStep.id, 'COMPLETED', captureResult.imagePath, gateFaceState || undefined);
+        // Read here, after the bookkeeping above but before the emit: a
+        // successful capture does NOT bump `attempts` on this path (only a
+        // retake / a rejected shot does), so `attempts + 1` is exactly the
+        // number this photo must be stored under.
+        const shotInfo = this.recordShotIfMultiShot(
+          currentStep.id,
+          captureResult.imagePath,
+          gateFaceState || undefined
+        );
 
         // Phát sự kiện trigger để UI hiển thị Flash & Freeze Base64 & Animation bay ảnh
         //
@@ -399,6 +430,8 @@ export class WorkflowEngine implements IWorkflowEngine {
           imagePath: captureResult.imagePath,
           triggerSource,
           ...(gesture ? { gesture } : {}),
+          attempt: shotInfo.attempt,
+          ...(shotInfo.shotIndex !== undefined ? { shotIndex: shotInfo.shotIndex } : {}),
         };
         this.emit('capture-trigger', capturePayload);
 
@@ -512,7 +545,6 @@ export class WorkflowEngine implements IWorkflowEngine {
     const idx = this.activeWorkflow.steps.findIndex((s) => s.id === stepId);
     if (idx === -1) return false;
 
-    const step = this.activeWorkflow.steps[idx];
     // Retaking during a retake must still come back to where ordered capture
     // was interrupted, not to the step of the retake that preceded it.
     if (this.retakeReturnIdx === null) this.retakeReturnIdx = this.currentStepIdx;
@@ -536,17 +568,7 @@ export class WorkflowEngine implements IWorkflowEngine {
       stepResult.attempts++;
     }
 
-    this._currentState = {
-      status: 'POSITIONING',
-      primaryInstruction: step.instruction,
-      primaryReason: 'NO_FACE',
-      progress: 0,
-      hints: [],
-      currentStepIndex: idx,
-      totalSteps: this.activeWorkflow.steps.length,
-      stepId: step.id,
-      stepType: step.type,
-    };
+    this._currentState = this.positioningStateFor(idx);
 
     this.emit('state-change', this._currentState);
     return true;
@@ -587,20 +609,114 @@ export class WorkflowEngine implements IWorkflowEngine {
     for (const stepResult of this._currentSession.steps) {
       stepResult.status = 'PENDING';
       stepResult.attempts++;
+      // A full retake starts every step over, the multi-shot step included:
+      // whatever shots (and selection) it had belonged to the run being
+      // redone. `capturedImagePath` itself stays until the replacement lands,
+      // same as every other step.
+      delete stepResult.shots;
+      delete stepResult.selectedShotIndex;
     }
 
-    const firstStep = this.activeWorkflow.steps[0];
-    this._currentState = {
-      status: 'POSITIONING',
-      primaryInstruction: firstStep.instruction,
-      primaryReason: 'NO_FACE',
-      progress: 0,
-      hints: [],
-      currentStepIndex: 0,
-      totalSteps: this.activeWorkflow.steps.length,
-      stepId: firstStep.id,
-      stepType: firstStep.type,
-    };
+    this._currentState = this.positioningStateFor(0);
+
+    this.emit('state-change', this._currentState);
+    return true;
+  }
+
+  /**
+   * Multi-shot: the operator picks which of the multi-shot step's photos is
+   * the one to keep. Copies that shot's image (and the pose/quality/timestamp
+   * it was taken with) onto the step itself, so everything that reads
+   * `capturedImagePath` — the review grid, the extended display, the saved
+   * session record — follows the selection without knowing shots exist.
+   *
+   * Refuses (returns false, changes nothing) while a capture is in flight —
+   * the capture that is about to land will auto-select itself, and racing it
+   * would leave the two disagreeing about which shot is current — and for any
+   * step other than the multi-shot one or an index outside the shots taken.
+   */
+  public selectShot(stepId: string, index: number): boolean {
+    if (this.isCapturing || !this._currentSession || !this.activeWorkflow) return false;
+    if (this.activeWorkflow.multiShotStepId !== stepId) return false;
+
+    const stepResult = this._currentSession.steps.find((s) => s.stepId === stepId);
+    const shots = stepResult?.shots;
+    if (!stepResult || !shots || !Number.isInteger(index) || index < 0 || index >= shots.length) return false;
+
+    const shot = shots[index];
+    stepResult.selectedShotIndex = index;
+    stepResult.capturedImagePath = shot.imagePath;
+    stepResult.pose = shot.pose;
+    stepResult.quality = shot.quality;
+    stepResult.timestamp = shot.timestamp;
+
+    this.emit('shot-selected', { stepId, index, attempt: shot.attempt });
+    return true;
+  }
+
+  /**
+   * Multi-shot: the selection has been saved, so the other shots are no
+   * longer needed — shrink `shots` down to the selected one (now index 0).
+   * A later "capture more" after a post-save reopen then starts from just
+   * the kept photo instead of dragging every discarded shot along.
+   */
+  public commitShotSelection(stepId: string): void {
+    if (!this._currentSession || this.activeWorkflow?.multiShotStepId !== stepId) return;
+    const stepResult = this._currentSession.steps.find((s) => s.stepId === stepId);
+    const shots = stepResult?.shots;
+    if (!stepResult || !shots || shots.length === 0) return;
+
+    const selected = shots[stepResult.selectedShotIndex ?? shots.length - 1] ?? shots[shots.length - 1];
+    stepResult.shots = [selected];
+    stepResult.selectedShotIndex = 0;
+  }
+
+  /**
+   * Abandons a retake that was opened (`retakeStep`) but never got its photo
+   * — e.g. the operator pressed "capture more", no face was in frame, and
+   * they went on to save anyway. Without this the session would still be
+   * RUNNING with one step PENDING, and saving would either be refused or
+   * would approve a half-finished run.
+   *
+   * Puts the step back to COMPLETED (its previous photo was never replaced —
+   * `retakeStep` deliberately leaves `capturedImagePath` alone), returns the
+   * cursor to where ordered capture had been, and — if that was the end of
+   * the workflow — closes the session again. Emits `state-change` so the UI
+   * (guidance text, review modal, extended display) sees the restored state;
+   * deliberately does NOT emit `completed`, which would reopen the review
+   * modal the caller is in the middle of using.
+   *
+   * Returns false, and touches nothing, while a capture is in flight (a shot
+   * that is about to land would be thrown away or clobber the restored
+   * state) or when there is no retake pending.
+   */
+  public cancelPendingRetake(): boolean {
+    if (this.isCapturing) return false;
+    if (!this.activeWorkflow || !this._currentSession || this.retakeReturnIdx === null) return false;
+
+    const workflow = this.activeWorkflow;
+    const session = this._currentSession;
+
+    const retakenStep = workflow.steps[this.currentStepIdx];
+    const retakenResult = retakenStep ? session.steps.find((s) => s.stepId === retakenStep.id) : undefined;
+    if (retakenResult && retakenResult.capturedImagePath) {
+      retakenResult.status = 'COMPLETED';
+    }
+
+    this.currentStepIdx = this.retakeReturnIdx;
+    this.retakeReturnIdx = null;
+    this.externalCaptureOnly = false;
+    this.stepStartTime = Date.now();
+    this.stabilityTracker.reset();
+
+    if (this.currentStepIdx >= workflow.steps.length) {
+      // Ordered capture had already run off the end when the retake began, so
+      // there is nothing left to do but close the session again — the same
+      // thing `advanceToNextStep` does once a retake's replacement lands.
+      this.markSessionCompleted(session);
+    } else {
+      this._currentState = this.positioningStateFor(this.currentStepIdx);
+    }
 
     this.emit('state-change', this._currentState);
     return true;
@@ -640,6 +756,10 @@ export class WorkflowEngine implements IWorkflowEngine {
     // replacement shot: this call *is* the attempt.
     stepResult.attempts++;
     this.updateStepStatus(stepId, 'COMPLETED', imagePath);
+    // `attempts` was already bumped just above, so `attempts + 1` read here is
+    // the value the capture-trigger listener has always stored this photo
+    // under on this path — see `CaptureTriggerEventPayload.attempt`.
+    const shotInfo = this.recordShotIfMultiShot(stepId, imagePath);
 
     // `triggerSource: 'EXTERNAL'` — pure additive plumbing (discussion doc
     // §3.7.1): a side-camera frame captured alongside the CENTER frame's own
@@ -649,6 +769,8 @@ export class WorkflowEngine implements IWorkflowEngine {
       stepId,
       imagePath,
       triggerSource: 'EXTERNAL',
+      attempt: shotInfo.attempt,
+      ...(shotInfo.shotIndex !== undefined ? { shotIndex: shotInfo.shotIndex } : {}),
     };
     this.emit('capture-trigger', externalPayload);
 
@@ -692,6 +814,37 @@ export class WorkflowEngine implements IWorkflowEngine {
     }
   }
 
+  /**
+   * The guidance a step starts out in once the cursor lands on it (a retake,
+   * a rewind, or ordered capture moving on) — same shape everywhere, so it is
+   * built in one place. `startSession` deliberately keeps its own literal: it
+   * opens in `SEARCHING_FACE`, not `POSITIONING`.
+   */
+  private positioningStateFor(idx: number): GuidanceState {
+    const workflow = this.activeWorkflow!;
+    const step = workflow.steps[idx];
+    return {
+      status: 'POSITIONING',
+      primaryInstruction: step.instruction,
+      primaryReason: 'NO_FACE',
+      progress: 0,
+      hints: [],
+      currentStepIndex: idx,
+      totalSteps: workflow.steps.length,
+      stepId: step.id,
+      stepType: step.type,
+    };
+  }
+
+  /** Closes `session` as finished and moves the guidance to its SUCCESS state. Does not emit anything — callers decide which event(s) the situation warrants. */
+  private markSessionCompleted(session: CaptureSession): void {
+    session.status = 'COMPLETED';
+    session.completedAt = Date.now();
+    this._currentState.status = 'SUCCESS';
+    this._currentState.primaryInstruction = 'Hoàn thành chụp ảnh!';
+    this._currentState.progress = 1.0;
+  }
+
   private async advanceToNextStep(): Promise<void> {
     if (!this.activeWorkflow || !this._currentSession) return;
 
@@ -727,25 +880,10 @@ export class WorkflowEngine implements IWorkflowEngine {
 
     if (this.currentStepIdx >= this.activeWorkflow.steps.length) {
       // Completed all steps
-      this._currentSession.status = 'COMPLETED';
-      this._currentSession.completedAt = Date.now();
-      this._currentState.status = 'SUCCESS';
-      this._currentState.primaryInstruction = 'Hoàn thành chụp ảnh!';
-      this._currentState.progress = 1.0;
+      this.markSessionCompleted(this._currentSession);
       this.emit('completed', this._currentSession);
     } else {
-      const nextStep = this.activeWorkflow.steps[this.currentStepIdx];
-      this._currentState = {
-        status: 'POSITIONING',
-        primaryInstruction: nextStep.instruction,
-        primaryReason: 'NO_FACE',
-        progress: 0,
-        hints: [],
-        currentStepIndex: this.currentStepIdx,
-        totalSteps: this.activeWorkflow.steps.length,
-        stepId: nextStep.id,
-        stepType: nextStep.type,
-      };
+      this._currentState = this.positioningStateFor(this.currentStepIdx);
     }
 
     // 2026-09-24 fix (confirmed audit finding): this function used to change
@@ -758,6 +896,40 @@ export class WorkflowEngine implements IWorkflowEngine {
     // text, its sequential role-switch effect, and its round-transition
     // stream handling all stayed frozen on the step that just completed.
     this.emit('state-change', this._currentState);
+  }
+
+  /**
+   * Bookkeeping for a photo that was just written onto `stepId` by
+   * `updateStepStatus`. Returns the attempt number the photo has to be stored
+   * under (`attempts + 1`, read at this instant — see
+   * `CaptureTriggerEventPayload.attempt`) and, ONLY when `stepId` is the
+   * workflow's multi-shot step, also files the photo into that step's
+   * `shots[]` and auto-selects it (the newest shot wins until the operator
+   * picks another) — `shotIndex` is then its position in `shots[]`.
+   *
+   * A workflow without `multiShotStepId` never gets `shots`/`selectedShotIndex`
+   * and always gets `shotIndex: undefined`, so every other step (and the
+   * whole engine when the feature is off) behaves exactly as before.
+   */
+  private recordShotIfMultiShot(
+    stepId: string,
+    imagePath: string,
+    faceState?: FaceState
+  ): { attempt: number; shotIndex?: number } {
+    const stepResult = this._currentSession?.steps.find((s) => s.stepId === stepId);
+    const attempt = (stepResult?.attempts ?? 0) + 1;
+    if (!stepResult || this.activeWorkflow?.multiShotStepId !== stepId) return { attempt };
+
+    const shots = stepResult.shots ?? (stepResult.shots = []);
+    shots.push({
+      attempt,
+      imagePath,
+      timestamp: stepResult.timestamp ?? Date.now(),
+      pose: faceState?.pose,
+      quality: faceState?.quality,
+    });
+    stepResult.selectedShotIndex = shots.length - 1;
+    return { attempt, shotIndex: shots.length - 1 };
   }
 
   private updateStepStatus(

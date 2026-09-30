@@ -1,6 +1,6 @@
 import type { Visibility } from '@face/core';
 import { FsClient } from './FsClient.js';
-import { FsError, UploadResult } from './types.js';
+import { FsError, FS_ERROR_CODES, UploadInput, UploadResult } from './types.js';
 
 /** What the worker needs from the queue. Implemented by UploadOutboxRepository. */
 export interface OutboxPort {
@@ -41,10 +41,57 @@ export interface FileReader {
   read(localPath: string): Promise<Uint8Array>;
 }
 
+/**
+ * Outcome of ONE input of a batched upload — same order and length as the
+ * `inputs` handed to `BatchUploadClient.uploadBatch`. A per-item failure is
+ * reported here rather than thrown, so one bad item never fails its siblings.
+ */
+export type BatchUploadOutcome =
+  | { ok: true; result: UploadResult }
+  | { ok: false; error: Error };
+
+/**
+ * A destination that can take several captures in one request (the kiosk's
+ * `ApiPhotoUploadClient`, for `POST /v1/devices/photos`). Opt-in: the worker
+ * only batches when `UploadWorkerOptions.batch` is set.
+ */
+export interface BatchUploadClient {
+  /** Whether this particular job may ride in a batch (e.g. videos may not). */
+  canBatch(job: OutboxJob): boolean;
+  /**
+   * Sends every input in ONE request. Resolves with one outcome per input, in
+   * order. Throws only when the request as a whole failed (network down, the
+   * whole body rejected) — see `UploadWorker.flushChunk` for how each kind of
+   * whole-call failure is handled.
+   */
+  uploadBatch(inputs: UploadInput[]): Promise<BatchUploadOutcome[]>;
+}
+
+export interface UploadBatchOptions {
+  client: BatchUploadClient;
+  /** Most jobs in one request. */
+  maxItems: number;
+  /** Most raw bytes (sum of the jobs' data) in one request — keep it under the server's body limit after base64 inflation. */
+  maxBytes: number;
+  /**
+   * After a whole-batch 400/404 (an API that predates the batch body shape),
+   * how long to stop trying batches and send singly. Default 30 minutes.
+   */
+  unsupportedCooldownMs?: number;
+}
+
+const DEFAULT_BATCH_UNSUPPORTED_COOLDOWN_MS = 30 * 60_000;
+
 export interface UploadWorkerOptions {
   client: FsClient;
   outbox: OutboxPort;
   files: FileReader;
+  /**
+   * Opt-in 1-n sending: jobs the batch client accepts are grouped (up to
+   * `maxItems` / `maxBytes` per request) instead of one request each. Unset =
+   * exactly the one-request-per-job behaviour this worker always had.
+   */
+  batch?: UploadBatchOptions;
   /** How often to look for work. Default 5s. */
   tickMs?: number;
   /** Jobs uploaded per tick. Keep small so the UI thread stays responsive. */
@@ -82,11 +129,21 @@ const DEFAULT_BACKOFF = (attempts: number) =>
  *   2. poll until scanned     → DONE
  */
 export class UploadWorker {
-  private readonly opts: Required<Omit<UploadWorkerOptions, 'onEvent'>> & {
+  private readonly opts: Required<Omit<UploadWorkerOptions, 'onEvent' | 'batch'>> & {
     onEvent?: (e: WorkerEvent) => void;
+    batch?: UploadBatchOptions;
   };
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
+  /** Epoch ms until which batching is switched off after an old-API rejection; 0 = not disabled. */
+  private batchDisabledUntil = 0;
+  /**
+   * Byte budget a batch is held to once a whole-batch 413 has shown that
+   * something between here and the API (a reverse proxy's body limit) rejects
+   * bodies of that size. Starts unbounded (the configured `maxBytes` alone
+   * applies) and only ever shrinks, for the lifetime of the worker.
+   */
+  private shrunkMaxBytes = Number.POSITIVE_INFINITY;
 
   constructor(options: UploadWorkerOptions) {
     this.opts = {
@@ -129,27 +186,182 @@ export class UploadWorker {
 
   private async sendDue(): Promise<void> {
     const jobs = this.opts.outbox.claimDue(Date.now(), this.opts.batchSize);
+    const batch = this.opts.batch;
+
+    // No batching configured, or switched off after an old-API rejection:
+    // exactly the original one-request-per-job loop.
+    if (!batch || Date.now() < this.batchDisabledUntil) {
+      for (const job of jobs) await this.sendOne(job);
+      return;
+    }
+
+    let chunk: Array<{ job: OutboxJob; data: Uint8Array }> = [];
+    let chunkBytes = 0;
+    const flush = async (): Promise<void> => {
+      const toSend = chunk;
+      chunk = [];
+      chunkBytes = 0;
+      await this.flushChunk(batch, toSend);
+    };
 
     for (const job of jobs) {
-      this.opts.outbox.markSending(job.id);
-      try {
-        const data = await this.opts.files.read(job.localPath);
-        const result = await this.upload(job, data);
-        this.opts.outbox.markUploaded(job.id, result.fileId, result.status);
-        this.emit({
-          type: 'uploaded',
-          jobId: job.id,
-          fileId: result.fileId,
-          dedupHit: result.dedupHit,
-        });
-      } catch (err) {
-        this.handleFailure(job, err as Error);
+      if (!batch.client.canBatch(job)) {
+        await this.sendOne(job);
+        continue;
       }
+
+      this.opts.outbox.markSending(job.id);
+      let data: Uint8Array;
+      try {
+        data = await this.opts.files.read(job.localPath);
+      } catch (err) {
+        // A read failure belongs to this job alone — it must not take the
+        // rest of the batch down with it.
+        this.handleFailure(job, err as Error);
+        continue;
+      }
+
+      // Bigger than a whole batch's byte budget: send it alone, on the
+      // ordinary single route. The budget is re-read per job because a 413
+      // from an earlier chunk of this same pass can shrink it.
+      const maxBytes = this.batchMaxBytes(batch);
+      if (data.byteLength > maxBytes) {
+        await this.sendOneWithData(job, data);
+        continue;
+      }
+
+      if (
+        chunk.length > 0 &&
+        (chunk.length + 1 > batch.maxItems || chunkBytes + data.byteLength > maxBytes)
+      ) {
+        await flush();
+      }
+      chunk.push({ job, data });
+      chunkBytes += data.byteLength;
+    }
+    await flush();
+  }
+
+  /** The byte budget one batch is held to right now: the configured cap, or less after a whole-batch 413. */
+  private batchMaxBytes(batch: UploadBatchOptions): number {
+    return Math.min(batch.maxBytes, this.shrunkMaxBytes);
+  }
+
+  /** The original per-job send: claim it as SENDING, read its bytes, upload, record the outcome. */
+  private async sendOne(job: OutboxJob): Promise<void> {
+    this.opts.outbox.markSending(job.id);
+    let data: Uint8Array;
+    try {
+      data = await this.opts.files.read(job.localPath);
+    } catch (err) {
+      this.handleFailure(job, err as Error);
+      return;
+    }
+    await this.sendOneWithData(job, data);
+  }
+
+  /** `sendOne`'s upload-and-record half, for a job that is already SENDING and whose bytes are already read. */
+  private async sendOneWithData(job: OutboxJob, data: Uint8Array): Promise<void> {
+    try {
+      const result = await this.upload(job, data);
+      this.recordUploaded(job, result);
+    } catch (err) {
+      this.handleFailure(job, err as Error);
     }
   }
 
-  private async upload(job: OutboxJob, data: Uint8Array): Promise<UploadResult> {
-    const input = {
+  private recordUploaded(job: OutboxJob, result: UploadResult): void {
+    this.opts.outbox.markUploaded(job.id, result.fileId, result.status);
+    this.emit({
+      type: 'uploaded',
+      jobId: job.id,
+      fileId: result.fileId,
+      dedupHit: result.dedupHit,
+    });
+  }
+
+  /**
+   * Sends one accumulated chunk. A single job (or a chunk that a concurrent
+   * old-API detection just made ineligible) goes through the ordinary single
+   * route — the same request a kiosk without batching would have made.
+   *
+   * When the WHOLE batch request throws a non-retryable `FsError`, every job
+   * in it falls back to a single send, so one poisonous item can never cost
+   * its siblings more than it would have unbatched:
+   *  - 400/404: an API that predates the batch body shape (its validation
+   *    strips `photos` and 400s, or the route shape is unknown) — batching is
+   *    switched off for the cooldown so later ticks do not keep paying for a
+   *    doomed batch attempt first;
+   *  - 413: the body was over a size limit somewhere between here and the API
+   *    (typically a reverse proxy's body cap that sits between one photo and
+   *    a full batch). Fall back to single sends, no cooldown — it says nothing
+   *    about whether the API supports batches — but halve the byte budget
+   *    (`shrunkMaxBytes`) so later batches stop re-hitting the same ceiling.
+   *    Each 413 at least halves it, so the wasted doomed requests are
+   *    logarithmic in the configured budget, not one per tick; once it drops
+   *    below a photo's size every job simply goes on the single route;
+   *  - anything else non-retryable: fall back too, no cooldown, no shrink.
+   * A retryable failure (network, 5xx, 429) or a non-`FsError` fails every
+   * job into the normal retry path, exactly as a single send would.
+   */
+  private async flushChunk(
+    batch: UploadBatchOptions,
+    chunk: Array<{ job: OutboxJob; data: Uint8Array }>,
+  ): Promise<void> {
+    if (chunk.length === 0) return;
+
+    if (chunk.length === 1 || Date.now() < this.batchDisabledUntil) {
+      for (const { job, data } of chunk) await this.sendOneWithData(job, data);
+      return;
+    }
+
+    let outcomes: BatchUploadOutcome[];
+    try {
+      outcomes = await batch.client.uploadBatch(
+        chunk.map(({ job, data }) => this.toUploadInput(job, data)),
+      );
+    } catch (err) {
+      if (err instanceof FsError && !err.retryable) {
+        if (err.httpStatus === 400 || err.httpStatus === 404) {
+          this.batchDisabledUntil =
+            Date.now() + (batch.unsupportedCooldownMs ?? DEFAULT_BATCH_UNSUPPORTED_COOLDOWN_MS);
+        } else if (err.httpStatus === 413) {
+          const rejectedBytes = chunk.reduce((sum, { data }) => sum + data.byteLength, 0);
+          this.shrunkMaxBytes = Math.min(
+            this.shrunkMaxBytes,
+            Math.max(1, Math.floor(rejectedBytes / 2))
+          );
+        }
+        for (const { job, data } of chunk) await this.sendOneWithData(job, data);
+        return;
+      }
+      for (const { job } of chunk) this.handleFailure(job, err as Error);
+      return;
+    }
+
+    chunk.forEach(({ job }, i) => {
+      const outcome = outcomes[i];
+      if (outcome?.ok) {
+        try {
+          this.recordUploaded(job, outcome.result);
+        } catch (err) {
+          this.handleFailure(job, err as Error);
+        }
+        return;
+      }
+      // A missing outcome is treated as retryable (status 0), never as a
+      // silent success or a permanent failure.
+      this.handleFailure(
+        job,
+        outcome
+          ? outcome.error
+          : new FsError(0, FS_ERROR_CODES.NETWORK, 'missing batch outcome'),
+      );
+    });
+  }
+
+  private toUploadInput(job: OutboxJob, data: Uint8Array): UploadInput {
+    return {
       virtualPath: job.virtualPath,
       data,
       mimeType: job.mimeType,
@@ -160,6 +372,10 @@ export class UploadWorker {
       // see the comment on OutboxJob.visibility.
       visibility: job.visibility ?? undefined,
     };
+  }
+
+  private async upload(job: OutboxJob, data: Uint8Array): Promise<UploadResult> {
+    const input = this.toUploadInput(job, data);
     // Full-resolution captures always go chunked; derived artefacts are small
     // enough for a single request.
     return job.kind === 'raw'

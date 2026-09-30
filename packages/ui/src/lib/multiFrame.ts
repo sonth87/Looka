@@ -49,6 +49,26 @@ export function framesForWorkflow(workflow: CaptureWorkflow): FrameSpec[] {
   }));
 }
 
+/**
+ * Each step's LOGICAL camera role, read off the campaign's ORIGINAL workflow:
+ * `step.cameraRole ?? defaultCameraRoleForStepType(step.type)`, keyed by step id.
+ *
+ * Must be taken from the workflow BEFORE simultaneous-capture round planning
+ * runs — `buildRoundPlan` rewrites every step's `cameraRole` to the physical
+ * camera that ends up serving it (CENTER for every step on a one-camera kiosk),
+ * so the prepared workflow can no longer say which display slot a step belongs
+ * to. Deriving it from `step.type` alone is not enough either: a workflow built
+ * from the CMS angle catalog types every step `CUSTOM` (the angle lives in
+ * `angleCode`/`cameraRole`), which the type default maps to CENTER for all of
+ * them — the extended display then treated every frame as the center camera
+ * and ignored its per-camera visibility settings.
+ */
+export function logicalRolesByStepId(workflow: CaptureWorkflow): Map<string, CameraRole> {
+  return new Map(
+    workflow.steps.map((step) => [step.id, step.cameraRole ?? defaultCameraRoleForStepType(step.type)])
+  );
+}
+
 /** A frame plus whether its role currently resolves to a connected physical camera. */
 export interface FrameReadiness extends FrameSpec {
   deviceId: string | null;

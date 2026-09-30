@@ -40,6 +40,15 @@ export const MAX_PHOTO_BYTES = 12 * 1024 * 1024;
 export const ALLOWED_PHOTO_MIME_TYPES = ['image/jpeg', 'image/png'];
 
 /**
+ * Most photos one `POST /v1/devices/photos` batch (`{ photos: [...] }`) may
+ * carry. This is a sanity bound on the loop, not the real ceiling — that is
+ * `main.ts`'s 25mb JSON body limit (each photo travels as a base64 data URL,
+ * up to ~16MB for a `MAX_PHOTO_BYTES` capture), which a well-behaved kiosk
+ * stays under with its own 16 MiB-raw-per-batch budget.
+ */
+export const MAX_DEVICE_PHOTOS_PER_REQUEST = 20;
+
+/**
  * Largest kiosk video accepted, before base64 expansion (2026-09-09, "route
  * kiosk video uploads through apps/api" — see `AddDeviceVideoDto`/
  * `SessionVideoService.addDeviceVideo`). Real recordings are 600KB-3MB

@@ -127,7 +127,39 @@ export interface CbHelpPublishState {
    */
   cameraRoleMapping?: Record<string, string>;
   connectedDeviceIds?: string[];
+  /**
+   * Multi-shot capture (the CENTER camera can be shot more than once) — how
+   * many photos the center step has taken, which one is currently selected,
+   * and a small thumbnail of each so the extended display can show the whole
+   * set and highlight the selection. `stepId` is the workflow step the shots
+   * belong to (the renderer attaches the badge to THAT frame, not to
+   * whichever frame happens to have `role === 'CENTER'`). `null`/absent when
+   * the feature is off or there is nothing to show.
+   */
+  centerShots?: CbHelpCenterShots | null;
 }
+
+/** See `CbHelpPublishState.centerShots`. */
+export interface CbHelpCenterShots {
+  stepId: string;
+  count: number;
+  selectedIndex: number;
+  /** `thumbnails[i]` is shot `i`'s preview; `''` means "no usable preview" (drawn as a blank tile), so positions always line up with the shots. */
+  thumbnails: string[];
+}
+
+/**
+ * Upper bound on how many center shots (and so thumbnails) a snapshot may
+ * describe — a malformed/hostile payload must not be able to make this window
+ * decode an unbounded list of images, nor build an unbounded list of strip
+ * tiles from `count` alone (the renderer draws one tile per `count`, whether
+ * or not a thumbnail exists for it). Comfortably above the kiosk's own
+ * `MAX_CENTER_SHOTS` (10, in packages/ui).
+ */
+const MAX_CENTER_SHOT_THUMBNAILS = 20;
+
+/** Longest thumbnail data URL kept, in characters. A real one is a ~320px JPEG (tens of KB); anything past this is not a preview and would only bloat every heartbeat's IPC clone. */
+const MAX_CENTER_SHOT_THUMBNAIL_CHARS = 512 * 1024;
 
 const EMPTY_CBHELP_STATE: CbHelpPublishState = {
   running: false,
@@ -141,6 +173,7 @@ const EMPTY_CBHELP_STATE: CbHelpPublishState = {
   centerPreviewDataUrl: null,
   errorMessage: null,
   thankYou: null,
+  centerShots: null,
 };
 
 let cbHelpState: CbHelpPublishState = EMPTY_CBHELP_STATE;
@@ -200,7 +233,40 @@ export function sanitizeCbHelpState(raw: unknown): CbHelpPublishState {
     connectedDeviceIds: Array.isArray(payload?.connectedDeviceIds)
       ? payload!.connectedDeviceIds.filter((id): id is string => typeof id === 'string')
       : [],
+    centerShots: sanitizeCenterShots(payload?.centerShots),
   };
+}
+
+/**
+ * `stepId` must be a string and `count` a whole number in
+ * `[1, MAX_CENTER_SHOT_THUMBNAILS]`, otherwise the whole field is dropped
+ * (`null`) rather than half-trusted. `selectedIndex` is clamped into
+ * `[0, count)`; `thumbnails` is at most `MAX_CENTER_SHOT_THUMBNAILS` long and
+ * keeps its POSITIONS: `thumbnails[i]` belongs to shot `i`, so an entry that
+ * is not an image data URL (or is oversized) becomes `''` — which the
+ * renderer draws as a blank tile — instead of being dropped, which would
+ * shift every later thumbnail onto the wrong shot. Only image data URLs pass,
+ * so this window is never handed an arbitrary URL to fetch.
+ */
+export function sanitizeCenterShots(raw: unknown): CbHelpCenterShots | null {
+  const c = raw as Partial<CbHelpCenterShots> | null | undefined;
+  if (!c || typeof c !== 'object') return null;
+  if (typeof c.stepId !== 'string') return null;
+  if (typeof c.count !== 'number' || !Number.isInteger(c.count) || c.count < 1 || c.count > MAX_CENTER_SHOT_THUMBNAILS) {
+    return null;
+  }
+
+  const rawIndex = typeof c.selectedIndex === 'number' && Number.isFinite(c.selectedIndex) ? Math.trunc(c.selectedIndex) : 0;
+  const selectedIndex = Math.min(Math.max(rawIndex, 0), c.count - 1);
+  const thumbnails = Array.isArray(c.thumbnails)
+    ? c.thumbnails
+        .slice(0, MAX_CENTER_SHOT_THUMBNAILS)
+        .map((t) =>
+          typeof t === 'string' && t.startsWith('data:image/') && t.length <= MAX_CENTER_SHOT_THUMBNAIL_CHARS ? t : ''
+        )
+    : [];
+
+  return { stepId: c.stepId, count: c.count, selectedIndex, thumbnails };
 }
 
 /** Every field is a plain string coming straight from `lookupStudent()`'s test data — reject the whole object if any is missing rather than showing a half-blank greeting. */

@@ -30,15 +30,25 @@ interface UploadedMulterFile {
   originalname: string;
 }
 
-type ResultFieldKey = 'subjectCode' | 'printStatus' | 'errorReason';
+type ResultFieldKey =
+  'subjectCode' | 'printStatus' | 'errorReason' | 'cardCode';
 
 /** Same header-matching mechanism `CampaignSubjectService.parseWorkbook` uses for roster uploads — duplicated (not imported) since `print` must not depend on `device-management` for one small string-normalization helper (module-boundary convention this whole codebase follows, see `1818000000000-Print.ts`'s own top comment). */
 const HEADER_ALIASES: Record<ResultFieldKey, string[]> = {
   subjectCode: ['Mã SV', 'MSSV', 'Mã số SV', 'Mã số sinh viên'],
   printStatus: ['Tình trạng', 'Tình trạng in', 'Trạng thái', 'Kết quả'],
   errorReason: ['Lỗi', 'Lý do', 'Lý do lỗi', 'Ghi chú'],
+  cardCode: ['Mã thẻ', 'Số thẻ', 'Mã số thẻ'],
 };
+/**
+ * `cardCode` is deliberately NOT required: `danh-sach-in.xlsx` files exported
+ * before the "Mã thẻ" column existed (and print shops that simply don't
+ * report card codes) must keep importing exactly as they always did.
+ */
 const REQUIRED_FIELDS: ResultFieldKey[] = ['subjectCode', 'printStatus'];
+
+/** `print_items.card_code` / `campaign_subjects.card_code` are `varchar(64)` — a longer value is rejected per row, never silently truncated. */
+const CARD_CODE_MAX_LENGTH = 64;
 
 /**
  * Only items that were actually handed off for physical printing may be
@@ -160,6 +170,25 @@ interface ParsedResultRow {
   subjectCode: string | null;
   printStatus: string | null;
   errorReason: string | null;
+  /** Trimmed "Mã thẻ" cell text; `null` when the column is absent or the cell is empty. Length is validated later, per row, in `importResults`. */
+  cardCode: string | null;
+}
+
+/**
+ * Renders a numeric xlsx cell as plain digits. Excel hands a numeric card
+ * code back as a JS number (e.g. `123456`); `String(n)` is already fine for
+ * that (never a trailing `.0`), but flips to exponent notation from 1e21 up
+ * (and for tiny fractions) — which would silently corrupt a long numeric
+ * code. Leading zeros can only survive when the cell is stored as TEXT —
+ * that is why the exported `Mã thẻ` column is pre-formatted as Text.
+ */
+function numberToPlainString(n: number): string {
+  if (Number.isInteger(n)) return BigInt(n).toString();
+  if (!Number.isFinite(n)) return String(n);
+  return n.toLocaleString('en-US', {
+    useGrouping: false,
+    maximumFractionDigits: 20,
+  });
 }
 
 /** `classifyStatus`'s three outcomes — `UNKNOWN` (an unrecognized status word) is deliberately never guessed into either PRINTED or FAILED (same "không bao giờ suy luận" spirit BA #14 states for `printedAt`) — it is reported alongside unmatched rows instead. */
@@ -211,6 +240,29 @@ function classifyStatus(raw: string | null): StatusOutcome {
  * `RETURNING`) is walked back out of `printedCount`/`failedCount` and
  * reported exactly like any other rejected row (`RACE_LOST_REASON`) —
  * counts always reflect what was actually WRITTEN, never merely planned.
+ *
+ * "Mã thẻ" (card code, optional `Mã thẻ` column — see `HEADER_ALIASES`):
+ * - "Đã in" + a code on an EXPORTED item → PRINTED as always AND the code is
+ *   stored on the print item (and on `campaign_subjects.card_code`, the
+ *   student's latest card) in the SAME guarded UPDATE/transaction.
+ * - "Đã in" with no code → PRINTED as always, `card_code` stays null (the
+ *   code is never required).
+ * - "Đã in" on an already-PRINTED item stays an idempotent no-op (no stock,
+ *   no stats, no event), with ONE exception: a non-empty code that differs
+ *   from the stored one (including stored null) updates ONLY the card code
+ *   — guarded by `status = 'PRINTED' AND batch_id = $N AND card_code IS NOT
+ *   DISTINCT FROM <snapshot value>` (optimistic concurrency, so the event's
+ *   from→to note is always truthful) — and writes one `RESULT_UPLOAD` event.
+ *   A same code (or no code) is a pure no-op.
+ * - "In thất bại": any code on the row is IGNORED, never stored.
+ * - A code longer than `CARD_CODE_MAX_LENGTH` rejects that ("Đã in") row with
+ *   a Vietnamese reason — never truncated.
+ * - Counters: every accepted "Đã in" row counts in `printedRows` (a code-only
+ *   update included — same bucket the pre-existing idempotent re-listed rows
+ *   already use: "rows whose reported outcome was printed and that weren't
+ *   rejected", NOT "cards that just transitioned"); `matchedRows` and
+ *   `unmatchedRows` keep their existing meaning. No new persisted bucket.
+ * - No uniqueness is enforced on card codes (open business question).
  */
 @Injectable()
 export class PrintResultImportService {
@@ -311,6 +363,8 @@ export class PrintResultImportService {
       | {
           item: PrintItem;
           outcome: 'PRINTED';
+          /** Validated, trimmed "Mã thẻ" from this row — `null` = none reported. */
+          cardCode: string | null;
           rowNo: number;
           subjectCode: string | null;
         }
@@ -371,19 +425,38 @@ export class PrintResultImportService {
       matched++;
       const outcome = classifyStatus(row.printStatus);
       if (outcome === 'PRINTED') {
-        // Idempotent by construction, not a special case here: an
-        // already-PRINTED item re-listed as "Đã in" (a cumulative sheet
-        // re-including an old row) is set again below, but the write-time
-        // `status = 'EXPORTED'` guard on the UPDATE (see the transaction)
-        // simply never selects it — no re-decrement, no duplicate event,
-        // `printedCount` still counts it as a normal successful row. This is
-        // the ONE case where the write not touching a row is expected, not a
-        // race — everything else in `printedItems` is snapshotted EXPORTED
-        // here and is reconciled against what the UPDATE actually touched.
+        // A code that can't fit the column is rejected for THIS row (never
+        // truncated — a silently cut-off card code would be a wrong code).
+        // Counted like the "unrecognized status" rows below: matched (the
+        // code was found) AND unmatched (nothing done with it). Only
+        // "Đã in" rows can reach here, so a too-long code on an
+        // "In thất bại" row — where the code is ignored anyway — never
+        // rejects that row. Length is measured in code points, matching
+        // Postgres' `varchar(n)`, not in UTF-16 units.
+        const cardCode = row.cardCode?.trim() || null;
+        const cardCodeLength = cardCode ? Array.from(cardCode).length : 0;
+        if (cardCodeLength > CARD_CODE_MAX_LENGTH) {
+          unmatched++;
+          reportRows.push({
+            rowNo: row.rowNo,
+            subjectCode: row.subjectCode,
+            reason: `Mã thẻ quá dài (${cardCodeLength} ký tự, tối đa ${CARD_CODE_MAX_LENGTH}) — dòng bị từ chối, không lưu gì`,
+          });
+          continue;
+        }
+        // An already-PRINTED item re-listed as "Đã in" (a cumulative sheet
+        // re-including an old row) is split out below into either a pure
+        // no-op (same/no code — the write never touches it: no re-decrement,
+        // no duplicate event, `printedCount` still counts it as a normal
+        // successful row) or a card-code-only update (a different non-empty
+        // code). Everything else in `printedItems` is snapshotted EXPORTED
+        // here and is reconciled against what the guarded UPDATE actually
+        // touched.
         printedCount++;
         outcomeByItemId.set(item.id, {
           item,
           outcome: 'PRINTED',
+          cardCode,
           rowNo: row.rowNo,
           subjectCode: row.subjectCode,
         });
@@ -422,8 +495,28 @@ export class PrintResultImportService {
       }
     }
 
+    /**
+     * "Đã in" rows on items snapshotted EXPORTED — the guarded
+     * EXPORTED → PRINTED transition. `cardCode` is whatever this row
+     * reported (null = none); stored in that same UPDATE.
+     */
     const printedItems: Array<{
       item: PrintItem;
+      cardCode: string | null;
+      rowNo: number;
+      subjectCode: string | null;
+    }> = [];
+    /**
+     * "Đã in" rows on items snapshotted ALREADY PRINTED that carry a non-empty
+     * card code differing from the stored one (`item.cardCode`, including
+     * null) — the ONE exception to the "already printed → no-op" rule; only
+     * `card_code` is written, never status/stock/stats. A same code, or no
+     * code, on an already-printed item never makes it into this list (pure
+     * no-op — it was still counted in `printedCount` at planning time).
+     */
+    const cardCodeUpdates: Array<{
+      item: PrintItem;
+      cardCode: string;
       rowNo: number;
       subjectCode: string | null;
     }> = [];
@@ -435,13 +528,26 @@ export class PrintResultImportService {
       subjectCode: string | null;
     }> = [];
     for (const entry of outcomeByItemId.values()) {
-      if (entry.outcome === 'PRINTED')
-        printedItems.push({
-          item: entry.item,
-          rowNo: entry.rowNo,
-          subjectCode: entry.subjectCode,
-        });
-      else
+      if (entry.outcome === 'PRINTED') {
+        if (entry.item.status !== 'PRINTED') {
+          printedItems.push({
+            item: entry.item,
+            cardCode: entry.cardCode,
+            rowNo: entry.rowNo,
+            subjectCode: entry.subjectCode,
+          });
+        } else if (
+          entry.cardCode &&
+          entry.cardCode !== (entry.item.cardCode ?? null)
+        ) {
+          cardCodeUpdates.push({
+            item: entry.item,
+            cardCode: entry.cardCode,
+            rowNo: entry.rowNo,
+            subjectCode: entry.subjectCode,
+          });
+        }
+      } else
         failedItems.push({
           item: entry.item,
           message: entry.message,
@@ -473,30 +579,39 @@ export class PrintResultImportService {
           // stamped as this batch's own PRINTED count. `UPDATE ...
           // RETURNING` here returns a `[rows, affectedCount]` tuple, same
           // rule `PrintItemService.bulkUpdateTemplate` documents.
+          //
+          // Card codes travel as a parallel `text[]` (aligned with `ids`,
+          // `null` = none reported) zipped in via a multi-argument
+          // `unnest(...)` — one row per item, in ONE guarded statement, so
+          // the code is stored atomically with the status change and can
+          // never land on an item this UPDATE didn't actually transition.
+          // `COALESCE(v.card_code, pi.card_code)` never blanks a code that
+          // is somehow already there.
+          const cardCodes = printedItems.map((p) => p.cardCode);
           const [updatedRows]: [Array<{ id: string }>, number] =
             await manager.query(
-              `UPDATE print_items
-                SET status = 'PRINTED', printed_at = COALESCE(printed_at, $3), error_message = NULL, updated_at = now()
-              WHERE id = ANY($1) AND batch_id = $2 AND status = 'EXPORTED'
-              RETURNING id`,
-              [ids, batchId, now],
+              `UPDATE print_items AS pi
+                SET status = 'PRINTED', printed_at = COALESCE(pi.printed_at, $3), card_code = COALESCE(v.card_code, pi.card_code), error_message = NULL, updated_at = now()
+               FROM unnest($1::uuid[], $4::text[]) AS v(id, card_code)
+              WHERE pi.id = v.id AND pi.batch_id = $2 AND pi.status = 'EXPORTED'
+              RETURNING pi.id`,
+              [ids, batchId, now, cardCodes],
             );
           const updatedIds = new Set(updatedRows.map((r) => r.id));
-          const newlyPrintedItems = printedItems
-            .filter((p) => updatedIds.has(p.item.id))
-            .map((p) => p.item);
+          const newlyPrinted = printedItems.filter((p) =>
+            updatedIds.has(p.item.id),
+          );
+          const newlyPrintedItems = newlyPrinted.map((p) => p.item);
 
-          // Rows NOT touched by the guarded UPDATE, split into the ONE
-          // expected case (already PRINTED at snapshot time — the idempotent
-          // no-op the loop above already anticipated) vs a genuine race:
-          // snapshotted EXPORTED, but something else moved it before this
-          // write landed. Only the latter is a real error — it must not
-          // silently vanish from the counts (`printedCount` was optimistically
-          // incremented for it above) nor be dropped from the report.
+          // Every entry in `printedItems` was snapshotted EXPORTED (an
+          // already-PRINTED item never gets here — see the split above), so
+          // anything the guarded UPDATE didn't touch lost a genuine race:
+          // something else moved it before this write landed. It must not
+          // silently vanish from the counts (`printedCount` was
+          // optimistically incremented for it above) nor be dropped from the
+          // report.
           for (const p of printedItems) {
-            if (updatedIds.has(p.item.id) || p.item.status === 'PRINTED') {
-              continue;
-            }
+            if (updatedIds.has(p.item.id)) continue;
             printedCount--;
             unmatched++;
             reportRows.push({
@@ -506,17 +621,19 @@ export class PrintResultImportService {
             });
           }
 
-          if (newlyPrintedItems.length) {
+          if (newlyPrinted.length) {
             await manager.save(
               PrintItemEvent,
-              newlyPrintedItems.map((item) =>
+              newlyPrinted.map(({ item, cardCode }) =>
                 this.events.create({
                   itemId: item.id,
                   fromStatus: item.status,
                   toStatus: 'PRINTED',
                   source: 'RESULT_UPLOAD',
                   actorUserId: uploadedByUserId,
-                  message: 'Xác nhận đã in (upload file kết quả)',
+                  message: cardCode
+                    ? `Xác nhận đã in (upload file kết quả) — mã thẻ: ${cardCode}`
+                    : 'Xác nhận đã in (upload file kết quả)',
                 }),
               ),
             );
@@ -525,18 +642,30 @@ export class PrintResultImportService {
             // — see `campaign_subjects.printedAt`'s own doc comment). Grouped
             // by campaign since one print batch's items can span more than
             // one. `COALESCE` for the same double-upload reason as above.
-            const codesByCampaign = new Map<string, string[]>();
-            for (const item of newlyPrintedItems) {
-              const list = codesByCampaign.get(item.campaignId) ?? [];
-              list.push(item.subjectCode);
-              codesByCampaign.set(item.campaignId, list);
+            // `card_code` is set to exactly this card's code (null when none
+            // was reported — NOT COALESCEd) so it always describes the same
+            // card `printed_batch_id` is being re-pointed at, never a stale
+            // code from an earlier print of the same student.
+            const rosterByCampaign = new Map<
+              string,
+              { codes: string[]; cardCodes: Array<string | null> }
+            >();
+            for (const { item, cardCode } of newlyPrinted) {
+              const entry = rosterByCampaign.get(item.campaignId) ?? {
+                codes: [],
+                cardCodes: [],
+              };
+              entry.codes.push(item.subjectCode);
+              entry.cardCodes.push(cardCode);
+              rosterByCampaign.set(item.campaignId, entry);
             }
-            for (const [campaignId, codes] of codesByCampaign) {
+            for (const [campaignId, entry] of rosterByCampaign) {
               await manager.query(
-                `UPDATE campaign_subjects
-                  SET printed_at = COALESCE(printed_at, now()), printed_batch_id = $3, updated_at = now()
-                WHERE campaign_id = $1 AND subject_code = ANY($2) AND status = 'VALID'`,
-                [campaignId, codes, batchId],
+                `UPDATE campaign_subjects AS cs
+                  SET printed_at = COALESCE(cs.printed_at, now()), printed_batch_id = $3, card_code = v.card_code, updated_at = now()
+                 FROM unnest($2::text[], $4::text[]) AS v(subject_code, card_code)
+                WHERE cs.campaign_id = $1 AND cs.subject_code = v.subject_code AND cs.status = 'VALID'`,
+                [campaignId, entry.codes, batchId, entry.cardCodes],
               );
             }
 
@@ -565,6 +694,99 @@ export class PrintResultImportService {
                 item.campaignId,
                 printerId,
                 now,
+              );
+            }
+          }
+        }
+
+        if (cardCodeUpdates.length) {
+          // Card-code-only update on already-PRINTED items — NEVER touches
+          // status/printed_at/stock/stats. Own guard: `status = 'PRINTED' AND
+          // batch_id = $2`, PLUS `card_code IS NOT DISTINCT FROM <the value
+          // read at snapshot time>` (optimistic concurrency): the UPDATE only
+          // lands if the stored code is still what the plan was built from,
+          // so a concurrent upload that changed it in the meantime is
+          // reported as a lost race instead of being overwritten, and the
+          // event's from→to note below is always truthful. `IS NOT DISTINCT
+          // FROM` (not `=`) because the stored value is usually NULL.
+          // Same `[rows, affectedCount]` tuple rule as the UPDATEs above.
+          const [changedRows]: [Array<{ id: string }>, number] =
+            await manager.query(
+              `UPDATE print_items AS pi
+                SET card_code = v.card_code, updated_at = now()
+               FROM unnest($1::uuid[], $3::text[], $4::text[]) AS v(id, card_code, old_card_code)
+              WHERE pi.id = v.id AND pi.batch_id = $2 AND pi.status = 'PRINTED'
+                AND pi.card_code IS NOT DISTINCT FROM v.old_card_code
+              RETURNING pi.id`,
+              [
+                cardCodeUpdates.map((u) => u.item.id),
+                batchId,
+                cardCodeUpdates.map((u) => u.cardCode),
+                cardCodeUpdates.map((u) => u.item.cardCode ?? null),
+              ],
+            );
+          const changedIds = new Set(changedRows.map((r) => r.id));
+          const changed = cardCodeUpdates.filter((u) =>
+            changedIds.has(u.item.id),
+          );
+
+          // Same reconciliation as the PRINTED branch: `printedCount` counted
+          // this row optimistically at planning time, so a row whose guarded
+          // write didn't land is walked back out into an error.
+          for (const u of cardCodeUpdates) {
+            if (changedIds.has(u.item.id)) continue;
+            printedCount--;
+            unmatched++;
+            reportRows.push({
+              rowNo: u.rowNo,
+              subjectCode: u.subjectCode,
+              reason: RACE_LOST_REASON,
+            });
+          }
+
+          if (changed.length) {
+            await manager.save(
+              PrintItemEvent,
+              changed.map(({ item, cardCode }) =>
+                this.events.create({
+                  itemId: item.id,
+                  fromStatus: 'PRINTED',
+                  toStatus: 'PRINTED',
+                  source: 'RESULT_UPLOAD',
+                  actorUserId: uploadedByUserId,
+                  message: item.cardCode
+                    ? `Cập nhật mã thẻ (upload file kết quả): "${item.cardCode}" → "${cardCode}"`
+                    : `Ghi nhận mã thẻ (upload file kết quả): (chưa có) → "${cardCode}"`,
+                }),
+              ),
+            );
+
+            // The student's "latest card code" — only when THIS batch is
+            // still the one their latest print points at
+            // (`printed_batch_id = $3`); if a newer print of the same
+            // student has since re-pointed it, this older card's corrected
+            // code must not overwrite the newer card's.
+            const rosterByCampaign = new Map<
+              string,
+              { codes: string[]; cardCodes: string[] }
+            >();
+            for (const { item, cardCode } of changed) {
+              const entry = rosterByCampaign.get(item.campaignId) ?? {
+                codes: [],
+                cardCodes: [],
+              };
+              entry.codes.push(item.subjectCode);
+              entry.cardCodes.push(cardCode);
+              rosterByCampaign.set(item.campaignId, entry);
+            }
+            for (const [campaignId, entry] of rosterByCampaign) {
+              await manager.query(
+                `UPDATE campaign_subjects AS cs
+                  SET card_code = v.card_code, updated_at = now()
+                 FROM unnest($2::text[], $4::text[]) AS v(subject_code, card_code)
+                WHERE cs.campaign_id = $1 AND cs.subject_code = v.subject_code
+                  AND cs.status = 'VALID' AND cs.printed_batch_id = $3`,
+                [campaignId, entry.codes, batchId, entry.cardCodes],
               );
             }
           }
@@ -816,13 +1038,14 @@ export class PrintResultImportService {
     return this.toDao(row);
   }
 
-  /** Same 3 result-related column headers `PrintPackageService`'s own `danh-sach-in.xlsx` export uses (`Mã SV`/`Tình trạng`/`Lý do`), so a fresh template and the real export stay interchangeable through `parseWorkbook`'s `HEADER_ALIASES`. */
+  /** Same 4 result-related column headers `PrintPackageService`'s own `danh-sach-in.xlsx` export uses (`Mã SV`/`Tình trạng`/`Mã thẻ`/`Lý do`), so a fresh template and the real export stay interchangeable through `parseWorkbook`'s `HEADER_ALIASES`. `Mã thẻ` cells are pre-formatted as Text so a code typed with leading zeros survives the upload (see `numberToPlainString`). */
   async buildTemplate(): Promise<Buffer> {
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Ket qua in');
-    sheet.addRow(['Mã SV', 'Tình trạng', 'Lý do']);
-    sheet.addRow(['SV001', 'Đã in', '']);
-    sheet.addRow(['SV002', 'In thất bại', 'Kẹt giấy']);
+    sheet.addRow(['Mã SV', 'Tình trạng', 'Mã thẻ', 'Lý do']);
+    sheet.addRow(['SV001', 'Đã in', 'TH0001', '']);
+    sheet.addRow(['SV002', 'In thất bại', '', 'Kẹt giấy']);
+    sheet.getColumn(3).numFmt = '@';
     return Buffer.from(await workbook.xlsx.writeBuffer());
   }
 
@@ -905,6 +1128,7 @@ export class PrintResultImportService {
         subjectCode,
         printStatus,
         errorReason: get('errorReason'),
+        cardCode: get('cardCode'),
       });
     }
     return rows;
@@ -912,12 +1136,26 @@ export class PrintResultImportService {
 
   private cellToString(value: ExcelJS.CellValue): string | null {
     if (value == null) return null;
+    if (typeof value === 'number') return numberToPlainString(value);
     if (typeof value === 'object') {
       if (value instanceof Date) return value.toISOString();
+      // A cell with mixed-format runs comes back as `{ richText: [...] }` —
+      // without this it would read as empty (a card code / status typed into
+      // such a cell would be silently dropped).
+      if ('richText' in value) {
+        return (
+          value.richText
+            .map((run) => run.text)
+            .join('')
+            .trim() || null
+        );
+      }
       if ('text' in value)
         return String((value as { text: unknown }).text).trim() || null;
       if ('result' in value) {
-        return String((value as { result: unknown }).result).trim() || null;
+        const result = (value as { result: unknown }).result;
+        if (typeof result === 'number') return numberToPlainString(result);
+        return String(result).trim() || null;
       }
       return null;
     }

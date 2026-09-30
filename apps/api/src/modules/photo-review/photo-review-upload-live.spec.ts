@@ -17,6 +17,7 @@ import { PhotoReviewEvent } from './entities/photo-review-event.entity';
 import { PhotoVariant } from './entities/photo-variant.entity';
 import { SubjectPhotoSet } from './entities/subject-photo-set.entity';
 import {
+  AI_EDIT_BACKGROUND_QUEUE_NAME,
   AI_EDIT_QUEUE_NAME,
   AiEditJobKind,
   PHOTO_REVIEW_ERROR_CODE,
@@ -96,7 +97,15 @@ describeDb('photo-review uploadVariant/acceptVariant (live)', () => {
   let workflowCatalog: {
     getVersionRef: jest.Mock;
   };
+  let reviewStats: {
+    recordAutoFailed: jest.Mock;
+    recordAiRequested: jest.Mock;
+    recordAiAccepted: jest.Mock;
+    recordUploaded: jest.Mock;
+    recordDecision: jest.Mock;
+  };
   let aiEditQueue: { add: jest.Mock };
+  let aiEditBackgroundQueue: { add: jest.Mock };
   const apiBaseUrl = 'http://localhost:3100';
 
   const tinyJpeg = () =>
@@ -144,7 +153,7 @@ describeDb('photo-review uploadVariant/acceptVariant (live)', () => {
       assertInScope: jest.fn().mockResolvedValue(undefined),
       buildScopeFilter: jest.fn().mockResolvedValue(null),
     };
-    const reviewStats = {
+    reviewStats = {
       recordAutoFailed: jest.fn().mockResolvedValue(undefined),
       recordAiRequested: jest.fn().mockResolvedValue(undefined),
       recordAiAccepted: jest.fn().mockResolvedValue(undefined),
@@ -165,7 +174,28 @@ describeDb('photo-review uploadVariant/acceptVariant (live)', () => {
     workflowCatalog = {
       getVersionRef: jest.fn().mockResolvedValue(null),
     };
-    aiEditQueue = { add: jest.fn().mockResolvedValue(undefined) };
+    // `getJob`/`getJobs`/`remove` mocked too (2026-09-29,
+    // priority-preemption rework) — `promoteToUserLane`/
+    // `requeueStuckAiEditVariants` call them; unused by this file's own
+    // tests today but kept so a code path that starts touching them fails
+    // loudly with a real assertion, not a generic "undefined is not a
+    // function".
+    aiEditQueue = {
+      add: jest.fn().mockResolvedValue(undefined),
+      getJob: jest.fn().mockResolvedValue(undefined),
+      getJobs: jest.fn().mockResolvedValue([]),
+      remove: jest.fn().mockResolvedValue(0),
+    } as unknown as { add: jest.Mock };
+    // Background lane (2026-09-29, priority-preemption rework) — a
+    // `reprocess()` call with no explicit `origin` argument defaults to
+    // `AiEditJobOrigin.AUTO`, which enqueues here instead of `aiEditQueue`;
+    // `runQueuedJob` below searches both.
+    aiEditBackgroundQueue = {
+      add: jest.fn().mockResolvedValue(undefined),
+      getJob: jest.fn().mockResolvedValue(undefined),
+      getJobs: jest.fn().mockResolvedValue([]),
+      remove: jest.fn().mockResolvedValue(0),
+    } as unknown as { add: jest.Mock };
 
     const built = await Test.createTestingModule({
       imports: [
@@ -205,6 +235,10 @@ describeDb('photo-review uploadVariant/acceptVariant (live)', () => {
           provide: getQueueToken(AI_EDIT_QUEUE_NAME),
           useValue: aiEditQueue,
         },
+        {
+          provide: getQueueToken(AI_EDIT_BACKGROUND_QUEUE_NAME),
+          useValue: aiEditBackgroundQueue,
+        },
       ],
     }).compile();
 
@@ -234,8 +268,10 @@ describeDb('photo-review uploadVariant/acceptVariant (live)', () => {
     sidecar.cardPhoto.mockClear();
     sidecar.identitySimilarity.mockClear();
     aiImageEdit.edit.mockClear();
+    reviewStats.recordAutoFailed.mockClear();
     workflowCatalog.getVersionRef.mockClear();
     aiEditQueue.add.mockClear();
+    aiEditBackgroundQueue.add.mockClear();
   });
 
   afterEach(async () => {
@@ -266,20 +302,27 @@ describeDb('photo-review uploadVariant/acceptVariant (live)', () => {
   });
 
   /**
-   * `aiEdit()`/`reprocess()` now only enqueue onto the `ai-edit` BullMQ
-   * queue (`aiEditQueue`, mocked above) instead of running the real
-   * `/edit`/sidecar call inline — 2026-09-29 ("đẩy vào queue, lock lại chỉ
-   * cho 1 tiến trình chạy", later "sử dụng bullmq ... tạo 1 processor để
-   * xử lý"). This finds the most recent `.add()` call queued for
-   * `variantId` and runs the same `PhotoReviewService.process*Job` method
-   * `AiEditProcessor` would eventually call, synchronously, so tests can
-   * assert on the FINAL (READY/FAILED) state without a real Redis worker
-   * loop.
+   * `aiEdit()`/`reprocess()` now only enqueue onto one of the two AI-edit
+   * BullMQ queues (`aiEditQueue`/`aiEditBackgroundQueue`, mocked above)
+   * instead of running the real `/edit`/sidecar call inline — 2026-09-29
+   * ("đẩy vào queue, lock lại chỉ cho 1 tiến trình chạy", later "sử dụng
+   * bullmq ... tạo 1 processor để xử lý", same day reworked again for
+   * user-priority preemption into 2 queues). This finds the most recent
+   * `.add()` call (across BOTH queues — which lane a job lands on depends
+   * on the caller's `origin`, e.g. a plain `reprocess(setId, null, url)`
+   * with no explicit origin defaults to `AUTO` → the background queue)
+   * queued for `variantId` and runs `PhotoReviewService.runQueuedAiEditJob`
+   * — the same dispatch `AiEditProcessor`/`AiEditBackgroundProcessor` would
+   * eventually call — synchronously, so tests can assert on the FINAL
+   * (DONE/PENDING/FAILED) state without a real Redis worker loop.
    */
   async function runQueuedJob(variantId: string): Promise<void> {
-    const calls = aiEditQueue.add.mock.calls as Array<
-      [AiEditJobKind, AiEditJobData]
-    >;
+    const calls = [
+      ...(aiEditQueue.add.mock.calls as Array<[AiEditJobKind, AiEditJobData]>),
+      ...(aiEditBackgroundQueue.add.mock.calls as Array<
+        [AiEditJobKind, AiEditJobData]
+      >),
+    ];
     const call = [...calls]
       .reverse()
       .find(([, data]) => data.variantId === variantId);
@@ -287,11 +330,7 @@ describeDb('photo-review uploadVariant/acceptVariant (live)', () => {
       throw new Error(`no ai-edit queue job found for variant ${variantId}`);
     }
     const [kind, data] = call;
-    if (kind === AiEditJobKind.REPROCESS) {
-      await service.processReprocessJob(data.setId, variantId);
-    } else {
-      await service.processAiEditJob(data.setId, variantId, data.payload ?? {});
-    }
+    await service.runQueuedAiEditJob(kind, data);
   }
 
   /**
@@ -345,7 +384,7 @@ describeDb('photo-review uploadVariant/acceptVariant (live)', () => {
         setId,
         PhotoVariantKind.CARD_AUTO,
         photoId,
-        PhotoVariantStatus.READY,
+        PhotoVariantStatus.DONE,
       ],
     );
     await dataSource.query(
@@ -377,7 +416,7 @@ describeDb('photo-review uploadVariant/acceptVariant (live)', () => {
       );
 
       expect(result.variant.kind).toBe(PhotoVariantKind.CARD_UPLOAD);
-      expect(result.variant.status).toBe(PhotoVariantStatus.READY);
+      expect(result.variant.status).toBe(PhotoVariantStatus.DONE);
       expect(result.identitySimilarity).toBeCloseTo(0.92, 5);
       expect(result.identityWarning).toBe(false); // 0.92 is above the 0.85 warn threshold
 
@@ -563,7 +602,7 @@ describeDb('photo-review uploadVariant/acceptVariant (live)', () => {
       // photo_variants.status is still READY (set by uploadVariant()
       // itself, before any of this ran) and fs_file_id/fs_status are BOTH
       // still null, exactly as if nothing had ever gone wrong.
-      expect(variantRow[0].status).toBe(PhotoVariantStatus.READY);
+      expect(variantRow[0].status).toBe(PhotoVariantStatus.DONE);
       expect(variantRow[0].fs_file_id).toBeNull();
       expect(variantRow[0].fs_status).toBeNull();
 
@@ -573,7 +612,7 @@ describeDb('photo-review uploadVariant/acceptVariant (live)', () => {
       // (resolveVariantViewSource's 'local' branch), completely
       // indistinguishable from a variant that reached fs-core just fine.
       const dao = await service.getJob(result.variant.id, apiBaseUrl, null);
-      expect(dao.status).toBe(PhotoVariantStatus.READY);
+      expect(dao.status).toBe(PhotoVariantStatus.DONE);
       expect(dao.viewUrl).toBeTruthy();
       expect(dao.viewUrl).toContain('/local-content');
     }, 30_000);
@@ -605,7 +644,7 @@ describeDb('photo-review uploadVariant/acceptVariant (live)', () => {
         apiBaseUrl,
         null,
       );
-      expect(aiVariant.status).toBe(PhotoVariantStatus.READY);
+      expect(aiVariant.status).toBe(PhotoVariantStatus.DONE);
       expect(aiVariant.kind).toBe(PhotoVariantKind.CARD_AI);
       // Confirms task item 1's own ask: aiEdit() never sets current by
       // itself (plan §6.2 rule 5, "con người chấp nhận") — the upload
@@ -624,7 +663,7 @@ describeDb('photo-review uploadVariant/acceptVariant (live)', () => {
         null,
         apiBaseUrl,
       );
-      expect(accepted.status).toBe(PhotoVariantStatus.READY);
+      expect(accepted.status).toBe(PhotoVariantStatus.DONE);
 
       const afterAccept: Array<{ current_card_variant_id: string }> =
         await dataSource.query(
@@ -669,7 +708,7 @@ describeDb('photo-review uploadVariant/acceptVariant (live)', () => {
       ).rejects.toMatchObject({
         payload: expect.objectContaining({
           code: PHOTO_REVIEW_ERROR_CODE.SET_LOCKED,
-        }),
+        }) as unknown,
       });
     });
 
@@ -708,7 +747,7 @@ describeDb('photo-review uploadVariant/acceptVariant (live)', () => {
         null,
         apiBaseUrl,
       );
-      expect(result.variant.status).toBe(PhotoVariantStatus.READY);
+      expect(result.variant.status).toBe(PhotoVariantStatus.DONE);
 
       const setRow: Array<{
         current_card_variant_id: string;
@@ -750,7 +789,7 @@ describeDb('photo-review uploadVariant/acceptVariant (live)', () => {
         apiBaseUrl,
         null,
       );
-      expect(aiVariant.status).toBe(PhotoVariantStatus.READY);
+      expect(aiVariant.status).toBe(PhotoVariantStatus.DONE);
 
       // And the set can be approved straight out of REJECTED afterwards,
       // confirming this really is a supported rework path, not dead code.
@@ -830,12 +869,246 @@ describeDb('photo-review uploadVariant/acceptVariant (live)', () => {
         const currentVariant = detail.variants.find(
           (v) => v.id === detail.currentCardVariantId,
         );
-        expect(currentVariant?.status).toBe(PhotoVariantStatus.READY);
+        expect(currentVariant?.status).toBe(PhotoVariantStatus.DONE);
       } finally {
         await dataSource.query(`DELETE FROM campaigns WHERE id = $1`, [
           campaignId,
         ]);
       }
+    });
+  });
+
+  describe('uploadVariant() fail-open when the AI backend is down (2026-09-30, "Cho phép tải lên, không chặn")', () => {
+    const upload = (setId: string) =>
+      service.uploadVariant(
+        setId,
+        { buffer: tinyJpeg(), mimetype: 'image/jpeg', size: 10 },
+        null,
+        apiBaseUrl,
+      );
+
+    it('accepts the upload with a null identity score when the identity check cannot run (card-photo step still works): unverified event, no error', async () => {
+      const { setId, sessionId } = await seedUnlockedSetWithFrontPhoto();
+      cleanup.setIds.push(setId);
+      cleanup.sessionIds.push(sessionId);
+      sidecar.identitySimilarity.mockRejectedValueOnce(
+        new Error('connect ECONNREFUSED 127.0.0.1:8321'),
+      );
+
+      const result = await upload(setId);
+
+      expect(result.identitySimilarity).toBeUndefined();
+      expect(result.identityWarning).toBe(false);
+      expect(result.variant.identitySimilarity ?? null).toBeNull();
+      const setRow: Array<{ current_card_variant_id: string }> =
+        await dataSource.query(
+          `SELECT current_card_variant_id FROM subject_photo_sets WHERE id = $1`,
+          [setId],
+        );
+      expect(setRow[0].current_card_variant_id).toBe(result.variant.id);
+      const ev: Array<{ payload: { identityVerified?: boolean } }> =
+        await dataSource.query(
+          `SELECT payload FROM photo_review_events WHERE set_id = $1 AND action = 'UPLOAD_REPLACED'`,
+          [setId],
+        );
+      expect(ev).toHaveLength(1);
+      expect(ev[0].payload.identityVerified).toBe(false);
+    });
+
+    it('uses the uploaded image as-is (with a visible warning + fallback audit) when BOTH the identity check and the card-photo step are down — the exact dead-sidecar situation', async () => {
+      const { setId, sessionId } = await seedUnlockedSetWithFrontPhoto();
+      cleanup.setIds.push(setId);
+      cleanup.sessionIds.push(sessionId);
+      sidecar.identitySimilarity.mockRejectedValueOnce(
+        new Error('connect ECONNREFUSED 127.0.0.1:8321'),
+      );
+      sidecar.cardPhoto.mockRejectedValueOnce(
+        new Error('connect ECONNREFUSED 127.0.0.1:8321'),
+      );
+
+      const result = await upload(setId);
+
+      const v: Array<{
+        status: string;
+        kind: string;
+        quality_report: { warnings?: string[] } | null;
+        identity_similarity: string | null;
+      }> = await dataSource.query(
+        `SELECT status, kind, quality_report, identity_similarity FROM photo_variants WHERE id = $1`,
+        [result.variant.id],
+      );
+      expect(v[0].status).toBe(PhotoVariantStatus.DONE);
+      expect(v[0].kind).toBe(PhotoVariantKind.CARD_UPLOAD);
+      expect(v[0].identity_similarity).toBeNull();
+      expect(v[0].quality_report?.warnings?.[0]).toContain(
+        'ẢNH TẢI LÊN NGUYÊN BẢN',
+      );
+      const outbox: Array<{ content: Buffer }> = await dataSource.query(
+        `SELECT content FROM variant_upload_outbox WHERE variant_id = $1`,
+        [result.variant.id],
+      );
+      expect(outbox).toHaveLength(1);
+      expect(Buffer.compare(outbox[0].content, tinyJpeg())).toBe(0);
+      const ev: Array<{
+        payload: {
+          fallback?: string;
+          reason?: string;
+          identityVerified?: boolean;
+        };
+      }> = await dataSource.query(
+        `SELECT payload FROM photo_review_events WHERE set_id = $1 AND action = 'UPLOAD_REPLACED'`,
+        [setId],
+      );
+      expect(ev[0].payload.fallback).toBe('ORIGINAL_UPLOAD');
+      expect(ev[0].payload.identityVerified).toBe(false);
+      // Internal host must not be persisted in the audit payload.
+      expect(ev[0].payload.reason).not.toContain('127.0.0.1:8321');
+    });
+
+    it('STILL rejects (422) an upload whose identity score is actually known and below the threshold — only an unrunnable check is fail-open', async () => {
+      const { setId, sessionId } = await seedUnlockedSetWithFrontPhoto();
+      cleanup.setIds.push(setId);
+      cleanup.sessionIds.push(sessionId);
+      sidecar.identitySimilarity.mockResolvedValueOnce({ similarity: 0.3 });
+
+      await expect(upload(setId)).rejects.toMatchObject({
+        payload: expect.objectContaining({
+          code: PHOTO_REVIEW_ERROR_CODE.IDENTITY_MISMATCH,
+        }) as unknown,
+      });
+      const variants: unknown[] = await dataSource.query(
+        `SELECT 1 FROM photo_variants WHERE set_id = $1 AND kind = 'CARD_UPLOAD'`,
+        [setId],
+      );
+      expect(variants).toHaveLength(0);
+    });
+  });
+
+  describe('reprocess() fallback when the AI pipeline fails terminally (2026-09-30, "Fallback ảnh gốc")', () => {
+    it('promotes the UNPROCESSED original FRONT photo to a READY current card (instead of the locked AUTO_FAILED), with a reviewer-visible warning + fallback audit event, and the set can then be approved', async () => {
+      const { setId, sessionId, autoVariantId } =
+        await seedUnlockedSetWithFrontPhoto(PhotoReviewSetStatus.PENDING_AUTO);
+      cleanup.setIds.push(setId);
+      cleanup.sessionIds.push(sessionId);
+      // The seed helper always gives the set a current CARD_AUTO; make this a
+      // genuine first-run set (no current card, no variants) so the fallback —
+      // not a pre-existing card — is what the assertions below observe.
+      await dataSource.query(
+        `UPDATE subject_photo_sets SET current_card_variant_id = NULL WHERE id = $1`,
+        [setId],
+      );
+      await dataSource.query(`DELETE FROM photo_variants WHERE id = $1`, [
+        autoVariantId,
+      ]);
+
+      // Any non-timeout sidecar failure classifies as `Unavailable` →
+      // `resolveAiJobFailureStatus` 'FAILED' — the dead-sidecar case.
+      sidecar.cardPhoto.mockRejectedValueOnce(
+        new Error('connect ECONNREFUSED 127.0.0.1:8321'),
+      );
+
+      const queuedDetail = await service.reprocess(setId, null, apiBaseUrl);
+      const queuedVariant = queuedDetail.variants.find(
+        (v) =>
+          v.kind === PhotoVariantKind.CARD_AUTO &&
+          v.status === PhotoVariantStatus.PROCESSING,
+      );
+      expect(queuedVariant).toBeDefined();
+      await runQueuedJob(queuedVariant!.id);
+
+      const setRow: Array<{
+        status: string;
+        current_card_variant_id: string | null;
+      }> = await dataSource.query(
+        `SELECT status, current_card_variant_id FROM subject_photo_sets WHERE id = $1`,
+        [setId],
+      );
+      expect(setRow[0].status).toBe(PhotoReviewSetStatus.READY);
+      expect(setRow[0].current_card_variant_id).toBe(queuedVariant!.id);
+
+      const variantRow: Array<{
+        status: string;
+        quality_report: { warnings?: string[] } | null;
+      }> = await dataSource.query(
+        `SELECT status, quality_report FROM photo_variants WHERE id = $1`,
+        [queuedVariant!.id],
+      );
+      expect(variantRow[0].status).toBe(PhotoVariantStatus.DONE);
+      expect(variantRow[0].quality_report?.warnings).toHaveLength(1);
+      expect(variantRow[0].quality_report?.warnings?.[0]).toContain(
+        'ẢNH GỐC CHƯA XỬ LÝ',
+      );
+
+      // The stored card bytes ARE the untouched original capture.
+      const outboxRow: Array<{ content: Buffer }> = await dataSource.query(
+        `SELECT content FROM variant_upload_outbox WHERE variant_id = $1`,
+        [queuedVariant!.id],
+      );
+      expect(outboxRow).toHaveLength(1);
+      expect(Buffer.compare(outboxRow[0].content, tinyJpeg())).toBe(0);
+
+      // Audit trail: an AUTO_GENERATED event flagged as a fallback, whose
+      // reason has the internal host:port redacted; NO AUTO_FAILED event.
+      const events: Array<{
+        action: string;
+        payload: { fallback?: string; reason?: string } | null;
+      }> = await dataSource.query(
+        `SELECT action, payload FROM photo_review_events WHERE set_id = $1`,
+        [setId],
+      );
+      const generated = events.find((e) => e.action === 'AUTO_GENERATED');
+      expect(generated?.payload?.fallback).toBe('ORIGINAL_PHOTO');
+      expect(generated?.payload?.reason).not.toContain('127.0.0.1:8321');
+      expect(events.some((e) => e.action === 'AUTO_FAILED')).toBe(false);
+      // Still counted so ops can see the AI failure rate.
+      expect(reviewStats.recordAutoFailed).toHaveBeenCalledTimes(1);
+
+      // The whole point: a reviewer can now approve it.
+      const approved = await service.approve(setId, {}, null, apiBaseUrl);
+      expect(approved.status).toBe(PhotoReviewSetStatus.APPROVED);
+    });
+
+    it('does NOT replace an existing current card with the raw original when a regeneration fails — the new variant is FAILED, the set stays READY on its old card (long-standing behavior preserved)', async () => {
+      // `seedUnlockedSetWithFrontPhoto` gives the set a READY current CARD_AUTO.
+      const { setId, sessionId, autoVariantId } =
+        await seedUnlockedSetWithFrontPhoto(PhotoReviewSetStatus.READY);
+      cleanup.setIds.push(setId);
+      cleanup.sessionIds.push(sessionId);
+
+      sidecar.cardPhoto.mockRejectedValueOnce(
+        new Error('connect ECONNREFUSED 127.0.0.1:8321'),
+      );
+
+      const queuedDetail = await service.reprocess(setId, null, apiBaseUrl);
+      const queuedVariant = queuedDetail.variants.find(
+        (v) =>
+          v.kind === PhotoVariantKind.CARD_AUTO &&
+          v.status === PhotoVariantStatus.PROCESSING,
+      );
+      expect(queuedVariant).toBeDefined();
+      await runQueuedJob(queuedVariant!.id);
+
+      const setRow: Array<{
+        status: string;
+        current_card_variant_id: string | null;
+      }> = await dataSource.query(
+        `SELECT status, current_card_variant_id FROM subject_photo_sets WHERE id = $1`,
+        [setId],
+      );
+      expect(setRow[0].status).toBe(PhotoReviewSetStatus.READY);
+      expect(setRow[0].current_card_variant_id).toBe(autoVariantId);
+
+      const variantRow: Array<{ status: string }> = await dataSource.query(
+        `SELECT status FROM photo_variants WHERE id = $1`,
+        [queuedVariant!.id],
+      );
+      expect(variantRow[0].status).toBe(PhotoVariantStatus.FAILED);
+      // No fallback side effects: no variant outbox bytes, no stats bump.
+      const outboxRow: unknown[] = await dataSource.query(
+        `SELECT 1 FROM variant_upload_outbox WHERE variant_id = $1`,
+        [queuedVariant!.id],
+      );
+      expect(outboxRow).toHaveLength(0);
     });
   });
 });

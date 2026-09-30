@@ -53,6 +53,53 @@ export class AiImageEditRetryableError extends AiImageEditError {
   }
 }
 
+/**
+ * Thrown when this app's OWN call timed out — this AbortController firing
+ * (`this.timeoutMs()`, `AI_IMAGE_EDIT_TIMEOUT_MS`), or undici's own
+ * lower-level `headersTimeout`/`bodyTimeout`/`connectTimeout` firing first
+ * (see `isFetchTimeout`'s own doc comment; Node 24's global `fetch` is
+ * undici, default 300s, and there is no custom dispatcher configured here,
+ * so 300s is this client's real effective ceiling today regardless of
+ * `AI_IMAGE_EDIT_TIMEOUT_MS` — raising it needs an undici `Agent`/dispatcher
+ * with a larger `headersTimeout`, a separate follow-up, not required for
+ * this task's own PENDING-vs-FAILED classification to be correct).
+ *
+ * Deliberately NOT a subclass of `AiImageEditRetryableError` — 2026-09-29
+ * user request: a photo-review job classifies a Timeout separately from a
+ * Retryable (both map to `PENDING`, same as each other, but through
+ * different `IntegrationOutcome.kind`s — see `PhotoAiAdapter.edit`), so
+ * `instanceof AiImageEditRetryableError` must stay false for this class.
+ */
+export class AiImageEditTimeoutError extends AiImageEditError {
+  constructor(message: string, cause?: unknown) {
+    super(message, cause);
+    this.name = 'AiImageEditTimeoutError';
+  }
+}
+
+/**
+ * True when `err` (thrown out of `fetch()`, or out of reading its response
+ * body) represents a timeout rather than some other network failure —
+ * covers both this class's own explicit `AbortController` (checked via
+ * `signal.aborted`, since an abort surfaces as a generic
+ * `DOMException`/`AbortError`, not something with its own distinguishing
+ * `cause`) and undici's own lower-level timeouts, which reject with
+ * `TypeError('fetch failed')` and a `cause.code` of `UND_ERR_HEADERS_TIMEOUT`
+ * / `UND_ERR_BODY_TIMEOUT` / `UND_ERR_CONNECT_TIMEOUT` — confirmed against
+ * Node 24's bundled undici (no direct `undici` dependency in this repo).
+ */
+export function isFetchTimeout(err: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) return true;
+  const name = (err as { name?: unknown })?.name;
+  if (name === 'TimeoutError' || name === 'AbortError') return true;
+  const causeCode = (err as { cause?: { code?: unknown } })?.cause?.code;
+  return (
+    causeCode === 'UND_ERR_HEADERS_TIMEOUT' ||
+    causeCode === 'UND_ERR_BODY_TIMEOUT' ||
+    causeCode === 'UND_ERR_CONNECT_TIMEOUT'
+  );
+}
+
 const DEFAULT_BASE_URL = 'http://10.20.15.25:8000';
 /**
  * The service's own `REQUEST_TIMEOUT_S` defaults to 120s, or 600s when it
@@ -142,7 +189,7 @@ export class AiImageEditClient {
           error: `HTTP ${res.status}`,
         };
       }
-      const body = await res.json().catch(() => null);
+      const body: unknown = await res.json().catch(() => null);
       const modelLoaded =
         !!body &&
         typeof body === 'object' &&
@@ -211,6 +258,12 @@ export class AiImageEditClient {
         signal: controller.signal,
       });
     } catch (error) {
+      if (isFetchTimeout(error, controller.signal)) {
+        throw new AiImageEditTimeoutError(
+          `AI image-edit service call timed out after ${this.timeoutMs()}ms`,
+          error,
+        );
+      }
       throw new AiImageEditError(
         `Could not reach the AI image-edit service at ${this.baseUrl()}`,
         error,
@@ -233,7 +286,22 @@ export class AiImageEditClient {
       );
     }
 
-    const buffer = Buffer.from(await res.arrayBuffer());
+    let arrayBuffer: ArrayBuffer;
+    try {
+      arrayBuffer = await res.arrayBuffer();
+    } catch (error) {
+      if (isFetchTimeout(error)) {
+        throw new AiImageEditTimeoutError(
+          'AI image-edit service response body timed out mid-read',
+          error,
+        );
+      }
+      throw new AiImageEditError(
+        'AI image-edit service response body could not be read',
+        error,
+      );
+    }
+    const buffer = Buffer.from(arrayBuffer);
     const seedHeader = res.headers.get('x-seed-used');
     const durationHeader = res.headers.get('x-duration-ms');
     return {

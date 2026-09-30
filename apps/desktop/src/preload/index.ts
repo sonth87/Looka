@@ -225,6 +225,13 @@ export interface ApprovalStepInfo {
   cameraRole: string;
   attempt: number;
   capturedAt?: string;
+  /**
+   * Multi-shot capture: the attempt number of the photo the operator picked
+   * as the best one for this step (only set for the workflow's multi-shot
+   * step) — see `packages/ui`'s copy of this type and uploads.ts's
+   * `SessionApprovalStepInfo.selectedAttempt`.
+   */
+  selectedAttempt?: number;
 }
 
 // Widened 2026-09-09 (item 2, angle-related settings audit) to match
@@ -317,6 +324,19 @@ export interface CbHelpPublishState {
    * type for the full reasoning.
    */
   errorMessage?: string | null;
+  /**
+   * Multi-shot capture (the CENTER camera can be shot more than once): how
+   * many photos the center step has and which one is currently selected, plus
+   * a small thumbnail of each. `null`/absent when the feature is off or there
+   * is no session to show. Mirrors `apps/desktop/src/main/cbHelpWindow.ts`'s
+   * own copy — see there for how each field is validated.
+   */
+  centerShots?: {
+    stepId: string;
+    count: number;
+    selectedIndex: number;
+    thumbnails: string[];
+  } | null;
 }
 
 /**
@@ -504,6 +524,16 @@ export interface FaceAPIBridge {
     /** See uploads.ts's SessionReportPayload.operatorUserId doc comment. */
     operatorUserId?: string;
   }) => Promise<ApproveSessionUploadResult>;
+
+  /**
+   * Removes a session's staged-but-never-approved photos (queue rows and
+   * files) when the operator abandons the run instead of saving it — call
+   * from `handleRestart`/`handleCancelWorkflow`, and when the next student's
+   * session starts over an unsaved post-save retake. The photo counterpart of
+   * `discardSessionVideos`. Approved photos are never touched; see
+   * `discardStagedPhotos`'s own doc comment in the main process's `uploads.ts`.
+   */
+  discardStagedPhotos: (sessionId: string) => Promise<{ removed: number }>;
 
   getUploadStatus: () => Promise<UploadStatus>;
   pingFileService: () => Promise<boolean>;
@@ -884,6 +914,7 @@ const faceAPI: FaceAPIBridge = {
 
   queueCapture: (payload) => ipcRenderer.invoke('capture:queue', payload),
   approveSessionUpload: (payload) => ipcRenderer.invoke('session:approveUpload', payload),
+  discardStagedPhotos: (sessionId) => ipcRenderer.invoke('session:discardStaged', sessionId),
   getUploadStatus: () => ipcRenderer.invoke('uploads:status'),
   pingFileService: () => ipcRenderer.invoke('uploads:ping'),
   retryUpload: (jobId) => ipcRenderer.invoke('uploads:retry', jobId),

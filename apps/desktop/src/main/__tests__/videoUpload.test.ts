@@ -3,9 +3,17 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { CaptureStreamItem, EnqueueInput, ApproveSessionResult, OutboxItem, RecordApprovalInput } from '@face/database';
+import type {
+  CaptureStreamItem,
+  EnqueueInput,
+  ApproveSessionOptions,
+  ApproveSessionResult,
+  OutboxItem,
+  RecordApprovalInput,
+} from '@face/database';
 import {
   approveSessionUpload,
+  type SessionApprovalStepInfo,
   type ApproveSessionUploadRepo,
   type ApproveSessionUploadStreamRepo,
   type ApproveSessionUploadStudentRepo,
@@ -24,13 +32,17 @@ class FakeOutboxRepo implements ApproveSessionUploadRepo {
   /** Calls made to supersedeOlderApprovedAttempts(), for assertions. */
   public supersedeCalls: Array<{ sessionId: string; kind: string; stepId: string; keepId: string }> = [];
   constructor(
-    private approveResult: ApproveSessionResult = { approved: 0, superseded: [], approvedRows: [] },
+    private approveResult: ApproveSessionResult = { approved: 0, superseded: [], approvedRows: [], missingKeepAttempts: [] },
     private rows: OutboxItem[] = [],
     /** Canned response for supersedeOlderApprovedAttempts(), keyed by `${kind}:${stepId}` — empty (nothing stale) unless a test configures otherwise. */
     private staleByKey: Record<string, Array<{ id: string; localPath: string; fsFileId: string | null }>> = {}
   ) {}
 
-  approveSession(): ApproveSessionResult {
+  /** Every call made to approveSession(), so a test can check exactly what options approveSessionUpload() handed it. */
+  public approveCalls: Array<{ sessionId: string; options: ApproveSessionOptions | undefined }> = [];
+
+  approveSession(sessionId: string, options?: ApproveSessionOptions): ApproveSessionResult {
+    this.approveCalls.push({ sessionId, options });
     return this.approveResult;
   }
 
@@ -288,7 +300,7 @@ function makeOutboxItem(over: Partial<OutboxItem> = {}): OutboxItem {
 
 describe('approveSessionUpload — local student index', () => {
   test('records the local student index when the session carries a subjectCode and rows were approved', async () => {
-    const outboxRepo = new FakeOutboxRepo({ approved: 1, superseded: [], approvedRows: [makeOutboxItem()] }, [makeOutboxItem()]);
+    const outboxRepo = new FakeOutboxRepo({ approved: 1, superseded: [], approvedRows: [makeOutboxItem()], missingKeepAttempts: [] }, [makeOutboxItem()]);
     const streamRepo = new FakeStreamRepo([]);
     const studentRepo = new FakeStudentRepo();
 
@@ -311,7 +323,7 @@ describe('approveSessionUpload — local student index', () => {
   });
 
   test('does not record anything when the session carries no subjectCode', async () => {
-    const outboxRepo = new FakeOutboxRepo({ approved: 1, superseded: [], approvedRows: [makeOutboxItem()] }, [makeOutboxItem()]);
+    const outboxRepo = new FakeOutboxRepo({ approved: 1, superseded: [], approvedRows: [makeOutboxItem()], missingKeepAttempts: [] }, [makeOutboxItem()]);
     const streamRepo = new FakeStreamRepo([]);
     const studentRepo = new FakeStudentRepo();
 
@@ -321,7 +333,7 @@ describe('approveSessionUpload — local student index', () => {
   });
 
   test('does not record anything when nothing was approved, even if a subjectCode was sent', async () => {
-    const outboxRepo = new FakeOutboxRepo({ approved: 0, superseded: [], approvedRows: [] }, []);
+    const outboxRepo = new FakeOutboxRepo({ approved: 0, superseded: [], approvedRows: [], missingKeepAttempts: [] }, []);
     const streamRepo = new FakeStreamRepo([]);
     const studentRepo = new FakeStudentRepo();
 
@@ -338,7 +350,7 @@ describe('approveSessionUpload — local student index', () => {
   });
 
   test('a studentRepo failure is logged, not thrown — the approval itself must still succeed', async () => {
-    const outboxRepo = new FakeOutboxRepo({ approved: 1, superseded: [], approvedRows: [makeOutboxItem()] }, [makeOutboxItem()]);
+    const outboxRepo = new FakeOutboxRepo({ approved: 1, superseded: [], approvedRows: [makeOutboxItem()], missingKeepAttempts: [] }, [makeOutboxItem()]);
     const streamRepo = new FakeStreamRepo([]);
     const throwingStudentRepo: ApproveSessionUploadStudentRepo = {
       recordApproval: () => {
@@ -363,7 +375,7 @@ describe('approveSessionUpload — post-save retake supersede (2026-09-08)', () 
   test('a freshly approved photo attempt is checked against an earlier approval at the same (kind, stepId)', async () => {
     const approvedRow = makeOutboxItem({ id: 'photo-2', kind: 'face', stepId: 'step-front', attempt: 2 });
     const outboxRepo = new FakeOutboxRepo(
-      { approved: 1, superseded: [], approvedRows: [approvedRow] },
+      { approved: 1, superseded: [], approvedRows: [approvedRow], missingKeepAttempts: [] },
       [approvedRow]
     );
     const streamRepo = new FakeStreamRepo([]);
@@ -382,7 +394,7 @@ describe('approveSessionUpload — post-save retake supersede (2026-09-08)', () 
       writeFileSync(staleLocalPath, 'old photo bytes');
       const approvedRow = makeOutboxItem({ id: 'photo-2', kind: 'face', stepId: 'step-front', attempt: 2 });
       const outboxRepo = new FakeOutboxRepo(
-        { approved: 1, superseded: [], approvedRows: [approvedRow] },
+        { approved: 1, superseded: [], approvedRows: [approvedRow], missingKeepAttempts: [] },
         [approvedRow],
         { 'face:step-front': [{ id: 'photo-1', localPath: staleLocalPath, fsFileId: null }] }
       );
@@ -399,7 +411,7 @@ describe('approveSessionUpload — post-save retake supersede (2026-09-08)', () 
   test('no stale attempt found is a harmless no-op — the common case, most attempts are never retaken', async () => {
     const approvedRow = makeOutboxItem({ id: 'photo-1', kind: 'face', stepId: 'step-front', attempt: 1 });
     const outboxRepo = new FakeOutboxRepo(
-      { approved: 1, superseded: [], approvedRows: [approvedRow] },
+      { approved: 1, superseded: [], approvedRows: [approvedRow], missingKeepAttempts: [] },
       [approvedRow]
     );
     const streamRepo = new FakeStreamRepo([]);
@@ -463,6 +475,118 @@ describe('approveSessionUpload — post-save retake supersede (2026-09-08)', () 
       );
 
       assert.deepEqual(streamRepo.deletedIds, []);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('approveSessionUpload — operator-chosen center photo (multi-shot keepAttempts)', () => {
+  const step = (over: Partial<SessionApprovalStepInfo> & { stepId: string }): SessionApprovalStepInfo => ({
+    stepType: 'FRONT',
+    cameraRole: 'CENTER',
+    attempt: 1,
+    ...over,
+  });
+
+  test('hands the chosen attempt to approveSession as keepAttempts', async () => {
+    const outboxRepo = new FakeOutboxRepo();
+
+    await approveSessionUpload(
+      'sess-1',
+      [step({ stepId: 'step-front', selectedAttempt: 2 }), step({ stepId: 'step-left', stepType: 'LEFT', cameraRole: 'LEFT' })],
+      undefined,
+      outboxRepo,
+      new FakeStreamRepo([]),
+      new FakeStudentRepo()
+    );
+
+    assert.equal(outboxRepo.approveCalls.length, 1);
+    assert.equal(outboxRepo.approveCalls[0].sessionId, 'sess-1');
+    assert.deepEqual(outboxRepo.approveCalls[0].options, { keepAttempts: { 'step-front': 2 } });
+  });
+
+  test('the key is the sanitised token queueCapture stored, not the raw step id', async () => {
+    const outboxRepo = new FakeOutboxRepo();
+    const longId = 'step.front/with weird*chars-' + 'x'.repeat(60);
+
+    await approveSessionUpload(
+      'sess-1',
+      [step({ stepId: longId, selectedAttempt: 3 })],
+      undefined,
+      outboxRepo,
+      new FakeStreamRepo([]),
+      new FakeStudentRepo()
+    );
+
+    // Same transform as `safeFileToken(stepId, 'step')` in `session:queueCapture`:
+    // every char outside [A-Za-z0-9_-] becomes '_', cut to 40 characters.
+    const expectedKey = longId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40);
+    assert.equal(expectedKey.length, 40);
+    assert.deepEqual(outboxRepo.approveCalls[0].options, { keepAttempts: { [expectedKey]: 3 } });
+  });
+
+  test('an invalid selectedAttempt is ignored, and with no valid one approveSession gets no options at all', async () => {
+    const outboxRepo = new FakeOutboxRepo();
+
+    await approveSessionUpload(
+      'sess-1',
+      [
+        step({ stepId: 'a', selectedAttempt: 0 }),
+        step({ stepId: 'b', selectedAttempt: -3 }),
+        step({ stepId: 'c', selectedAttempt: 1.5 }),
+        step({ stepId: 'd', selectedAttempt: Number.NaN }),
+        step({ stepId: 'e', selectedAttempt: '2' as unknown as number }),
+        step({ stepId: 'f' }),
+      ],
+      undefined,
+      outboxRepo,
+      new FakeStreamRepo([]),
+      new FakeStudentRepo()
+    );
+
+    assert.equal(outboxRepo.approveCalls[0].options, undefined, 'the default highest-attempt rule stays in force');
+  });
+
+  test('without steps, approveSession is called exactly as before', async () => {
+    const outboxRepo = new FakeOutboxRepo();
+
+    await approveSessionUpload('sess-1', undefined, undefined, outboxRepo, new FakeStreamRepo([]), new FakeStudentRepo());
+
+    assert.deepEqual(outboxRepo.approveCalls, [{ sessionId: 'sess-1', options: undefined }]);
+  });
+
+  test('a refused approval (missingKeepAttempts) throws SELECTED_SHOT_NOT_STAGED and does no follow-up work', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'face-selected-shot-missing-'));
+    try {
+      const localPath = join(dir, 'stream-1.webm');
+      writeFileSync(localPath, 'fake video bytes');
+      const outboxRepo = new FakeOutboxRepo(
+        { approved: 0, superseded: [], approvedRows: [], missingKeepAttempts: ['step-front:7'] },
+        []
+      );
+      const streamRepo = new FakeStreamRepo([makeStream({ localPath })]);
+      const studentRepo = new FakeStudentRepo();
+
+      await assert.rejects(
+        approveSessionUpload(
+          'sess-1',
+          [step({ stepId: 'step-front', selectedAttempt: 7 })],
+          { videoSessionId: 'video-session-1', subjectCode: 'SV001' },
+          outboxRepo,
+          streamRepo,
+          studentRepo
+        ),
+        (err: Error) => {
+          assert.match(err.message, /^SELECTED_SHOT_NOT_STAGED:/);
+          assert.match(err.message, /step-front:7/);
+          return true;
+        }
+      );
+
+      assert.deepEqual(outboxRepo.enqueued, [], 'no video enqueued for a refused approval');
+      assert.deepEqual(studentRepo.recorded, [], 'no student index entry for a refused approval');
+      assert.deepEqual(outboxRepo.supersedeCalls, []);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

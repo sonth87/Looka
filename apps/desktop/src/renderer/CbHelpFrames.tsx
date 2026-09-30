@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { CameraRole } from '@face/core';
-import { CAMERA_ROLE_LABELS_VI, CAPTURE_MIRRORED, FrameTile } from '@face/ui';
+import { CAMERA_ROLE_LABELS_VI, CAPTURE_MIRRORED, CenterShotStrip, FrameTile, ShotCountBadge } from '@face/ui';
 import { Settings, X, ChevronUp, ChevronDown } from 'lucide-react';
 
 /**
@@ -100,6 +100,21 @@ interface CbHelpPublishState {
    */
   cameraRoleMapping?: Record<string, string>;
   connectedDeviceIds?: string[];
+  /**
+   * Multi-shot CENTER camera — mirrors `apps/desktop/src/main/cbHelpWindow.ts`'s
+   * own copy (already validated there). How many photos the center step has,
+   * which one is currently selected, and a small thumbnail of each. Drives the
+   * "Ảnh camera giữa: N" header, the "Ảnh k/N" badge on the center frame and the
+   * thumbnail strip under the grid. `null`/absent when the feature is off or
+   * there is nothing to show. The big tile itself needs no special handling:
+   * the selected shot is already that frame's `capturedDataUrl`.
+   */
+  centerShots?: {
+    stepId: string;
+    count: number;
+    selectedIndex: number;
+    thumbnails: string[];
+  } | null;
 }
 
 /** Mirrors `apps/desktop/src/main/cbHelpWindow.ts`'s own copy. */
@@ -123,6 +138,7 @@ const EMPTY_STATE: CbHelpPublishState = {
   thankYou: null,
   cameraRoleMapping: {},
   connectedDeviceIds: [],
+  centerShots: null,
 };
 
 /**
@@ -1038,6 +1054,11 @@ export default function CbHelpFrames() {
   const isLive = state.phase === 'live';
   const currentFrame = isLive ? state.frames.find((f) => f.stepId === state.currentStepId) : undefined;
   const completedCount = state.frames.filter((f) => f.status === 'COMPLETED').length;
+  // Multi-shot CENTER: only honoured while the frame it belongs to is actually in
+  // the grid (the CB Help visibility panel may hide it) — a count with no tile to
+  // attach the badge to would otherwise still add a header/strip out of nowhere.
+  const centerShots =
+    state.centerShots && state.frames.some((f) => f.stepId === state.centerShots!.stepId) ? state.centerShots : null;
   const headerTitle = isLive
     ? 'Đang chụp ảnh'
     : state.phase === 'review'
@@ -1055,6 +1076,7 @@ export default function CbHelpFrames() {
             ? `${CAMERA_ROLE_LABELS_VI[currentFrame.role as CameraRole] ?? currentFrame.role} · ${currentFrame.label} — `
             : ''}
           {completedCount}/{state.frames.length} đã chụp
+          {centerShots && centerShots.count >= 1 ? ` · Ảnh camera giữa: ${centerShots.count}` : ''}
         </p>
       </header>
 
@@ -1132,7 +1154,7 @@ export default function CbHelpFrames() {
           // CENTER already relies on above.
           const sideLiveImage =
             !isCenter && frame.status !== 'COMPLETED' ? frame.livePreviewDataUrl ?? null : null;
-          return (
+          const tile = (
             <FrameTile
               key={frame.stepId}
               size="large"
@@ -1153,8 +1175,40 @@ export default function CbHelpFrames() {
               showCompositionGrid={isCenter}
             />
           );
+          // Multi-shot CENTER: the "Ảnh k/N" badge belongs on the frame the shots
+          // were taken for — matched by step id, NOT by `role === 'CENTER'`
+          // (`role` here is the logical display slot; the step that carries the
+          // shots is whichever one the workflow marked multi-shot).
+          if (centerShots && frame.stepId === centerShots.stepId) {
+            return (
+              <div key={frame.stepId} className="relative w-full h-full min-h-0">
+                {tile}
+                <ShotCountBadge
+                  selectedIndex={centerShots.selectedIndex}
+                  count={centerShots.count}
+                  className="absolute top-3 right-3 z-20 rounded-lg px-3 py-1 text-sm shadow-lg"
+                />
+              </div>
+            );
+          }
+          return tile;
         })}
       </div>
+
+      {/* Multi-shot CENTER: every center photo taken so far, the selected one highlighted (the operator moves the selection with the arrow keys on the main screen). Thumbnails are already pixel-mirrored stills, so no CSS flip. */}
+      {centerShots && centerShots.count > 1 && (
+        <div className="shrink-0 flex items-center justify-center gap-2 overflow-x-auto py-1">
+          <span className="shrink-0 text-xs text-slate-400">Ảnh camera giữa</span>
+          {/* Same strip the operator's review modal draws (shared, so the two always agree on the wording and the highlight) — here read-only. */}
+          <CenterShotStrip
+            count={centerShots.count}
+            thumbnails={centerShots.thumbnails}
+            selectedIndex={centerShots.selectedIndex}
+            className="items-center gap-2"
+            tileClassName="h-16 aspect-[4/3] rounded-lg"
+          />
+        </div>
+      )}
     </div>
   );
 }

@@ -37,6 +37,31 @@ export const SIMILARITY_TONE_CLASS: Record<'good' | 'warn' | 'bad', string> = {
   bad: 'text-red-600',
 };
 
+/** `photo_review_events.action` (PhotoReviewAction on the API) → what a reviewer should read in the "Lịch sử" strip instead of the raw enum name. An unknown action falls back to the raw value, so a newly added server-side action never renders blank. */
+export const REVIEW_ACTION_LABEL: Record<string, string> = {
+  AUTO_GENERATED: 'Tạo ảnh 4x6 tự động',
+  AUTO_FAILED: 'Tạo ảnh 4x6 lỗi',
+  REPROCESS: 'Yêu cầu tạo lại ảnh 4x6',
+  AI_REQUESTED: 'Yêu cầu sửa bằng AI',
+  AI_ACCEPTED: 'Chấp nhận bản AI',
+  AI_DISCARDED: 'Bỏ bản AI',
+  UPLOAD_REPLACED: 'Thay bằng ảnh tải lên',
+  SET_CURRENT: 'Đặt làm ảnh hiện tại',
+  APPROVED: 'Duyệt',
+  REJECTED: 'Từ chối',
+  VIEWED_ORIGINAL: 'Xem ảnh gốc',
+};
+
+export function reviewActionLabel(action: string): string {
+  return REVIEW_ACTION_LABEL[action] ?? action;
+}
+
+/** The free-text note a reviewer typed (plus the compiled checklist) when approving/rejecting — stored in the event's `payload.note`. Empty when there is none. */
+export function reviewEventNote(payload?: Record<string, unknown> | null): string {
+  const note = payload?.note;
+  return typeof note === 'string' ? note.trim() : '';
+}
+
 export function formatDateTime(iso?: string): string {
   if (!iso) return '—';
   const d = new Date(iso);

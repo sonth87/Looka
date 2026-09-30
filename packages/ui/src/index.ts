@@ -68,6 +68,8 @@ export { GuidanceMessage } from './components/workflow/GuidanceMessage.js';
 export { StabilityProgress } from './components/workflow/StabilityProgress.js';
 export { CountdownTimer } from './components/workflow/CountdownTimer.js';
 export { SessionReviewModal } from './components/workflow/SessionReviewModal.js';
+export { CenterShotStrip, ShotCountBadge } from './components/workflow/CenterShotStrip.js';
+export type { CenterShotStripProps } from './components/workflow/CenterShotStrip.js';
 export { SubjectInfoBadge } from './components/workflow/SubjectInfoBadge.js';
 export type { SubjectInfoBadgeProps } from './components/workflow/SubjectInfoBadge.js';
 export { CapturedListPanel } from './components/workflow/CapturedListPanel.js';

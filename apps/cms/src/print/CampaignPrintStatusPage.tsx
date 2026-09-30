@@ -5,7 +5,6 @@ import {
   Campaign,
   Paginated,
   PrintItem,
-  PrintItemStatus,
   listCampaigns,
   listCampaignSubjectDistinctValues,
   listPrintItems,
@@ -15,8 +14,8 @@ import { Pager } from '../components/Pager';
 import {
   PRINT_ITEM_BUCKET_BADGE_CLASS,
   PRINT_ITEM_BUCKET_LABEL,
-  PRINT_ITEM_STATUS_LABEL,
   printItemStatusBucket,
+  printItemStatusFilterOptions,
 } from './printFormat';
 
 /**
@@ -45,7 +44,10 @@ import {
 export function CampaignPrintStatusPage() {
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [campaignId, setCampaignId] = useState('');
-  const [statusFilter, setStatusFilter] = useState<PrintItemStatus | ''>('');
+  // One status or a comma-separated list — this screen spans every batch of the
+  // campaign, and (like its 3-bucket badges) treats PENDING + RENDERED as one
+  // "Chưa in" (`printItemStatusFilterOptions(true)`).
+  const [statusFilter, setStatusFilter] = useState('');
   const [classNameFilter, setClassNameFilter] = useState('');
   const [facultyFilter, setFacultyFilter] = useState('');
   const [classNameOptions, setClassNameOptions] = useState<string[]>([]);
@@ -170,15 +172,15 @@ export function CampaignPrintStatusPage() {
         <select
           value={statusFilter}
           onChange={(e) => {
-            setStatusFilter(e.target.value as PrintItemStatus | '');
+            setStatusFilter(e.target.value);
             setPage(1);
           }}
           className="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900"
         >
           <option value="">Tất cả trạng thái</option>
-          {(Object.keys(PRINT_ITEM_STATUS_LABEL) as PrintItemStatus[]).map((s) => (
-            <option key={s} value={s}>
-              {PRINT_ITEM_STATUS_LABEL[s]}
+          {printItemStatusFilterOptions(true).map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
             </option>
           ))}
         </select>
@@ -199,6 +201,7 @@ export function CampaignPrintStatusPage() {
                   <div className="text-sm font-medium text-gray-900 truncate">{item.subjectCode}</div>
                   <div className="text-xs text-gray-500 truncate mb-1">{item.fullName ?? '—'}</div>
                   <div className="text-xs text-gray-400 truncate mb-1.5">Người chụp: {item.operatorName ?? '—'}</div>
+                  {item.cardCode && <div className="text-xs text-gray-400 truncate mb-1.5">Mã thẻ: {item.cardCode}</div>}
                   <span className={`px-2 py-0.5 rounded-full border text-xs font-medium ${PRINT_ITEM_BUCKET_BADGE_CLASS[bucket]}`}>
                     {PRINT_ITEM_BUCKET_LABEL[bucket]}
                   </span>

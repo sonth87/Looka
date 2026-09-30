@@ -42,10 +42,27 @@ export class ListPrintItemsQueryDto extends QueryPaginateDto {
   @IsBoolean()
   unassigned?: boolean;
 
-  @ApiPropertyOptional({ enum: PRINT_ITEM_STATUSES })
+  /**
+   * One status, or several comma-separated (`status=PENDING,RENDERED`) —
+   * 2026-09-30: a CENTRALIZED batch has no render step, so the CMS shows
+   * PENDING and RENDERED as ONE "Chưa in" filter option (two options with
+   * the same label were confusing, and the second matched nothing). A single
+   * value keeps working exactly as before (parsed to a one-element array).
+   */
+  @ApiPropertyOptional({
+    description: `Một hoặc nhiều trạng thái, cách nhau bằng dấu phẩy. Giá trị hợp lệ: ${PRINT_ITEM_STATUSES.join(', ')}`,
+  })
   @IsOptional()
-  @IsIn(PRINT_ITEM_STATUSES)
-  status?: PrintItemStatus;
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string'
+      ? value
+          .split(',')
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0)
+      : value,
+  )
+  @IsIn(PRINT_ITEM_STATUSES, { each: true })
+  status?: PrintItemStatus[];
 
   @ApiPropertyOptional()
   @IsOptional()

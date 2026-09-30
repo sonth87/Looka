@@ -65,6 +65,12 @@ export class CampaignSubjectDao {
   @Expose()
   printedAt?: Date | null;
 
+  @ApiPropertyOptional({
+    description: 'Mã thẻ của thẻ in gần nhất của SV này, nếu có',
+  })
+  @Expose()
+  cardCode?: string | null;
+
   @ApiProperty()
   @Expose()
   createdAt: Date;
